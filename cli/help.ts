@@ -86,19 +86,20 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       more: '-b is required. The project must exist: a typo errors with the known projects instead of creating one.' },
   }],
   ['ASK AHMED', {
-    ask: { use: 'cb ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>" [-c "<context>"] [--multi] [--blocking -t <id>] [--to <user>] [--free] [--after Q<id> [--if "<Label>"]]', topic: 'ask',
+    ask: { use: 'cb ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>" [-c "<context>"] [--multi] [--blocking -t <id>] [--to <user>] [--free] [--after Q<id> [--if "<Label>"]] [-i "<Caption>=<picture>" ...]', topic: 'ask',
       does: 'Ask Ahmed without stopping: 2-4 options he clicks. Prints Q<id>. Keep working; the answer is pushed into this session. --free (no options) ONLY for a fact: a URL, a name, a number. --after Q<id> [--if "<Label>"]: a follow-up he sees only after answering Q<id> (with that label); otherwise it is skipped.',
-      eg: 'cb ask ihop "#2796: merge now or after the aidocs DB run?" -o "After the run (Recommended)=test-only, 20 min" -o "Now=saves 20 min, unverified"' },
+      eg: 'cb ask ihop "#2796: merge now or after the aidocs DB run?" -o "After the run (Recommended)=test-only, 20 min" -o "Now=saves 20 min, unverified"',
+      more: '-i/--image adds a picture (PNG, JPEG, WebP or GIF, 5 MB, up to 6), shown on the card with its caption. Optional: add pictures when the choice is about how something looks or what a change does to a screen, e.g. -i "Now=shots/before.png" -i "After=shots/after.png". Ahmed can always send a question back with "Show me" to ask for them.' },
     pending: { use: 'cb pending [project]', topic: 'ask',
       does: 'Answered questions no relay has delivered yet. Workers: the fallback without a relay. Orchestrator: deliver each, then cb delivered.',
       eg: 'cb pending' },
     delivered: { use: 'cb delivered <qid> [session]', topic: 'ask',
       does: 'Mark an answer delivered; unblocks its task back to Next.',
       eg: 'cb delivered Q12 W2@macbook' },
-    reask: { use: 'cb reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"]', topic: 'ask',
-      does: 'Ahmed sent your question back (more details, his own question, simpler, or the options are wrong): rewrite it in place. Same Q id; it shows up on his board again as new. Give only what changes: the text, the options, the context, or several.',
+    reask: { use: 'cb reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]', topic: 'ask',
+      does: 'Ahmed sent your question back (more details, his own question, simpler, the options are wrong, or "Show me": add pictures): rewrite it in place. Same Q id; it shows up on his board again as new. Give only what changes: the text, the options, the context, or several.',
       eg: 'cb reask Q12 "Ship #2796 today?" -o "Yes (Recommended)=tests green on SIT" -o "No=wait for the DB run"',
-      more: 'Never answer a send-back with a new cb ask: rewrite the same question. -c replaces the context (Ahmed still sees the old version). New -o replace all options: keep any option a --after/--if follow-up waits on, or withdraw that follow-up first. Only the session that asked can rewrite it; it also works on an open question nobody answered yet.' },
+      more: 'Never answer a send-back with a new cb ask: rewrite the same question. -c replaces the context (Ahmed still sees the old version). New -o replace all options: keep any option a --after/--if follow-up waits on, or withdraw that follow-up first. Only the session that asked can rewrite it; it also works on an open question nobody answered yet. -i replaces all the pictures (none given: they stay); "Show me" needs at least one -i: a screenshot of how it looks now and one of how it will look (a mockup if it is not built yet).' },
     withdraw: { use: 'cb withdraw <qid>', topic: 'ask',
       does: 'Withdraw a question that no longer matters or was asked wrong (then ask again properly).',
       eg: 'cb withdraw Q12' },
@@ -490,9 +491,12 @@ NEVER
 export const TOPIC_NAMES = Object.keys(TOPICS);
 
 // A send-back (#616) as the asking session reads it: in the relay's push and in cb pending.
-const BACK: Record<string, string> = { details: 'it needs more details', clarify: 'a question for you', simplify: 'simplify it', reask: 'the options are wrong' };
+const BACK: Record<string, string> = { details: 'it needs more details', clarify: 'a question for you', simplify: 'simplify it', reask: 'the options are wrong',
+  visual: 'show it: ask again with pictures of how it looks now and how it will look after (cb reask --image)' };
 export const backWhy = (reason: string, note?: string | null) => `${BACK[reason] ?? reason}${note ? ` — ${note}` : ''}`;
-export const reaskHint = (id: number | string) => `cb reask Q${id} "<new question>" [-o ...] [-c ...]`;
+export const reaskHint = (id: number | string, reason?: string) => reason === 'visual'
+  ? `cb reask Q${id} --image "Now=<screenshot>" --image "After=<mockup or screenshot>" ["<new question>"] [-o ...]`
+  : `cb reask Q${id} "<new question>" [-o ...] [-c ...]`;
 /** Someone's text inside our own lines: its extra lines indented, so none passes for a line of ours (as the relay does). */
 export const flat = (s: unknown) => String(s ?? '').replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, '\n    ');
 

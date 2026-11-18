@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronRight, CornerDownLeft, CornerDownRight, Loader2, Undo2 } from 'lucide-react'
+import { Check, ChevronRight, CornerDownLeft, CornerDownRight, Image as ImageIcon, Loader2, Undo2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { BACK_REASONS, onProject, rpc, useUsers, type BackReason, type Question } from '@/lib/api'
@@ -151,6 +151,8 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
           </div>
         )}
 
+        {!!q.images?.length && <Pictures q={q} />}
+
         {q.options && q.options.length > 0 && (
           <div className="mt-4 grid gap-1.5" role={q.multi ? 'group' : undefined} aria-label={q.multi ? 'Pick any' : undefined}>
             {q.multi && <p className="mb-0.5 text-xs text-muted-foreground">Pick any that apply, then send.</p>}
@@ -207,13 +209,35 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
               <button key={r.key} disabled={!!busy} onClick={() => sendBack(r.key)}
                 className={cn('inline-flex min-h-8 items-center gap-1 rounded px-2 text-xs text-muted-foreground hover:bg-raised hover:text-foreground disabled:opacity-50',
                   armed === r.key && 'bg-raised font-medium text-foreground')}>
-                {busy === `__back:${r.key}` && <Loader2 className="size-3 animate-spin" />}{armed === r.key ? `${r.label}: tap again, your text goes as the note` : r.label}
+                {busy === `__back:${r.key}` ? <Loader2 className="size-3 animate-spin" /> : r.key === 'visual' && <ImageIcon className="size-3" />}{armed === r.key ? `${r.label}: tap again, your text goes as the note` : r.label}
               </button>
             ))}
           </div>
         )}
       </div>
     </article>
+  )
+}
+
+/** The question's pictures ("Now", "After"): side by side when there are two or more, each opening full size. */
+function Pictures({ q }: { q: Question }) {
+  const pics = q.images ?? []
+  return (
+    <div className={cn('mt-3 grid gap-3', pics.length > 1 && 'sm:grid-cols-2')}>
+      {pics.map((p, i) => {
+        const src = `/api/questions/${q.id}/images/${p.id}`
+        return (
+          <figure key={p.id} className="min-w-0">
+            <a href={src} target="_blank" rel="noreferrer" title="Open full size"
+              className="block overflow-hidden rounded-md border bg-background/50 hover:border-foreground/35">
+              <img src={src} alt={p.caption ?? `Picture ${i + 1} for Q${q.id}`} loading="lazy"
+                className="max-h-80 w-full object-contain" />
+            </a>
+            {p.caption && <figcaption className="mt-1 text-xs font-medium text-muted-foreground">{p.caption}</figcaption>}
+          </figure>
+        )
+      })}
+    </div>
   )
 }
 

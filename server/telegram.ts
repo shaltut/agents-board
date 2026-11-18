@@ -2,18 +2,21 @@
 // from there through the dashboard's path (cb-web, as ahmed). Long polling, plain text, no dependency.
 // The token travels in every request URL: errors here name the method and status only, never the URL.
 import { randomBytes } from 'node:crypto';
-import { sql } from './db.ts';
+import { sql, dotenv } from './db.ts';
 import { callFn } from './rpc.ts';
 
 const LIMIT = 4096; // Telegram's message length, in UTF-16 units (a JS string's length)
 const RECOMMENDED = /\s*\(recommended\)\s*$/i; // as QuestionCard strips it from a clicked label
-const REASONS: Record<string, string> = { details: 'More details', clarify: 'Clarify', simplify: 'Simplify', reask: 'Re-ask' };
+const REASONS: Record<string, string> = { details: 'More details', clarify: 'Clarify', simplify: 'Simplify', reask: 'Re-ask', visual: 'Show me' };
 const CUT = '\n[context cut: the full text is on the dashboard]';
 
 type Q = { id: number; project: string; asked_by: string; body: string; context: string | null; multi: boolean;
   options: { label: string; description: string | null }[] | null; blocking?: boolean; task_id?: number | null;
-  versions?: { reason: string | null }[] | null; hands?: { name: string; display: string }[] };
+  versions?: { reason: string | null }[] | null; hands?: { name: string; display: string }[]; pictures?: number };
 type Button = { text: string; callback_data: string };
+// How many pictures a question carries (cb ask --image): the chat says so and points at the board, where they show.
+const PICS = () => sql`(select count(*)::int from cb.question_images i where i.question_id = q.id) as pictures`;
+const boardUrl = () => (process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '').replace(/\/$/, '');
 // The people a question can be handed to (#1200): those on its project, as the dashboard's For picker offers them.
 const HANDS = () => sql`(select coalesce(jsonb_agg(jsonb_build_object('name', u.name, 'display', u.display) order by u.name), '[]')
   from cb.users u join cb.user_projects up on up.user_name = u.name where up.project = q.project) as hands`;
@@ -60,7 +63,8 @@ export function compose(q: Q, picked: string[] = [], outcome?: string) {
     + (q.multi ? '\nPick any, then Send.' : '') : '';
   const how = outcome ?? (opts.length ? 'Tap an option, or reply to this message with your own answer.' : 'Reply to this message to answer.');
   let body = q.body, ctx = q.context ?? '';
-  const join = () => [head, body, list, ctx ? `Context:\n${ctx}` : '', how].filter(Boolean).join('\n\n');
+  const pics = q.pictures ? `${q.pictures} picture${q.pictures > 1 ? 's' : ''} with this question: see ${q.pictures > 1 ? 'them' : 'it'} on the board${boardUrl() ? ` ${boardUrl()}` : ''}` : '';
+  const join = () => [head, body, pics, list, ctx ? `Context:\n${ctx}` : '', how].filter(Boolean).join('\n\n');
   let text = join();
   if (text.length > LIMIT && ctx) { ctx = fit(ctx, ctx.length - (text.length - LIMIT) - CUT.length) + CUT; text = join(); }
   if (text.length > LIMIT) { body = fit(body, body.length - (text.length - LIMIT) - CUT.length) + CUT; text = join(); }
@@ -117,7 +121,7 @@ async function pass() {
   const chat = await pairedChat();
   if (!chat) return;
   // 1. messages whose question is no longer open for Ahmed as sent (or whose answer changed): show the outcome
-  const moved = await sql`select q.*, ${HANDS()}, m.message_id, m.chat_id as m_chat, m.state, m.desired from (
+  const moved = await sql`select q.*, ${HANDS()}, ${PICS()}, m.message_id, m.chat_id as m_chat, m.state, m.desired from (
       select m.*, case when q.status = 'open' and q.assigned_to is null and q.created_at = m.asked_at then 'open'
                        when q.status = 'open' and q.assigned_to is null then 'superseded'
                        when q.status in ('answered', 'delivered') then 'answered:' || q.answer
@@ -138,7 +142,7 @@ async function pass() {
   }
   // 2. open for Ahmed and not on Telegram as it stands: send it (new, rewritten, a follow-up that opened, handed back)
   // asked_at as text: created_at has microseconds, which a JS Date would drop (and every pass would re-send)
-  const fresh = await sql`select q.*, ${HANDS()}, q.created_at::text as asked_at from cb.questions q left join cb.telegram_messages m on m.question_id = q.id
+  const fresh = await sql`select q.*, ${HANDS()}, ${PICS()}, q.created_at::text as asked_at from cb.questions q left join cb.telegram_messages m on m.question_id = q.id
     where q.status = 'open' and q.assigned_to is null and (m.question_id is null or m.state <> 'open' or m.chat_id <> ${chat})
     order by q.created_at, q.id`;
   for (const q of fresh) {
@@ -203,7 +207,7 @@ async function onButton(cb: any, chat: number) {
   if (kind === 't' && label(arg)) {
     const l = label(arg)!, picked: string[] = m.picked.includes(l) ? m.picked.filter((x: string) => x !== l) : [...m.picked, l];
     await sql`update cb.telegram_messages set picked = ${sql.json(picked)} where question_id = ${id}`;
-    const [q] = await sql`select q.*, ${HANDS()} from cb.questions q where id = ${id}`;
+    const [q] = await sql`select q.*, ${HANDS()}, ${PICS()} from cb.questions q where id = ${id}`;
     await tg('editMessageReplyMarkup', { chat_id: chat, message_id: m.message_id, reply_markup: compose(q as any, picked).reply_markup })
       .catch((e) => { if (!notModified(e)) throw e; });
     return toast(picked.includes(l) ? `Picked ${l}` : `Unpicked ${l}`);

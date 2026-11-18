@@ -116,7 +116,7 @@ function format(raw: any): string {
       `  You asked: ${cut(a.body, 200)}`);
   // Sent back (#616): rewrite the same question. ?? []: a board whose schema predates it.
   for (const s of i.sent_back ?? [])
-    lines.push(`${who({ answered_by: s.by })} sent Q${s.id} back: ${backWhy(s.reason, s.note && cut(s.note, 500)).replace(/([^.!?…])$/, '$1.')} Rewrite it: ${reaskHint(s.id)}`,
+    lines.push(`${who({ answered_by: s.by })} sent Q${s.id} back: ${backWhy(s.reason, s.note && cut(s.note, 500)).replace(/([^.!?…])$/, '$1.')} Rewrite it: ${reaskHint(s.id, s.reason)}`,
       `  You asked: ${cut(s.body, 200)}`);
   for (const c of i.answer_copies ?? [])
     lines.push(c.was != null

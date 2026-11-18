@@ -102,7 +102,7 @@ export async function tick(project: string, actor: string) {
   }
   for (const x of b.my_questions)
     if (x.status === 'sent_back') { const s = x.sent_back; // #616: it waits on me now
-      add('questions', actor, `Q${x.id} sent back ${ago(s.at)}, ${s.by}: ${cut(backWhy(s.reason, s.note), 300)}`, reaskHint(x.id), `asked: ${cut(x.body)}`);
+      add('questions', actor, `Q${x.id} sent back ${ago(s.at)}, ${s.by}: ${cut(backWhy(s.reason, s.note), 300)}`, reaskHint(x.id, s.reason), `asked: ${cut(x.body)}`);
     } else add('questions', x.for, `Q${x.id} open ${ago(x.created_at)}, ${x.for}: ${cut(x.body)}${x.no_options ? ' ⚠ no options' : ''}`,
       x.no_options ? `cb withdraw ${x.id}` : null, x.no_options ? 'then ask again with -o "Label (Recommended)=why" -o ...' : undefined);
 

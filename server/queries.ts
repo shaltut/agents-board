@@ -69,7 +69,11 @@ export async function goal(id: number) {
 const followups = (user?: string) => sql`
   (select p.answer from cb.questions p where p.id = q.parent_id ${user ? sql`and p.assigned_to = ${user}` : sql``}) as parent_answer,
   (select jsonb_agg(jsonb_build_object('id', c.id, 'if_answer', c.if_answer, 'body', c.body) order by c.id) from cb.questions c
-    where c.parent_id = q.id and c.status = 'dormant' ${user ? sql`and c.assigned_to = ${user}` : sql``}) as branches`;
+    where c.parent_id = q.id and c.status = 'dormant' ${user ? sql`and c.assigned_to = ${user}` : sql``}) as branches,
+  ${images()}`;
+/** The question's pictures, in order: ids and captions only; the bytes come from /api/questions/:id/images/:image. */
+const images = () => sql`(select jsonb_agg(jsonb_build_object('id', i.id, 'caption', i.caption) order by i.ord)
+    from cb.question_images i where i.question_id = q.id) as images`;
 
 /** status 'answered_today' (#1346): every answer not yet delivered, and the ones delivered in the last 24 h. */
 export function questions(project?: string, status?: string) {

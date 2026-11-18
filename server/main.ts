@@ -138,6 +138,12 @@ app.use('/api/*', async (c, next) => {
   if (u.role === 'admin') { c.set('admin', u); return next(); }
   if (c.req.path === '/api/stream') return next();
   if (c.req.path === '/api/me') return c.json(await q.me(u.name, onTheirProjects(u.name)));
+  // a question's pictures, only on a question handed to this guest (as answering it is)
+  const pic = c.req.method === 'GET' && /^\/api\/questions\/(\d+)\/images\/\d+$/.exec(c.req.path);
+  if (pic) {
+    const [mine] = await sql`select 1 from cb.questions where id = ${Number(pic[1])} and assigned_to = ${u.name} and ${onTheirProjects(u.name)}`;
+    return mine ? next() : c.json({ ok: false, error: 'that question is not assigned to you' }, 403);
+  }
   const fn = c.req.method === 'POST' && /^\/api\/rpc\/(answer|send_back|log)$/.exec(c.req.path)?.[1];
   if (!fn) return c.json({ ok: false, error: 'not available to guests' }, 403);
   const args = (await c.req.json().catch(() => null)) ?? {};
@@ -212,6 +218,16 @@ app.get('/api/tasks/:id', async (c) => {
   return r ? c.json(r) : c.json({ ok: false, error: 'not found' }, 404);
 });
 app.get('/api/questions', async (c) => c.json(await q.questions(opt(c.req.query('project')), opt(c.req.query('status')))));
+// One picture of a question. The type is the one cb._image_mime read from its bytes; nosniff and a sandboxing CSP keep
+// even a crafted file an image. A picture never changes (a reask's new ones get new ids), so the browser may keep it.
+app.get('/api/questions/:id/images/:image', async (c) => {
+  const id = Number(c.req.param('id')), image = Number(c.req.param('image'));
+  if (!Number.isSafeInteger(id) || !Number.isSafeInteger(image)) return c.json({ ok: false, error: 'not a valid id' }, 400);
+  const [i] = await sql`select mime, data from cb.question_images where id = ${image} and question_id = ${id}`;
+  if (!i) return c.json({ ok: false, error: 'not found' }, 404);
+  return c.body(i.data, 200, { 'content-type': i.mime, 'cache-control': 'private, max-age=86400',
+    'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" });
+});
 app.get('/api/events', async (c) => {
   const f = c.req.query();
   return c.json(await q.events({ project: opt(f.project), actor: opt(f.actor), kind: opt(f.kind), since: opt(f.since),

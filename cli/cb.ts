@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { hostname, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { callFn } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
@@ -16,7 +16,7 @@ const OPTIONS = {
   body: { type: 'string', short: 'b' }, labels: { type: 'string', short: 'l' },
   link: { type: 'string', multiple: true }, pr: { type: 'string' }, commit: { type: 'string' }, branch: { type: 'string' },
   title: { type: 'string' }, assignee: { type: 'string' }, project: { type: 'string' },
-  task: { type: 'string', short: 't' }, option: { type: 'string', short: 'o', multiple: true },
+  task: { type: 'string', short: 't' }, option: { type: 'string', short: 'o', multiple: true }, image: { type: 'string', short: 'i', multiple: true },
   multi: { type: 'boolean' }, blocking: { type: 'boolean' }, free: { type: 'boolean' }, to: { type: 'string' }, context: { type: 'string', short: 'c' },
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
@@ -91,6 +91,23 @@ function options() {
     const i = s.indexOf('=');
     return i > 0 ? { label: s.slice(0, i).trim(), description: s.slice(i + 1).trim() } : { label: s, description: null };
   });
+}
+
+/** --image "Caption=path" or --image path, read before anything is posted so a bad file never leaves half a question.
+ *  The type is checked again from the bytes in cb.question_image_add; this only gives the early, plain error. */
+function images() {
+  return (o.image ?? []).map((s: string) => {
+    const i = s.indexOf('=');
+    const [caption, path] = i > 0 && !existsSync(s) ? [s.slice(0, i).trim(), s.slice(i + 1).trim()] : [null, s.trim()];
+    if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`--image ${path}: no such file. Give a PNG, JPEG, WebP or GIF, e.g. --image "Now=shots/now.png"`);
+    if (statSync(path).size > 5 * 1024 * 1024) throw new Error(`--image ${path}: over 5 MB. Crop it to what matters, or save it as JPEG`);
+    return { caption, data: readFileSync(path) };
+  });
+}
+async function addImages(tx: any, id: unknown, pics: ReturnType<typeof images>, replace: boolean) {
+  for (const [n, p] of pics.entries())
+    await tx`select cb.question_image_add(id => ${String(id)}, data => ${p.data}, caption => ${p.caption},
+                                          replace_all => ${replace && n === 0}, actor => ${actor})`;
 }
 
 const line = (t: any) =>
@@ -193,7 +210,7 @@ async function start() {
   const queue = project ? await sql`select id, priority, title, labels, project, assignee from cb.tasks
     where project = ${project} and status = 'next' and (assignee is null or assignee = ${actor})
     order by priority <> 'P0', case when priority <> 'P0' then cb._goal_rank(id) end nulls last, priority, rank, id limit 3` : []; // = cb.task_claim
-  const qs = await sql`select id, status, body from cb.questions where asked_by = ${actor} and status in ('open', 'answered', 'sent_back') order by id`;
+  const qs = await sql`select id, status, body, sent_back from cb.questions where asked_by = ${actor} and status in ('open', 'answered', 'sent_back') order by id`;
   const cut = (s: string) => (s.length > 100 ? s.slice(0, 99) + '…' : s);
   // Ahmed's asks (#936) waiting on this session's reply: a resumed session lost the terminal they were pushed into
   const asks = (await callFn('asks_list', { to_actor: actor, include_closed: false }) as any[]).filter((a) => a.awaiting);
@@ -205,7 +222,7 @@ async function start() {
   const doing = open.find((t: any) => t.status === 'in_progress');
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
-  for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
+  for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
   if (qs.some((q: any) => q.status === 'answered')) out.push('  cb pending                      an answer to your question is waiting: act on it, then cb delivered <qid> <you>');
   if (!doing) out.push(`  already working on something not listed? register it first: cb add ${project ?? '<project>'} "<title>" -s in_progress -b "<context>"`);
   if (doing) out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, cb done ${doing.id} "<summary>" --commit <sha> when finished`);
@@ -613,10 +630,15 @@ async function run(): Promise<unknown> {
         throw new Error('give Ahmed options to click: -o "Label (Recommended)=why" -o "Label=tradeoff" (2-4 of them). ' +
           'Only a question with no possible choices (a fact, a URL, a name) goes as --free.');
       if (o.if && !o.after) throw new Error('--if needs --after: name the question whose answer it waits for, e.g. cb ask <project> "<q>" -o ... --after Q12 --if "Yes"');
-      const reply_to = replyTo();
-      const id = await callFn('ask', { project: args[0], body: args.slice(1).join(' '), options: o.option ? options() : null,
-        multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: o.context ?? null, reply_to, actor, to_user: o.to ?? null,
-        parent: o.after ?? null, if_answer: o.if ?? null });
+      const reply_to = replyTo(), pics = images();
+      // one transaction: the question never shows on the board without the pictures it was asked with
+      const id = await sql.begin(async (tx) => {
+        const qid = await callFn('ask', { project: args[0], body: args.slice(1).join(' '), options: o.option ? options() : null,
+          multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: o.context ?? null, reply_to, actor, to_user: o.to ?? null,
+          parent: o.after ?? null, if_answer: o.if ?? null }, tx);
+        await addImages(tx, qid, pics, false);
+        return qid;
+      });
       const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}` : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
       if (!o['reply-to']) {
@@ -629,7 +651,7 @@ async function run(): Promise<unknown> {
       return { out: (f ? `Q${id} posted as a follow-up to Q${f.parent_id}: ` +
           (f.if_answer ? `it opens only if Q${f.parent_id} is answered "${f.if_answer}", else it is skipped` : `it opens once Q${f.parent_id} is answered`) +
           ' — keep working; its answer arrives like any other'
-        : `Q${id} posted — keep working; the answer arrives in this session by itself once \`cb relay\` is on, else via \`cb pending\``) +
+        : `Q${id} posted${pics.length ? ` with ${pics.length} picture${pics.length > 1 ? 's' : ''}` : ''} — keep working; the answer arrives in this session by itself once \`cb relay\` is on, else via \`cb pending\``) +
         (o.free ? `\nPosted with --free: Ahmed must type the answer. If he could pick instead (yes/no, approve?, A or B, who does it), run cb withdraw Q${id} and ask again with -o options (cb help ask).` : ''), json: id };
     }
     case 'pending': {
@@ -639,17 +661,21 @@ async function run(): Promise<unknown> {
       return { out: rows.length ? rows.map((q: any) => { const p: any = parents.get(q.parent_id);
         if (q.status === 'sent_back') { const by = q.sent_back.by === 'ahmed' ? 'Ahmed' : `${q.sent_back.by} (not Ahmed)`;
           return `Q${q.id} sent back by ${by} to ${q.asked_by}: ${flat(backWhy(q.sent_back.reason, q.sent_back.note?.slice(0, 500)))}` +
-            `\n  asked: ${flat(q.body)}\n  rewrite it: ${reaskHint(q.id)}`; }
+            `\n  asked: ${flat(q.body)}\n  rewrite it: ${reaskHint(q.id, q.sent_back.reason)}`; }
         return `Q${q.id} → ${q.asked_by}${q.reply_to?.pane ? ` (pane ${q.reply_to.pane}@${q.reply_to.machine})` : ''}` +
           `${p ? `\n  follow-up to Q${p.id} (answered ${flat(p.answer)}): ${flat(p.body)}` : ''}\n  asked: ${flat(q.body)}\n  answer: ${flat(q.answer)}` +
           (q.answer_history?.length ? `\n  CHANGED: was "${flat(q.answer_history.at(-1).answer)}". Undo or redo what you did based on the old answer.` : ''); }).join('\n')
         : 'no answers waiting', json: rows };
     }
     case 'reask': {
-      need(1, 'reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"]');
-      const id = args[0].replace(/^q/i, '');
-      await callFn('reask', { id, body: args.slice(1).join(' ') || null, options: o.option ? options() : null, free: !!o.free,
-        multi: o.multi ? true : null, context: o.context ?? null, actor });
+      need(1, 'reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]');
+      const id = args[0].replace(/^q/i, ''), pics = images();
+      // new --image pictures replace the old ones; without --image the question keeps its pictures
+      await sql.begin(async (tx) => {
+        await callFn('reask', { id, body: args.slice(1).join(' ') || null, options: o.option ? options() : null, free: !!o.free,
+          multi: o.multi ? true : null, context: o.context ?? null, actor, pictures: pics.length > 0 }, tx);
+        await addImages(tx, id, pics, true);
+      });
       const [w] = await sql`select u.display from cb.questions q join cb.users u on u.name = q.assigned_to where q.id = ${Number(id)}`;
       return { out: `Q${id} rewritten and back ${w ? `with ${w.display}` : "on Ahmed's board"} — keep working; the answer arrives like any other` };
     }

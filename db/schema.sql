@@ -719,7 +719,21 @@ end $$;
 drop function if exists cb.questions_history cascade;
 alter table cb.questions add column if not exists assigned_to text references cb.users(name) on update cascade on delete set null;
 alter table cb.questions add column if not exists answered_by text;
+-- Pictures on a question: "it looks like this now", "this is how it looks after the change". Kept in the board's own
+-- database (it already holds client work, so no new place), read only through the server's signed-in route.
+create table if not exists cb.question_images (
+  id          bigint generated always as identity primary key,
+  question_id bigint not null references cb.questions(id) on delete cascade,
+  ord         int not null,
+  caption     text,
+  mime        text not null check (mime in ('image/png', 'image/jpeg', 'image/webp', 'image/gif')),
+  data        bytea not null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists question_images_q on cb.question_images (question_id, ord);
 drop function if exists cb.ask cascade;
+drop function if exists cb._image_mime cascade;
+drop function if exists cb.question_image_add cascade;
 drop function if exists cb.user_add cascade;
 drop function if exists cb.user_rotate cascade;
 drop function if exists cb.user_remove cascade;
@@ -840,6 +854,47 @@ begin
     perform set_config('cb.note', '', true);
   end if;
   return qid;
+end $$;
+
+-- A picture's type, from its first bytes (never from a file name or a caller's say-so): the server serves it with
+-- this type, so a file that only claims to be a PNG can't reach the page as HTML or script. null: not a picture we take.
+create function cb._image_mime(data bytea) returns text language sql immutable as $$
+  select case
+    when substring(data from 1 for 8) = '\x89504e470d0a1a0a'::bytea then 'image/png'
+    when substring(data from 1 for 3) = '\xffd8ff'::bytea then 'image/jpeg'
+    when substring(data from 1 for 4) = '\x47494638'::bytea then 'image/gif'
+    when substring(data from 1 for 4) = '\x52494646'::bytea and substring(data from 9 for 4) = '\x57454250'::bytea then 'image/webp'
+  end
+$$;
+
+-- One picture on a question its asker is still shaping (open, dormant or sent back), in the order given; caption is
+-- what it shows ("Now", "After"). replace_all clears the question's pictures first: new pictures on a reask replace
+-- the old ones, as new -o replace the options. At most 6 a question, 5 MB each.
+create function cb.question_image_add(id text, data bytea, caption text default null, replace_all boolean default false,
+                                      actor text default null)
+returns bigint language plpgsql as $$
+#variable_conflict use_variable
+declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
+        q cb.questions; m text := cb._image_mime(data); n int; iid bigint;
+begin
+  select * into q from cb.questions x where x.id = qid for update;
+  if q.id is null then raise exception 'question Q% not found', qid; end if;
+  if a <> q.asked_by then raise exception 'Q% was asked by %: only its asker adds pictures to it', qid, q.asked_by; end if;
+  if q.status not in ('open', 'dormant', 'sent_back') then
+    raise exception 'Q% is already %: pictures go on a question still waiting for its answer, so ask a new one', qid, q.status;
+  end if;
+  if coalesce(octet_length(data), 0) = 0 then raise exception 'the picture is empty'; end if;
+  if octet_length(data) > 5 * 1024 * 1024 then
+    raise exception 'the picture is % MB, 5 MB at most: crop it to what matters, or save it as JPEG', round(octet_length(data) / 1048576.0, 1);
+  end if;
+  if m is null then raise exception 'not a PNG, JPEG, WebP or GIF picture: save it as one of those'; end if;
+  if coalesce(replace_all, false) then delete from cb.question_images i where i.question_id = qid; end if;
+  select count(*) into n from cb.question_images i where i.question_id = qid;
+  if n >= 6 then raise exception 'Q% already has 6 pictures, the most one question carries', qid; end if;
+  insert into cb.question_images (question_id, ord, caption, mime, data)
+  values (qid, n + 1, nullif(trim(caption), ''), m, data) returning cb.question_images.id into iid;
+  perform pg_notify('cb', 'questions'); -- open pages re-read the question and show the picture
+  return iid;
 end $$;
 
 -- Options as stored: jsonb array of strings or {label, description} -> [{label, description}].
@@ -1076,8 +1131,9 @@ begin
   if hit is not null then
     raise exception 'that looks like %; the note goes to a session: say where the value lives, not the value', hit;
   end if;
-  if r not in ('details', 'clarify', 'simplify', 'reask') then
-    raise exception '"%" is not a reason: details, clarify, simplify or reask', trim(coalesce(reason, ''));
+  -- visual: "show me": the asker asks again with pictures of what it looks like now and after (cb reask --image)
+  if r not in ('details', 'clarify', 'simplify', 'reask', 'visual') then
+    raise exception '"%" is not a reason: details, clarify, simplify, reask or visual', trim(coalesce(reason, ''));
   end if;
   if r = 'clarify' and n is null then raise exception 'clarify needs your question in the note'; end if;
   select q.status into cur from cb.questions q where q.id = qid for update;
@@ -1097,7 +1153,8 @@ end $$;
 -- A dormant follow-up waiting on one of its option labels keeps it (compared as answers compare labels, cb._label)
 -- and takes the new spelling, so the answer still routes to it; dropping it is refused.
 create function cb.reask(id text, body text default null, options jsonb default null, free boolean default false,
-                         multi boolean default null, context text default null, actor text default null)
+                         multi boolean default null, context text default null, actor text default null,
+                         pictures boolean default false)
 returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
@@ -1111,8 +1168,12 @@ begin
   if q.status not in ('open', 'sent_back') then
     raise exception 'Q% is %: only an open or sent-back question can be rewritten', qid, q.status;
   end if;
-  if b is null and options is null and not fr and multi is null and context is null then
-    raise exception 'nothing to rewrite: give the new question, -o options, --free, --multi or -c context';
+  -- pictures: the caller adds new pictures in this same transaction (cb reask -i, via cb.question_image_add)
+  if b is null and options is null and not fr and multi is null and context is null and not coalesce(pictures, false) then
+    raise exception 'nothing to rewrite: give the new question, -o options, --free, --multi, -c context or -i pictures';
+  end if;
+  if q.sent_back ->> 'reason' = 'visual' and not coalesce(pictures, false) and not cb._is_dashboard() then
+    raise exception 'Q% was sent back with "Show me": rewrite it with pictures (cb reask Q% -i "Now=<screenshot>" -i "After=<mockup>")', qid, qid;
   end if;
   if options is not null and fr then raise exception 'give options or --free, not both'; end if;
   if options is not null and jsonb_typeof(options) <> 'array' then
@@ -1138,7 +1199,8 @@ begin
   insert into cb.events (actor, project, task_id, question_id, kind, summary)
   values (a, q.project, q.task_id, qid, 'rewritten', 'Q' || qid || ' rewritten'
           || coalesce(' (' || case q.sent_back ->> 'reason' when 'details' then 'more details' when 'clarify' then 'clarified'
-                                   when 'simplify' then 'simplified' when 'reask' then 'new options' end || ')', '')
+                                   when 'simplify' then 'simplified' when 'reask' then 'new options'
+                                   when 'visual' then 'with pictures' end || ')', '')
           || ': ' || left(coalesce(b, q.body), 100));
 end $$;
 

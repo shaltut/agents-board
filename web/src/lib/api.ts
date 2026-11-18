@@ -39,17 +39,19 @@ export interface Question {
   // follow-ups (#472): a dormant question waits for parent_id's answer (if_answer: one label, null = any)
   parent_id: number | null; if_answer: string | null; parent_answer?: string | null
   branches?: { id: number; if_answer: string | null; body: string }[] | null // this question's dormant follow-ups
+  images?: { id: number; caption: string | null }[] | null // pictures (cb ask --image), in order; bytes at /api/questions/:id/images/:image
   // send back (#616): while sent_back, why and by whom; versions: earlier texts, oldest first, with the send-back that asked for the rewrite
   sent_back: { reason: BackReason; note: string | null; by: string; at: string; delivered_at?: string } | null
   versions: { body: string; options: QOption[] | null; context: string | null; reason: BackReason | null; note: string | null; rewritten_at: string }[] | null
 }
-export type BackReason = 'details' | 'clarify' | 'simplify' | 'reask'
+export type BackReason = 'details' | 'clarify' | 'simplify' | 'reask' | 'visual'
 /** Why a question goes back to its asker: the picker's label, the quiet row's word, the rewritten card's word. */
 export const BACK_REASONS: { key: BackReason; label: string; short: string; past: string }[] = [
   { key: 'details', label: 'More details', short: 'more details', past: 'more details' },
   { key: 'clarify', label: 'Ask a question', short: 'a question', past: 'clarified' },
   { key: 'simplify', label: 'Simplify', short: 'simplify', past: 'simplified' },
   { key: 'reask', label: 'Options are wrong', short: 'new options', past: 'new options' },
+  { key: 'visual', label: 'Show me', short: 'show me', past: 'with pictures' },
 ]
 export interface User { name: string; display: string; projects?: string[] } // projects: only from /api/users, not on a guest's whoami
 /** People who can take work on a project (they're on it), plus whoever already holds the item. */
