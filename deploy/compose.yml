@@ -8,6 +8,9 @@ services:
   db:
     image: postgres:16
     restart: unless-stopped
+    # Every Claude session holds a relay (its LISTEN and a query connection) and each cb call opens one more: the
+    # default 100 ran out on 2026-11-17 (~9,400 "too many clients" in 35 minutes). An idle connection costs a few MB.
+    command: ["postgres", "-c", "max_connections=300"]
     # Watchtower (running on vps2) restarts whatever has a newer image: never the database or the board, whose
     # upgrades are deliberate (maintain.md)
     labels:

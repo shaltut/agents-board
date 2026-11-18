@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
+import { compress } from 'hono/compress';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync, readFileSync } from 'node:fs';
@@ -64,6 +65,12 @@ const stale = (f: { until: number; last: number }, now: number) => f.until ? f.u
 let loginWaits = 0;
 // Guests with a project scope: only what is assigned to them, on a project Ahmed put them on.
 const onTheirProjects = (user: string) => sql`project in (select project from cb.user_projects where user_name = ${user})`;
+
+// gzip the API's JSON: /api/tasks alone is ~2 MB and every open page re-reads it on each board change (80 GB through
+// the proxy in a week before this). Hono skips text/event-stream itself; the explicit check keeps /api/stream's events
+// from being buffered whatever a future Hono does.
+const gzip = compress();
+app.use('/api/*', (c, next) => c.req.path === '/api/stream' ? next() : gzip(c, next));
 
 app.use('/api/*', async (c, next) => {
   // CSRF: a browser always sends Origin on a cross-site POST; a page elsewhere must not drive the board.

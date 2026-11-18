@@ -168,6 +168,22 @@ test('live updates through nginx: the stream tells the proxy not to buffer it', 
   await r.body?.cancel();
 });
 
+test('API answers are gzipped for a browser that asks; the live stream never is (compression would hold events back)', async () => {
+  const sql = await db();
+  await owner(sql);
+  const cookie = (await login('ahmed', 'owner-pass-1')).cookie;
+  for (let i = 0; i < 10; i++) await sql`select cb.task_add(project => 'demo', title => ${'card ' + i}, body => ${'x'.repeat(300)}, actor => 'W1')`;
+  const tasks = await web('/api/tasks', { cookie, headers: { 'accept-encoding': 'gzip' } });
+  assert.equal(tasks.status, 200);
+  assert.equal(tasks.headers.get('content-encoding'), 'gzip');
+  assert.ok(Array.isArray(JSON.parse(Buffer.from(await new Response(tasks.body!.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()).toString())));
+  const plain = await web('/api/tasks', { cookie });
+  assert.equal(plain.headers.get('content-encoding'), null, 'no Accept-Encoding: plain JSON');
+  const stream = await web('/api/stream', { cookie, headers: { 'accept-encoding': 'gzip' } });
+  assert.equal(stream.headers.get('content-encoding'), null);
+  await stream.body?.cancel();
+});
+
 test('anyone signed in changes their own password; the current one is required', async () => {
   const sql = await db();
   await owner(sql);

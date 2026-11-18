@@ -13,10 +13,14 @@ export function databaseUrl(): string {
   return process.env.CB_DATABASE_URL || dotenv('DATABASE_URL') || 'postgres://cb@127.0.0.1:5434/claude_board';
 }
 
-export function connect(url: string = databaseUrl()) {
+/** app names the connection in pg_stat_activity (who holds the board's connections when it runs out of them: the
+ *  limit is shared by every session's relay and cb). Never 'cb-web': that name is the dashboard's (schema.sql).
+ *  max: a process that queries one at a time (the relay) needs one connection, not a pool of ten. */
+export function connect(url: string = databaseUrl(), o: { app?: string; max?: number } = {}) {
   // int8 → Number: ids and counts stay well below 2^53 and must be JSON-friendly.
   return postgres(url, {
-    onnotice: () => {}, max: 10, connect_timeout: 5,
+    onnotice: () => {}, max: o.max ?? 10, connect_timeout: 5,
+    connection: { application_name: o.app ?? process.env.PGAPPNAME ?? 'cb' },
     types: { int8: { to: 20, from: [20], serialize: (x: number) => String(x), parse: (x: string) => Number(x) } } as any,
   });
 }

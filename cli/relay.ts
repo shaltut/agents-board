@@ -41,7 +41,7 @@ if (!process.argv.includes('--child')) {
 writeFileSync(LOCK, String(process.pid));
 
 const M = machine();
-const sql = connect();
+const sql = connect(undefined, { app: 'cb-relay', max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
 let busy = false, again = false;
 
