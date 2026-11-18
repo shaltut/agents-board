@@ -74,9 +74,10 @@ test('compose: a Hand to row, one button per person on the project, above the se
   const q = { id: 7, project: 'demo', asked_by: 'W1', body: 'Ship it?', context: null, multi: false, options: [{ label: 'Yes', description: null }],
     hands: [{ name: 'iman', display: 'Iman' }, { name: 'omar', display: 'Omar' }] };
   const rows = tg.compose(q as any).reply_markup.inline_keyboard;
-  assert.deepEqual(rows.at(-2).map((b: any) => [b.text, b.callback_data]), [['Hand to Iman', 'h:7:iman'], ['Hand to Omar', 'h:7:omar']]);
-  assert.equal(rows.at(-1)[0].callback_data, 'b:7:details');
-  assert.equal(tg.compose({ ...q, hands: [] } as any).reply_markup.inline_keyboard.length, 2, 'nobody on the project: no row');
+  // the send-back buttons are the last two rows (five in one were too narrow on a phone)
+  assert.deepEqual(rows.at(-3).map((b: any) => [b.text, b.callback_data]), [['Hand to Iman', 'h:7:iman'], ['Hand to Omar', 'h:7:omar']]);
+  assert.equal(rows.at(-2)[0].callback_data, 'b:7:details');
+  assert.equal(tg.compose({ ...q, hands: [] } as any).reply_markup.inline_keyboard.length, 3, 'nobody on the project: no row');
   // review: Telegram refuses the whole message for a row over 8 buttons or callback_data over 64 bytes, and the question never arrives
   const many = Array.from({ length: 9 }, (_, i) => ({ name: `user${i}`, display: `User ${i}` })).concat({ name: 'x'.repeat(60), display: 'Long' });
   const kb = tg.compose({ ...q, id: 1234567, hands: many } as any).reply_markup.inline_keyboard;
