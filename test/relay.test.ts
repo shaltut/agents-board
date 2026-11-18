@@ -75,8 +75,8 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
   try {
     await new Promise((r) => setTimeout(r, 1500)); // relay is listening
     // every session runs one: it names its connections, and holds no more than its LISTEN and one for queries
-    const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where application_name = 'cb-relay' and pid <> pg_backend_pid()`;
-    assert.ok(n >= 1 && n <= 2, `cb-relay connections: ${n}`);
+    const [{ conns }] = await sql`select count(*)::int as conns from pg_stat_activity where application_name = 'cb-relay' and pid <> pg_backend_pid()`;
+    assert.ok(conns >= 1 && conns <= 2, `cb-relay connections: ${conns}`);
     await sql`select cb.answer('1', 'Rotate now')`;
     for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(inbox.got.length, 1);
