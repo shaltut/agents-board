@@ -100,8 +100,10 @@ const qs = (o: Record<string, string | undefined>) => {
 
 export const useUsers = () => useQuery({ queryKey: ['users'], queryFn: () => get<User[]>('/api/users') })
 export const useProjects = () => useQuery({ queryKey: ['projects'], queryFn: () => get<Project[]>('/api/projects') })
+/** A card from the list: no description (the server leaves it off; useTask has it). */
+export type ListTask = Omit<Task, 'body'>
 export const useTasks = (project?: string, status?: Status) =>
-  useQuery({ queryKey: ['tasks', project, status], queryFn: () => get<Task[]>(`/api/tasks${qs({ project, status })}`) })
+  useQuery({ queryKey: ['tasks', project, status], queryFn: () => get<ListTask[]>(`/api/tasks${qs({ project, status })}`) })
 export const useQuestions = (project?: string, status?: string) =>
   useQuery({ queryKey: ['questions', project, status], queryFn: () => get<Question[]>(`/api/questions${qs({ project, status })}`) })
 export const useTask = (id: number | null) =>

@@ -8,7 +8,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useTasks, type Status, type Task } from '@/lib/api'
+import { rpc, useTasks, type Status, type ListTask } from '@/lib/api'
 import { STATUS } from '@/lib/format'
 import { bandRank, byQueue, dropIndex } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
@@ -20,12 +20,12 @@ const COLUMNS: Status[] = ['backlog', 'next', 'in_progress', 'blocked', 'review'
 const HINT: Partial<Record<Status, string>> = { backlog: 'Not ready yet', next: 'Sessions take from the top' }
 
 /** Shared drag-and-drop move: status change (if any) then the rank Ahmed chose. The DB result wins. */
-export async function moveTask(t: Task, to: Status, rank: number | null) {
+export async function moveTask(t: ListTask, to: Status, rank: number | null) {
   if (t.status !== to) await rpc('task_move', { id: t.id, status: to })
   if (rank != null) await rpc('task_update', { id: t.id, fields: { rank } })
 }
 
-function SortableCard({ t, showProject }: { t: Task; showProject: boolean }) {
+function SortableCard({ t, showProject }: { t: ListTask; showProject: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: t.id, data: { status: t.status } })
   return (
     <TaskCard ref={setNodeRef} t={t} showProject={showProject} dragging={isDragging}
@@ -42,7 +42,7 @@ function SortableCard({ t, showProject }: { t: Task; showProject: boolean }) {
   )
 }
 
-function Column({ status, tasks, showProject }: { status: Status; tasks: Task[]; showProject: boolean }) {
+function Column({ status, tasks, showProject }: { status: Status; tasks: ListTask[]; showProject: boolean }) {
   const { setNodeRef, isOver } = useDroppable({ id: `col:${status}`, data: { status } })
   const [collapsed, setCollapsed] = useState(false)
   return (
@@ -78,7 +78,7 @@ export function Board({ route }: { route: Route }) {
   const qc = useQueryClient()
   const { data = [], isLoading } = useTasks(route.project)
   const [optimistic, setOptimistic] = useState<{ id: number; status: Status; rank: number } | null>(null)
-  const [active, setActive] = useState<Task | null>(null)
+  const [active, setActive] = useState<ListTask | null>(null)
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -86,7 +86,7 @@ export function Board({ route }: { route: Route }) {
 
   const columns = useMemo(() => {
     const rows = data.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type)).map((t) => (optimistic && t.id === optimistic.id ? { ...t, status: optimistic.status, rank: optimistic.rank } : t))
-    const by = Object.fromEntries(COLUMNS.map((s) => [s, [] as Task[]])) as Record<Status, Task[]>
+    const by = Object.fromEntries(COLUMNS.map((s) => [s, [] as ListTask[]])) as Record<Status, ListTask[]>
     for (const t of rows) by[t.status]?.push(t)
     for (const s of COLUMNS) by[s].sort((a, b) => (s === 'done' ? +new Date(b.done_at ?? 0) - +new Date(a.done_at ?? 0) : byQueue(a, b)))
     return by

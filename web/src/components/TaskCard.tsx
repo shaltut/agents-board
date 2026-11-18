@@ -1,11 +1,11 @@
 import { forwardRef } from 'react'
 import { GitCommitHorizontal, GitPullRequest, GitBranch } from 'lucide-react'
-import { useQuestions, type Task } from '@/lib/api'
+import { useQuestions, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ActorChip, EpicChip, GoalChip, PriorityPicker, ProjectChip, TagChip, TaskId, TypeChip, WaitsOn } from './Chips'
 
-type Props = { t: Task; showProject?: boolean; dragging?: boolean; overlay?: boolean } & React.HTMLAttributes<HTMLDivElement>
+type Props = { t: ListTask; showProject?: boolean; dragging?: boolean; overlay?: boolean } & React.HTMLAttributes<HTMLDivElement>
 
 /** A flight strip. The left edge only speaks when it matters: amber when the task holds on a
  *  question to Ahmed, red for P0. */

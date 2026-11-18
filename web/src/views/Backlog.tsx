@@ -7,7 +7,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Plus } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useProjects, useTasks, type Status, type Task } from '@/lib/api'
+import { rpc, useProjects, useTasks, type Status, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { bandRank, dropIndex } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
@@ -18,7 +18,7 @@ import { Input } from '@/components/ui/input'
 import { ActorChip, EpicChip, PriorityPicker, ProjectChip, TagChip, TaskId, TypeChip, WaitsOn } from '@/components/Chips'
 import { moveTask } from './Board'
 
-function Row({ t, showProject, place, selected, onSelect }: { t: Task; showProject: boolean; place?: number; selected?: boolean; onSelect?: (on: boolean) => void }) {
+function Row({ t, showProject, place, selected, onSelect }: { t: ListTask; showProject: boolean; place?: number; selected?: boolean; onSelect?: (on: boolean) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: t.id, data: { status: t.status } })
   return (
     <li ref={setNodeRef} style={{ transform: CSS.Translate.toString(transform), transition }}
@@ -46,7 +46,7 @@ function Row({ t, showProject, place, selected, onSelect }: { t: Task; showProje
   )
 }
 
-function List({ status, tasks, children, empty }: { status: Status; tasks: Task[]; children: React.ReactNode; empty: string }) {
+function List({ status, tasks, children, empty }: { status: Status; tasks: ListTask[]; children: React.ReactNode; empty: string }) {
   const { setNodeRef, isOver } = useDroppable({ id: `list:${status}`, data: { status } })
   return (
     <ul ref={setNodeRef} className={cn('overflow-hidden rounded-lg border bg-card transition-shadow', isOver && 'ring-2 ring-ring/40')}>
@@ -60,7 +60,7 @@ export function Backlog({ route }: { route: Route }) {
   const qc = useQueryClient()
   const { data: nextAll = [] } = useTasks(route.project, 'next')
   const { data: backlogAll = [] } = useTasks(route.project, 'backlog')
-  const tagged = (ts: Task[]) => ts.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type))
+  const tagged = (ts: ListTask[]) => ts.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type))
   const next = useMemo(() => tagged(nextAll), [nextAll, route.tag, route.type])
   const backlog = useMemo(() => tagged(backlogAll), [backlogAll, route.tag, route.type])
   const { data: projects = [] } = useProjects()

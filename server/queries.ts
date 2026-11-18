@@ -9,7 +9,12 @@ export const projects = () => sql`
     (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') as question_count
   from cb.projects p where not p.archived order by p.name`;
 
-export function tasks(project?: string, status?: string) {
+/** The board's card list. No descriptions (`body`): no list view shows them, the panel reads them from task(id), and
+ *  they were half of the ~2 MB every open page re-read on each board change. */
+export async function tasks(project?: string, status?: string) {
+  return (await taskRows(project, status)).map(({ body, ...t }: any) => t);
+}
+function taskRows(project?: string, status?: string) {
   const filter = status
     ? sql`status = ${status}`
     : sql`status <> 'cancelled' and (status <> 'done' or done_at > now() - interval '7 days')`;
@@ -131,6 +136,11 @@ export async function huddle(id: number) {
   return { ...h, lines };
 }
 
+const waiting = (q: any) => q.status === 'open' || q.status === 'sent_back';
+/** An answered question on the guest page is a one-line row (question, answer, Change): what answering needed (options,
+ *  context, versions, follow-ups, pictures) stays off it. A guest answers hundreds a week, re-sent on every change. */
+const answeredRow = ({ options, context, versions, branches, parent_answer, images, ...q }: any) => q;
+
 /** A guest's own page: questions handed to them (open, and answered this week) and their open tasks, on their projects. */
 export async function me(user: string, scope: ReturnType<typeof sql>) {
   const [rows, tasks] = await Promise.all([
@@ -142,7 +152,7 @@ export async function me(user: string, scope: ReturnType<typeof sql>) {
         from cb.tasks t where t.assignee = ${user} and ${scope} and t.status not in ('done', 'cancelled') order by t.priority, t.rank, t.id`,
   ]);
   // earlier answers and who they were delivered to are the board's (#1346), not the guest's
-  const questions = rows.map(({ answer_history, delivered_to, ...q }: any) => q);
+  const questions = rows.map(({ answer_history, delivered_to, ...q }: any) => waiting(q) ? q : answeredRow(q));
   return { questions, tasks };
 }
 

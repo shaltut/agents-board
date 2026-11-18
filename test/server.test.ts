@@ -186,6 +186,7 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
 
   const me = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(me.questions.map((q: any) => q.body), ['E1 scope?']);
+  assert.deepEqual(me.questions[0].options.map((o: any) => o.label), ['A', 'B'], 'an open question carries what answering it needs');
   assert.deepEqual(me.tasks.map((t: any) => t.title), ['PO sign-off on E1-E12']);
   assert.equal((await remote('/api/tasks', { cookie: token })).status, 403, 'guests get no board-wide reads');
 
@@ -207,6 +208,11 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
   await sql`select cb.log(project => 'ihop', summary => 'internal session chatter', task_id => '1', actor => 'W2@macbook')`;
   const after = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(after.tasks[0].my_notes.map((n: any) => n.summary), ['signed']);
+  // an answered question is a one-line row (question, answer, Change): not its options or context, re-sent on every change
+  const done = after.questions.find((q: any) => q.id === 1);
+  assert.deepEqual([done.body, done.answer, done.status], ['E1 scope?', 'A', 'answered']);
+  assert.equal(done.options, undefined);
+  assert.equal(done.context, undefined);
 });
 
 test('a guest answers a follow-up once it opens, and sees what comes next on the parent', async () => {
@@ -268,7 +274,7 @@ test('epics over HTTP: the dashboard creates one; lists, epic page and task pane
   const res = await rpc('epic_create', { project: 'demo', title: 'Payer gateway', goal: 'g' });
   assert.equal(res.status, 200);
   const e = (await res.json()).result;
-  for (const title of ['a', 'b']) await rpc('task_add', { project: 'demo', title, status: 'next', epic: `E${e}` });
+  for (const title of ['a', 'b']) await rpc('task_add', { project: 'demo', title, body: `${title} in full`, status: 'next', epic: `E${e}` });
   assert.equal((await rpc('task_block', { task: '2', blocker: '1' })).status, 200);
   const [epic] = await (await app.request('/api/epics?project=demo')).json();
   assert.deepEqual([epic.id, epic.total, epic.finished, epic.status], [e, 2, 0, 'open']);
@@ -281,6 +287,9 @@ test('epics over HTTP: the dashboard creates one; lists, epic page and task pane
   assert.match((await unknown.json()).error, /unknown project "nope"/);
   const tasks = await (await app.request('/api/tasks?project=demo')).json();
   assert.deepEqual(tasks.find((t: any) => t.id === 2).waits_on, [1]);
+  // the list is cards (titles): descriptions come with the task panel, not on every board refresh
+  assert.ok(tasks.every((t: any) => !('body' in t)), 'the task list carries no descriptions');
+  assert.equal((await (await app.request('/api/tasks/2')).json()).task.body, 'b in full');
   const panel = await (await app.request('/api/tasks/2')).json();
   assert.deepEqual(panel.blockers.map((t: any) => [t.id, t.title]), [[1, 'a']]);
   assert.deepEqual((await (await app.request('/api/tasks/1')).json()).blocks.map((t: any) => t.id), [2]);
