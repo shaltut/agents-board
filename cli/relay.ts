@@ -9,7 +9,8 @@ import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } fro
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connect, machine } from '../server/db.ts';
+import { connect, databaseUrl, machine } from '../server/db.ts';
+import { serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 
 const SOCKET = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
@@ -200,24 +201,30 @@ const soon = () => { clearTimeout(timer); timer = setTimeout(check, 250); };
 await sql.listen('cb', soon, soon).catch((e) => log(`listen failed: ${e?.message}`));
 log(`relay up for ${PANE}@${M}`);
 await check();
+// this session's cb calls run on this connection (bridge.ts): no connect of their own
+const unbridge = await serveBridge(sql, key, databaseUrl(), log).catch((e) => { log(`bridge failed: ${e?.message}`); return async () => {}; });
+for (const s of ['SIGTERM', 'SIGINT'] as const) process.on(s, () => { unbridge().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 500); });
 setInterval(check, 30_000); // safety net if a notify is missed while reconnecting
 // Board updates reach running sessions: when this code changes (and has settled), hand over to a fresh relay.
-const CODE = [import.meta.filename, join(import.meta.dirname, '..', 'server', 'db.ts')];
+const CODE = [import.meta.filename, join(import.meta.dirname, 'bridge.ts'), join(import.meta.dirname, '..', 'server', 'db.ts')];
 const version = () => CODE.map((f) => { try { return statSync(f).mtimeMs; } catch { return 0; } });
 const born = version().join();
 
+let leaving = false; // unbridge() is async: one exit, not one per tick
 setInterval(() => {
+  if (leaving) return;
   const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK, ''); } catch {} };
   if (!existsSync(SOCKET)) {
     log('session inbox gone; exiting');
-    release();
-    process.exit(0);
+    release(); leaving = true;
+    unbridge().finally(() => process.exit(0));
+    return;
   }
   const v = version();
   if (v.join() !== born && Date.now() - Math.max(...v) > 3000) {
     log('relay code changed; restarting');
-    release();
-    relaunch();
-    process.exit(0);
+    release(); leaving = true;
+    unbridge().finally(() => { relaunch(); process.exit(0); });
+    return;
   }
 }, 2000);

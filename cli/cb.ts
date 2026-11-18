@@ -5,9 +5,10 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { callFn } from '../server/rpc.ts';
+import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
-import { sql, databaseUrl, machine } from '../server/db.ts';
+import { sql as direct, databaseUrl, machine } from '../server/db.ts';
+import { openBridge } from './bridge.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
 
 const OPTIONS = {
@@ -52,6 +53,13 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
   console.error("cb: only Ahmed's dashboard can act as ahmed: sessions use their own name");
   process.exit(1);
 }
+
+// Through this session's relay when it has one (bridge.ts): its connection is already open. Not as cb-web: the
+// relay's connection is named cb-relay, so a PGAPPNAME run connects itself.
+const relayKey = process.env.CLAUDE_CODE_MESSAGING_SOCKET && !process.env.PGAPPNAME && cmd !== 'help' && !o.help
+  ? createHash('sha1').update(process.env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12) : null;
+const sql: any = (relayKey && await openBridge(relayKey, databaseUrl(), () => direct).catch(() => null)) || direct;
+useDb(sql);
 
 let sessionProject: string | null = null;
 

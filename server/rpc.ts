@@ -25,7 +25,11 @@ function param(i: number, v: unknown): { expr: string; value: unknown } {
   return { expr: n, value: typeof v === "boolean" ? v : String(v) }; // postgres.js serializes booleans by identity
 }
 
-export async function callFn(fn: string, args: Record<string, unknown> = {}, db: any = sql) {
+/** cb's queries go through its session's relay when it has one (cli/bridge.ts): callFn's default follows. */
+let fallback: any = sql;
+export const useDb = (db: any) => { fallback = db; };
+
+export async function callFn(fn: string, args: Record<string, unknown> = {}, db: any = fallback) {
   if (!RPC_FUNCTIONS.includes(fn)) throw new RpcError(404, `unknown function ${fn}; available: ${RPC_FUNCTIONS.join(', ')}`);
   const keys = Object.keys(args);
   for (const k of keys) if (!/^[a-z_]+$/.test(k)) throw new RpcError(400, `bad argument name "${k}"`);
