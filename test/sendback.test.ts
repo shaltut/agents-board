@@ -80,7 +80,7 @@ test('send back refuses a clarify without his question, and an unknown reason', 
   const id = await ask(sql);
   await assert.rejects(back(sql, id, 'clarify'), /clarify needs your question in the note/);
   await assert.rejects(back(sql, id, 'clarify', '  '), /clarify needs your question in the note/);
-  await assert.rejects(back(sql, id, 'vague'), /"vague" is not a reason: details, clarify, simplify or reask/);
+  await assert.rejects(back(sql, id, 'vague'), /"vague" is not a reason: details, clarify, simplify, reask or visual/);
   await back(sql, id, 'CLARIFY', 'Which client, Tawuniya or SEHA?');
   assert.equal((await row(sql, id)).sent_back.reason, 'clarify');
 });
@@ -124,7 +124,7 @@ test('cb reask with only context: the text stays, the context is replaced', asyn
   assert.equal(q.versions[0].context, null);
   const [e] = await sql`select summary from cb.events where kind = 'rewritten'`;
   assert.equal(e.summary, 'Q1 rewritten (more details): Ship #12 today?');
-  assert.match(cb(['reask', 'Q1']).err, /nothing to rewrite: give the new question, -o options, --free, --multi or -c context/);
+  assert.match(cb(['reask', 'Q1']).err, /nothing to rewrite: give the new question, -o options, --free, --multi, -c context or -i pictures/);
 });
 
 test('only the asker (or Ahmed\'s dashboard) rewrites; it works from open too, not from answered', async () => {

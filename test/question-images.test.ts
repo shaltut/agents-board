@@ -80,10 +80,13 @@ test('"Show me" sends a question back for pictures; the asker rewrites it with o
   const session = postgres(TEST_URL, { onnotice: () => {} }); // the asker's session, not the dashboard
   try {
     await assert.rejects(session`select cb.reask(id => ${q}, body => 'Which header, really?', actor => 'W1')`, /sent back with "Show me": rewrite it with pictures/);
-    // as cb reask -i does: the rewrite and its pictures in one transaction
+    // a picture from an earlier transaction doesn't count: the rewrite must bring new ones
+    await add(session, q, PNG, 'old');
+    await assert.rejects(session`select cb.reask(id => ${q}, actor => 'W1')`, /sent back with "Show me"/);
+    // as cb reask -i does: the pictures, then the rewrite, in one transaction
     await session.begin(async (tx: any) => {
-      await tx`select cb.reask(id => ${q}, actor => 'W1', pictures => true)`;
       await add(tx, q, PNG, 'Now', 'W1', true);
+      await tx`select cb.reask(id => ${q}, actor => 'W1')`;
     });
   } finally { await session.end(); }
   const [row] = await sql`select status, versions -> -1 ->> 'reason' as reason from cb.questions where id = ${Number(q)}`;

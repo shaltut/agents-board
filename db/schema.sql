@@ -1153,12 +1153,14 @@ end $$;
 -- A dormant follow-up waiting on one of its option labels keeps it (compared as answers compare labels, cb._label)
 -- and takes the new spelling, so the answer still routes to it; dropping it is refused.
 create function cb.reask(id text, body text default null, options jsonb default null, free boolean default false,
-                         multi boolean default null, context text default null, actor text default null,
-                         pictures boolean default false)
+                         multi boolean default null, context text default null, actor text default null)
 returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
         q cb.questions; opts jsonb; c record; label text; b text := nullif(trim(body), ''); fr boolean := coalesce(free, false);
+        -- new pictures: added in this same transaction, just before (cb reask -i). now() is the transaction's start,
+        -- so a picture's created_at equals it only if it was added in this transaction: read from the rows, never a flag.
+        pictures boolean := exists (select 1 from cb.question_images i where i.question_id = qid and i.created_at = now());
 begin
   select * into q from cb.questions x where x.id = qid for update;
   if q.id is null then raise exception 'question Q% not found', qid; end if;
@@ -1168,12 +1170,11 @@ begin
   if q.status not in ('open', 'sent_back') then
     raise exception 'Q% is %: only an open or sent-back question can be rewritten', qid, q.status;
   end if;
-  -- pictures: the caller adds new pictures in this same transaction (cb reask -i, via cb.question_image_add)
-  if b is null and options is null and not fr and multi is null and context is null and not coalesce(pictures, false) then
-    raise exception 'nothing to rewrite: give the new question, -o options, --free, --multi, -c context or -i pictures';
+  if q.sent_back ->> 'reason' = 'visual' and not pictures and not cb._is_dashboard() then
+    raise exception 'Q% was sent back with "Show me": rewrite it with pictures (cb reask Q% -i "Now=<screenshot>" -i "After=<mockup>"). No way to make one? cb withdraw Q% and ask again saying why', qid, qid, qid;
   end if;
-  if q.sent_back ->> 'reason' = 'visual' and not coalesce(pictures, false) and not cb._is_dashboard() then
-    raise exception 'Q% was sent back with "Show me": rewrite it with pictures (cb reask Q% -i "Now=<screenshot>" -i "After=<mockup>")', qid, qid;
+  if b is null and options is null and not fr and multi is null and context is null and not pictures then
+    raise exception 'nothing to rewrite: give the new question, -o options, --free, --multi, -c context or -i pictures';
   end if;
   if options is not null and fr then raise exception 'give options or --free, not both'; end if;
   if options is not null and jsonb_typeof(options) <> 'array' then

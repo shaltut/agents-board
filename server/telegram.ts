@@ -16,7 +16,8 @@ type Q = { id: number; project: string; asked_by: string; body: string; context:
 type Button = { text: string; callback_data: string };
 // How many pictures a question carries (cb ask --image): the chat says so and points at the board, where they show.
 const PICS = () => sql`(select count(*)::int from cb.question_images i where i.question_id = q.id) as pictures`;
-const boardUrl = () => (process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '').replace(/\/$/, '');
+let board: string | undefined; // read once: compose runs on every message
+const boardUrl = () => (board ??= (process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '').replace(/\/$/, ''));
 // The people a question can be handed to (#1200): those on its project, as the dashboard's For picker offers them.
 const HANDS = () => sql`(select coalesce(jsonb_agg(jsonb_build_object('name', u.name, 'display', u.display) order by u.name), '[]')
   from cb.users u join cb.user_projects up on up.user_name = u.name where up.project = q.project) as hands`;
@@ -58,7 +59,7 @@ export function compose(q: Q, picked: string[] = [], outcome?: string) {
   const opts = q.options ?? [];
   const head = [`Q${q.id} · ${q.project} · from ${q.asked_by}`,
     q.blocking && q.task_id ? `Holding #${q.task_id} until you answer` : '',
-    q.versions?.length ? `Rewritten${q.versions.at(-1)?.reason ? ` (${REASONS[q.versions.at(-1)!.reason!]?.toLowerCase()})` : ''}` : ''].filter(Boolean).join('\n');
+    q.versions?.length ? `Rewritten${q.versions.at(-1)?.reason ? ` (${q.versions.at(-1)!.reason === 'visual' ? 'with pictures' : REASONS[q.versions.at(-1)!.reason!]?.toLowerCase()})` : ''}` : ''].filter(Boolean).join('\n');
   const list = opts.length ? opts.map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n')
     + (q.multi ? '\nPick any, then Send.' : '') : '';
   const how = outcome ?? (opts.length ? 'Tap an option, or reply to this message with your own answer.' : 'Reply to this message to answer.');
@@ -76,7 +77,8 @@ export function compose(q: Q, picked: string[] = [], outcome?: string) {
       : { text: o.label, callback_data: `o:${q.id}:${i}` }]),
     ...(q.multi && opts.length ? [[{ text: picked.length ? `Send (${picked.length})` : 'Send', callback_data: `s:${q.id}` }]] : []),
     ...hands(q),
-    Object.entries(REASONS).map(([k, v]) => ({ text: v, callback_data: `b:${q.id}:${k}` })),
+    // two rows: five send-back buttons in one are too narrow on a phone
+    ...((b) => [b.slice(0, 3), b.slice(3)])(Object.entries(REASONS).map(([k, v]) => ({ text: v, callback_data: `b:${q.id}:${k}` }))),
   ];
   return { text, reply_markup: { inline_keyboard: rows } };
 }

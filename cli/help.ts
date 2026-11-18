@@ -99,7 +99,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     reask: { use: 'cb reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]', topic: 'ask',
       does: 'Ahmed sent your question back (more details, his own question, simpler, the options are wrong, or "Show me": add pictures): rewrite it in place. Same Q id; it shows up on his board again as new. Give only what changes: the text, the options, the context, or several.',
       eg: 'cb reask Q12 "Ship #2796 today?" -o "Yes (Recommended)=tests green on SIT" -o "No=wait for the DB run"',
-      more: 'Never answer a send-back with a new cb ask: rewrite the same question. -c replaces the context (Ahmed still sees the old version). New -o replace all options: keep any option a --after/--if follow-up waits on, or withdraw that follow-up first. Only the session that asked can rewrite it; it also works on an open question nobody answered yet. -i replaces all the pictures (none given: they stay); "Show me" needs at least one -i: a screenshot of how it looks now and one of how it will look (a mockup if it is not built yet).' },
+      more: 'Never answer a send-back with a new cb ask: rewrite the same question. -c replaces the context (Ahmed still sees the old version). New -o replace all options: keep any option a --after/--if follow-up waits on, or withdraw that follow-up first. Only the session that asked can rewrite it; it also works on an open question nobody answered yet. -i replaces all the pictures (none given: they stay; the old ones are not kept with the old version); "Show me" needs at least one -i: a screenshot of how it looks now and one of how it will look (a mockup if it is not built yet).' },
     withdraw: { use: 'cb withdraw <qid>', topic: 'ask',
       does: 'Withdraw a question that no longer matters or was asked wrong (then ask again properly).',
       eg: 'cb withdraw Q12' },
@@ -492,7 +492,7 @@ export const TOPIC_NAMES = Object.keys(TOPICS);
 
 // A send-back (#616) as the asking session reads it: in the relay's push and in cb pending.
 const BACK: Record<string, string> = { details: 'it needs more details', clarify: 'a question for you', simplify: 'simplify it', reask: 'the options are wrong',
-  visual: 'show it: ask again with pictures of how it looks now and how it will look after (cb reask --image)' };
+  visual: 'show it: ask again with pictures of how it looks now and how it will look after (cb reask --image; no way to make them: cb withdraw and ask again saying why)' };
 export const backWhy = (reason: string, note?: string | null) => `${BACK[reason] ?? reason}${note ? ` — ${note}` : ''}`;
 export const reaskHint = (id: number | string, reason?: string) => reason === 'visual'
   ? `cb reask Q${id} --image "Now=<screenshot>" --image "After=<mockup or screenshot>" ["<new question>"] [-o ...]`

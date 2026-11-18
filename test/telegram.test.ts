@@ -61,8 +61,8 @@ test('compose: plain text, options as buttons, a send-back row, context cut to t
   assert.match(m.text, /context cut/);
   const rows = m.reply_markup.inline_keyboard;
   assert.deepEqual(rows.slice(0, 2).map((r: any) => r[0].callback_data), ['o:7:0', 'o:7:1']);
-  assert.deepEqual(rows.at(-1).map((b: any) => b.text), ['More details', 'Clarify', 'Simplify', 'Re-ask']);
-  assert.deepEqual(rows.at(-1).map((b: any) => b.callback_data), ['b:7:details', 'b:7:clarify', 'b:7:simplify', 'b:7:reask']);
+  assert.deepEqual(rows.slice(-2).map((r: any) => r.map((b: any) => b.text)), [['More details', 'Clarify', 'Simplify'], ['Re-ask', 'Show me']]);
+  assert.deepEqual(rows.slice(-2).flat().map((b: any) => b.callback_data), ['b:7:details', 'b:7:clarify', 'b:7:simplify', 'b:7:reask', 'b:7:visual']);
 
   const multi = tg.compose({ ...q, context: null, multi: true } as any, ['No']);
   assert.deepEqual(multi.reply_markup.inline_keyboard.slice(0, 3).map((r: any) => r[0].text), ['[ ] Yes (Recommended)', '[x] No', 'Send (1)']);

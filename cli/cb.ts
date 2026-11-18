@@ -670,11 +670,12 @@ async function run(): Promise<unknown> {
     case 'reask': {
       need(1, 'reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]');
       const id = args[0].replace(/^q/i, ''), pics = images();
-      // new --image pictures replace the old ones; without --image the question keeps its pictures
+      // new -i pictures replace the old ones (without -i the question keeps its pictures). They go in first:
+      // cb.reask sees them in this transaction, which is what a "Show me" send-back needs.
       await sql.begin(async (tx) => {
-        await callFn('reask', { id, body: args.slice(1).join(' ') || null, options: o.option ? options() : null, free: !!o.free,
-          multi: o.multi ? true : null, context: o.context ?? null, actor, pictures: pics.length > 0 }, tx);
         await addImages(tx, id, pics, true);
+        await callFn('reask', { id, body: args.slice(1).join(' ') || null, options: o.option ? options() : null, free: !!o.free,
+          multi: o.multi ? true : null, context: o.context ?? null, actor }, tx);
       });
       const [w] = await sql`select u.display from cb.questions q join cb.users u on u.name = q.assigned_to where q.id = ${Number(id)}`;
       return { out: `Q${id} rewritten and back ${w ? `with ${w.display}` : "on Ahmed's board"} — keep working; the answer arrives like any other` };
