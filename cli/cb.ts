@@ -58,7 +58,8 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 // relay's connection is named cb-relay, so a PGAPPNAME run connects itself.
 const relayKey = process.env.CLAUDE_CODE_MESSAGING_SOCKET && !process.env.PGAPPNAME && cmd !== 'help' && !o.help
   ? createHash('sha1').update(process.env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12) : null;
-const sql: any = (relayKey && await openBridge(relayKey, databaseUrl(), () => direct).catch(() => null)) || direct;
+const sql: any = (relayKey && await openBridge(relayKey, databaseUrl(), () => direct, pane ? { machine: machine(), pane } : undefined)
+  .catch(() => null)) || direct;
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -66,7 +67,8 @@ let sessionProject: string | null = null;
 /** This pane's binding (cb iam): its actor, unless --as/$CB_ACTOR say otherwise, and its project. */
 async function resolveActor() {
   if (!pane) return;
-  const [s] = await sql`select actor, project from cb.sessions where machine = ${machine()} and pane = ${pane}`;
+  // the relay hands it over with the hello when it holds it (#3256): one round trip a command instead of two
+  const [s] = sql.binding ? [sql.binding] : await sql`select actor, project from cb.sessions where machine = ${machine()} and pane = ${pane}`;
   if (s && !explicitActor) actor = s.actor;
   sessionProject = s?.project ?? null;
 }

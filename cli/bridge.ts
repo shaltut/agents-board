@@ -42,8 +42,12 @@ function framed(sock: net.Socket, onMessage: (m: any) => void) {
 
 const errorOut = (e: any) => ({ message: String(e?.message ?? e), code: e?.code, detail: e?.detail, hint: e?.hint, severity: e?.severity });
 
+/** What the relay adds (#3256): binding(who) is the pane's cb iam binding when the relay holds it, handed over with
+ *  the hello so cb skips its own lookup; served(text) is told each query it ran, once it returned. */
+export type BridgeOpts = { binding?: (who: { machine: string; pane: string }) => unknown; served?: (text: string) => void };
+
 /** The relay's side: run each request on its connection. Returns stop(). */
-export async function serveBridge(sql: any, key: string, url: string, log: (m: string) => void = () => {}) {
+export async function serveBridge(sql: any, key: string, url: string, log: (m: string) => void = () => {}, opts: BridgeOpts = {}) {
   const files = bridgeFiles(key);
   const token = randomBytes(24).toString('hex');
   const open = new Set<net.Socket>();
@@ -54,7 +58,8 @@ export async function serveBridge(sql: any, key: string, url: string, log: (m: s
       if (!ok) { // the first message: who is asking, for which database
         const good = m?.v === V && typeof m.token === 'string' && m.token.length === token.length &&
           timingSafeEqual(Buffer.from(m.token), Buffer.from(token)) && m.url === urlId(url);
-        send({ ok: good });
+        const binding = good && m.who ? opts.binding?.(m.who) : undefined;
+        send(binding === undefined ? { ok: good } : { ok: good, binding });
         if (good) ok = true; else sock.end();
         return;
       }
@@ -67,6 +72,7 @@ export async function serveBridge(sql: any, key: string, url: string, log: (m: s
           ? await sql.unsafe(m.text, values, values.length ? { prepare: true } : {})
           : await sql(Object.assign([...m.strings], { raw: [...m.strings] }), ...values);
         served++;
+        opts.served?.(m.text ?? m.strings.join('$'));
         send({ id, rows: [...rows] }); // a plain array: cb reads rows, never .count or .columns
       } catch (e) {
         send({ id, error: errorOut(e) });
@@ -93,16 +99,17 @@ export async function serveBridge(sql: any, key: string, url: string, log: (m: s
 
 /** cb's side: an object that answers like postgres.js's sql for what cb uses (tagged queries, sql(list), unsafe),
  *  or null if there is no relay to use. Transactions (sql.begin) are not bridged: openDirect() is used for them. */
-export async function openBridge(key: string, url: string, openDirect: () => any = () => { throw new Error('no direct connection'); }): Promise<any> {
+export async function openBridge(key: string, url: string, openDirect: () => any = () => { throw new Error('no direct connection'); },
+                                 who?: { machine: string; pane: string }): Promise<any> {
   const files = bridgeFiles(key);
   let info: any;
   try { info = JSON.parse(readFileSync(files.info, 'utf8')); } catch { return null; }
   const sock = net.connect(info.socket);
   const pending = new Map<number, { res: (r: any) => void; rej: (e: any) => void }>();
-  let hello: ((ok: boolean) => void) | undefined;
+  let hello: ((ok: boolean) => void) | undefined, binding: unknown;
   const helloOk = new Promise<boolean>((r) => { hello = r; });
   const send = framed(sock, (m) => {
-    if (hello) { const h = hello; hello = undefined; return h(!!m.ok); }
+    if (hello) { const h = hello; hello = undefined; binding = m.binding; return h(!!m.ok); }
     const p = pending.get(m.id); if (!p) return;
     pending.delete(m.id);
     if (m.error) p.rej(Object.assign(new Error(m.error.message), m.error)); else p.res(m.rows);
@@ -114,7 +121,7 @@ export async function openBridge(key: string, url: string, openDirect: () => any
     pending.clear();
   };
   sock.on('error', lost); sock.on('close', lost);
-  sock.once('connect', () => send({ v: V, token: info.token, url: urlId(url) }));
+  sock.once('connect', () => send({ v: V, token: info.token, url: urlId(url), ...(who ? { who } : {}) }));
   const timer = setTimeout(() => hello?.(false), 500); // a wedged relay must not cost more than the connect it saves
   const ok = await helloOk;
   clearTimeout(timer);
@@ -134,5 +141,6 @@ export async function openBridge(key: string, url: string, openDirect: () => any
   db.unsafe = (text: string, values: any[] = []) => call({ text, values });
   db.begin = (...a: any[]) => (direct ??= openDirect()).begin(...a);
   db.end = async (o?: any) => { sock.end(); await direct?.end(o); };
+  db.binding = binding; // this pane's { actor, project } as the relay holds it; undefined: look it up
   return db;
 }

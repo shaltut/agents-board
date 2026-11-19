@@ -50,6 +50,18 @@ const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
 let busy = false, again = false;
 
+// This pane's binding (cb iam), handed to its cb calls with the bridge's hello so a call skips its own lookup (#3256).
+// Refreshed by every inbox read; dropped the moment it may have changed: a cb_bind notice for this pane (any writer:
+// the dashboard, a cb without the relay, a renamed project), a cb iam this relay ran itself (before cb hears the
+// answer), a LISTEN (re)connect (notices were lost meanwhile). gen stops a read that began before a change from
+// storing the old name. Never kept without LISTEN, and never older than 90 s (the inbox is read every 30 s).
+const ME = `${M.trim()}:${PANE.trim()}`;
+let binding: { actor: string; project: string | null; at: number } | undefined, bindGen = 0, hearing = false;
+const forget = () => { binding = undefined; bindGen++; };
+const heldBinding = (who: { machine: string; pane: string }) =>
+  who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 90_000
+    ? { actor: binding.actor, project: binding.project } : undefined;
+
 /** One line per connection, opened only when the message is ready (the inbox closes idle connections). */
 function post(text: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -175,7 +187,10 @@ async function check() {
   try {
     do {
       again = false;
+      const gen = bindGen;
       const [{ i }] = await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i`;
+      // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
+      if (hearing && gen === bindGen && i.actor && 'project' in i) binding = { actor: i.actor, project: i.project, at: Date.now() };
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
       const read = [...i.broadcasts, ...i.messages, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
@@ -203,10 +218,15 @@ let timer: NodeJS.Timeout | undefined;
 const soon = () => { clearTimeout(timer); timer = setTimeout(check, 250); };
 
 await sql.listen('cb', soon, soon).catch((e) => log(`listen failed: ${e?.message}`));
+await sql.listen('cb_bind', (p: string) => { if (p === ME) { forget(); check(); } }, () => { forget(); hearing = true; check(); })
+  .catch((e) => log(`listen cb_bind failed: ${e?.message}`));
 log(`relay ${VERSION} up for ${PANE}@${M}`);
 await check();
 // this session's cb calls run on this connection (bridge.ts): no connect of their own
-const unbridge = await serveBridge(sql, key, databaseUrl(), log).catch((e) => { log(`bridge failed: ${e?.message}`); return async () => {}; });
+const unbridge = await serveBridge(sql, key, databaseUrl(), log, {
+  binding: heldBinding,
+  served: (text) => { if (/\bcb\.iam\s*\(/.test(text)) { forget(); check(); } },
+}).catch((e) => { log(`bridge failed: ${e?.message}`); return async () => {}; });
 for (const s of ['SIGTERM', 'SIGINT'] as const) process.on(s, () => { unbridge().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 500); });
 setInterval(check, 30_000); // safety net if a notify is missed while reconnecting
 // Board updates reach running sessions: when this code changes (and has settled), hand over to a fresh relay.

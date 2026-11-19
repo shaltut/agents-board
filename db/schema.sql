@@ -241,6 +241,7 @@ drop function if exists cb.project_alias cascade;
 drop function if exists cb.tasks_before cascade;
 drop function if exists cb.tasks_history cascade;
 drop function if exists cb.notify cascade;
+drop function if exists cb.sessions_bind_notify cascade;
 drop function if exists cb.task_add cascade;
 drop function if exists cb.norm_tag cascade;
 drop function if exists cb.task_tag cascade;
@@ -566,6 +567,23 @@ create or replace trigger epics_notify after insert or update or delete on cb.ep
   for each statement execute function cb.notify();
 create or replace trigger task_blockers_notify after insert or update or delete on cb.task_blockers
   for each statement execute function cb.notify();
+
+-- A session's binding (cb iam: its actor and project) is kept by its relay, which hands it to every cb call so the
+-- call is one round trip, not two (#3256). The relay must hear every change, whatever made it: cb iam through the
+-- relay or directly, the dashboard, a project renamed or deleted (by cascade). One notice per changed row, on its
+-- own channel: the heartbeats (last_seen, broadcast_seen) say nothing.
+create function cb.sessions_bind_notify() returns trigger language plpgsql as $$
+begin
+  if tg_op = 'DELETE' then perform pg_notify('cb_bind', old.machine || ':' || old.pane);
+  else perform pg_notify('cb_bind', new.machine || ':' || new.pane); end if;
+  return null;
+end $$;
+create or replace trigger sessions_bind_notify after insert or delete on cb.sessions
+  for each row execute function cb.sessions_bind_notify();
+create or replace trigger sessions_bind_changed after update on cb.sessions
+  for each row when (old.actor is distinct from new.actor or old.project is distinct from new.project
+                     or old.machine is distinct from new.machine or old.pane is distinct from new.pane)
+  execute function cb.sessions_bind_notify();
 
 -- The open blockers a task waits on (not done or cancelled), lowest id first: "waits on #12".
 create function cb._waits_on(tid bigint) returns bigint[] language sql stable as $$
@@ -1342,6 +1360,7 @@ begin
   returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen into me, proj, seen;
   return jsonb_build_object(
     'actor', me,
+    'project', proj, -- with actor: the binding the relay hands to cb (#3256)
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)

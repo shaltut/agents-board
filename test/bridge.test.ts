@@ -15,12 +15,12 @@ const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function served(url = TEST_URL) {
+async function served(url = TEST_URL, opts: any = {}) {
   const sql = await freshDb(); clients.push(sql);
   const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
   const key = `t${process.pid}${Math.random().toString(36).slice(2, 6)}`;
   const files = bridgeFiles(key);
-  const stop = await serveBridge(relaySql, key, url);
+  const stop = await serveBridge(relaySql, key, url, undefined, opts);
   return { sql, key, files, stop };
 }
 
@@ -85,4 +85,73 @@ test('cb in a session with a relay runs through it, and opens no connection of i
     await exited;
   }
   assert.ok(!fs.existsSync(bridgeFiles(key).info) || process.platform === 'win32', 'a stopped relay leaves no bridge behind');
+});
+
+// Speed 6 (#3256): the relay keeps its pane's binding (cb iam) and hands it to cb with the hello, so a cb call is one
+// round trip, not two. Whatever changes a binding must reach the relay at once: a notice per changed row.
+test('a changed binding is announced on cb_bind, whatever changed it; a heartbeat is not', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  const heard: string[] = [];
+  const l = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(l);
+  await l.listen('cb_bind', (p: string) => heard.push(p));
+  const settle = async (n: number) => { for (let i = 0; i < 50 && heard.length < n; i++) await wait(20); await wait(100); };
+  await sql`select cb.ensure_project('demo'), cb.ensure_project('other')`;
+  await sql`select cb.inbox('PC', 'p1', 0)`;                       // the relay's own row
+  await settle(1); assert.deepEqual(heard, ['pc:p1']);
+  await sql`select cb.inbox('pc', 'p1', 0)`;                       // heartbeat: nothing changed
+  await sql`select cb.iam('pc', 'p1', 'p1@pc', null)`;             // same name again: nothing changed
+  await settle(2); assert.deepEqual(heard, ['pc:p1'], 'no notice without a change');
+  await sql`select cb.iam('pc', 'p1', 'W1', 'demo')`;
+  await settle(2); assert.deepEqual(heard.length, 2);
+  await sql`update cb.projects set slug = 'demo2' where slug = 'demo'`; // a rename reaches the session by cascade
+  await settle(3); assert.equal(heard.length, 3);
+  const [{ i }] = await sql`select cb.inbox('pc', 'p1', 0) as i`;
+  assert.deepEqual([i.actor, i.project], ['W1', 'demo2'], 'the inbox says the binding, so the relay keeps it fresh');
+  await sql`delete from cb.sessions`;
+  await settle(4); assert.deepEqual(heard.at(-1), 'pc:p1');
+});
+
+test('the hello carries the binding the relay holds: for its own pane only', async () => {
+  const { key, stop } = await served(TEST_URL, { binding: (who: any) => who.machine === 'pc' && who.pane === 'p1' ? { actor: 'W1', project: 'demo' } : undefined });
+  try {
+    const mine: any = await openBridge(key, TEST_URL, undefined, { machine: 'pc', pane: 'p1' });
+    assert.deepEqual(mine.binding, { actor: 'W1', project: 'demo' });
+    await mine.end();
+    const other: any = await openBridge(key, TEST_URL, undefined, { machine: 'pc', pane: 'p2' });
+    assert.equal(other.binding, undefined, 'another pane looks itself up');
+    await other.end();
+  } finally { await stop(); }
+});
+
+test('cb takes its name from the relay, and hears every change: its own cb iam, a direct cb iam, the dashboard', { timeout: 60_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  const inbox = process.platform === 'win32' ? String.raw`\\.\pipe\cb-bind-test-` + process.pid : join(tmpdir(), `cb-bind-${process.pid}.sock`);
+  const key = createHash('sha1').update(inbox).digest('hex').slice(0, 12);
+  fs.writeFileSync(join(tmpdir(), `cb-relay-${key}.pid`), '');
+  const base = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p8', PGAPPNAME: '' };
+  delete (base as any).CB_ACTOR;
+  const env = { ...base, CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+  const exited = new Promise((r) => relay.on('exit', r));
+  const cb = (e: any, ...a: string[]) => { const r = spawnSync('node', ['cli/cb.ts', ...a], { encoding: 'utf8', env: e }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+  let n = 0;
+  const addedBy = async () => { cb(env, 'add', 'demo', `t${++n}`); const [t] = await sql`select created_by from cb.tasks where title = ${'t' + n}`; return t.created_by; };
+  try {
+    for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
+    cb(env, 'iam', 'W8', 'demo');
+    assert.equal(await addedBy(), 'W8', 'its own cb iam, through the relay');
+    // behind the relay's back (triggers off): cb still says W8, so it took the relay's name, not the table's
+    await sql.begin(async (tx: any) => { await tx`set local session_replication_role = replica`; await tx`update cb.sessions set actor = 'Stale' where pane = 'p8'`; });
+    assert.equal(await addedBy(), 'W8', 'the name came with the hello');
+    await sql`select cb.iam('testbox', 'p8', 'W9', null)`;          // the dashboard's way
+    await wait(400);
+    assert.equal(await addedBy(), 'W9');
+    cb(base, 'iam', 'W10');                                          // a cb without the relay
+    await wait(400);
+    assert.equal(await addedBy(), 'W10');
+  } finally {
+    relay.kill();
+    await exited;
+  }
 });
