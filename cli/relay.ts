@@ -51,16 +51,29 @@ let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no hi
 let busy = false, again = false;
 
 // This pane's binding (cb iam), handed to its cb calls with the bridge's hello so a call skips its own lookup (#3256).
-// Refreshed by every inbox read; dropped the moment it may have changed: a cb_bind notice for this pane (any writer:
-// the dashboard, a cb without the relay, a renamed project), a cb iam this relay ran itself (before cb hears the
-// answer), a LISTEN (re)connect (notices were lost meanwhile). gen stops a read that began before a change from
-// storing the old name. Never kept without LISTEN, and never older than 90 s (the inbox is read every 30 s).
+// Dropped the moment it may have changed: a cb_bind notice for this pane (any writer: the dashboard, a cb without the
+// relay, a renamed project), a cb iam this relay ran itself (before cb hears the answer), a LISTEN (re)connect
+// (notices were lost meanwhile). gen stops a read that began before a change from storing the old name.
+// Each inbox read sends a ping on cb_bind with it; the binding read is kept only once that ping comes back on the
+// LISTEN connection, and served for 35 s from then. Notices arrive in commit order, so every change committed before
+// the read has been heard by then; and a LISTEN connection that died without a close (a laptop asleep, a network
+// change) returns no pings, so the binding ages out and cb looks itself up. Reads run every 30 s, so it stays warm.
 const ME = `${M.trim()}:${PANE.trim()}`;
-let binding: { actor: string; project: string | null; at: number } | undefined, bindGen = 0, hearing = false;
+type Binding = { actor: string; project: string | null };
+let binding: (Binding & { at: number }) | undefined, bindGen = 0, pings = 0;
+const waiting = new Map<string, Binding & { gen: number }>(); // ping → the read it vouches for
 const forget = () => { binding = undefined; bindGen++; };
 const heldBinding = (who: { machine: string; pane: string }) =>
-  who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 90_000
+  who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
+function bindNotice(p: string) {
+  if (p === ME) { forget(); check(); return; }
+  const read = waiting.get(p);
+  if (!read) return; // another relay's ping
+  waiting.delete(p);
+  for (const k of waiting.keys()) if (Number(k.slice(k.lastIndexOf('#') + 1)) < Number(p.slice(p.lastIndexOf('#') + 1))) waiting.delete(k); // older reads: superseded
+  if (read.gen === bindGen) binding = { actor: read.actor, project: read.project, at: Date.now() };
+}
 
 /** One line per connection, opened only when the message is ready (the inbox closes idle connections). */
 function post(text: string): Promise<void> {
@@ -187,10 +200,10 @@ async function check() {
   try {
     do {
       again = false;
-      const gen = bindGen;
-      const [{ i }] = await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i`;
+      const gen = bindGen, ping = `ping:${ME}#${++pings}`;
+      const [{ i }] = await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
-      if (hearing && gen === bindGen && i.actor && 'project' in i) binding = { actor: i.actor, project: i.project, at: Date.now() };
+      if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
       const read = [...i.broadcasts, ...i.messages, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
@@ -218,7 +231,7 @@ let timer: NodeJS.Timeout | undefined;
 const soon = () => { clearTimeout(timer); timer = setTimeout(check, 250); };
 
 await sql.listen('cb', soon, soon).catch((e) => log(`listen failed: ${e?.message}`));
-await sql.listen('cb_bind', (p: string) => { if (p === ME) { forget(); check(); } }, () => { forget(); hearing = true; check(); })
+await sql.listen('cb_bind', bindNotice, () => { forget(); check(); })
   .catch((e) => log(`listen cb_bind failed: ${e?.message}`));
 log(`relay ${VERSION} up for ${PANE}@${M}`);
 await check();

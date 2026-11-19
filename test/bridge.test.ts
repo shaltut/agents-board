@@ -150,6 +150,12 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     cb(base, 'iam', 'W10');                                          // a cb without the relay
     await wait(400);
     assert.equal(await addedBy(), 'W10');
+    // the relay's connections cut (Postgres restarted, a network change): a rename meanwhile is not missed
+    await sql`select pg_terminate_backend(pid) from pg_stat_activity where application_name like 'cb-relay%'`;
+    await sql`select cb.iam('testbox', 'p8', 'W11', null)`;
+    assert.equal(await addedBy(), 'W11', 'no notice could reach the relay: cb must not get the old name');
+    await wait(1500);
+    assert.equal(await addedBy(), 'W11');
   } finally {
     relay.kill();
     await exited;
