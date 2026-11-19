@@ -3,4 +3,7 @@
 # repo directly when Volta is here; anywhere else (the Mac) plain node.
 d=$(dirname "$0")/..
 n=$(cd "$d" && volta which node 2>/dev/null) || n=node
+# Node's compile cache: converting cb's TypeScript was ~190 ms of every call; cached, a call starts in ~90 ms.
+# Keyed by file content, so a pulled change is converted again by itself.
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-${TMPDIR:-/tmp}/cb-node-cache}"
 exec "${n:-node}" "$d/cli/cb.ts" "$@"

@@ -42,7 +42,11 @@ if (!process.argv.includes('--child')) {
 writeFileSync(LOCK, String(process.pid));
 
 const M = machine();
-const sql = connect(undefined, { app: 'cb-relay', max: 1 }); // check() runs one at a time (busy); LISTEN has its own
+// The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
+// rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
+const CODE = [import.meta.filename, join(import.meta.dirname, 'bridge.ts'), join(import.meta.dirname, '..', 'server', 'db.ts')];
+const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
+const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
 let busy = false, again = false;
 
@@ -199,14 +203,13 @@ let timer: NodeJS.Timeout | undefined;
 const soon = () => { clearTimeout(timer); timer = setTimeout(check, 250); };
 
 await sql.listen('cb', soon, soon).catch((e) => log(`listen failed: ${e?.message}`));
-log(`relay up for ${PANE}@${M}`);
+log(`relay ${VERSION} up for ${PANE}@${M}`);
 await check();
 // this session's cb calls run on this connection (bridge.ts): no connect of their own
 const unbridge = await serveBridge(sql, key, databaseUrl(), log).catch((e) => { log(`bridge failed: ${e?.message}`); return async () => {}; });
 for (const s of ['SIGTERM', 'SIGINT'] as const) process.on(s, () => { unbridge().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 500); });
 setInterval(check, 30_000); // safety net if a notify is missed while reconnecting
 // Board updates reach running sessions: when this code changes (and has settled), hand over to a fresh relay.
-const CODE = [import.meta.filename, join(import.meta.dirname, 'bridge.ts'), join(import.meta.dirname, '..', 'server', 'db.ts')];
 const version = () => CODE.map((f) => { try { return statSync(f).mtimeMs; } catch { return 0; } });
 const born = version().join();
 

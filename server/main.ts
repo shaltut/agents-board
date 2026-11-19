@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
 import { compress } from 'hono/compress';
+import { etag } from 'hono/etag';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync, readFileSync } from 'node:fs';
@@ -71,6 +72,16 @@ const onTheirProjects = (user: string) => sql`project in (select project from cb
 // from being buffered whatever a future Hono does.
 const gzip = compress();
 app.use('/api/*', (c, next) => c.req.path === '/api/stream' ? next() : gzip(c, next));
+// ETag on the reads: the page re-checks a query on each board change it might touch, and most find nothing new.
+// The browser keeps the answer (private: never a shared cache) and always asks again (no-cache) with If-None-Match;
+// unchanged, it gets an empty 304. The tag is a hash of the answer itself, so one user never gets another's.
+const tagged = etag();
+app.use('/api/*', async (c, next) => {
+  if (c.req.method !== 'GET' || c.req.path === '/api/stream') return next();
+  await tagged(c, next);
+  // only on a real answer (an error is never kept), and images keep their own
+  if ((c.res.status === 200 || c.res.status === 304) && !c.res.headers.get('cache-control')) c.header('Cache-Control', 'private, no-cache');
+});
 
 app.use('/api/*', async (c, next) => {
   // CSRF: a browser always sends Origin on a cross-site POST; a page elsewhere must not drive the board.

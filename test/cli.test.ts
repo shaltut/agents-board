@@ -1,6 +1,9 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
 
 const clients: any[] = [];
@@ -280,6 +283,21 @@ test('bin/cb passes quotes, < > | and newlines through untouched (#660)', async 
   });
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.includes('"<words>" a | b\nline2'), r.stdout);
+});
+
+test('bin/cb keeps Node\'s compile cache: converting cb\'s TypeScript was ~190 ms of every call (2026-11-19)', async (t) => {
+  if (spawnSync('sh', ['-c', 'exit 0']).error) return t.skip('no sh on this machine');
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-ncc-'));
+  const env: any = { ...process.env, TMPDIR: tmp, CB_DATABASE_URL: TEST_URL };
+  delete env.NODE_COMPILE_CACHE;
+  const r = spawnSync('sh', ['bin/cb', 'help'], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(readdirSync(join(tmp, 'cb-node-cache')).length > 0, 'cache written');
+  // one already set wins
+  const mine = join(tmp, 'mine');
+  spawnSync('sh', ['bin/cb', 'help'], { env: { ...env, NODE_COMPILE_CACHE: mine } });
+  assert.ok(existsSync(mine));
+  rmSync(tmp, { recursive: true, force: true });
 });
 
 test('cb show prints one task with its body and its notes; a wrong id says how to find one (#660)', async () => {

@@ -184,6 +184,26 @@ test('API answers are gzipped for a browser that asks; the live stream never is 
   await stream.body?.cancel();
 });
 
+test('an unchanged API answer is a 304: the page re-checks often, and most checks find nothing new', async () => {
+  const sql = await db();
+  await owner(sql);
+  const cookie = (await login('ahmed', 'owner-pass-1')).cookie;
+  await sql`select cb.task_add(project => 'demo', title => 'one', actor => 'W1')`;
+  const first = await web('/api/tasks', { cookie });
+  const tag = first.headers.get('etag');
+  assert.ok(tag, 'an ETag');
+  // the browser keeps it but always asks again (private: never a shared cache)
+  assert.equal(first.headers.get('cache-control'), 'private, no-cache');
+  await first.body?.cancel();
+  const same = await web('/api/tasks', { cookie, headers: { 'if-none-match': tag! } });
+  assert.equal(same.status, 304);
+  await sql`select cb.task_add(project => 'demo', title => 'two', actor => 'W1')`;
+  const changed = await web('/api/tasks', { cookie, headers: { 'if-none-match': tag! } });
+  assert.equal(changed.status, 200);
+  assert.notEqual(changed.headers.get('etag'), tag);
+  assert.equal((await changed.json()).length, 2);
+});
+
 test('anyone signed in changes their own password; the current one is required', async () => {
   const sql = await db();
   await owner(sql);

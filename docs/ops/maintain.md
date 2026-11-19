@@ -47,7 +47,10 @@ Then the workers, right away, because their `cb` must match the schema:
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
   broke every `cb` on the Mac for 15 minutes.
-- Relays restart themselves when their code changes.
+- Relays restart themselves when their code changes. Their connections are named `cb-relay/<version>` (a hash of
+  the relay's code), so one query shows which sessions run what:
+  `dc exec db psql -U cb -d claude_board -c "select application_name, count(*) from pg_stat_activity group by 1"`.
+  Each session holds two (its LISTEN and its queries); `cb` calls ride on them (cli/bridge.ts).
 
 If the schema change drops or renames a function the old CLI calls, a worker's `cb` fails until it is updated: that
 is the window to keep short.

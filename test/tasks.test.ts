@@ -17,6 +17,12 @@ test('setup twice keeps rows', async () => {
 
 const events = (sql: any) => sql`select * from cb.events order by id`;
 
+test('tasks are indexed by assignee: inbox and mine look a session\'s cards up by it (2026-11-19: 13 billion rows read in 6 days)', async () => {
+  const sql = await db();
+  const [i] = await sql`select indexdef from pg_indexes where schemaname = 'cb' and indexname = 'tasks_assignee_status'`;
+  assert.match(i?.indexdef ?? '', /\(assignee, status\)/);
+});
+
 test('add creates project and history', async () => {
   const sql = await db();
   const [{ id }] = await sql`select cb.task_add(project => 'Demo', title => 'T1', actor => 'W1@mac') as id`;

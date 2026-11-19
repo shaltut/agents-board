@@ -210,6 +210,9 @@ create table if not exists cb.settings (
 );
 
 create index if not exists tasks_project_status_rank on cb.tasks (project, status, rank);
+-- a session's own cards (inbox's "nothing in progress", mine, claim): without it every relay's inbox check read the
+-- whole table, 13 billion rows in 6 days (2026-11-19)
+create index if not exists tasks_assignee_status on cb.tasks (assignee, status);
 create index if not exists events_at on cb.events (at desc);
 create index if not exists events_task on cb.events (task_id);
 create index if not exists questions_status on cb.questions (status);
