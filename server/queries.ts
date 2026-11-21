@@ -156,6 +156,14 @@ export async function me(user: string, scope: ReturnType<typeof sql>) {
   return { questions, tasks };
 }
 
+/** One of a guest's questions whole (options, context, pictures), for Change on a slim answered row; null if not theirs. */
+export async function meQuestion(user: string, scope: ReturnType<typeof sql>, id: number) {
+  const [row] = await sql`select q.*, ${followups(user)} from cb.questions q where q.id = ${id} and assigned_to = ${user} and ${scope}`;
+  if (!row) return null;
+  const { answer_history, delivered_to, ...q } = row; // the board's (#1346), as on /api/me
+  return q;
+}
+
 /** The Users page (local only: it carries the link tokens). What waits on each person, and when they last answered or wrote. */
 export const people = () => sql`
   select u.name, u.display, u.role, case when u.role = 'admin' then null else u.token end as token, u.created_at, u.password is not null as has_password,

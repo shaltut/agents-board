@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, CornerDownLeft, CornerDownRight, Image as ImageIcon, Loader2, Undo2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
-import { BACK_REASONS, onProject, rpc, useUsers, type BackReason, type Question } from '@/lib/api'
+import { BACK_REASONS, get, onProject, rpc, useUsers, type BackReason, type Question } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { go } from '@/lib/route'
-import { Textarea } from '@/components/ui/textarea'
 import { VoiceTextarea } from './VoiceTextarea'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -16,15 +15,38 @@ import { AlreadyRuled, MakeRule } from './MakeRule'
 
 const RECOMMENDED = /\s*\(recommended\)\s*$/i
 
+/** What an answer was made of, so Change opens with it in place: the option(s) clicked and the note typed after
+ *  " — " (withNote below), or free text. */
+function parseAnswer(q: Question): { picked: string[]; text: string } {
+  const a = q.answer ?? ''
+  const labels = (q.options ?? []).map((o) => o.label)
+  const bare = (l: string) => l.replace(RECOMMENDED, '')
+  const match = (part: string) => labels.find((l) => bare(l) === part.trim() || l === part.trim())
+  const cut = a.indexOf(' — ')
+  for (const [head, note] of cut >= 0 ? [[a.slice(0, cut), a.slice(cut + 3)], [a, '']] : [[a, '']]) {
+    const parts = q.multi ? head.split('; ') : [head]
+    const found = parts.map(match)
+    if (parts.length && found.every(Boolean)) return { picked: found as string[], text: note }
+  }
+  return { picked: [], text: a }
+}
+
 /** An open question from Claude, answerable in place: one click on an option sends it.
  *  Draft text lives here, keyed by question id, so live refetches never wipe what Ahmed is typing.
- *  On success the lamp turns green and the strip leaves; onCleared fires once it has gone. */
-export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
+ *  On success the lamp turns green and the strip leaves; onCleared fires once it has gone.
+ *  With onChanged it changes an answer instead: the same card, the current answer picked, no send-back (#1346). */
+export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest, onChanged }: {
   q: Question; onAnswered?: (id: number) => void; onClearing?: (q: Question) => void; onCleared?: (id: number) => void; guest?: boolean
+  onChanged?: () => void
 }) {
   const qc = useQueryClient()
-  const [text, setText] = useState('')
-  const [picked, setPicked] = useState<string[]>([])
+  const changing = !!onChanged
+  const was = changing ? parseAnswer(q) : null
+  const [text, setText] = useState(was?.text ?? '')
+  const [picked, setPicked] = useState<string[]>(q.multi ? was?.picked ?? [] : [])
+  // changing a one-choice answer: the option it has stays picked, so Save keeps it with the edited note; clicking it
+  // again un-picks it (then Save sends the typed text alone), clicking another saves that one at once
+  const [kept, setKept] = useState<string | null>(!q.multi ? was?.picked[0] ?? null : null)
   const [showContext, setShowContext] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [cleared, setCleared] = useState(false)
@@ -36,6 +58,7 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
   /** ruled: answer "Already ruled" with that memory entry; the server writes the text, so the session gets the rule. */
   async function send(answer: string, via = '__text', ruled?: number) {
     if (!answer.trim() || busy) return
+    if (changing) return change(answer, via)
     setBusy(via)
     try {
       await rpc('answer', ruled ? { id: q.id, ruled_by: `M${ruled}` } : { id: q.id, answer })
@@ -48,6 +71,21 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
       await qc.invalidateQueries()
     } catch (e: any) {
       toast.error(`Could not answer Q${q.id}`, { description: e.message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function change(answer: string, via: string) {
+    if (answer.trim() === (q.answer ?? '').trim()) { toast('No change: same answer'); return onChanged!() }
+    setBusy(via)
+    try {
+      await rpc('answer', { id: q.id, answer })
+      toast.success(`Changed the answer to Q${q.id}`, q.status === 'delivered' ? { description: 'The session gets it as a correction.' } : undefined)
+      onChanged!()
+      await qc.invalidateQueries()
+    } catch (e: any) {
+      toast.error(`Could not change Q${q.id}`, { description: e.message })
     } finally {
       setBusy(null)
     }
@@ -77,11 +115,12 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
   }
 
   const withNote = (base: string) => (text.trim() ? `${base} — ${text.trim()}` : base)
-  const sendTyped = () => send(q.multi && picked.length ? withNote(picked.join('; ')) : text)
+  const sendTyped = () => send(q.multi && picked.length ? withNote(picked.join('; ')) : kept ? withNote(kept.replace(RECOMMENDED, '')) : text)
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendTyped() }
+    if (e.key === 'Escape' && changing) onChanged!()
   }
-  const holding = q.blocking && !cleared
+  const holding = q.blocking && !cleared && !changing
   // The amber lamp means "waiting on whoever is looking": Ahmed for his own, the guest on their page.
   // A question handed to someone else shows on Ahmed's Today as a dark lamp.
   const lit = guest || !q.assigned_to
@@ -94,7 +133,9 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
         cleared && 'clearing shadow-[inset_3px_0_0_var(--clear)]')}
       aria-labelledby={`q${q.id}-body`}>
       <div className="flex justify-center pt-[7px]">
-        {cleared
+        {changing
+          ? <span className="size-2.5 rounded-full border-2 border-clear" title="Changing the answer" />
+          : cleared
           ? <span className="size-2.5 rounded-full bg-clear shadow-[0_0_0_3px_color-mix(in_oklab,var(--clear)_22%,transparent),0_0_12px_var(--clear)]" title="Answered" />
           : lit
             ? <span className={cn('lamp size-2.5', holding && 'lamp-breathe')} title={q.blocking ? 'Holding work until you answer' : 'Waiting on you'} />
@@ -153,16 +194,25 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
 
         {!!q.images?.length && <Pictures q={q} />}
 
+        {changing && (
+          <p className="mt-3 flex items-start gap-1.5 text-sm text-muted-foreground">
+            <CornerDownRight className="mt-0.5 size-3.5 shrink-0 text-clear" aria-hidden />
+            <span className="min-w-0">Answered: <span className="text-foreground">{q.answer}</span>
+              {q.status === 'delivered' && ' · already delivered: the session is told you changed it, with the old answer'}</span>
+          </p>
+        )}
+
         {q.options && q.options.length > 0 && (
           <div className="mt-4 grid gap-1.5" role={q.multi ? 'group' : undefined} aria-label={q.multi ? 'Pick any' : undefined}>
             {q.multi && <p className="mb-0.5 text-xs text-muted-foreground">Pick any that apply, then send.</p>}
             {q.options.map((o) => {
               const label = o.label.replace(RECOMMENDED, '')
               const rec = RECOMMENDED.test(o.label)
-              const on = picked.includes(o.label) || busy === o.label
+              const on = picked.includes(o.label) || busy === o.label || (!busy && kept === o.label)
               return (
                 <button key={o.label} disabled={!!busy || cleared} aria-pressed={q.multi ? on : undefined}
-                  onClick={() => q.multi ? setPicked((p) => on ? p.filter((x) => x !== o.label) : [...p, o.label]) : send(withNote(label), o.label)}
+                  onClick={() => q.multi ? setPicked((p) => on ? p.filter((x) => x !== o.label) : [...p, o.label])
+                    : kept === o.label ? setKept(null) : send(withNote(label), o.label)}
                   className={cn('group/opt flex min-h-11 items-start gap-3 rounded-md border bg-background/50 px-3 py-2.5 text-left transition-[border-color,background-color] duration-150',
                     'hover:border-foreground/35 hover:bg-background disabled:cursor-default',
                     on && 'border-foreground bg-background')}>
@@ -190,16 +240,17 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest }: {
         )}
 
         <div className="mt-3 flex items-end gap-2">
-          <VoiceTextarea value={text} onValue={setText} voice={!guest} onKeyDown={onKey} rows={1} disabled={cleared}
-            placeholder={q.options?.length ? (q.multi ? 'Add a note (optional)…' : 'Or write your own answer; a note here rides along with the option you click…') : 'Write your answer…'}
+          <VoiceTextarea value={text} onValue={setText} voice={!guest} onKeyDown={onKey} rows={1} disabled={cleared} autoFocus={changing && !q.options?.length}
+            placeholder={q.options?.length ? (q.multi ? 'Add a note (optional)…' : 'Or write your own answer; a note here rides along with the option you click…') : changing ? 'The new answer…' : 'Write your answer…'}
             className="min-h-9 resize-y bg-background/50 text-sm" aria-label={`Answer to Q${q.id}`} />
-          <Button disabled={!!busy || cleared || (q.multi ? !picked.length && !text.trim() : !text.trim())}
+          <Button disabled={!!busy || cleared || (q.multi ? !picked.length && !text.trim() : !kept && !text.trim())}
             onClick={sendTyped} className="h-9 shrink-0 gap-1.5" title="Send (Ctrl+Enter)">
             {busy === '__text' && <Loader2 className="size-3.5 animate-spin" />}
-            Send <Kbd className="hidden bg-transparent text-current opacity-70 sm:inline-flex"><CornerDownLeft className="size-3" /></Kbd>
+            {changing ? 'Save' : 'Send'} <Kbd className="hidden bg-transparent text-current opacity-70 sm:inline-flex"><CornerDownLeft className="size-3" /></Kbd>
           </Button>
+          {changing && <Button variant="ghost" onClick={onChanged} className="h-9 shrink-0" title="Keep the answer (Esc)">Cancel</Button>}
         </div>
-        {!cleared && (
+        {!cleared && !changing && (
           <div className="mt-1.5 -ml-1.5 flex flex-wrap items-center gap-1.5">
             {!guest && <AlreadyRuled q={q} disabled={!!busy} onPick={(m) => send(`Already ruled: M${m.id} ${m.title}`, '__ruled', m.id)} />}
             <span className="ml-1.5 inline-flex items-center gap-1 px-0.5 text-xs text-muted-foreground" title={`Back to ${guest ? 'whoever asked' : q.asked_by} to rewrite; it comes back here. A note typed above rides along.`}>
@@ -243,32 +294,19 @@ function Pictures({ q }: { q: Question }) {
 
 export const changeable = (q: Question) => q.status === 'answered' || q.status === 'delivered'
 
-/** The box that changes an answer. A delivered one goes back to its session as a correction (#1346). */
-export function ChangeAnswer({ q, onDone }: { q: Question; onDone: () => void }) {
-  const qc = useQueryClient()
-  const [text, setText] = useState(q.answer ?? '')
-  async function save() {
-    if (text.trim() === (q.answer ?? '').trim()) { toast('No change: same answer'); return onDone() }
-    try {
-      await rpc('answer', { id: q.id, answer: text })
-      toast.success(`Changed the answer to Q${q.id}`, q.status === 'delivered' ? { description: 'The session gets it as a correction.' } : undefined)
-      onDone()
-      await qc.invalidateQueries()
-    } catch (e: any) { toast.error(`Could not change Q${q.id}`, { description: e.message }) }
-  }
-  return (
-    <div className="mt-2">
-      <div className="flex gap-2">
-        <Textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} rows={2} className="text-sm" aria-label={`New answer to Q${q.id}`}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) save(); if (e.key === 'Escape') onDone() }} />
-        <div className="flex flex-col gap-1">
-          <Button size="sm" onClick={save}>Save</Button>
-          <Button size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
-        </div>
-      </div>
-      {q.status === 'delivered' && <p className="mt-1 text-xs text-muted-foreground">Already delivered: the session is told you changed it, with the old answer.</p>}
+/** Changing an answer opens the question as it was asked: its options, pictures and context, the answer picked.
+ *  A delivered one goes back to its session as a correction (#1346). */
+export function ChangeAnswer({ q, onDone, guest }: { q: Question; onDone: () => void; guest?: boolean }) {
+  // a guest's answered rows are slim (no options: /api/me stays small), so the whole question comes when Change opens
+  const slim = q.options === undefined
+  const full = useQuery({ queryKey: ['me', 'question', q.id], queryFn: () => get<Question>(`/api/me/questions/${q.id}`), enabled: slim, staleTime: 0 })
+  if (slim && !full.data) return (
+    <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-sm text-muted-foreground">
+      {full.error ? <>Could not open Q{q.id}: {(full.error as Error).message}</> : <><Loader2 className="size-3.5 animate-spin" /> Opening Q{q.id}…</>}
+      <Button size="sm" variant="ghost" className="ml-auto" onClick={onDone}>Cancel</Button>
     </div>
   )
+  return <QuestionCard q={slim ? full.data! : q} guest={guest} onChanged={onDone} />
 }
 
 /** Scrolls the row being changed into view once it is on the page: the toast's Change (#1345) can open a row the
@@ -292,6 +330,7 @@ function AnsweredBy({ name }: { name: string }) {
 /** An answer, delivered or on its way, with Change (#1346). A guest doesn't see session names or make rules. */
 export function AnsweredRow({ q, editing, onEdit, guest }: { q: Question; editing: boolean; onEdit: (on: boolean) => void; guest?: boolean }) {
   const sent = q.status === 'delivered'
+  if (editing) return <li id={`answered-${q.id}`} className="scroll-mt-20 py-2"><ChangeAnswer q={q} guest={guest} onDone={() => onEdit(false)} /></li>
   return (
     <li id={`answered-${q.id}`} className="grid scroll-mt-20 grid-cols-[1.75rem_minmax(0,1fr)] py-3 sm:grid-cols-[2.5rem_minmax(0,1fr)]">
       <span className={cn('mt-[5px] size-2.5 justify-self-center rounded-full', sent ? 'bg-clear' : q.status === 'withdrawn' ? 'border-2 border-muted-foreground/50' : 'border-2 border-clear')}
@@ -300,23 +339,21 @@ export function AnsweredRow({ q, editing, onEdit, guest }: { q: Question; editin
         <div className="flex items-baseline gap-2 text-sm">
           {!guest && <ActorChip actor={q.asked_by} />}
           <span className="min-w-0 flex-1 truncate text-muted-foreground">{q.body}</span>
-          {!editing && !guest && <MakeRule q={q} />}
-          {!editing && changeable(q) && <button onClick={() => onEdit(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}
+          {!guest && <MakeRule q={q} />}
+          {changeable(q) && <button onClick={() => onEdit(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}
         </div>
-        {editing ? <ChangeAnswer q={q} onDone={() => onEdit(false)} /> : (
-          <p className="mt-1 flex items-start gap-1.5 text-sm">
-            <CornerDownRight className="mt-0.5 size-3.5 shrink-0 text-clear" aria-label="Answer" />
-            <span className="min-w-0">
-              {q.answer}
-              {!guest && q.answered_by && q.answered_by !== 'ahmed' && <AnsweredBy name={q.answered_by} />}
-              <span className="ml-2 text-xs text-muted-foreground tabular-nums">
-                {sent ? `delivered${!guest && q.delivered_to ? ` to ${q.delivered_to}` : ''} ${ago(q.delivered_at)}`
-                  : q.status === 'withdrawn' ? 'withdrawn' : `on its way, ${ago(q.answered_at)}`}
-                {q.answer_history?.length ? ' · changed' : ''}
-              </span>
+        <p className="mt-1 flex items-start gap-1.5 text-sm">
+          <CornerDownRight className="mt-0.5 size-3.5 shrink-0 text-clear" aria-label="Answer" />
+          <span className="min-w-0">
+            {q.answer}
+            {!guest && q.answered_by && q.answered_by !== 'ahmed' && <AnsweredBy name={q.answered_by} />}
+            <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+              {sent ? `delivered${!guest && q.delivered_to ? ` to ${q.delivered_to}` : ''} ${ago(q.delivered_at)}`
+                : q.status === 'withdrawn' ? 'withdrawn' : `on its way, ${ago(q.answered_at)}`}
+              {q.answer_history?.length ? ' · changed' : ''}
             </span>
-          </p>
-        )}
+          </span>
+        </p>
       </div>
     </li>
   )

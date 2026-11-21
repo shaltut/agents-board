@@ -320,6 +320,7 @@ function AllQuestions({ route }: { route: Route }) {
 
 function ClosedQuestion({ q }: { q: Question }) {
   const [editing, setEditing] = useState(false)
+  if (editing) return <li><ChangeAnswer q={q} onDone={() => setEditing(false)} /></li>
   return (
     <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] rounded-lg border bg-card/60 py-4 pr-4 sm:grid-cols-[2.5rem_minmax(0,1fr)]">
       <span className={cn('mt-[5px] size-2.5 justify-self-center rounded-full', q.status === 'withdrawn' ? 'border-2 border-muted-foreground/50' : q.status === 'delivered' ? 'bg-clear' : 'border-2 border-clear')} aria-hidden />
@@ -331,12 +332,10 @@ function ClosedQuestion({ q }: { q: Question }) {
           <span className="ml-auto capitalize">{q.status.replace('_', ' ')}{q.delivered_to ? ` to ${q.delivered_to}` : ''}</span>
         </div>
         <p className="mt-2 text-sm text-pretty">{q.body}</p>
-        {editing ? <ChangeAnswer q={q} onDone={() => setEditing(false)} /> : <>
-          {q.answer && <p className="mt-1.5 text-sm font-medium text-pretty">{q.answer}</p>}
-          {q.answer && <div className="mt-1.5 -ml-1.5 flex items-center gap-1"><MakeRule q={q} />
-            {changeable(q) && <button onClick={() => setEditing(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}
-          </div>}
-        </>}
+        {q.answer && <p className="mt-1.5 text-sm font-medium text-pretty">{q.answer}</p>}
+        {q.answer && <div className="mt-1.5 -ml-1.5 flex items-center gap-1"><MakeRule q={q} />
+          {changeable(q) && <button onClick={() => setEditing(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}
+        </div>}
       </div>
     </li>
   )

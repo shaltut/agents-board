@@ -213,6 +213,15 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
   assert.deepEqual([done.body, done.answer, done.status], ['E1 scope?', 'A', 'answered']);
   assert.equal(done.options, undefined);
   assert.equal(done.context, undefined);
+  // Change opens the question as it was asked: the whole of it comes on demand, only for a question that is theirs
+  const full = await (await remote('/api/me/questions/1', { cookie: token })).json();
+  assert.deepEqual([full.body, full.answer, full.options.map((o: any) => o.label)], ['E1 scope?', 'A', ['A', 'B']]);
+  assert.equal(full.answer_history, undefined, 'earlier answers are the board\'s');
+  assert.equal(full.delivered_to, undefined);
+  await sql`select cb.ask(project => 'ihop', body => 'not his', actor => 'orch@shaltoot')`;
+  const [{ id: other }] = await sql`select max(id)::int as id from cb.questions`;
+  assert.equal((await remote(`/api/me/questions/${other}`, { cookie: token })).status, 404);
+  assert.equal((await remote('/api/me/questions/x', { cookie: token })).status, 404);
 });
 
 test('a guest answers a follow-up once it opens, and sees what comes next on the parent', async () => {

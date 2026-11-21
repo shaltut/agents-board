@@ -156,6 +156,11 @@ app.use('/api/*', async (c, next) => {
   if (u.role === 'admin') { c.set('admin', u); return next(); }
   if (c.req.path === '/api/stream') return next();
   if (c.req.path === '/api/me') return c.json(await q.me(u.name, onTheirProjects(u.name)));
+  const one = c.req.method === 'GET' && /^\/api\/me\/questions\/(\d+)$/.exec(c.req.path);
+  if (one || c.req.path.startsWith('/api/me/questions/')) {
+    const found = one && Number.isSafeInteger(Number(one[1])) ? await q.meQuestion(u.name, onTheirProjects(u.name), Number(one[1])) : null;
+    return found ? c.json(found) : c.json({ ok: false, error: 'no such question of yours' }, 404);
+  }
   // a question's pictures, only on a question handed to this guest (as answering it is)
   const pic = c.req.method === 'GET' && /^\/api\/questions\/(\d+)\/images\/\d+$/.exec(c.req.path);
   if (pic) {
