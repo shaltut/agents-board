@@ -70,6 +70,46 @@ test('compose: plain text, options as buttons, a send-back row, context cut to t
   assert.doesNotMatch(multi.text, /context cut/);
 });
 
+test('compose: a Markdown question reads as plain text: tables as rows, links with their address, no markers', () => {
+  const body = [
+    '## Which **export** format?',
+    '',
+    'Finance reads it in *Excel*; see [the spec](https://example.com/spec) and `report.ts`.',
+    '',
+    '| Format | Size | Notes |',
+    '|:-------|-----:|-------|',
+    '| XLSX   | 2 MB | one sheet per month |',
+    '| CSV \\| TSV | 1 MB | pipeline |',
+    '',
+    '> ops asked first',
+    '',
+    '- ~~old~~ new',
+    '* second',
+    '---',
+    '```',
+    'select **not** this;',
+    '```',
+    '![screen](https://example.com/a.png) snake_case_name stays',
+  ].join('\n');
+  const m = tg.compose({ id: 8, project: 'demo', asked_by: 'W1', body, context: 'Use **CSV** if unsure', multi: false,
+    options: [{ label: 'CSV', description: 'see [docs](https://x.y)' }] } as any);
+  const t = m.text;
+  assert.match(t, /^Which export format\?$/m);
+  assert.match(t, /Finance reads it in Excel; see the spec \(https:\/\/example\.com\/spec\) and report\.ts\./);
+  assert.match(t, /^Format \| Size \| Notes$/m);
+  assert.match(t, /^XLSX \| 2 MB \| one sheet per month$/m);
+  assert.match(t, /^CSV \| TSV \| 1 MB \| pipeline$/m, 'an escaped pipe is text');
+  assert.doesNotMatch(t, /:?-{3,}/, 'no table rule or horizontal rule left');
+  assert.match(t, /^> ops asked first$/m);
+  assert.match(t, /^• old new$/m);
+  assert.match(t, /^• second$/m);
+  assert.match(t, /^select \*\*not\*\* this;$/m, 'code is kept as written');
+  assert.match(t, /screen \(https:\/\/example\.com\/a\.png\) snake_case_name stays/);
+  assert.match(t, /Use CSV if unsure/);
+  assert.match(t, /1\. CSV — see docs \(https:\/\/x\.y\)/);
+  assert.equal(m.reply_markup.inline_keyboard[0][0].text, 'CSV', 'labels are the answer: as written');
+});
+
 test('compose: a Hand to row, one button per person on the project, above the send-back row (#1200)', () => {
   const q = { id: 7, project: 'demo', asked_by: 'W1', body: 'Ship it?', context: null, multi: false, options: [{ label: 'Yes', description: null }],
     hands: [{ name: 'iman', display: 'Iman' }, { name: 'omar', display: 'Omar' }] };

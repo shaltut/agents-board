@@ -14,6 +14,7 @@ import { Timeline } from '@/components/Timeline'
 import { ActorChip, ProjectChip } from '@/components/Chips'
 import { GoalProgress } from '@/views/Goals'
 import { Asks } from '@/components/Asks'
+import { Md } from '@/components/Md'
 
 /**
  * "Since you last looked" is anchored once per visit: the stored marker is read on mount and never
@@ -331,7 +332,7 @@ function ClosedQuestion({ q }: { q: Question }) {
           <span className="callsign text-[12px]">Q{q.id}</span>
           <span className="ml-auto capitalize">{q.status.replace('_', ' ')}{q.delivered_to ? ` to ${q.delivered_to}` : ''}</span>
         </div>
-        <p className="mt-2 text-sm text-pretty">{q.body}</p>
+        <Md className="mt-2">{q.body}</Md>
         {q.answer && <p className="mt-1.5 text-sm font-medium text-pretty">{q.answer}</p>}
         {q.answer && <div className="mt-1.5 -ml-1.5 flex items-center gap-1"><MakeRule q={q} />
           {changeable(q) && <button onClick={() => setEditing(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}

@@ -4,6 +4,7 @@ import { clock, day, STATUS } from '@/lib/format'
 import { go } from '@/lib/route'
 import { cn } from '@/lib/utils'
 import { ActorChip, ProjectChip, StatusDot, TaskId } from './Chips'
+import { mdLine } from './Md'
 
 const ICON: Record<CbEvent['kind'], typeof Plus> = {
   task_created: Plus, moved: CircleDot, updated: PencilLine, done: CheckCircle2, note: StickyNote,
@@ -23,7 +24,9 @@ const VERB: Partial<Record<CbEvent['kind'], string>> = {
 function prettySummary(e: CbEvent) {
   const m = e.summary.match(/^(\w+) → (\w+)$/)
   const a = m && STATUS[m[1] as Status], b = m && STATUS[m[2] as Status]
-  return a && b ? `${a.label} → ${b.label}` : e.summary
+  if (a && b) return `${a.label} → ${b.label}`
+  // a question's text is Markdown (its first 120 characters): one plain line here, like the other rows
+  return e.kind === 'asked' || e.kind === 'rewritten' ? mdLine(e.summary) : e.summary
 }
 
 /** One line of the shift log: time, a node on the rail, who did what. */

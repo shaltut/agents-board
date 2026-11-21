@@ -47,6 +47,10 @@ and Ahmed's view of what you do. Keep it true at all times. Use the `cb` command
       way you would in AskUserQuestion. Add `--multi` if several fit.
     - Use `--free` (no options) only for a question with no possible choices: a fact, a URL, a name.
       Yes/no, "approve?" and "A or B?" all have options.
+    - Write the question, `-c` and each option's why in Markdown when it helps Ahmed decide: a table to
+      compare options or numbers, a [link](https://...) to the PR, **bold** for what decides it. The first
+      line is the question itself. Labels stay plain text. Several lines or a table: give the question (or
+      `-c`) as `-` and pipe it in: `cb ask <project> - -o ... <<'EOF'` ... `EOF` (details: `cb help ask`).
     - Pictures are optional. Add them when the choice is about how something looks or what a change does to a
       screen: `-i "Now=<screenshot>" -i "After=<screenshot or mockup>"` (PNG/JPEG/WebP/GIF, 5 MB, up to 6).
       If Ahmed sends a question back with "Show me", rewrite it with them: `cb reask Q<id> -i ... -i ...`.

@@ -7,6 +7,7 @@ import { go } from '@/lib/route'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
+import { Md, mdLine } from '@/components/Md'
 
 /** On an answered question: save the answer as a ruling, so a session that would ask it again reads it instead.
  *  Once saved, the button becomes a link to the ruling. */
@@ -53,7 +54,7 @@ export function MakeRule({ q }: { q: Question }) {
               </DialogDescription>
             </DialogHeader>
             <p className="rounded-md border bg-raised/40 px-3 py-2 text-sm text-pretty text-muted-foreground">
-              {q.body}<br /><span className="font-medium text-foreground">{q.answer}</span>
+              {mdLine(q.body)}<br /><span className="font-medium text-foreground">{q.answer}</span>
             </p>
             <Input autoFocus required maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} aria-label="The rule, in one line" />
             <DialogFooter><Button type="submit">Save rule</Button></DialogFooter>
@@ -86,7 +87,7 @@ export function AlreadyRuled({ q, disabled, onPick }: { q: Question; disabled?: 
               Pick the rule. It becomes the answer, so {q.asked_by} gets the rule itself, and it counts toward the weekly memory metric.
             </DialogDescription>
           </DialogHeader>
-          <p className="rounded-md border bg-raised/40 px-3 py-2 text-sm text-pretty text-muted-foreground">{q.body}</p>
+          <Md className="rounded-md border bg-raised/40 px-3 py-2 text-muted-foreground">{q.body}</Md>
           {branches && <p className="text-xs text-st-blocked">A ruled answer picks no option: the if-branches will be skipped.</p>}
           <Input autoFocus value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Search live rules, rulings, facts…" aria-label="Search memory" />
           <ul className="-mx-2 max-h-72 overflow-y-auto" aria-live="polite">

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { useWho } from '@/components/Account'
+import { mdLine } from '@/components/Md'
 
 /** Who is looking at the Users page: an admin by name, or Ahmed on his PC's own dashboard (no sign-in there). */
 function useViewer() {
@@ -164,7 +165,7 @@ function PersonCard({ p, base }: { p: Person; base: string }) {
           {p.questions.map((q) => (
             <li key={`q${q.id}`} className="flex items-center gap-2">
               <span className="callsign w-9 shrink-0 text-[12px] text-muted-foreground">Q{q.id}</span>
-              <span className="line-clamp-1 min-w-0 flex-1">{q.body}</span>
+              <span className="line-clamp-1 min-w-0 flex-1">{mdLine(q.body)}</span>
               {q.blocking && <span className="shrink-0 text-xs text-muted-foreground">holds work</span>}
               <span className="hidden shrink-0 sm:inline"><ProjectChip slug={q.project} /></span>
             </li>

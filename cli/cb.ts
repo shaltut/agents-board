@@ -114,6 +114,18 @@ function images() {
     return { caption, data: readFileSync(path) };
   });
 }
+/** A question (or -c context) given as "-" comes from stdin: Markdown with a table or several paragraphs is easier
+ *  as a heredoc than as one quoted argument. Only one of them can. */
+async function fromStdin(text: string | null | undefined, what: string): Promise<string | null | undefined> {
+  if (text !== '-') return text;
+  if (o.context === '-' && what === 'question') throw new Error('stdin holds one text: give either the question or -c as "-", not both. Put the other in quotes');
+  if (process.stdin.isTTY) throw new Error(`${what} "-" reads stdin: pipe it in, e.g. cb ${cmd} ... - <<'EOF' ... EOF`);
+  let s = '';
+  for await (const chunk of process.stdin) s += chunk;
+  if (!s.trim()) throw new Error(`stdin was empty: the ${what} goes there when you give "-"`);
+  return s.replace(/\s+$/, '');
+}
+
 async function addImages(tx: any, id: unknown, pics: ReturnType<typeof images>, replace: boolean) {
   for (const [n, p] of pics.entries())
     await tx`select cb.question_image_add(id => ${String(id)}, data => ${p.data}, caption => ${p.caption},
@@ -641,10 +653,11 @@ async function run(): Promise<unknown> {
           'Only a question with no possible choices (a fact, a URL, a name) goes as --free.');
       if (o.if && !o.after) throw new Error('--if needs --after: name the question whose answer it waits for, e.g. cb ask <project> "<q>" -o ... --after Q12 --if "Yes"');
       const reply_to = replyTo(), pics = images();
+      const body = await fromStdin(args.slice(1).join(' '), 'question'), context = await fromStdin(o.context, 'context');
       // one transaction: the question never shows on the board without the pictures it was asked with
       const id = await sql.begin(async (tx) => {
-        const qid = await callFn('ask', { project: args[0], body: args.slice(1).join(' '), options: o.option ? options() : null,
-          multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: o.context ?? null, reply_to, actor, to_user: o.to ?? null,
+        const qid = await callFn('ask', { project: args[0], body, options: o.option ? options() : null,
+          multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: context ?? null, reply_to, actor, to_user: o.to ?? null,
           parent: o.after ?? null, if_answer: o.if ?? null }, tx);
         await addImages(tx, qid, pics, false);
         return qid;
@@ -680,12 +693,13 @@ async function run(): Promise<unknown> {
     case 'reask': {
       need(1, 'reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]');
       const id = args[0].replace(/^q/i, ''), pics = images();
+      const body = await fromStdin(args.slice(1).join(' ') || null, 'question'), context = await fromStdin(o.context, 'context');
       // new -i pictures replace the old ones (without -i the question keeps its pictures). They go in first:
       // cb.reask sees them in this transaction, which is what a "Show me" send-back needs.
       await sql.begin(async (tx) => {
         await addImages(tx, id, pics, true);
-        await callFn('reask', { id, body: args.slice(1).join(' ') || null, options: o.option ? options() : null, free: !!o.free,
-          multi: o.multi ? true : null, context: o.context ?? null, actor }, tx);
+        await callFn('reask', { id, body, options: o.option ? options() : null, free: !!o.free,
+          multi: o.multi ? true : null, context: context ?? null, actor }, tx);
       });
       const [w] = await sql`select u.display from cb.questions q join cb.users u on u.name = q.assigned_to where q.id = ${Number(id)}`;
       return { out: `Q${id} rewritten and back ${w ? `with ${w.display}` : "on Ahmed's board"} — keep working; the answer arrives like any other` };

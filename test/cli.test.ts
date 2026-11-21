@@ -178,6 +178,30 @@ test('cb ask needs options (Ahmed answers by clicking); --free allows an open qu
   assert.equal(n, 2);
 });
 
+test('cb ask - and -c - read Markdown from stdin: a table keeps its lines; cb reask - rewrites it the same way', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'seed')`;
+  const md = '## Export format\n\n| Format | Size |\n|---|---|\n| CSV | 1 MB |\n';
+  const ask = (args: string[], input: string) => {
+    const r = spawnSync('node', ['cli/cb.ts', ...args], { encoding: 'utf8', input,
+      env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '' } });
+    return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
+  };
+  const r = ask(['ask', 'demo', '-', '-o', 'CSV (Recommended)=small', '-o', 'XLSX=formatted'], md);
+  assert.equal(r.code, 0, r.err);
+  const [q] = await sql`select id, body, context from cb.questions`;
+  assert.equal(q.body, md.trimEnd());
+  assert.equal(ask(['ask', 'demo', 'Which one?', '--free', '-c', '-'], '**why**: see the table\n').code, 0);
+  const [c] = await sql`select context from cb.questions order by id desc limit 1`;
+  assert.equal(c.context, '**why**: see the table');
+  const both = ask(['ask', 'demo', '-', '--free', '-c', '-'], 'x');
+  assert.equal(both.code, 1);
+  assert.match(both.err, /not both/);
+  assert.equal(ask(['reask', `Q${q.id}`, '-'], '## Export format, v2\n').code, 0);
+  const [v2] = await sql`select body from cb.questions where id = ${q.id}`;
+  assert.equal(v2.body, '## Export format, v2');
+});
+
 test('cb user add adds a person (Ahmed copies the link); cb ask --to and cb assign hand questions and tasks to a user', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'PO sign-off')`;

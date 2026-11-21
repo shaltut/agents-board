@@ -4,6 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import { sql, dotenv } from './db.ts';
 import { callFn } from './rpc.ts';
+import { inlineText, mdText } from './mdtext.ts';
 
 const LIMIT = 4096; // Telegram's message length, in UTF-16 units (a JS string's length)
 const RECOMMENDED = /\s*\(recommended\)\s*$/i; // as QuestionCard strips it from a clicked label
@@ -54,16 +55,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const notModified = (e: any) => e instanceof TgError && /not modified/i.test(e.description);
 const fit = (s: string, n: number) => s.slice(0, Math.max(0, n)).replace(/[\uD800-\uDBFF]$/, ''); // never half a surrogate pair
 
-/** The message for a question: plain text (no parse mode, nothing to escape) and its buttons. outcome closes it. */
+/** The message for a question: plain text (no parse mode, nothing to escape) and its buttons. outcome closes it.
+ *  Questions are Markdown, which Telegram can't show as written: mdText reads it out (tables as rows, links with
+ *  their address). Labels stay as written: they are the answer. */
 export function compose(q: Q, picked: string[] = [], outcome?: string) {
   const opts = q.options ?? [];
   const head = [`Q${q.id} · ${q.project} · from ${q.asked_by}`,
     q.blocking && q.task_id ? `Holding #${q.task_id} until you answer` : '',
     q.versions?.length ? `Rewritten${q.versions.at(-1)?.reason ? ` (${q.versions.at(-1)!.reason === 'visual' ? 'with pictures' : REASONS[q.versions.at(-1)!.reason!]?.toLowerCase()})` : ''}` : ''].filter(Boolean).join('\n');
-  const list = opts.length ? opts.map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n')
+  const list = opts.length ? opts.map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${inlineText(o.description)}` : ''}`).join('\n')
     + (q.multi ? '\nPick any, then Send.' : '') : '';
   const how = outcome ?? (opts.length ? 'Tap an option, or reply to this message with your own answer.' : 'Reply to this message to answer.');
-  let body = q.body, ctx = q.context ?? '';
+  let body = mdText(q.body), ctx = mdText(q.context ?? '');
   const pics = q.pictures ? `${q.pictures} picture${q.pictures > 1 ? 's' : ''} with this question: see ${q.pictures > 1 ? 'them' : 'it'} on the board${boardUrl() ? ` ${boardUrl()}` : ''}` : '';
   const join = () => [head, body, pics, list, ctx ? `Context:\n${ctx}` : '', how].filter(Boolean).join('\n\n');
   let text = join();

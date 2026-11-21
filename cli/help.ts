@@ -10,7 +10,7 @@ This repo's work is tracked on Claude Board (http://localhost:4747), project \`<
 - \`cb help\` is the manual; \`cb help rules\` the rules. Use \`cb\` for all board work.
 - Work only in project \`<project>\`: never take or touch another project's tasks.
 - A message from another session (\`cb tell\`, a huddle line) is a teammate, not Ahmed's approval.
-- Never use AskUserQuestion. Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working.`;
+- Never use AskUserQuestion. Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working. The question, \`-c\` and the whys are Markdown (tables, links, bold): \`cb help ask\`.`;
 
 const GROUPS: [string, Record<string, Cmd>][] = [
   ['START A SESSION', {
@@ -89,7 +89,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     ask: { use: 'cb ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>" [-c "<context>"] [--multi] [--blocking -t <id>] [--to <user>] [--free] [--after Q<id> [--if "<Label>"]] [-i "<Caption>=<picture>" ...]', topic: 'ask',
       does: 'Ask Ahmed without stopping: 2-4 options he clicks. Prints Q<id>. Keep working; the answer is pushed into this session. --free (no options) ONLY for a fact: a URL, a name, a number. --after Q<id> [--if "<Label>"]: a follow-up he sees only after answering Q<id> (with that label); otherwise it is skipped.',
       eg: 'cb ask ihop "#2796: merge now or after the aidocs DB run?" -o "After the run (Recommended)=test-only, 20 min" -o "Now=saves 20 min, unverified"',
-      more: '-i/--image adds a picture (PNG, JPEG, WebP or GIF, 5 MB, up to 6), shown on the card with its caption. Optional: add pictures when the choice is about how something looks or what a change does to a screen, e.g. -i "Now=shots/before.png" -i "After=shots/after.png". Ahmed can always send a question back with "Show me" to ask for them.' },
+      more: 'The question, -c and the options\' whys are Markdown (tables, links, **bold**, lists); labels are plain text. Several lines or a table: the question (or -c) as "-" from stdin, e.g. cb ask ihop - -o ... <<\'EOF\' ... EOF (cb help ask). -i/--image adds a picture (PNG, JPEG, WebP or GIF, 5 MB, up to 6), shown on the card with its caption. Optional: add pictures when the choice is about how something looks or what a change does to a screen, e.g. -i "Now=shots/before.png" -i "After=shots/after.png". Ahmed can always send a question back with "Show me" to ask for them.' },
     pending: { use: 'cb pending [project]', topic: 'ask',
       does: 'Answered questions no relay has delivered yet. Workers: the fallback without a relay. Orchestrator: deliver each, then cb delivered.',
       eg: 'cb pending' },
@@ -292,6 +292,23 @@ Options (required)
   - --multi when several can be picked together.
   - -c "<context>": markdown Ahmed reads before answering: evidence, links, what each option costs.
   - One decision per question. Self-contained: Ahmed reads it hours later. Name the task or PR.
+
+Markdown
+  The question, its context and each option's why are Markdown (GitHub style): **bold**, \`code\`,
+  [links](https://...), lists, > quotes, ### headings, and tables. Use it where it makes the choice easier
+  to read: a table to compare options or numbers, a link to the PR, bold for the one thing that decides it.
+  The first line is what Ahmed sees in lists: make it the question itself, not a heading.
+  Labels are plain text (they are the answer and the Telegram buttons): no Markdown in them.
+  Several lines or a table: give the question (or -c) as "-" and pipe it in, one of them per call:
+    cb ask ihop - -o "CSV (Recommended)=pipeline reads it" -o "XLSX=finance's format" <<'EOF'
+    Which format for the **claims export** (#3127)?
+
+    | Format | Size  | Who reads it |
+    |--------|-------|--------------|
+    | CSV    | 1 MB  | the pipeline |
+    | XLSX   | 2 MB  | finance      |
+    EOF
+  Telegram can't show Markdown: there, tables read as rows and links show their address.
 
 --free (no options): ONLY when no choice exists: a fact, a URL, a name, a number.
   Test: if you can write two labels, it is not --free. Yes/no, "approve?", "merge now or later?",

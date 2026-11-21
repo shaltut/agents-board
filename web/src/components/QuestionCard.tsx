@@ -10,7 +10,7 @@ import { VoiceTextarea } from './VoiceTextarea'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { ActorChip, ProjectChip, TaskId } from './Chips'
-import { Md } from './Md'
+import { Md, mdLine } from './Md'
 import { AlreadyRuled, MakeRule } from './MakeRule'
 
 const RECOMMENDED = /\s*\(recommended\)\s*$/i
@@ -173,14 +173,14 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest, onCh
             </button>
             {showPrev && (
               <div className="mt-1 max-w-[68ch] border-l-2 pl-3 text-pretty">
-                <p>{prev.body}</p>
+                <Md>{prev.body}</Md>
                 {prev.options?.length ? <p className="mt-1">Options: {prev.options.map((o) => o.label.replace(RECOMMENDED, '')).join(' · ')}</p> : null}
                 {prev.note && <p className="mt-1">Sent back: {prev.note}</p>}
               </div>
             )}
           </div>
         )}
-        <p id={`q${q.id}-body`} className={cn('max-w-[68ch] text-base leading-normal text-pretty', q.parent_id || prev ? 'mt-1' : 'mt-2.5')}>{q.body}</p>
+        <div id={`q${q.id}-body`} className={cn('max-w-[68ch] text-pretty', q.parent_id || prev ? 'mt-1' : 'mt-2.5')}><Md className="prose-q">{q.body}</Md></div>
 
         {q.context && (
           <div className="mt-2">
@@ -225,7 +225,7 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest, onCh
                       <span className="text-sm font-medium">{label}</span>
                       {rec && <span className="ml-auto shrink-0 rounded-[3px] bg-raised px-1.5 py-px text-[11px] font-medium text-muted-foreground">Recommended</span>}
                     </span>
-                    {o.description && <span className="mt-0.5 block text-[13px] leading-snug text-muted-foreground">{o.description}</span>}
+                    {o.description && <span className="mt-0.5 block text-[13px] leading-snug text-muted-foreground"><Md inline>{o.description}</Md></span>}
                   </span>
                 </button>
               )
@@ -235,7 +235,7 @@ export function QuestionCard({ q, onAnswered, onClearing, onCleared, guest, onCh
 
         {!!q.branches?.length && (
           <p className="mt-3 text-xs text-muted-foreground text-pretty">
-            Then: {q.branches.map((b) => `${b.if_answer ? `if ${b.if_answer.replace(RECOMMENDED, '')}` : 'after any answer'} → ${b.body}`).join(' · ')}
+            Then: {q.branches.map((b) => `${b.if_answer ? `if ${b.if_answer.replace(RECOMMENDED, '')}` : 'after any answer'} → ${mdLine(b.body)}`).join(' · ')}
           </p>
         )}
 
@@ -338,7 +338,7 @@ export function AnsweredRow({ q, editing, onEdit, guest }: { q: Question; editin
       <div className="min-w-0">
         <div className="flex items-baseline gap-2 text-sm">
           {!guest && <ActorChip actor={q.asked_by} />}
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">{q.body}</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{mdLine(q.body)}</span>
           {!guest && <MakeRule q={q} />}
           {changeable(q) && <button onClick={() => onEdit(true)} className="rounded px-1.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Change</button>}
         </div>
@@ -366,7 +366,7 @@ export function SentBackRow({ q, guest }: { q: Question; guest?: boolean }) {
     <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] py-3 sm:grid-cols-[2.5rem_minmax(0,1fr)]">
       <Undo2 className="mt-[3px] size-3.5 justify-self-center text-muted-foreground" aria-hidden />
       <div className="min-w-0 text-sm">
-        <p className="truncate text-muted-foreground">{q.body}</p>
+        <p className="truncate text-muted-foreground">{mdLine(q.body)}</p>
         <p className="mt-0.5 text-xs text-muted-foreground text-pretty">
           Sent back{guest ? '' : <> to <ActorChip actor={q.asked_by} /></>}: {r?.short ?? q.sent_back?.reason}
           {q.sent_back?.note && <> — <span className="text-foreground/90">{q.sent_back.note}</span></>} · waiting for the rewrite

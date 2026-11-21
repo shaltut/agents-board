@@ -6,6 +6,7 @@ import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
 import { ActorChip, Priority, ProjectChip, StatusDot, TaskId } from '@/components/Chips'
 import { Timeline } from '@/components/Timeline'
+import { Md } from '@/components/Md'
 
 export interface SessionRow {
   actor: string; project: string | null; machine: string | null; pane: string | null; last_seen: string | null; live: boolean
@@ -192,7 +193,7 @@ function SessionDetail({ route, row }: { route: Route; row?: SessionRow }) {
                           {waiting ? <><span className="lamp size-1.5" />waiting on you</> : <span className="capitalize">{q.status}</span>}
                         </span>
                       </div>
-                      <p className="text-pretty">{q.body}</p>
+                      <Md>{q.body}</Md>
                       {q.answer && <p className="mt-1.5 font-medium text-pretty">{q.answer}</p>}
                     </li>
                   )

@@ -222,3 +222,18 @@
 .prose-cb pre code { @apply bg-transparent p-0; }
 .prose-cb a { @apply underline underline-offset-2; }
 .prose-cb h1, .prose-cb h2, .prose-cb h3 { @apply mt-3 mb-1 font-semibold; }
+.prose-cb h4, .prose-cb h5, .prose-cb h6 { @apply mt-2 mb-1 font-semibold; }
+.prose-cb > :first-child { @apply mt-0; }
+.prose-cb > :last-child { @apply mb-0; }
+.prose-cb strong { @apply font-semibold text-foreground; }
+.prose-cb blockquote { @apply my-2 border-l-2 pl-3 text-muted-foreground; }
+.prose-cb hr { @apply my-3 border-border; }
+.prose-cb li > p { @apply my-0; }
+.prose-cb table { @apply w-full border-collapse text-[0.9em]; }
+.prose-cb th { @apply border-b px-2 py-1 text-left font-semibold; }
+.prose-cb td { @apply border-b border-border/60 px-2 py-1 align-top; }
+.prose-cb th:first-child, .prose-cb td:first-child { @apply pl-0; }
+.prose-cb input[type=checkbox] { @apply mr-1 align-middle; }
+.prose-inline p { @apply my-0; }
+.prose-cb.prose-q { @apply text-base leading-normal; } /* a question's own text: the card's main line */
+.prose-cb.prose-inline { @apply text-[length:inherit] leading-[inherit]; }
