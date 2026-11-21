@@ -1,12 +1,16 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { ArrowLeft } from 'lucide-react'
-import { get, qs, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
+import { get, qs, rpc, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
 import { ago, splitActor, STATUS } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
 import { ActorChip, Priority, ProjectChip, StatusDot, TaskId } from '@/components/Chips'
 import { Timeline } from '@/components/Timeline'
 import { Md } from '@/components/Md'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 
 export interface SessionRow {
   actor: string; project: string | null; machine: string | null; pane: string | null; last_seen: string | null; live: boolean
@@ -132,6 +136,33 @@ const quiet = (s: SessionRow) => !s.live && s.doing.length === 0 && s.queued ===
 
 const OPEN: Task['status'][] = ['in_progress', 'blocked', 'review', 'next', 'backlog']
 
+/** Type into the session as if at its terminal: the relay hands it over as an ordinary prompt, exactly this text. */
+function TypeBox({ actor, live }: { actor: string; live: boolean }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function send() {
+    if (!text.trim() || busy) return
+    setBusy(true)
+    try {
+      await rpc('type_to', { to_actor: actor, message: text })
+      setText('')
+      toast.success(live ? 'Sent: it arrives in the session within seconds' : 'Queued: it arrives when the session\'s relay is back (held 24 h)')
+    } catch (e: any) { toast.error(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <section aria-labelledby="type" className="mb-8">
+      <h2 id="type" className="mb-2 text-sm font-semibold">Type to this session</h2>
+      <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} disabled={busy}
+        onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send() } }}
+        placeholder="Sent as a normal prompt, as if you typed it in its terminal. Ctrl+Enter to send." />
+      <div className="mt-2 flex items-center gap-3">
+        <Button onClick={send} disabled={busy || !text.trim()}>{busy ? 'Sending…' : 'Send'}</Button>
+        <span className="text-xs text-muted-foreground">Plain text only: no slash commands, no permission dialogs.</span>
+      </div>
+    </section>
+  )
+}
+
 function SessionDetail({ route, row }: { route: Route; row?: SessionRow }) {
   const actor = route.actor!
   const { who, where } = splitActor(actor)
@@ -161,6 +192,8 @@ function SessionDetail({ route, row }: { route: Route; row?: SessionRow }) {
           {row?.pane && <span className="text-xs">pane <span className="font-mono">{row.pane}</span> on {row.machine}</span>}
         </div>
       </header>
+
+      {row && <TypeBox actor={actor} live={row.live} />}
 
       <div className="grid gap-10 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-0">
         <div className="space-y-10 lg:pr-10">

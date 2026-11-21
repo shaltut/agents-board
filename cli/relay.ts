@@ -206,10 +206,17 @@ async function check() {
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
-      const read = [...i.broadcasts, ...i.messages, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
+      // Ahmed typing from the dashboard (cb.type_to): his exact text as its own prompt, in order, no wrapper.
+      // The inbox only marks `raw` for his own events; everything else keeps the indented, labelled format.
+      const typed = i.messages.filter((m: any) => m.raw);
+      i.messages = i.messages.filter((m: any) => !m.raw);
+      const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
-        await post(format(i));
+        for (const m of typed) await post(String(m.summary));
+        // only what is left over gets the board's wrapper (a lone typed line must not add an empty "[Claude Board]")
+        if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length > typed.length || i.next_work.length || i.memory?.length)
+          await post(format(i));
         for (const a of i.asks ?? []) await sql`select cb.ask_delivered(${String(a.id)}, ${a.upto}, ${i.actor}, ${a.reminder})`;
         if (read.length) await sql`select cb.broadcast_seen(${M}, ${PANE}, ${Math.max(...read)})`;
         // the answer as pushed (#1346): one changed meanwhile stays answered and goes in the next push

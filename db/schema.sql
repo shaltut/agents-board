@@ -256,6 +256,7 @@ drop function if exists cb.inbox cascade;
 drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
+drop function if exists cb.type_to cascade;
 drop function if exists cb.huddle_open cascade;
 drop function if exists cb.huddle_add cascade;
 drop function if exists cb.huddle_say cascade;
@@ -1365,7 +1366,9 @@ begin
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
                                and e.actor is distinct from me), '[]'),
-    'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary) order by e.id)
+    -- raw: Ahmed typing from the dashboard (cb.type_to); the relay hands it over as a plain prompt, no board wrapper
+    'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
+                                                              'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true') order by e.id)
                             from cb.events e
                            where e.kind = 'message' and e.data ->> 'to' = me and e.id > seen
                              and e.at > now() - interval '24 hours'), '[]'),
@@ -1529,6 +1532,23 @@ begin
     raise exception 'unknown session %: see cb sessions for names', to_actor;
   end if;
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'message', trim(message), jsonb_build_object('to', to_actor))
+  returning cb.events.id into new_id;
+  return new_id;
+end $$;
+
+-- Ahmed typing into a session from the dashboard: arrives as an ordinary prompt, exactly his text, as if typed in its
+-- terminal. Dashboard only (cb.dashboard_only), and the event is always his: no session can produce a raw line.
+create function cb.type_to(to_actor text, message text, actor text default null) returns bigint language plpgsql as $$
+#variable_conflict use_variable
+declare new_id bigint; p text;
+begin
+  perform cb.dashboard_only('Sessions');
+  perform cb.set_actor('ahmed');
+  if coalesce(trim(message), '') = '' then raise exception 'message is required'; end if;
+  select s.project into p from cb.sessions s where s.actor = to_actor order by s.last_seen desc limit 1;
+  if not found then raise exception 'unknown session %: it appears once its relay has started', to_actor; end if;
+  insert into cb.events (actor, project, kind, summary, data)
+  values ('ahmed', p, 'message', message, jsonb_build_object('to', to_actor, 'raw', 'true'))
   returning cb.events.id into new_id;
   return new_id;
 end $$;

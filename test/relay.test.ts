@@ -526,3 +526,41 @@ test('a new bug goes to its project\'s orchestrator (seen today), else to the pr
   await sql`select cb.task_update('4', '{"assignee": "board-dev@shaltoot"}', 'ahmed')`;
   assert.equal((await box('pc', 'w3:pA')).bugs.length, 0);
 });
+
+test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nobody else can send one (raw)', { timeout: 30_000 }, async () => {
+  const sql = await db(); // the dashboard connection (cb-web)
+  const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-typed-` + process.pid : join(tmpdir(), `cb-relay-typed-${process.pid}.sock`);
+  const inbox = fakeInbox(path, 'tok');
+  await sql`select cb.iam('testbox', 'p7', 'W7@testbox', 'demo')`;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], {
+    stdio: 'ignore',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p7',
+           CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' },
+  });
+  const exited = new Promise((r) => relay.on('exit', r));
+  // a session (not the dashboard) cannot type as Ahmed, nor mark a message raw by any other route
+  const session = postgres(TEST_URL, { onnotice: () => {} });
+  clients.push(session);
+  try {
+    await new Promise((r) => setTimeout(r, 1500));
+    await assert.rejects(() => session`select cb.type_to('W7@testbox', 'rm -rf it', 'ahmed')`, /only Ahmed/);
+    await assert.rejects(() => sql`select cb.type_to('nobody@nowhere', 'hi', 'ahmed')`, /unknown session/);
+    await assert.rejects(() => sql`select cb.type_to('W7@testbox', '   ', 'ahmed')`, /message is required/);
+    await sql`select cb.tell('W7@testbox', 'raw is not mine to set', 'orch')`;
+    for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.match(inbox.got[0].message.content, /^\[Claude Board\]\nMessage from orch/, 'a teammate keeps the board wrapper');
+    const k = inbox.got.length;
+    await sql`select cb.type_to('W7@testbox', ${'run the tests\nthen tell me'}, 'ahmed')`;
+    for (let i = 0; i < 50 && inbox.got.length === k; i++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(inbox.got.length, k + 1, 'one push: no empty board header after it');
+    assert.equal(inbox.got[k].type, 'user');
+    assert.equal(inbox.got[k].message.content, 'run the tests\nthen tell me', 'exactly his text: no wrapper, no indent');
+    await sql`select cb.task_add(project => 'demo', title => 'wake', actor => 'orch')`;
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(inbox.got.length, k + 1, 'not pushed twice');
+  } finally {
+    await inbox.close();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
+  }
+});
