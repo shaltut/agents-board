@@ -123,6 +123,29 @@ test('the hello carries the binding the relay holds: for its own pane only', asy
   } finally { await stop(); }
 });
 
+test('cb uses the name the hello hands it, not a lookup of its own', { timeout: 30_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('testbox', 'p9', 'InTheTable', 'demo')`;
+  const inbox = join(tmpdir(), `cb-hello-${process.pid}.sock`);
+  const key = createHash('sha1').update(inbox).digest('hex').slice(0, 12);
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  const stop = await serveBridge(relaySql, key, TEST_URL, undefined,
+    { binding: (who: any) => who.machine === 'testbox' && who.pane === 'p9' ? { actor: 'FromTheHello', project: 'demo' } : undefined });
+  try {
+    const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p9', PGAPPNAME: '',
+                  CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+    delete (env as any).CB_ACTOR;
+    // not spawnSync: the bridge lives in this process and must answer cb's hello meanwhile
+    const child = spawn('node', ['cli/cb.ts', 'add', 'demo', 'named by the hello'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = ''; child.stderr.on('data', (d) => { err += d; });
+    const code = await new Promise((r) => child.on('exit', r));
+    assert.equal(code, 0, err);
+    const [t] = await sql`select created_by from cb.tasks`;
+    assert.equal(t.created_by, 'FromTheHello');
+  } finally { await stop(); }
+});
+
 test('cb takes its name from the relay, and hears every change: its own cb iam, a direct cb iam, the dashboard', { timeout: 60_000 }, async () => {
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo')`;
@@ -141,9 +164,6 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
     cb(env, 'iam', 'W8', 'demo');
     assert.equal(await addedBy(), 'W8', 'its own cb iam, through the relay');
-    // behind the relay's back (triggers off): cb still says W8, so it took the relay's name, not the table's
-    await sql.begin(async (tx: any) => { await tx`set local session_replication_role = replica`; await tx`update cb.sessions set actor = 'Stale' where pane = 'p8'`; });
-    assert.equal(await addedBy(), 'W8', 'the name came with the hello');
     await sql`select cb.iam('testbox', 'p8', 'W9', null)`;          // the dashboard's way
     await wait(400);
     assert.equal(await addedBy(), 'W9');
