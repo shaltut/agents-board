@@ -3683,7 +3683,7 @@ $$;
 
 -- What needs the lead in a pipeline project: plain lines, the stage count first, P0 cards next, at most 20. Reads only:
 -- it frees nothing and writes nothing on any card.
-create function cb.digest(project text, since timestamptz default now() - interval '15 minutes') returns jsonb language plpgsql stable as $$
+create function cb.digest(project text, since timestamptz default now() - interval '15 minutes', cap boolean default true) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project); head text; rest jsonb;
 begin
@@ -3786,12 +3786,16 @@ begin
       ) n having count(*) > 0)
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
-    select x.grp, x.p0, x.id, case when x.rn = 5 and x.cnt > 5 then x.line || format(' +%s more', x.cnt - 5) else x.line end as line
-      from (select i.*, row_number() over (partition by i.grp order by i.p0 desc, i.id) rn, count(*) over (partition by i.grp) cnt from items i) x
-     where x.rn <= 5),
-  ranked as (select c.*, row_number() over (order by c.p0 desc, c.grp, c.id) o, count(*) over () total from capped c)
-  select coalesce(jsonb_agg(r.line order by r.o) filter (where r.total <= 19 or r.o <= 18), '[]')
-         || case when max(r.total) > 19 then jsonb_build_array(format('+%s more: cb digest %s', max(r.total) - 18, p)) else '[]'::jsonb end
+    select x.grp, x.p0, x.id,
+           case when cap and x.rn = 5 and x.cnt > 5 then x.line || format(' +%s more (cb digest %s --all)', x.cnt - 5, p) else x.line end as line,
+           case when cap and x.rn = 5 and x.cnt > 5 then x.cnt - 5 else 0 end as hid
+      from (select i.*, row_number() over (partition by i.grp order by i.p0 desc, i.id, i.line) rn, count(*) over (partition by i.grp) cnt from items i) x
+     where not cap or x.rn <= 5),
+  ranked as (select c.*, row_number() over (order by c.p0 desc, c.grp, c.id, c.line) o, count(*) over () total from capped c)
+  select coalesce(jsonb_agg(r.line order by r.o) filter (where not cap or r.total <= 19 or r.o <= 18), '[]')
+         || case when cap and max(r.total) > 19
+                 then jsonb_build_array(format('+%s more: cb digest %s --all', max(r.total) - 18 + coalesce(sum(r.hid) filter (where r.o > 18), 0), p))
+                 else '[]'::jsonb end
     into rest from ranked r;
   return jsonb_build_array(head) || rest;
 end $$;

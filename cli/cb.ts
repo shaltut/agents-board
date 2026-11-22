@@ -809,6 +809,10 @@ ${body}`, json: pg };
       }
       throw new Error(`unknown lock command "${sub}": take, release, queue`);
     }
+    case 'digest': {
+      const lines: any = await callFn('digest', { project: args[0] ?? sessionProject, cap: !o.all });
+      return { out: lines.join('\n'), json: lines };
+    }
     case 'brief': {
       const b: any = await callFn('brief', { project: args[0] ?? sessionProject, tag: o.tag ?? null, ...(o.type ? { type: o.type } : {}) });
       // the same pack cb iam prints, with this machine's own entries (cb.brief can't know the machine)

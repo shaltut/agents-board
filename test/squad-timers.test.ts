@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { freshDb } from './helpers.ts';
+import { spawnSync } from 'node:child_process';
+import { freshDb, TEST_URL } from './helpers.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -258,7 +259,7 @@ test('each group is capped at 5 lines and never buries a later group', async () 
   await sql`update cb.tasks set labels = array['billing'] where title = 'd'`;
   const all: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
   assert.ok(all.length <= 20);
-  assert.match(all.at(-1)!, /^\+\d+ more: cb digest demo$/);
+  assert.match(all.at(-1)!, /^\+\d+ more: cb digest demo --all$/);
 });
 
 test('an identical digest is not repeated, a changed one is', async () => {
@@ -283,4 +284,29 @@ test('an unheld review card whose only live reviewer built it is named; a down h
   const lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
   assert.ok(lines.some((l) => /^nobody can take: #2 \(review, no live session can take it\)/.test(l)), lines.join('\n'));
   assert.ok(lines.some((l) => /^W7@mac is down and holds #3:/.test(l)), lines.join('\n'));
+});
+
+test('cb digest --all shows what the digest caps', async () => {
+  const { sql } = await setup();
+  for (let i = 0; i < 8; i++) await sql`select cb.task_add(project => 'demo', title => ${'plain ' + i}, status => 'next', actor => 'github')`;
+  for (let i = 0; i < 7; i++) await sql`select cb.task_add(project => 'demo', title => 'm', actor => 'orch@pc')`;
+  await sql`update cb.tasks set stage = 'merge', status = 'next' where title = 'm'`;
+  for (let i = 0; i < 5; i++) await sql`select cb.task_add(project => 'demo', title => 'd', actor => 'orch@pc')`;
+  await sql`update cb.tasks set labels = array['billing'] where title = 'd'`;
+  for (let i = 0; i < 5; i++) await sql`select cb.task_add(project => 'demo', title => 'x', priority => 'P0', actor => 'github')`;
+  const capped: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(capped.some((l) => /\+2 more \(cb digest demo --all\)/.test(l)));
+  assert.match(capped.at(-1)!, /^\+\d+ more: cb digest demo --all$/);
+  const all: string[] = (await sql`select cb.digest('demo', cap => false) as d`)[0].d;
+  assert.equal(all.filter((l) => /is not staged/.test(l)).length, 8);
+  assert.ok(all.length > capped.length && all.length > 20);
+  assert.ok(!all.some((l) => /more/.test(l)));
+  // the closing count includes the items hidden behind a cut group's own "+K more"
+  const n = Number(capped.at(-1)!.match(/^\+(\d+) more/)![1]);
+  const inLines = capped.reduce((t, l) => t + Number(l.match(/ \+(\d+) more \(/)?.[1] ?? 0), 0);
+  assert.equal(capped.length - 1 + inLines + n, all.length, 'shown + hidden in lines + hidden in the closing count = everything');
+  const r = spawnSync('node', ['cli/cb.ts', 'digest', 'demo', '--all'], { encoding: 'utf8',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'orch@pc', HERDR_PANE_ID: '', CB_MACHINE: 'pc', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^Stages: /);
 });
