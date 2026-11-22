@@ -177,6 +177,9 @@ function printBrief(b: any) {
 }
 
 /** Projects are namespaces: a session bound to one project never changes another project's tasks. */
+const STAGE_WORDS: Record<string, string> = { design: 'Design', approval: 'Waiting for your approval', build: 'Building', review: 'In review',
+  merge: 'Merging to dev', qa: 'Checking on dev against the design', done: 'Done' };
+
 async function guard(id: string | undefined) {
   const n = Number(String(id ?? '').replace(/^#/, ''));
   if (!sessionProject || !Number.isInteger(n)) return;
@@ -575,6 +578,18 @@ async function run(): Promise<unknown> {
       await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
       return { out: `#${args[0].replace('#', '')} ${args[1] === 'none' ? 'is out of the pipeline' : 'goes to build'}` };
     }
+    case 'pass': {
+      need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
+      await guard(args[0]);
+      const stage = await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
+      return { out: `#${args[0].replace('#', '')} → ${STAGE_WORDS[stage] ?? stage}`, json: stage };
+    }
+    case 'fail': {
+      need(2, 'fail <id> "<why>" [--to design]   e.g. cb fail 42 "the error path is missing"');
+      await guard(args[0]);
+      const stage = await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor });
+      return { out: `#${args[0].replace('#', '')} → ${STAGE_WORDS[stage] ?? stage}`, json: stage };
+    }
     case 'move':
       need(2, 'move <id> <status> ["<note>"]');
       await guard(args[0]);
@@ -631,8 +646,9 @@ async function run(): Promise<unknown> {
       if (!pg) throw new Error(`no page yet for ${o.area ? `area ${o.area}` : `#${args[1].replace('#', '')}`}: write it with cb page set`);
       if (o.approved && pg.approved_version == null) throw new Error('nothing approved on this page yet');
       const body = o.approved ? pg.approved_body : pg.body, ver = o.approved ? pg.approved_version : pg.version;
-      const t = new Date(pg.updated_at).toISOString().slice(0, 16).replace('T', ' ');
-      const head = `${o.area ? `${o.area} page for ${pg.project}` : `design page for #${pg.task_id}`}, v${ver}${!o.approved && pg.approved_version ? ` (approved v${pg.approved_version})` : ''} · ${pg.updated_by} · ${t}`;
+      const who = o.approved ? pg.approved_by : pg.updated_by;
+      const t = new Date(o.approved ? pg.approved_at : pg.updated_at).toISOString().slice(0, 16).replace('T', ' ');
+      const head = `${o.area ? `${o.area} page for ${pg.project}` : `design page for #${pg.task_id}`}, v${ver}${!o.approved && pg.approved_version ? ` (approved v${pg.approved_version})` : ''} · ${who} · ${t}`;
       return { out: `${head}
 
 ${body}`, json: pg };

@@ -949,11 +949,15 @@ create function cb.answer(id text, answer text default null, actor text default 
 returns void language plpgsql as $$
 #variable_conflict use_variable
 -- no cb.memories row type: it is created further down
-declare qid bigint := cb.norm_id(id); cur text; a text; par bigint; qp text; rid bigint; rst text; rp text; stale boolean; asker text; prev text;
+declare qid bigint := cb.norm_id(id); cur text; a text; par bigint; qp text; rid bigint; rst text; rp text; stale boolean; asker text; prev text; appr bigint;
 begin
   a := cb.set_actor(actor);
-  select q.status, q.parent_id, q.project, q.asked_by, q.answered_by into cur, par, qp, asker, prev from cb.questions q where q.id = qid for update;
+  select q.status, q.parent_id, q.project, q.asked_by, q.answered_by, q.approval_for into cur, par, qp, asker, prev, appr from cb.questions q where q.id = qid for update;
   if cur is null then raise exception 'question Q% not found', qid; end if;
+  -- a design approval is Ahmed's, from the dashboard (squad pipeline, #3598)
+  if appr is not null and not (cb.ahmed_like(a) and current_setting('application_name') = 'cb-web') then
+    raise exception 'only Ahmed approves designs, from the board';
+  end if;
   if nullif(trim(ruled_by), '') is not null then
     perform cb.dashboard_only('Today');  -- the metric counts Ahmed's "Already ruled", and the answer carries his authority
     select x.id, x.status, x.project, coalesce(x.review_after < current_date, false),
@@ -981,6 +985,7 @@ begin
            answer = trim(answer), answered_at = now(), answered_by = a, ruled_by = rid, delivered_at = null, delivered_to = null
      where q.id = qid;
     perform cb._followups_route(qid);
+    perform cb._approval_answered(qid);
     return;
   end if;
   if cur = 'dormant' then raise exception 'Q% waits on Q%: it opens when that one is answered', qid, par; end if;
@@ -991,6 +996,7 @@ begin
   end if;
   update cb.questions q set status = 'answered', answer = trim(answer), answered_at = now(), answered_by = a, ruled_by = rid where q.id = qid;
   perform cb._followups_route(qid);  -- first answer or a change: the follow-ups follow it
+  perform cb._approval_answered(qid);
 end $$;
 
 -- The option labels (as the parent spells them) an answer picked. The dashboard sends "Label — note" (label without
@@ -3249,6 +3255,10 @@ drop function if exists cb.project_pipeline cascade;
 drop function if exists cb.page_set cascade;
 drop function if exists cb.page_get cascade;
 drop function if exists cb.stage_set cascade;
+drop function if exists cb._stage_move cascade;
+drop function if exists cb.stage_pass cascade;
+drop function if exists cb.stage_fail cascade;
+drop function if exists cb._approval_answered cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3267,6 +3277,7 @@ alter table cb.sessions add column if not exists area text;
 alter table cb.sessions add column if not exists model text;
 
 alter table cb.questions add column if not exists approval_for bigint references cb.tasks(id) on delete set null;
+alter table cb.questions add column if not exists page_version int;
 
 -- A card's page (task_id) or an area's page (area): one current body, older ones in page_versions.
 create table if not exists cb.pages (
@@ -3326,7 +3337,7 @@ end $$;
 create function cb.page_set(body text, task text default null, area text default null, project text default null, actor text default null)
 returns int language plpgsql as $$
 #variable_conflict use_variable
-declare a text := cb.set_actor(actor); hit text; pg cb.pages%rowtype; tid bigint; p text;
+declare a text := cb.set_actor(actor); hit text; pg cb.pages%rowtype; tid bigint; p text; st text;
 begin
   if (task is null) = (area is null) then raise exception 'give exactly one of task or area'; end if;
   if coalesce(trim(body), '') = '' then raise exception 'the page is empty; write the design'; end if;
@@ -3336,9 +3347,12 @@ begin
   end if;
   if task is not null then
     tid := cb.norm_id(task);
-    select t.project into p from cb.tasks t where t.id = tid;
+    select t.project, t.stage into p, st from cb.tasks t where t.id = tid;
     if p is null then raise exception 'no task #%', tid; end if;
     select * into pg from cb.pages g where g.task_id = tid for update;
+    if st = 'approval' then
+      raise exception '#% waits for Ahmed''s approval of v%: to change the page, take it back with cb fail % "<why>"', tid, pg.version, tid;
+    end if;
   else
     if project is null then raise exception 'an area page needs a project'; end if;
     p := cb.read_project(project);
@@ -3362,7 +3376,7 @@ end $$;
 create function cb.page_get(task text default null, area text default null, project text default null, version int default null)
 returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
-declare pg cb.pages%rowtype; v cb.page_versions%rowtype; av int; ab text;
+declare pg cb.pages%rowtype; v cb.page_versions%rowtype; av int; ab text; aby text; aat timestamptz;
 begin
   if (task is null) = (area is null) then raise exception 'give exactly one of task or area'; end if;
   if task is not null then
@@ -3375,10 +3389,10 @@ begin
   if v.page_id is null then return null; end if;
   if pg.task_id is not null then
     select t.approved_version into av from cb.tasks t where t.id = pg.task_id;
-    select pv.body into ab from cb.page_versions pv where pv.page_id = pg.id and pv.version = av;
+    select pv.body, pv.updated_by, pv.updated_at into ab, aby, aat from cb.page_versions pv where pv.page_id = pg.id and pv.version = av;
   end if;
   return jsonb_build_object('project', pg.project, 'task_id', pg.task_id, 'area', pg.area, 'version', v.version, 'body', v.body,
-    'updated_by', v.updated_by, 'updated_at', v.updated_at, 'approved_version', av, 'approved_body', ab);
+    'updated_by', v.updated_by, 'updated_at', v.updated_at, 'approved_version', av, 'approved_body', ab, 'approved_by', aby, 'approved_at', aat);
 end $$;
 
 -- The lead restages an unclaimed card. build: small found work (a bug or chore) skips design (Q2315); none: work with
@@ -3408,4 +3422,130 @@ begin
           case when s = 'build' then 'small work, skipped design: ' || trim(why) else 'taken out of the pipeline: ' || trim(why) end,
           case when s = 'build' then '{"small": true}'::jsonb else '{"unstaged": true}'::jsonb end);
   return case when s = 'build' then 'build' end;
+end $$;
+
+-- Move a card to a stage in one update: who holds it next, its status, the history note. data may carry links and crew
+-- to merge into the card; the history event keeps all of it plus the stage change.
+create function cb._stage_move(tid bigint, to_stage text, hold text, note text, data jsonb default '{}') returns void language plpgsql as $$
+#variable_conflict use_variable
+declare fromst text;
+begin
+  select t.stage into fromst from cb.tasks t where t.id = tid for update;
+  perform set_config('cb.stage_ok', 'on', true);
+  perform set_config('cb.note', coalesce(note, ''), true);
+  perform set_config('cb.data', (coalesce(data, '{}') || jsonb_build_object('stage', jsonb_build_object('from', fromst, 'to', to_stage)))::text, true);
+  update cb.tasks t set stage = case when to_stage = 'done' then null else to_stage end,
+         stage_since = case when to_stage = 'done' then null else now() end,
+         assignee = hold,
+         status = case to_stage when 'approval' then 'review' when 'done' then 'done' else 'next' end,
+         links = t.links || coalesce(data -> 'links', '{}'),
+         crew = t.crew || coalesce(data -> 'crew', '{}')
+   where t.id = tid;
+  perform set_config('cb.stage_ok', '', true);
+  perform set_config('cb.note', '', true);
+  perform set_config('cb.data', '', true);
+  delete from cb.stage_nudges n where n.task_id = tid;
+end $$;
+
+-- The holder hands a card to the next stage. approval is never passed by a session: Ahmed's answer moves it.
+create function cb.stage_pass(id text, summary text, links jsonb default '{}', actor text default null) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); r text := cb._role(a);
+        lk jsonb := coalesce(links, '{}'); nxt text; hold text; extra jsonb := '{}'; v int; qid bigint; pgbody text;
+begin
+  select * into t from cb.tasks x where x.id = tid for update;
+  if not found then raise exception 'task #% not found', tid; end if;
+  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %', t.project; end if;
+  if t.stage is null then raise exception '#% is not in the pipeline', tid; end if;
+  if t.stage = 'approval' then
+    select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
+    raise exception 'waiting for Ahmed''s answer on Q%', qid;
+  end if;
+  if t.stage = 'design' and r not in ('owner', 'architect') then raise exception 'design is passed by an owner or architect session'; end if;
+  if t.stage = 'build' and r is distinct from 'builder' then raise exception 'build is passed by a builder session'; end if;
+  if t.stage = 'review' and r is distinct from 'reviewer' then raise exception 'review is passed by a reviewer session'; end if;
+  if t.stage = 'merge' and r is distinct from 'lead' then raise exception 'merging is the lead''s'; end if;
+  if t.stage = 'qa' and r is distinct from 'qa' then raise exception 'checking on dev is a qa session''s'; end if;
+  if t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
+  if coalesce(trim(summary), '') = '' then raise exception 'summary is required: say in one line what you did'; end if;
+  if t.stage = 'design' then
+    select g.version, g.body into v, pgbody from cb.pages g where g.task_id = tid;
+    if v is null then raise exception 'write the design page first: cb page set % -f <file>', tid; end if;
+    extra := jsonb_build_object('crew', jsonb_build_object('design', a));
+  elsif t.stage = 'build' then
+    if nullif(lk ->> 'pr', '') is null and nullif(t.links ->> 'pr', '') is null then raise exception 'give the pull request: --pr <url>'; end if;
+    extra := jsonb_build_object('crew', jsonb_build_object('build', a));
+  elsif t.stage = 'review' then
+    if a = t.crew ->> 'build' then raise exception 'you built it: another reviewer passes review'; end if;
+    if a = t.crew ->> 'design' then raise exception 'you designed it: another reviewer passes review'; end if;
+    extra := jsonb_build_object('crew', jsonb_build_object('review', a));
+  elsif t.stage = 'merge' then
+    if nullif(lk ->> 'commit', '') is null and nullif(t.links ->> 'commit', '') is null then raise exception 'give the merge commit: --commit <sha>'; end if;
+  elsif t.stage = 'qa' then
+    if a = t.crew ->> 'build' then raise exception 'you built it: another qa session checks it'; end if;
+  end if;
+  nxt := case t.stage when 'design' then 'approval' when 'build' then 'review' when 'review' then 'merge' when 'merge' then 'qa' else 'done' end;
+  hold := case when nxt = 'done' then a end;
+  perform cb._stage_move(tid, nxt, hold, trim(summary), extra || jsonb_build_object('links', lk));
+  if nxt = 'approval' then
+    qid := cb.ask(t.project, format('Approve the design for #%s "%s"?', tid, t.title),
+                  jsonb_build_array(jsonb_build_object('label', 'Approve', 'description', 'it goes to build'),
+                                    jsonb_build_object('label', 'Changes needed', 'description', 'back to ' || a || ' with your note')),
+                  task_id => tid::text, context => pgbody || E'\n\nv' || v || ', written by ' || a, actor => 'board');
+    perform cb.set_actor(a);
+    update cb.questions q set approval_for = tid, page_version = v where q.id = qid;
+  end if;
+  return nxt;
+end $$;
+
+-- A reviewer or qa session sends the card back (to its builder, or to design); the designer takes a card back from approval.
+create function cb.stage_fail(id text, why text, to_stage text default null, actor text default null) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(nullif(trim(to_stage), '')); nxt text; qid bigint;
+begin
+  select * into t from cb.tasks x where x.id = tid for update;
+  if not found then raise exception 'task #% not found', tid; end if;
+  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %', t.project; end if;
+  if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
+  if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
+  if t.stage in ('review', 'qa') then
+    if t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
+    nxt := coalesce(s, 'build');
+  elsif t.stage = 'approval' and a = t.crew ->> 'design' then
+    nxt := 'design';
+    select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
+    if qid is not null then perform cb.withdraw(qid::text, a); end if;
+  else
+    raise exception 'cb fail is for the holder of a card in review or qa, or the designer taking a card back from approval';
+  end if;
+  perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
+  return nxt;
+end $$;
+
+-- Ahmed answered an approval question (first answer or a change). Still at approval: Approve sends the card to build,
+-- Changes needed back to its designer. Moved on already: a note for the digest, the card is left alone.
+create function cb._approval_answered(qid bigint) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare q cb.questions%rowtype; t cb.tasks%rowtype; picked text[];
+begin
+  select * into q from cb.questions x where x.id = qid;
+  if q.approval_for is null then return; end if;
+  select * into t from cb.tasks x where x.id = q.approval_for for update;
+  if not found then return; end if;
+  if t.stage = 'approval' then
+    picked := cb._picked(q.options, q.answer, false);
+    if 'Approve' = any (picked) then
+      perform cb._stage_move(t.id, 'build', null, 'design approved');
+      update cb.tasks x set approved_version = q.page_version where x.id = t.id;
+    elsif 'Changes needed' = any (picked) then
+      perform cb._stage_move(t.id, 'design', t.crew ->> 'design', q.answer);
+    else
+      return;  -- a typed answer picks nothing: the card keeps waiting
+    end if;
+    update cb.questions x set status = 'delivered', delivered_at = now(), delivered_to = 'board' where x.id = qid;
+  else
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    values (coalesce(nullif(current_setting('cb.actor', true), ''), 'unknown'), t.project, t.id, 'note',
+            format('approval answer changed to "%s" after the card moved on', q.answer), '{"digest": true}');
+  end if;
 end $$;

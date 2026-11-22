@@ -9,7 +9,7 @@ export const RPC_FUNCTIONS = [
   'mem_add', 'mem_rule', 'mem_confirm', 'mem_retire', 'mem_supersede', 'mem_find', 'mem_list', 'mem_show', 'mem_pack',
   'goal_create', 'goal_update', 'goal_status', 'goal_tick', 'goal_opened', 'goal_preview', 'goal_propose', 'goals_list',
   'ask_open', 'ask_record', 'ask_say', 'ask_reply', 'ask_close', 'ask_reroute', 'asks_list',
-  'page_set', 'page_get', 'stage_set',
+  'page_set', 'page_get', 'stage_set', 'stage_pass', 'stage_fail',
 ];
 const SETOF = new Set(['task_claim', 'mine', 'answers_pending']);
 

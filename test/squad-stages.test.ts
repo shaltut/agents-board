@@ -115,3 +115,121 @@ test('a staged new card never starts claimed: an explicit in_progress becomes ne
   const [t] = await sql`select stage, status, assignee from cb.tasks where id = ${id}`;
   assert.deepEqual({ ...t }, { stage: 'design', status: 'next', assignee: null });
 });
+
+// --- pass / fail / approval (Task 5)
+const claim = (sql: any, id: number, actor: string) => sql`update cb.tasks set status = 'in_progress', assignee = ${actor} where id = ${id}`;
+const pass = (sql: any, id: number, actor: string, summary = 'ok', links: any = {}) =>
+  sql`select cb.stage_pass(${id}::text, ${summary}, ${sql.json(links)}, ${actor}) as r`;
+const row = async (sql: any, id: number) => (await sql`select stage, status, assignee, approved_version, crew from cb.tasks where id = ${id}`)[0];
+// a card at design, the owner holding it, page written
+async function atDesign(sql: any) {
+  const id = await card(sql);
+  await claim(sql, id, 'O1@mac');
+  await sql`select cb.page_set('the design', task => ${id}::text, actor => 'O1@mac')`;
+  return id;
+}
+async function atApproval(sql: any) {
+  const id = await atDesign(sql);
+  await pass(sql, id, 'O1@mac', 'designed');
+  const [q] = await sql`select id from cb.questions where approval_for = ${id}`;
+  return { id, q: Number(q.id) };
+}
+
+test('a card walks every stage', async () => {
+  const sql = await setup();
+  const id = await card(sql);
+  await claim(sql, id, 'O1@mac');
+  await assert.rejects(() => pass(sql, id, 'O1@mac'), /page/);
+  await sql`select cb.page_set('the design', task => ${id}::text, actor => 'O1@mac')`;
+  assert.equal((await pass(sql, id, 'O1@mac', 'designed'))[0].r, 'approval');
+  assert.deepEqual({ ...(await row(sql, id)) }, { stage: 'approval', status: 'review', assignee: null, approved_version: null, crew: { design: 'O1@mac' } });
+  const qs = await sql`select id, approval_for, page_version, status from cb.questions`;
+  assert.equal(qs.length, 1);
+  assert.equal(Number(qs[0].approval_for), id); assert.equal(qs[0].page_version, 1);
+  await sql`select cb.answer(${qs[0].id}::text, 'Approve', 'ahmed')`;
+  assert.deepEqual({ ...(await row(sql, id)) }, { stage: 'build', status: 'next', assignee: null, approved_version: 1, crew: { design: 'O1@mac' } });
+  assert.equal((await sql`select status from cb.questions where id = ${qs[0].id}`)[0].status, 'delivered');
+  const pg = (await sql`select cb.page_get(${id}::text) as r`)[0].r;
+  assert.deepEqual([pg.approved_by, pg.approved_at != null], ['O1@mac', true]);
+  await claim(sql, id, 'B1@mac');
+  await assert.rejects(() => pass(sql, id, 'B1@mac'), /--pr/);
+  assert.equal((await pass(sql, id, 'B1@mac', 'built', { pr: 'https://x/pull/1' }))[0].r, 'review');
+  await claim(sql, id, 'R1@mac');
+  assert.equal((await pass(sql, id, 'R1@mac', 'reviewed'))[0].r, 'merge');
+  await claim(sql, id, 'orch@pc');
+  await assert.rejects(() => pass(sql, id, 'orch@pc'), /--commit/);
+  assert.equal((await pass(sql, id, 'orch@pc', 'merged', { commit: 'abc1234' }))[0].r, 'qa');
+  await claim(sql, id, 'Q1@mac');
+  assert.equal((await pass(sql, id, 'Q1@mac', 'checked'))[0].r, 'done');
+  const r = await row(sql, id);
+  assert.deepEqual([r.status, r.stage], ['done', null]);
+  assert.deepEqual(r.crew, { design: 'O1@mac', build: 'B1@mac', review: 'R1@mac' });
+  const [t] = await sql`select links from cb.tasks where id = ${id}`;
+  assert.deepEqual({ ...t.links }, { pr: 'https://x/pull/1', commit: 'abc1234' });
+});
+
+test('fail returns the card to the same builder or designer', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  await sql`select cb.answer(${q}::text, 'Approve', 'ahmed')`;
+  await claim(sql, id, 'B1@mac'); await pass(sql, id, 'B1@mac', 'built', { pr: '#1' });
+  await claim(sql, id, 'R1@mac');
+  assert.equal((await sql`select cb.stage_fail(${id}::text, 'wrong', null, 'R1@mac') as r`)[0].r, 'build');
+  const b1 = await row(sql, id);
+  assert.deepEqual([b1.stage, b1.status, b1.assignee], ['build', 'next', 'B1@mac']);
+  await claim(sql, id, 'B1@mac'); await pass(sql, id, 'B1@mac', 'again');
+  await claim(sql, id, 'R1@mac'); await pass(sql, id, 'R1@mac'); await claim(sql, id, 'orch@pc'); await pass(sql, id, 'orch@pc', 'm', { commit: 'abc' });
+  await claim(sql, id, 'Q1@mac');
+  await sql`select cb.stage_fail(${id}::text, 'design is off', 'design', 'Q1@mac')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.stage, r.assignee], ['design', 'O1@mac']);
+  // Changes needed
+  const b = await atApproval(sql);
+  await sql`select cb.answer(${b.q}::text, 'Changes needed — add the error path', 'ahmed')`;
+  const c = await row(sql, b.id);
+  assert.deepEqual([c.stage, c.status, c.assignee], ['design', 'next', 'O1@mac']);
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${b.id} and summary like '%add the error path%' and data ? 'stage'`)[0].n, 1);
+  // the designer takes it back
+  const d = await atApproval(sql);
+  await sql`select cb.stage_fail(${d.id}::text, 'fix the page', null, 'O1@mac')`;
+  const dr = await row(sql, d.id);
+  assert.deepEqual([dr.stage, dr.assignee], ['design', 'O1@mac']);
+  assert.equal((await sql`select status from cb.questions where id = ${d.q}`)[0].status, 'withdrawn');
+  const e = await atApproval(sql);
+  await assert.rejects(() => sql`select cb.stage_fail(${e.id}::text, 'x', null, 'B1@mac')`, /./);
+});
+
+test('only Ahmed approves, and only what he saw', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
+  await assert.rejects(() => session`select cb.answer(${q}::text, 'Approve', 'R1@mac')`, /only Ahmed approves/);
+  await assert.rejects(() => session`select cb.answer(${q}::text, 'Approve', 'ahmed')`, /only Ahmed/);
+  assert.equal((await row(sql, id)).stage, 'approval');
+  await assert.rejects(() => sql`select cb.page_set('new text', task => ${id}::text, actor => 'O1@mac')`, /waits for Ahmed's approval of v1/);
+});
+
+test('the wrong role and the builder reviewing are refused', async () => {
+  const sql = await setup();
+  const id = await card(sql);
+  await claim(sql, id, 'B1@mac');
+  await assert.rejects(() => pass(sql, id, 'B1@mac'), /owner or architect/);
+  const { id: a, q } = await atApproval(sql);
+  await assert.rejects(() => pass(sql, a, 'O1@mac'), /waiting for Ahmed/);
+  await sql`select cb.answer(${q}::text, 'Approve', 'ahmed')`;
+  await claim(sql, a, 'B1@mac'); await pass(sql, a, 'B1@mac', 'built', { pr: '#2' });
+  await sql`update cb.sessions set role = 'reviewer' where actor = 'B1@mac'`;
+  await claim(sql, a, 'B1@mac');
+  await assert.rejects(() => pass(sql, a, 'B1@mac'), /built it/);
+});
+
+test('a changed approval answer never moves the card twice', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  await sql`select cb.answer(${q}::text, 'Approve', 'ahmed')`;
+  await claim(sql, id, 'B1@mac');
+  await sql`select cb.answer(${q}::text, 'Changes needed', 'ahmed')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.stage, r.assignee], ['build', 'B1@mac']);
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and data ? 'digest'`)[0].n, 1);
+});
