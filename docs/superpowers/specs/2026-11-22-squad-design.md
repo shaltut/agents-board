@@ -270,6 +270,9 @@ Two Sonnet sessions in auto mode replayed 14 git/node commands in a throwaway re
 - Q2315: small found work (a bug, a one-file chore) may start at `build` with the lead's note; Ahmed's tasks never.
 - Q2316: QA runs after merge, on the dev environment; done = seen working on dev.
 - Q2317: design pages and area files live on the board as versioned markdown.
+- Q2325: models per role as in "Models per role" (Opus for judgment roles, Sonnet for builder and QA; Fable only
+  when Ahmed names it).
+- Q2327: the pipeline is built one fresh agent per task, each checked by a fresh reviewer.
 - Q2324: no card is freed because its session or machine is down; Ahmed restores it.
 - Q2323: work with no code (ops, a data check) leaves the pipeline when the lead marks it, with a one-line reason
   (`cb stage <id> none --why "..."`); it shows in the digest.
