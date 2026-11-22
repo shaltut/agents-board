@@ -743,7 +743,7 @@ begin
    where t.status = 'next' and (p is null or t.project = p)
      and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
      and cb._claimable(t, a)
-   order by t.priority <> 'P0', coalesce(cb._area(a) = any(t.labels), false) desc, case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit 1
+   order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(a) = any(t.labels), false) desc, case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit 1
    for update skip locked;
   if tid is null then return; end if;
   perform set_config('cb.note', 'claimed by ' || a, true);
@@ -1468,7 +1468,7 @@ begin
                              from cb.tasks t
                             where me is not null and proj is not null and t.project = proj and t.status = 'next'
                               and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
-                              and not (t.type = 'bug' and t.assignee is null and t.stage is null)
+                              and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')))
@@ -3600,7 +3600,7 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
         (cb._role(a) = 'owner' and cb._area(a) = any(t.labels))
         or (cb._role(a) in ('architect', 'owner') and (t.assignee = a
               or (cb._area(a) is null and (t.stage_since < now() - interval '15 minutes'
-                  or not exists (select 1 from cb.sessions s where s.role = 'owner' and s.area = any(t.labels)
+                  or not exists (select 1 from cb.sessions s where s.role = 'owner' and s.project = t.project and s.area = any(t.labels)
                                     and s.last_seen > now() - interval '10 minutes')))))
       when 'build' then cb._role(a) = 'builder'
       when 'review' then cb._role(a) = 'reviewer' and a is distinct from t.crew ->> 'build' and a is distinct from t.crew ->> 'design'

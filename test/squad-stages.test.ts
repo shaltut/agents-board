@@ -386,3 +386,18 @@ test('the push of new work reaches only sessions that can claim it', async () =>
   assert.deepEqual(await inbox('p2'), [b]);  // B1 builds
   assert.deepEqual(await inbox('p3'), []);   // R1 reviews
 });
+
+test('outside a pipeline project an area never reorders claims, and staged bugs go to triage once it is off', async () => {
+  const sql = await setup();
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  const lo = Number((await sql`select cb.task_add(project => 'demo', title => 'lo', priority => 'P3', labels => '["claims"]', status => 'next', actor => 'orch@pc') as id`)[0].id);
+  const hi = Number((await sql`select cb.task_add(project => 'demo', title => 'hi', priority => 'P1', status => 'next', actor => 'orch@pc') as id`)[0].id);
+  assert.deepEqual(await take(sql, 'O1@mac'), [hi]); // O1 has area claims
+  assert.deepEqual(await take(sql, 'O1@mac'), [lo]);
+  // a bug staged while the pipeline was on stays out of next_work when it is off
+  await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+  const bug = await card(sql, { actor: 'orch@pc' });
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  const nw = (await sql`select cb.inbox('mac', 'p2', 0) as r`)[0].r.next_work.map((w: any) => Number(w.id));
+  assert.ok(!nw.includes(bug)); // p2 is B1 (bound to demo)
+});
