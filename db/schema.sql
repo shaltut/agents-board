@@ -1422,7 +1422,7 @@ begin
     'answer_copies', coalesce((select jsonb_agg(jsonb_build_object('event_id', e.id, 'id', q.id, 'task_id', q.task_id, 'asked_by', q.asked_by, 'answered_by', q.answered_by,
                                                                    'body', q.body, 'answer', q.answer, 'was', e.data ->> 'was') order by e.id)
                                  from cb.events e join cb.questions q on q.id = e.question_id
-                                where e.kind = 'answered' and (me like 'orch@%' or me = 'orch') and e.project = proj
+                                where e.kind = 'answered' and (me like 'orch@%' or me = 'orch') and e.project = proj and not cb._pipeline(proj)  -- a pipeline lead gets cb.digest instead
                                   and q.asked_by <> me and e.id > seen and e.at > now() - interval '24 hours'), '[]'),
     -- new unassigned bugs filed in my project, if I triage it (cb.triagers: its orchestrator, else everyone bound)
     'bugs', coalesce((select jsonb_agg(jsonb_build_object('event_id', e.id, 'id', t.id, 'project', t.project, 'title', t.title,
@@ -1662,7 +1662,7 @@ declare r record; o text; n int := 0; mins int; idle text; live boolean;
 begin
   for r in
     select t.id, t.project, left(t.title, 80) as title, nullif(trim(t.assignee), '') as assignee, t.status,  -- unassigned cards hold '' as well as null; a title is cut: GitHub cards carry strangers' text
-           greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
+           t.stage, greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
      where t.status not in ('done', 'cancelled')
        and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
@@ -1678,7 +1678,8 @@ begin
               jsonb_build_object('to', r.assignee, 'nudge', true));
       n := n + 1;
     end if;
-    for o in select x from unnest(cb.triagers(r.project)) x where (x like 'orch@%' or x = 'orch') and x is distinct from r.assignee loop
+    for o in select x from unnest(cb.triagers(r.project)) x where (x like 'orch@%' or x = 'orch') and x is distinct from r.assignee
+                 and not (r.stage is not null and cb._pipeline(r.project)) loop  -- a staged card's lead copy is the digest's
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
               format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
@@ -2375,7 +2376,7 @@ begin
     from freed f
     join (select distinct s2.actor, s2.project from cb.sessions s2
            where (s2.actor like 'orch@%' or s2.actor = 'orch') and s2.last_seen > now() - interval '1 day') s on s.project = f.project
-   where f.assignee is null;
+   where f.assignee is null and not cb._pipeline(f.project);  -- a pipeline lead hears of it in the digest
   perform set_config('cb.note', coalesce(note, ''), true);
   perform set_config('cb.data', coalesce(data, ''), true);
   return null;
@@ -3282,6 +3283,9 @@ drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
 drop function if exists cb.stage_stalls_due cascade;
+drop function if exists cb._role_model cascade;
+drop function if exists cb.digest cascade;
+drop function if exists cb.digests_due cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3666,6 +3670,145 @@ begin
       on conflict (task_id) do update set nudged_at = excluded.nudged_at;
       n := n + 1;
     end if;
+  end loop;
+  return n;
+end $$;
+
+-- ---------------------------------------------------------------- The lead's digest (Task 9)
+-- One message to the lead every 15 minutes (at once on a new P0) replaces the per-event copies in pipeline projects.
+-- ponytail: fixed defaults until the per-project model map lands (piece 2).
+create function cb._role_model(role text) returns text language sql immutable as $$
+  select case when role in ('builder', 'qa') then 'sonnet' else 'opus' end
+$$;
+
+-- What needs the lead in a pipeline project: plain lines, the stage count first, P0 cards next, at most 20. Reads only:
+-- it frees nothing and writes nothing on any card.
+create function cb.digest(project text, since timestamptz default now() - interval '15 minutes') returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); head text; rest jsonb;
+begin
+  select format('Stages: design %s · waiting for Ahmed %s · build %s · review %s · merge %s · QA on dev %s',
+                count(*) filter (where t.stage = 'design'), count(*) filter (where t.stage = 'approval'),
+                count(*) filter (where t.stage = 'build'), count(*) filter (where t.stage = 'review'),
+                count(*) filter (where t.stage = 'merge'), count(*) filter (where t.stage = 'qa'))
+    into head from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled');
+  with items(grp, p0, id, line) as (
+    -- 2: freed since the last digest
+    select 2, t.priority = 'P0', t.id, format('#%s freed from %s (%s): cb session %s', t.id, m[1], m[2], m[1])
+      from cb.events e join cb.tasks t on t.id = e.task_id
+     cross join lateral regexp_match(e.summary, '^freed from ([^:]+): (.*)$') m
+     where e.project = p and e.at > since and e.data ? 'stall' and e.kind <> 'message' and m is not null
+    union all
+    -- 3: designs waiting for Ahmed
+    select 3, bool_or(t.priority = 'P0'), null::bigint,
+           format('%s designs wait for Ahmed''s approval, oldest %sh (#%s)', count(*),
+                  floor(extract(epoch from now() - min(coalesce(t.stage_since, t.updated_at))) / 3600),
+                  (array_agg(t.id order by coalesce(t.stage_since, t.updated_at)))[1])
+      from cb.tasks t where t.project = p and t.stage = 'approval' and t.status not in ('done', 'cancelled') having count(*) > 0
+    union all
+    -- 4: reviewed, waiting for the lead to merge
+    select 4, t.priority = 'P0', t.id, format('#%s reviewed: merge it, then cb pass %s --commit <sha>', t.id, t.id)
+      from cb.tasks t where t.project = p and t.stage = 'merge' and t.status not in ('done', 'cancelled')
+    union all
+    -- 5: answers nobody collected: the lead asked, or the asker's relay has been gone for 10 minutes
+    select 5, false, q.id, format('Q%s answered for %s (%s): cb pending', q.id, q.asked_by,
+                                  case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its session has been gone 10 minutes' end)
+      from cb.questions q
+     where q.project = p and q.status = 'answered' and q.approval_for is null and q.asked_by not in ('ahmed', 'board')
+       and (cb._role(q.asked_by) = 'lead'
+            or not exists (select 1 from cb.sessions s where s.actor = q.asked_by and s.last_seen > now() - interval '10 minutes'))
+    union all
+    -- 6: design cards no live owner of their area will take
+    select 6, t.priority = 'P0', t.id,
+           format('#%s has no area owner (tags: %s): an architect takes it after 15 min, or cb tag %s <area>', t.id, array_to_string(t.labels, ', '), t.id)
+      from cb.tasks t
+     where t.project = p and t.stage = 'design' and t.status = 'next' and nullif(trim(t.assignee), '') is null and cardinality(t.labels) > 0
+       and not exists (select 1 from cb.sessions s where s.role = 'owner' and s.project = p and s.area = any(t.labels)
+                          and s.last_seen > now() - interval '10 minutes')
+    union all
+    -- 7: notes the lead should see (small work, taken out of the pipeline, other digest notes)
+    select 7, t.priority = 'P0', t.id, format('#%s %s: cb show %s', t.id, e.summary, t.id)
+      from cb.events e join cb.tasks t on t.id = e.task_id
+     where e.project = p and e.at > since and (e.data ? 'small' or e.data ? 'unstaged' or e.data ? 'digest')
+    union all
+    -- 8: cards waiting in Next outside the pipeline with nobody to take them (research has its own line below)
+    select 8, t.priority = 'P0', t.id, format('#%s is not staged: cb edit %s --assignee <session>', t.id, t.id)
+      from cb.tasks t
+     where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
+    union all
+    -- 9: a holder that is down keeps its cards (Q2324); a name with no session row is a re-bound pane
+    select 9, bool_or(t.priority = 'P0'), min(t.id),
+           format('%s is down and holds %s: restore it, or cb edit %s --assignee <session>', t.assignee,
+                  string_agg('#' || t.id, ', ' order by t.id), min(t.id))
+      from cb.tasks t
+     where t.project = p and t.status in ('in_progress', 'next') and nullif(trim(t.assignee), '') is not null
+       and not exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
+       and (t.assignee like '%@%' or exists (select 1 from cb.sessions s where s.actor = t.assignee))
+     group by t.assignee
+    union all
+    -- 10: a live session on the wrong model for its role
+    select 10, false, null::bigint, format('%s is a %s on %s; the role runs %s: restart it with --model %s',
+                                           s.actor, s.role, s.model, cb._role_model(s.role), cb._role_model(s.role))
+      from (select distinct on (s2.actor) s2.actor, s2.role, s2.model from cb.sessions s2
+             where s2.project = p and s2.role is not null and s2.model is not null and s2.last_seen > now() - interval '10 minutes'
+             order by s2.actor, s2.last_seen desc) s
+     where s.model not ilike '%' || cb._role_model(s.role) || '%'
+    union all
+    -- 11: cards no session can ever take, named instead of left silent
+    select 11, bool_or(n.p0), min(n.id), 'nobody can take: ' || string_agg(n.what, ', ' order by n.id)
+      from (
+        -- a hold by a live session whose role no longer fits the stage
+        select t.id, t.priority = 'P0' as p0,
+               format('#%s (held by %s, %s, at %s)', t.id, t.assignee,
+                      case when cb._role(t.assignee) is null then 'with no role' else 'a ' || cb._role(t.assignee) end, t.stage) as what
+          from cb.tasks t
+         where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is not null
+           and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
+           and not cb._claimable(t, t.assignee)
+        union all
+        -- a design card no live owner of its area and no area-less owner or architect could take, waiting time aside
+        select t.id, t.priority = 'P0', format('#%s (design, no owner or architect for it)', t.id)
+          from cb.tasks t
+         where t.project = p and t.stage = 'design' and t.status = 'next' and nullif(trim(t.assignee), '') is null
+           and not exists (select 1 from cb.sessions s
+                            where s.project = p and s.role in ('owner', 'architect') and s.last_seen > now() - interval '10 minutes'
+                              and cb._claimable(jsonb_populate_record(null::cb.tasks, to_jsonb(t) || jsonb_build_object('stage_since', now() - interval '1 day')), s.actor))
+        union all
+        select t.id, t.priority = 'P0', format('#%s (research, no investigator)', t.id)
+          from cb.tasks t
+         where t.project = p and t.type = 'research' and t.status = 'next' and nullif(trim(t.assignee), '') is null
+           and not exists (select 1 from cb.sessions s where s.project = p and s.role = 'investigator' and s.last_seen > now() - interval '10 minutes')
+      ) n having count(*) > 0)
+  -- ponytail: the 20-line cap cuts the tail silently; a "+N more" line if the lead ever misses one
+  select coalesce(jsonb_agg(l.line order by l.p0 desc, l.grp, l.id), '[]') into rest
+    from (select i.* from items i order by i.p0 desc, i.grp, i.id limit 19) l;
+  return jsonb_build_array(head) || rest;
+end $$;
+
+-- The 60 s tick. A pipeline project with a lead seen in the last day gets a digest when 15 minutes have passed since the
+-- last one, or a P0 card was created since. Only the stage line = nothing to say: no message, but the time is recorded.
+-- The digest is one message to each lead and writes nothing on any card, so it never counts as card activity.
+create function cb.digests_due() returns int language plpgsql as $$
+declare r record; leads text[]; last_at timestamptz; lines jsonb; txt text; l text; n int := 0;
+begin
+  for r in select pr.slug from cb.projects pr where pr.pipeline loop
+    select array_agg(distinct s.actor) into leads from cb.sessions s
+     where s.project = r.slug and cb._role(s.actor) = 'lead' and s.last_seen > now() - interval '1 day';
+    continue when leads is null;
+    select (st.value ->> 'at')::timestamptz into last_at from cb.settings st where st.key = 'digest:' || r.slug;
+    continue when last_at is not null and last_at > now() - interval '15 minutes'
+              and not exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
+    lines := cb.digest(r.slug, coalesce(last_at, now() - interval '15 minutes'));
+    if jsonb_array_length(lines) > 1 then
+      select string_agg(x.v, E'\n' order by x.n) into txt from jsonb_array_elements_text(lines) with ordinality x(v, n);
+      foreach l in array leads loop
+        insert into cb.events (actor, project, kind, summary, data)
+        values ('board', r.slug, 'message', 'Digest for ' || r.slug || E':\n' || txt, jsonb_build_object('to', l, 'digest', true));
+        n := n + 1;
+      end loop;
+    end if;
+    insert into cb.settings (key, value) values ('digest:' || r.slug, jsonb_build_object('at', now()))
+    on conflict (key) do update set value = excluded.value;
   end loop;
   return n;
 end $$;

@@ -411,6 +411,7 @@ export async function start() {
     // "why is this card not moving": the cards Ahmed pinged (cb.pings_due); one board sends them, like the pollers
     setInterval(() => { void sql`select cb.pings_due()`.catch((e) => console.error(`pings: ${e?.message}`)) }, 60_000).unref()
     setInterval(() => { void sql`select cb.stage_stalls_due()`.catch((e) => console.error(`stalls: ${e?.message}`)) }, 60_000).unref()
+    setInterval(() => { void sql`select cb.digests_due()`.catch((e) => console.error(`digest: ${e?.message}`)) }, 60_000).unref()
   });
 }
 

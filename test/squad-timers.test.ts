@@ -129,3 +129,103 @@ test('a restored session keeps its cards: nudged once, never freed a minute late
   assert.equal(await due(), 0);
   assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac');
 });
+
+// ---- the lead's digest (Task 9) ----
+async function digestSetup() {
+  const { sql } = await setup();
+  const add = async (title: string, o: any = {}) => Number((await sql`select cb.task_add(project => 'demo', title => ${title}, type => ${o.type ?? null}, actor => ${o.actor ?? 'orch@pc'}) as id`)[0].id);
+  await sql`update cb.sessions set model = 'opus' where actor = 'B1@mac'`;
+  const merge = await add('to merge'); await sql`update cb.tasks set stage = 'merge', status = 'next' where id = ${merge}`;
+  const appr = await add('to approve'); await sql`update cb.tasks set stage = 'approval', status = 'review', stage_since = now() - interval '3 hours' where id = ${appr}`;
+  const plain = await add('unstaged', { actor: 'github' });
+  const freed = await add('freed one'); await sql`update cb.tasks set stage = 'build', status = 'next' where id = ${freed}`;
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, data) values ('board','demo',${freed},'note','freed from B1@mac: held for 1h 40m with no activity','{"stall":true}')`;
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, data) values ('orch@pc','demo',1,'note','small work, skipped design: tiny','{"small":true}')`;
+  const design = await add('held at design'); await sql`update cb.tasks set status = 'next', assignee = 'B1@mac' where id = ${design}`;
+  const research = await add('look into it', { type: 'research' }); await sql`update cb.tasks set status = 'next' where id in (${research}, ${plain})`;
+  const tagged = await add('needs an owner'); await sql`update cb.tasks set labels = array['billing'] where id = ${tagged}`;
+  const rebound = await add('re-bound'); await sql`update cb.tasks set stage = 'build', status = 'next', assignee = 'W1@mac' where id = ${rebound}`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p9','W9@mac','demo','builder')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, last_seen) values ('mac','p7','B2@mac','demo','builder', now() - interval '3 hours')`;
+  const gone = await add('on a down session'); await sql`update cb.tasks set stage = 'build', status = 'in_progress', assignee = 'B2@mac' where id = ${gone}`;
+  return { sql, merge, appr, plain, freed, design, research, rebound, gone, tagged };
+}
+
+test('the digest names what needs the lead, each with its command', async () => {
+  const { sql, merge, appr, plain, freed, design, research, rebound, gone, tagged } = await digestSetup();
+  await sql`select cb.ask(project => 'demo', body => 'Which one?', actor => 'orch@pc')`;
+  await sql`select cb.answer('1', 'this one')`;
+  const lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.length <= 20);
+  assert.match(lines[0], /^Stages: design 2 · waiting for Ahmed 1 · build \d · review 0 · merge 1 · QA on dev 0$/);
+  const has = (re: RegExp) => assert.ok(lines.some((l) => re.test(l)), `${re}\n${lines.join('\n')}`);
+  has(new RegExp(`^#${freed} freed from B1@mac \\(held for 1h 40m with no activity\\): cb session B1@mac$`));
+  has(/^1 designs wait for Ahmed's approval, oldest 3h \(#\d+\)/);
+  has(new RegExp(`^#${merge} reviewed: merge it, then cb pass ${merge} --commit <sha>$`));
+  has(/^Q1 answered for orch@pc \(.*\): cb pending$/);
+  has(new RegExp(`^#${tagged} has no area owner \\(tags: billing\\): an architect takes it after 15 min, or cb tag ${tagged} <area>`));
+  has(/small work, skipped design: tiny: cb show 1$/);
+  has(new RegExp(`^#${plain} is not staged: cb edit ${plain} --assignee <session>$`));
+  has(new RegExp(`^W1@mac is down and holds #${rebound}: restore it, or cb edit ${rebound} --assignee <session>$`));
+  has(new RegExp(`^B2@mac is down and holds #${gone}: `));
+  has(/^B1@mac is a builder on opus; the role runs sonnet: restart it with --model sonnet$/);
+  has(new RegExp(`^nobody can take: #${design} \\(held by B1@mac, a builder, at design\\), #${research} \\(research, no investigator\\), #${tagged} \\(design, no owner or architect for it\\)$`));
+  assert.equal((await sql`select count(*)::int n from cb.tasks where id = ${appr} and assignee is not null`)[0].n, 0, 'the digest frees nothing');
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id is not null and (data ->> 'digest') = 'true'`)[0].n, 0, 'and writes nothing on cards');
+});
+
+test('P0 cards come first, behind the stage line', async () => {
+  const { sql, plain } = await digestSetup();
+  await sql`update cb.tasks set priority = 'P0' where id = ${plain}`;
+  const lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.match(lines[1], new RegExp(`^#${plain} is not staged`));
+});
+
+test('digests go every 15 minutes, at once on a P0, and never empty', async () => {
+  const { sql } = await digestSetup();
+  const due = async () => (await sql`select cb.digests_due() as n`)[0].n;
+  const sent = async () => (await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'digest' and kind = 'message' and actor = 'board' order by id`) as any[];
+  assert.equal(await due(), 1);
+  const m = await sent();
+  assert.equal(m.length, 1);
+  assert.equal(m[0].to_, 'orch@pc');
+  assert.match(m[0].summary, /^Digest for demo:\nStages: design 2/);
+  assert.equal(await due(), 0, 'again at once: nothing');
+  await sql`select cb.task_add(project => 'demo', title => 'on fire', priority => 'P0', actor => 'github')`;
+  assert.equal(await due(), 1, 'a new P0 goes out at once');
+  // quiet: clear every reason to speak, age the last digest 16 minutes
+  await sql`update cb.tasks set status = 'cancelled'`;
+  await sql`delete from cb.sessions where actor in ('W9@mac', 'B2@mac')`;
+  await sql`update cb.sessions set model = 'sonnet'`;
+  await sql`update cb.questions set status = 'delivered'`;
+  await sql`delete from cb.events where data ? 'small' or data ? 'stall'`;
+  await sql`update cb.settings set value = jsonb_build_object('at', now() - interval '16 minutes') where key = 'digest:demo'`;
+  const before = (await sent()).length;
+  assert.equal(await due(), 0);
+  assert.equal((await sent()).length, before, 'only the stage line: nothing to say');
+  const [{ at }] = await sql`select (value ->> 'at')::timestamptz > now() - interval '1 minute' as at from cb.settings where key = 'digest:demo'`;
+  assert.equal(at, true, 'and the time is still recorded');
+});
+
+test('pipeline projects stop sending the lead per-event copies', async () => {
+  const { sql, age } = await setup();
+  await sql`select cb.ensure_project('old')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p5','orch@pc2','old',null), ('mac','p6','W2@mac','old',null)`;
+  const q = async (proj: string, who: string) => Number((await sql`select cb.ask(project => ${proj}, body => 'ok?', actor => ${who}) as id`)[0].id);
+  const dq = await q('demo', 'B1@mac'), oq = await q('old', 'W2@mac');
+  await sql`select cb.answer(${String(dq)}, 'yes')`; await sql`select cb.answer(${String(oq)}, 'yes')`;
+  const box = async (m: string, p: string) => (await sql`select cb.inbox(${m}, ${p}, 0) as i`)[0].i;
+  assert.equal((await box('pc', 'p4')).answer_copies.length, 0, 'pipeline: no copy');
+  assert.equal((await box('pc', 'p5')).answer_copies.length, 1, 'plain project: still a copy');
+  // a pinged staged card asks its holder only
+  await age(120);
+  await sql`select cb.task_ping_set('1', true, 'ahmed')`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 1);
+  assert.deepEqual((await sql`select data ->> 'to' as t from cb.events where kind = 'message' and data ? 'nudge' and summary like 'Card #1 %'`).map((r: any) => r.t), ['B1@mac']);
+  // a freed blocked card is not copied to the lead either
+  await sql`select cb.task_add(project => 'demo', title => 'blocker', actor => 'orch@pc')`;
+  await sql`select cb.task_add(project => 'demo', title => 'waits', status => 'backlog', actor => 'orch@pc')`;
+  await sql`select cb.task_block('3', '2', 'orch@pc')`;
+  await sql`select cb.task_move('2', 'cancelled', null, 'orch@pc')`;
+  assert.equal((await sql`select count(*)::int n from cb.events where kind = 'message' and summary like 'unblocked: #3%'`)[0].n, 0);
+});
