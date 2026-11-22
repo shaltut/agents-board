@@ -810,7 +810,9 @@ ${body}`, json: pg };
       throw new Error(`unknown lock command "${sub}": take, release, queue`);
     }
     case 'digest': {
-      const lines: any = await callFn('digest', { project: args[0] ?? sessionProject, cap: !o.all });
+      const project = args[0] ?? sessionProject;
+      if (!project) throw new Error('no project: say which (cb digest ihop) or bind this session once (cb iam <name> <project>)');
+      const lines: any = await callFn('digest', { project, cap: !o.all });
       return { out: lines.join('\n'), json: lines };
     }
     case 'brief': {

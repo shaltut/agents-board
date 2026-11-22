@@ -303,10 +303,19 @@ test('cb digest --all shows what the digest caps', async () => {
   assert.ok(!all.some((l) => /more/.test(l)));
   // the closing count includes the items hidden behind a cut group's own "+K more"
   const n = Number(capped.at(-1)!.match(/^\+(\d+) more/)![1]);
+  const unstagedShown = capped.map((l, i) => [l, i] as const).filter(([l]) => /is not staged/.test(l));
+  assert.ok(unstagedShown.length < 5, 'the total cap cut the not-staged group before its own +3 more line (which is its 5th row, past position 18)');
   const inLines = capped.reduce((t, l) => t + Number(l.match(/ \+(\d+) more \(/)?.[1] ?? 0), 0);
   assert.equal(capped.length - 1 + inLines + n, all.length, 'shown + hidden in lines + hidden in the closing count = everything');
   const r = spawnSync('node', ['cli/cb.ts', 'digest', 'demo', '--all'], { encoding: 'utf8',
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'orch@pc', HERDR_PANE_ID: '', CB_MACHINE: 'pc', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^Stages: /);
+});
+
+test('cb digest with no project and no bound session says which project', () => {
+  const r = spawnSync('node', ['cli/cb.ts', 'digest'], { encoding: 'utf8',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: '', HERDR_PANE_ID: '', CB_MACHINE: 'pc', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
+  assert.notEqual(r.status, 0);
+  assert.ok((r.stderr + r.stdout).includes("no project: say which (cb digest ihop)"));
 });
