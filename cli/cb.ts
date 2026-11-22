@@ -176,9 +176,17 @@ function printBrief(b: any) {
   sec('RULES & FACTS', b.memory?.entries ?? [], memLine);
 }
 
+/** A staged card's block for cb resume and cb next: the words, the finish line, the page it is built from, notes, questions. */
+function cardBlock(c: any, head = true): string {
+  const ind = (s: string) => s.split('\n').map((l) => `    ${l}`).join('\n');
+  return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`, `  finish with: ${c.finish}`,
+    c.page && `  page (v${c.page.version}${c.page.approved ? ', approved' : ''}):\n${ind(c.page.body)}`,
+    c.notes.length && `  notes:\n${c.notes.map((n: any) => `    ${new Date(n.at).toISOString().slice(0, 16).replace('T', ' ')} ${n.actor}: ${flat(n.summary)}`).join('\n')}`,
+    c.questions.length && `  open questions:\n${c.questions.map((q: any) => `    Q${q.id} ${flat(q.body)}`).join('\n')}`,
+  ].filter(Boolean).join('\n');
+}
+
 /** Projects are namespaces: a session bound to one project never changes another project's tasks. */
-const STAGE_WORDS: Record<string, string> = { design: 'Design', approval: 'Waiting for your approval', build: 'Building', review: 'In review',
-  merge: 'Merging to dev', qa: 'Checking on dev against the design', done: 'Done' };
 
 async function guard(id: string | undefined) {
   const n = Number(String(id ?? '').replace(/^#/, ''));
@@ -233,9 +241,7 @@ async function start() {
   // cb.mine also lists tasks reassigned away in the last 24h: never tell the agent to continue those
   const open = mine.filter((t: any) => t.assignee === actor && !['done', 'cancelled'].includes(t.status));
   const project = sessionProject;
-  const queue = project ? await sql`select id, priority, title, labels, project, assignee from cb.tasks
-    where project = ${project} and status = 'next' and (assignee is null or assignee = ${actor})
-    order by priority <> 'P0', case when priority <> 'P0' then cb._goal_rank(id) end nulls last, priority, rank, id limit 3` : []; // = cb.task_claim
+  const queue = project ? await callFn('task_queue', { project, actor, lim: 3 }) as any[] : []; // what cb next would take: same filter and order
   const qs = await sql`select id, status, body, sent_back from cb.questions where asked_by = ${actor} and status in ('open', 'answered', 'sent_back') order by id`;
   const cut = (s: string) => (s.length > 100 ? s.slice(0, 99) + '…' : s);
   // Ahmed's asks (#936) waiting on this session's reply: a resumed session lost the terminal they were pushed into
@@ -243,7 +249,7 @@ async function start() {
   if (asks.length) out.push('AHMED ASKS YOU', ...asks.map((a) =>
     `  A${a.id}${a.late ? ` LATE ${dur((Date.now() - +new Date(a.delivered_at)) / 60000)}` : ''}${a.from_terminal ? ' (asked in your terminal)' : ''}: ${cut(flat(a.body))}`));
   out.push(`YOUR TASKS (cb mine)`, ...(mine.length ? mine.map((t: any) => '  ' + line(t)) : ['  none']),
-    `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line(t)) : ['  empty']),
+    `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line({ ...t, status: '' })) : ['  empty']),
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
@@ -254,7 +260,7 @@ async function start() {
   if (doing) out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, cb done ${doing.id} "<summary>" --commit <sha> when finished`);
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
-  out.push('', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
+  out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return out.join('\n');
 }
 
@@ -552,6 +558,7 @@ async function run(): Promise<unknown> {
       return await mem();
     case 'add': {
       need(2, 'add <project> "<title>" [-s next] [-p P1]   e.g. cb add ihop "Fix Hijri month parse" -s next');
+      if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb add <project> "<title>" --stage build --why "<why>"');
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
@@ -561,6 +568,7 @@ async function run(): Promise<unknown> {
     case 'bug': {
       need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual"');
       if (!o.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
+      if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb bug <project> "<title>" -b "<what happened>" --stage build --why "<why>"');
       await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
@@ -568,7 +576,7 @@ async function run(): Promise<unknown> {
       const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
-      if (stage) return { out: `#${id} ${stage === 'build' ? 'is in build' : 'starts at design'}; a small fix can skip it: cb stage ${id} build --why "..."`, json: { id, project, told, stage } };
+      if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: cb stage ${id} build --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
         : all.length ? `you triage it: cb edit ${id} --assignee <worker>` : `no session works in ${project} yet: it waits in Next`;
       return { out: `#${id} bug filed in ${project}; ${who}`, json: { id, project, told } };
@@ -576,19 +584,19 @@ async function run(): Promise<unknown> {
     case 'stage': {
       need(2, 'stage <id> build|none --why "<why>"   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
       await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
-      return { out: `#${args[0].replace('#', '')} ${args[1] === 'none' ? 'is out of the pipeline' : 'goes to build'}` };
+      return { out: await callFn('next_step', { id: args[0] }) };
     }
     case 'pass': {
       need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
       await guard(args[0]);
       const stage = await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
-      return { out: `#${args[0].replace('#', '')} → ${STAGE_WORDS[stage] ?? stage}`, json: stage };
+      return { out: await callFn('next_step', { id: args[0] }), json: stage };
     }
     case 'fail': {
       need(2, 'fail <id> "<why>" [--to design]   e.g. cb fail 42 "the error path is missing"');
       await guard(args[0]);
       const stage = await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor });
-      return { out: `#${args[0].replace('#', '')} → ${STAGE_WORDS[stage] ?? stage}`, json: stage };
+      return { out: await callFn('next_step', { id: args[0] }), json: stage };
     }
     case 'move':
       need(2, 'move <id> <status> ["<note>"]');
@@ -675,7 +683,13 @@ ${body}`, json: pg };
       const rows: any = await callFn('task_claim', { project, actor });
       if (!rows.length) return { out: 'nothing to claim', json: null };
       const t = rows[0];
-      return { out: `${line(t)}${t.body ? '\n\n' + t.body : ''}`, json: t };
+      const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null;
+      return { out: `${line(t)}${t.body ? '\n\n' + t.body : ''}${staged ? '\n\n' + cardBlock(staged, false) : ''}`, json: staged ? { ...t, ...staged } : t };
+    }
+    case 'resume': {
+      const r: any = await callFn('resume', { actor });
+      return { out: r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
+        : `${r.actor} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`, json: r };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');

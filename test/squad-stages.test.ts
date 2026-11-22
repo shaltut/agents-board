@@ -401,3 +401,123 @@ test('outside a pipeline project an area never reorders claims, and staged bugs 
   const nw = (await sql`select cb.inbox('mac', 'p2', 0) as r`)[0].r.next_work.map((w: any) => Number(w.id));
   assert.ok(!nw.includes(bug)); // p2 is B1 (bound to demo)
 });
+
+// ---- Task 10: agent-native output
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+function cb(args: string[], env: Record<string, string> = {}) {
+  const r = spawnSync('node', ['cli/cb.ts', ...args], { encoding: 'utf8',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'B1@mac', HERDR_PANE_ID: '', CB_MACHINE: 'mac', CLAUDE_CODE_MESSAGING_SOCKET: '', ...env } });
+  return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
+}
+const PR = 'https://github.com/o/r/pull/9';
+
+test('resume gives back each card with its stage, finish line, page and notes', async () => {
+  const sql = await setup();
+  const id = await atBuild(sql);
+  await sql`select cb.page_set('v1 text', task => ${String(id)}, actor => 'O1@mac')`;
+  await sql`select cb.page_set('v2 text', task => ${String(id)}, actor => 'O1@mac')`;
+  await sql`update cb.tasks set approved_version = 1, assignee = 'B1@mac', status = 'in_progress' where id = ${id}`;
+  await sql`select cb.log('demo', 'tried the obvious fix', ${String(id)}, actor => 'B1@mac')`;
+  await sql`select cb.ask('demo', 'Which table holds it?', null, task_id => ${String(id)}, actor => 'B1@mac')`;
+  const r = (await sql`select cb.resume('B1@mac') as r`)[0].r;
+  assert.deepEqual([r.actor, r.role, r.project], ['B1@mac', 'builder', 'demo']);
+  const c = r.cards[0];
+  assert.equal(r.cards.length, 1);
+  assert.equal(c.stage_words, 'Building');
+  assert.match(c.finish, /cb pass \d+ .*--pr/);
+  assert.equal(c.page.version, 1);
+  assert.equal(c.page.body, 'v1 text');
+  assert.equal(c.notes[0].summary, 'tried the obvious fix');
+  assert.equal(c.questions[0].body, 'Which table holds it?');
+  // the designer sees the newest version, not the approved one
+  await sql`update cb.tasks set assignee = 'O1@mac' where id = ${id}`;
+  assert.equal((await sql`select cb.resume('O1@mac') as r`)[0].r.cards[0].page.version, 2);
+});
+
+test('stage words come from SQL only, and finish lines name the next command', async () => {
+  const sql = await setup();
+  const w = async (s: string | null) => (await sql`select cb._stage_words(${s}) as w`)[0].w;
+  assert.deepEqual(await Promise.all(['design', 'approval', 'build', 'review', 'merge', 'qa'].map(w)),
+    ['Design', 'Waiting for your approval', 'Building', 'In review', 'Merging to dev', 'Checking on dev against the design']);
+  assert.equal(await w(null), 'Not staged');
+  assert.ok(!/STAGE_WORDS/.test(readFileSync('cli/cb.ts', 'utf8')), 'the CLI keeps no copy of the words');
+  const id = await atBuild(sql);
+  const f = async (st: string | null) => (await sql`select cb._finish_line(jsonb_populate_record(null::cb.tasks,
+    to_jsonb(t) || jsonb_build_object('stage', ${st}::text))) as f from cb.tasks t where t.id = ${id}`)[0].f;
+  assert.match(await f('design'), /cb page set \d+ -f page\.md, then cb pass \d+ "<summary>"/);
+  assert.match(await f('build'), /cb pass \d+ "<summary>" --pr <url>/);
+  assert.match(await f('review'), /cb pass \d+ "<verdict>" or cb fail \d+ "<what is wrong>"/);
+  assert.match(await f('merge'), /cb pass \d+ .*--commit <sha>/);
+  assert.match(await f('qa'), /cb fail \d+ "<what fails>"/);
+  assert.match(await f(null), /cb done \d+ "<summary>"/);
+});
+
+test('cb pass, fail and stage say where the card went and who takes it', async () => {
+  const sql = await setup();
+  const id = await atBuild(sql);
+  await sql`update cb.tasks set assignee = 'B1@mac', status = 'in_progress' where id = ${id}`;
+  const p = cb(['pass', String(id), 'built', '--pr', PR]);
+  assert.match(p.out, /→ In review; a reviewer takes it\. You: cb next/, p.err);
+  await sql`update cb.tasks set assignee = 'R1@mac', status = 'in_progress' where id = ${id}`;
+  const f = cb(['fail', String(id), 'the error path is missing'], { CB_ACTOR: 'R1@mac' });
+  assert.match(f.out, /→ Building; B1@mac takes it\. You: cb next/, f.err);
+  const b = await card(sql, { actor: 'orch@pc' });
+  const s = cb(['stage', String(b), 'build', '--why', 'small'], { CB_ACTOR: 'orch@pc' });
+  assert.match(s.out, new RegExp(`#${b} → Building; a builder takes it\\. You: cb next`), s.err);
+  const n = await card(sql, { actor: 'orch@pc' });
+  const none = cb(['stage', String(n), 'none', '--why', 'ops'], { CB_ACTOR: 'orch@pc' });
+  assert.match(none.out, /→ Not staged; /, none.err);
+  const again = cb(['stage', String(n), 'none', '--why', 'ops'], { CB_ACTOR: 'orch@pc' });
+  assert.notEqual(again.code, 0);
+  assert.match(again.err, new RegExp(`#${n} is not in the pipeline`));
+});
+
+test('cb resume, cb next and cb start point agents at what to do', async () => {
+  const sql = await setup();
+  const id = await atBuild(sql);
+  await sql`select cb.page_set('the design text', task => ${String(id)}, actor => 'O1@mac')`;
+  const nx = cb(['next', 'demo']);
+  assert.match(nx.out, /stage: Building/, nx.err);
+  assert.match(nx.out, /finish with: cb pass \d+ .*--pr/);
+  assert.match(nx.out, /the design text/);
+  const r = cb(['resume']);
+  assert.match(r.out, /finish with:/, r.err);
+  assert.match(r.out, /the design text/);
+  assert.equal(JSON.parse(cb(['resume', '--json']).out).cards[0].id, id);
+  assert.match(cb(['start']).out, /after a compaction or restart: cb resume/);
+});
+
+test('deferred output fixes: bug hint, stage case, why without stage, add help', async () => {
+  await setup();
+  const L = { CB_ACTOR: 'orch@pc' };
+  const b = cb(['bug', 'demo', 'broken', '-b', 'what happened', '--stage', 'build', '--why', 'small'], L);
+  assert.equal(b.code, 0, b.err);
+  assert.ok(!/starts at design/.test(b.out), b.out);
+  const d = cb(['bug', 'demo', 'broken2', '-b', 'what happened'], L);
+  assert.equal(d.code, 0, d.err);
+  assert.match(d.out, /starts at design; a small fix can skip it/);
+  const up = cb(['add', 'demo', 'x', '--type', 'bug', '--stage', 'Build', '--why', 'small'], L);
+  assert.equal(up.code, 0, up.err);
+  const nw = cb(['add', 'demo', 'x', '--why', 'small'], L);
+  assert.notEqual(nw.code, 0);
+  assert.match(nw.err, /--stage build/);
+  const nb = cb(['bug', 'demo', 'y', '-b', 'z', '--why', 'small'], L);
+  assert.notEqual(nb.code, 0);
+  assert.match(nb.err, /--stage build/);
+  assert.ok(!/Defaults: -s backlog, -p/.test(readFileSync('cli/help.ts', 'utf8')));
+});
+
+test('start lists only cards this session can claim, in claim order', async () => {
+  const sql = await setup();
+  const mine = await atBuild(sql);                        // a builder can claim it
+  await card(sql, { actor: 'orch@pc' });                  // a design card: B1 cannot
+  const q = (await sql`select id from cb.task_queue('demo', 'B1@mac', 3)`).map((r: any) => Number(r.id));
+  assert.deepEqual(q, [mine]);
+  const s = cb(['start'], { HERDR_PANE_ID: 'p2' });
+  const head = s.out.split('QUEUE HEAD')[1].split('\nNEXT')[0];
+  assert.match(head, new RegExp(`#${mine} `), s.err);
+  assert.equal((head.match(/#\d+ /g) ?? []).length, 1, head);
+  assert.deepEqual(await take(sql, 'B1@mac'), q);         // the preview is what next takes
+});
