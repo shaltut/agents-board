@@ -410,6 +410,7 @@ export async function start() {
     startGithub(); // #1207: polls the repos `cb github` lists (none: nothing is called)
     // "why is this card not moving": the cards Ahmed pinged (cb.pings_due); one board sends them, like the pollers
     setInterval(() => { void sql`select cb.pings_due()`.catch((e) => console.error(`pings: ${e?.message}`)) }, 60_000).unref()
+    setInterval(() => { void sql`select cb.stage_stalls_due()`.catch((e) => console.error(`stalls: ${e?.message}`)) }, 60_000).unref()
   });
 }
 

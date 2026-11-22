@@ -3281,6 +3281,7 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb.stage_stalls_due cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3609,3 +3610,58 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
       else false end, false)
     end
 $$;
+
+-- Quiet staged cards (never approval, never unstaged ones such as investigations): a live holder is nudged after 30 minutes
+-- and loses the card after 90 if the nudge went unanswered; a hold (status next) whose live holder has gone 90 minutes
+-- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
+-- event (the board's own nudges excluded) and no event by the holder anywhere. Returns messages sent plus cards freed.
+create function cb.stage_stalls_due() returns int language plpgsql as $$
+declare r record; n int := 0; mins int; idle text; why text; tid bigint;
+begin
+  -- the close path leaves a card's nudge row behind: drop rows of cards that have no stage any more
+  delete from cb.stage_nudges d where not exists (select 1 from cb.tasks t where t.id = d.task_id and t.stage is not null);
+  for r in
+    select t.id, t.project, left(t.title, 80) as title, t.assignee, t.status, t.stage, q.quiet_since, nd.nudged_at
+      from cb.tasks t
+      cross join lateral (select greatest(t.updated_at,
+                                          coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at),
+                                          coalesce((select max(e.at) from cb.events e where e.actor = t.assignee), t.updated_at)) as quiet_since) q
+      left join cb.stage_nudges nd on nd.task_id = t.id
+     where t.stage is not null and t.stage <> 'approval' and nullif(trim(t.assignee), '') is not null
+       and t.status in ('in_progress', 'next') and cb._pipeline(t.project)
+       and q.quiet_since <= now() - interval '30 minutes'
+       and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
+  loop
+    mins := floor(extract(epoch from now() - r.quiet_since) / 60);
+    idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
+    if mins >= 90 and (r.status = 'next' or r.nudged_at > r.quiet_since) then
+      why := case when r.status = 'next' then format('held for %s with no activity', idle)
+                  else format('no update for %s and the nudge went unanswered', idle) end;
+      perform set_config('cb.actor', 'board', true);
+      perform set_config('cb.note', format('freed from %s: %s', r.assignee, why), true);
+      perform set_config('cb.data', '{"stall": true}', true);
+      update cb.tasks t set assignee = null, status = 'next',
+             rank = (select coalesce(min(x.rank) - 1024, 0) from cb.tasks x where x.project = t.project and x.status = 'next' and x.id <> t.id)
+       where t.id = r.id;
+      perform set_config('cb.note', '', true);
+      perform set_config('cb.data', '', true);
+      delete from cb.stage_nudges d where d.task_id = r.id;
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message', format('#%s went back to the queue: %s', r.id, why),
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
+      n := n + 2;
+    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since) then
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message',
+              format('#%s "%s" has had no update for %s at %s. Say where it stands (cb log %s "...") or it goes back to the queue in an hour.',
+                     r.id, r.title, idle,
+                     case r.stage when 'design' then 'Design' when 'build' then 'Building' when 'review' then 'In review'
+                                  when 'merge' then 'Merging to dev' else 'Checking on dev against the design' end, r.id),
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
+      insert into cb.stage_nudges (task_id, nudged_at) values (r.id, now())
+      on conflict (task_id) do update set nudged_at = excluded.nudged_at;
+      n := n + 1;
+    end if;
+  end loop;
+  return n;
+end $$;
