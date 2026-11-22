@@ -742,7 +742,8 @@ begin
   select t.id into tid from cb.tasks t
    where t.status = 'next' and (p is null or t.project = p)
      and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
-   order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit 1
+     and cb._claimable(t, a)
+   order by t.priority <> 'P0', coalesce(cb._area(a) = any(t.labels), false) desc, case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit 1
    for update skip locked;
   if tid is null then return; end if;
   perform set_config('cb.note', 'claimed by ' || a, true);
@@ -1466,7 +1467,8 @@ begin
                                             order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id)
                              from cb.tasks t
                             where me is not null and proj is not null and t.project = proj and t.status = 'next'
-                              and (t.assignee is null or t.assignee = me) and not (t.type = 'bug' and t.assignee is null)
+                              and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
+                              and not (t.type = 'bug' and t.assignee is null and t.stage is null)
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')))
@@ -3278,6 +3280,7 @@ drop function if exists cb.stage_pass cascade;
 drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
+drop function if exists cb._claimable cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3582,3 +3585,27 @@ begin
   end if;
   update cb.questions x set status = 'delivered', delivered_at = now(), delivered_to = 'board' where x.id = qid;
 end $$;
+
+-- May session a take this card? Outside a pipeline project: always. Unstaged: research goes to investigators, the rest to
+-- roleless sessions and the lead. Staged: the role must match the stage; a hold (assignee = a, as stage_fail sets it)
+-- only skips the area and 15-minute checks of design, never the role.
+create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
+  select case
+    when not cb._pipeline(t.project) then true
+    when t.stage is null then
+      case when t.type = 'research' then cb._role(a) = 'investigator' or t.assignee = a
+           else cb._role(a) is null or cb._role(a) = 'lead' or t.assignee = a end
+    else coalesce(case t.stage
+      when 'design' then
+        (cb._role(a) = 'owner' and cb._area(a) = any(t.labels))
+        or (cb._role(a) in ('architect', 'owner') and (t.assignee = a
+              or (cb._area(a) is null and (t.stage_since < now() - interval '15 minutes'
+                  or not exists (select 1 from cb.sessions s where s.role = 'owner' and s.area = any(t.labels)
+                                    and s.last_seen > now() - interval '10 minutes')))))
+      when 'build' then cb._role(a) = 'builder'
+      when 'review' then cb._role(a) = 'reviewer' and a is distinct from t.crew ->> 'build' and a is distinct from t.crew ->> 'design'
+      when 'merge' then cb._role(a) = 'lead'
+      when 'qa' then cb._role(a) = 'qa' and a is distinct from t.crew ->> 'build'
+      else false end, false)
+    end
+$$;

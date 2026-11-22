@@ -314,3 +314,75 @@ test('an approval question is withdrawn, sent back or reassigned only by the des
   await s`select cb.stage_fail(${id}::text, 'rework', null, 'O1@mac')`; // the designer's own path still withdraws it
   assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'withdrawn');
 });
+
+// --- role-aware claiming and pushes (Task 7)
+const take = async (sql: any, actor: string) => (await sql`select * from cb.task_claim('demo', ${actor})`).map((r: any) => Number(r.id));
+const addCard = async (sql: any, o: { type?: string; labels?: string[]; actor?: string } = {}) =>
+  Number((await sql`select cb.task_add(project => 'demo', title => 'c', type => ${o.type ?? 'feature'}, labels => ${sql.json(o.labels ?? [])}, status => 'next', actor => ${o.actor ?? 'orch@pc'}) as id`)[0].id);
+const toStage = (sql: any, id: number, st: string) => sql`select cb._stage_move(${id}, ${st}, null, 'x')`;
+const extraSessions = (sql: any) => sql`insert into cb.sessions (machine, pane, actor, project, role, area) values
+  ('mac','p6','A1@mac','demo','architect',null), ('mac','p7','I1@mac','demo','investigator',null),
+  ('mac','p8','X1@mac','demo',null,null), ('mac','p9','B2@mac','demo','builder',null)`;
+
+test('next gives each role only its stage', async () => {
+  const sql = await setup(); await extraSessions(sql);
+  const design = await addCard(sql, { labels: ['claims'] });
+  const build = await addCard(sql); await toStage(sql, build, 'build');
+  const review = await addCard(sql); await toStage(sql, review, 'review');
+  const merge = await addCard(sql); await toStage(sql, merge, 'merge');
+  const qa = await addCard(sql); await toStage(sql, qa, 'qa');
+  const approval = await addCard(sql); await toStage(sql, approval, 'approval');
+  const research = await addCard(sql, { type: 'research' });
+  const plain = Number((await sql`select cb.task_add(project => 'demo', title => 'pr', type => 'feature', status => 'next', actor => 'github') as id`)[0].id);
+  const handed = await addCard(sql, { labels: ['other'] });
+  await sql`update cb.tasks set assignee = 'B1@mac' where id = ${handed}`; // the lead handed a design card to a builder
+  assert.deepEqual(await take(sql, 'X1@mac'), [plain]);      // roleless: unstaged only
+  assert.deepEqual(await take(sql, 'X1@mac'), []);
+  assert.deepEqual(await take(sql, 'I1@mac'), [research]);
+  assert.deepEqual(await take(sql, 'I1@mac'), []);
+  assert.deepEqual(await take(sql, 'R1@mac'), [review]);
+  assert.deepEqual(await take(sql, 'Q1@mac'), [qa]);
+  assert.deepEqual(await take(sql, 'orch@pc'), [merge]);
+  assert.deepEqual(await take(sql, 'B1@mac'), [build]);       // never the design card it was handed
+  assert.deepEqual(await take(sql, 'B1@mac'), []);
+  assert.deepEqual(await take(sql, 'O1@mac'), [design]);
+  assert.equal((await row(sql, approval)).status, 'review');
+});
+
+test('a hold is only for the right role: a wrong-role holder is refused, a right-role holder skips the area wait', async () => {
+  const sql = await setup(); await extraSessions(sql);
+  const b = await addCard(sql); await toStage(sql, b, 'build');
+  await sql`update cb.tasks set assignee = 'R1@mac' where id = ${b}`; // reviewer holds a build card
+  assert.deepEqual(await take(sql, 'R1@mac'), []);
+  const d = await addCard(sql, { labels: ['claims'] });
+  await sql`update cb.tasks set assignee = 'A1@mac' where id = ${d}`; // live owner O1 has area claims, but the hold wins
+  assert.deepEqual(await take(sql, 'A1@mac'), [d]);
+});
+
+test('design goes to the area owner first, an architect after 15 minutes', async () => {
+  const sql = await setup(); await extraSessions(sql);
+  const d = await addCard(sql, { labels: ['claims'] });
+  assert.deepEqual(await take(sql, 'A1@mac'), []);
+  await sql`update cb.tasks set stage_since = now() - interval '16 minutes' where id = ${d}`;
+  assert.deepEqual(await take(sql, 'A1@mac'), [d]);
+  // an owner session that is down no longer holds the card back
+  const e = await addCard(sql, { labels: ['claims'] });
+  await sql`update cb.sessions set last_seen = now() - interval '11 minutes' where actor = 'O1@mac'`;
+  assert.deepEqual(await take(sql, 'A1@mac'), [e]);
+});
+
+test('two sessions claiming at once get one card each or nothing', async () => {
+  const sql = await setup(); await extraSessions(sql);
+  const b = await addCard(sql); await toStage(sql, b, 'build');
+  const s1 = session(), s2 = session();
+  const got = await Promise.all([take(s1, 'B1@mac'), take(s2, 'B2@mac')]);
+  assert.deepEqual(got.flat(), [b]);
+});
+
+test('the push of new work reaches only sessions that can claim it', async () => {
+  const sql = await setup();
+  const b = await addCard(sql); await toStage(sql, b, 'build');
+  const inbox = async (pane: string) => (await sql`select cb.inbox('mac', ${pane}, 0) as r`)[0].r.next_work.map((w: any) => Number(w.id));
+  assert.deepEqual(await inbox('p2'), [b]);  // B1 builds
+  assert.deepEqual(await inbox('p3'), []);   // R1 reviews
+});
