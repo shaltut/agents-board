@@ -21,7 +21,7 @@ const OPTIONS = {
   multi: { type: 'boolean' }, blocking: { type: 'boolean' }, free: { type: 'boolean' }, to: { type: 'string' }, context: { type: 'string', short: 'c' },
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
-  area: { type: 'string' }, file: { type: 'string', short: 'f' },
+  area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, admin: { type: 'boolean' },
 } as const;
 
@@ -505,7 +505,7 @@ async function run(): Promise<unknown> {
       const idle = (r: any) => (r.last ? (Date.now() - +new Date(r.last.at)) / 60000 : Infinity);
       const open = rows.filter((r: any) => r.live || r.doing.length || r.queued || r.open_questions);
       const out = open.map((r: any) => {
-        const head = `${r.actor} ${r.live ? 'relay live' : 'no relay'}${r.pane ? ` · ${r.pane}` : ''} · idle ${dur(idle(r))}` +
+        const head = `${r.actor}${r.role ? ` (${r.role})` : ''} ${r.live ? 'relay live' : 'no relay'}${r.pane ? ` · ${r.pane}` : ''} · idle ${dur(idle(r))}` +
           ` · ${r.queued} queued · ${r.done_24h} done 24h${r.open_questions ? ` · ${r.open_questions} asking Ahmed` : ''}` +
           (!r.live && r.doing.length && idle(r) > 60 ? '  ⚠ holds work, gone quiet' : '');
         return [head, ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.status}]`) : ['  (nothing in progress)'])].join('\n');
@@ -536,13 +536,14 @@ async function run(): Promise<unknown> {
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {
-      need(1, 'iam <name> [project]   e.g. cb iam W1@macbook ihop');
+      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>]   e.g. cb iam W1@macbook ihop --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
-      const p = await callFn('iam', { machine: machine(), pane, actor: args[0], project: args[1] ?? null });
-      const [b] = await sql`select project from cb.sessions where machine = ${machine()} and pane = ${pane}`;
+      const p = await callFn('iam', { machine: machine(), pane, actor: args[0], project: args[1] ?? null,
+        role: o.role ?? null, area: o.area ?? null, model: o.model ?? null });
+      const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
       const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
       const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
-      return { out: `this pane (${pane}@${machine()}) is ${p}${b?.project ? `, working on ${b.project}` : ' (no project: add one, cb iam <name> <project>)'}${pack ? `\n\n${pack}` : ''}${goals ? `\n\n${goals}` : ''}` };
+      return { out: `this pane (${pane}@${machine()}) is ${p}${b?.role ? ` as ${b.role}${b.area ? ` (area ${b.area})` : ''}` : ''}${b?.project ? `, working on ${b.project}` : ' (no project: add one, cb iam <name> <project>)'}${pack ? `\n\n${pack}` : ''}${goals ? `\n\n${goals}` : ''}` };
     }
     case 'mem':
       return await mem();

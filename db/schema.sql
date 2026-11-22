@@ -1335,17 +1335,24 @@ begin
 end $$;
 
 -- Bind a session (machine + herdr pane) to an actor. Machine names compare case-insensitively.
-create function cb.iam(machine text, pane text, actor text, project text default null) returns text language plpgsql as $$
+create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);  -- unknown project raises; null keeps the session's current one
+        ar text := nullif(cb.norm_tag(area), '');
+        mo text := nullif(trim(model), '');
 begin
+  if role is not null and role not in ('lead','architect','owner','builder','reviewer','qa','investigator') then
+    raise exception 'role must be one of lead, architect, owner, builder, reviewer, qa, investigator (got %)', role;
+  end if;
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
-  insert into cb.sessions (machine, pane, actor, project, broadcast_seen)
-  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0))
+  insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model)
+  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo)
   on conflict on constraint sessions_pkey do update
-    set actor = excluded.actor, project = coalesce(excluded.project, cb.sessions.project), started_at = now(), last_seen = now();
+    set actor = excluded.actor, project = coalesce(excluded.project, cb.sessions.project), started_at = now(), last_seen = now(),
+        role = coalesce(excluded.role, cb.sessions.role), area = coalesce(excluded.area, cb.sessions.area),
+        model = coalesce(excluded.model, cb.sessions.model);
   return trim(actor);
 end $$;
 
@@ -1505,6 +1512,7 @@ begin
     select jsonb_build_object(
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
+      'role', cb._role(a.actor), 'area', s.area, 'model', s.model,
       'doing', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) order by t.updated_at desc)
                            from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)), '[]'),
       'queued', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'next' and (p is null or t.project = p)),
