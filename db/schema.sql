@@ -3226,6 +3226,8 @@ drop function if exists cb._pipeline cascade;
 drop function if exists cb._role cascade;
 drop function if exists cb._area cascade;
 drop function if exists cb.project_pipeline cascade;
+drop function if exists cb.page_set cascade;
+drop function if exists cb.page_get cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3297,4 +3299,63 @@ begin
   insert into cb.events (actor, project, kind, summary)
   values (a, p, 'note', format('pipeline %s for %s', case when coalesce(enabled, false) then 'on' else 'off' end, p));
   return coalesce(enabled, false);
+end $$;
+
+-- Save a card's design page or an area page: one current body, every real save copied to page_versions.
+create function cb.page_set(body text, task text default null, area text default null, project text default null, actor text default null)
+returns int language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); hit text; pg cb.pages%rowtype; tid bigint; p text;
+begin
+  if (task is null) = (area is null) then raise exception 'give exactly one of task or area'; end if;
+  if coalesce(trim(body), '') = '' then raise exception 'the page is empty; write the design'; end if;
+  hit := cb._sensitive(body);
+  if hit is not null then
+    raise exception 'that looks like %; pages are on the board, so describe the code and where the value lives, never the value', hit;
+  end if;
+  if task is not null then
+    tid := cb.norm_id(task);
+    select t.project into p from cb.tasks t where t.id = tid;
+    if p is null then raise exception 'no task #%', tid; end if;
+    select * into pg from cb.pages g where g.task_id = tid for update;
+  else
+    if project is null then raise exception 'an area page needs a project'; end if;
+    p := cb.read_project(project);
+    select * into pg from cb.pages g where g.project = p and g.area = page_set.area for update;
+  end if;
+  if pg.id is not null and pg.body = body then return pg.version; end if;
+  if pg.id is null then
+    insert into cb.pages (project, task_id, area, body, version, updated_by) values (p, tid, area, body, 1, a) returning * into pg;
+  else
+    update cb.pages g set body = page_set.body, version = g.version + 1, updated_by = a, updated_at = now()
+     where g.id = pg.id returning * into pg;
+  end if;
+  insert into cb.page_versions (page_id, version, body, updated_by, updated_at) values (pg.id, pg.version, pg.body, a, pg.updated_at);
+  if tid is not null then
+    insert into cb.events (actor, project, task_id, kind, summary) values (a, p, tid, 'note', format('design page v%s', pg.version));
+  end if;
+  return pg.version;
+end $$;
+
+-- A page as jsonb (null: none). version picks an older one; approved_* is the version Ahmed approved (task pages).
+create function cb.page_get(task text default null, area text default null, project text default null, version int default null)
+returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare pg cb.pages%rowtype; v cb.page_versions%rowtype; av int; ab text;
+begin
+  if (task is null) = (area is null) then raise exception 'give exactly one of task or area'; end if;
+  if task is not null then
+    select * into pg from cb.pages g where g.task_id = cb.norm_id(task);
+  else
+    select * into pg from cb.pages g where g.project = cb.read_project(project) and g.area = page_get.area;
+  end if;
+  if pg.id is null then return null; end if;
+  select * into v from cb.page_versions pv where pv.page_id = pg.id and pv.version = coalesce(page_get.version, pg.version);
+  if v.page_id is null then return null; end if;
+  if pg.task_id is not null then
+    select t.approved_version into av from cb.tasks t where t.id = pg.task_id;
+    select pv.body into ab from cb.page_versions pv where pv.page_id = pg.id and pv.version = av;
+  end if;
+  return jsonb_build_object('project', pg.project, 'task_id', pg.task_id, 'area', pg.area, 'version', v.version, 'body', v.body,
+    'updated_by', v.updated_by, 'updated_at', v.updated_at, 'approved_version', av, 'approved_body', ab);
 end $$;

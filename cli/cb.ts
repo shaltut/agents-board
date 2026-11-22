@@ -21,7 +21,8 @@ const OPTIONS = {
   multi: { type: 'boolean' }, blocking: { type: 'boolean' }, free: { type: 'boolean' }, to: { type: 'string' }, context: { type: 'string', short: 'c' },
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
-  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, admin: { type: 'boolean' },
+  area: { type: 'string' }, file: { type: 'string', short: 'f' },
+  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, admin: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -603,6 +604,29 @@ async function run(): Promise<unknown> {
       const l = links(); if (Object.keys(l).length) fields.links = l;
       await callFn('task_update', { id: args[0], fields, actor });
       return { out: `#${args[0].replace('#', '')} updated` };
+    }
+    case 'page': {
+      const sub = args[0];
+      if ((sub !== 'show' && sub !== 'set') || (o.area ? args.length !== 1 : args.length !== 2))
+        throw new Error('usage: cb page show <task> [--approved]  |  cb page set <task> -f <file|->  (an area page: --area <name> [--project p] instead of <task>)');
+      const target = o.area ? { area: o.area, project: o.project ?? sessionProject ?? null } : { task: args[1].replace('#', '') };
+      if (o.area && !target.project) throw new Error('an area page needs a project: --project <name>');
+      if (sub === 'set') {
+        if (!o.file) throw new Error('give the page text: -f <file>, or -f - for stdin');
+        const body = o.file === '-' ? await fromStdin('-', 'page') : readFileSync(o.file, 'utf8');
+        if (!o.area) await guard(args[1]);
+        const v = await callFn('page_set', { body, ...target, actor });
+        return { out: `page saved, v${v}`, json: v };
+      }
+      const pg = await callFn('page_get', target);
+      if (!pg) throw new Error(`no page yet for ${o.area ? `area ${o.area}` : `#${args[1].replace('#', '')}`}: write it with cb page set`);
+      if (o.approved && pg.approved_version == null) throw new Error('nothing approved on this page yet');
+      const body = o.approved ? pg.approved_body : pg.body, ver = o.approved ? pg.approved_version : pg.version;
+      const t = new Date(pg.updated_at).toISOString().slice(0, 16).replace('T', ' ');
+      const head = `${o.area ? `${o.area} page for ${pg.project}` : `design page for #${pg.task_id}`}, v${ver}${!o.approved && pg.approved_version ? ` (approved v${pg.approved_version})` : ''} · ${pg.updated_by} · ${t}`;
+      return { out: `${head}
+
+${body}`, json: pg };
     }
     case 'log':
       need(2, 'log <task id> "<what happened>"   e.g. cb log 130 "SC64 graded 27/32"');
