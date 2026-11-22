@@ -14,6 +14,7 @@ export function DesignPage({ t }: { t: Pick<Task, 'id' | 'stage' | 'type'> }) {
   const qc = useQueryClient()
   const { data: page, isLoading, isError } = usePage(t.id, true)
   const [edit, setEdit] = useState(false)
+  const [base, setBase] = useState<number | null>(null) // the version Edit started from, not the live one
   const [text, setText] = useState('')
   const [showApproved, setShowApproved] = useState(false)
   const [err, setErr] = useState('')
@@ -30,8 +31,8 @@ export function DesignPage({ t }: { t: Pick<Task, 'id' | 'stage' | 'type'> }) {
     : { version: page.version, by: page.updated_by, at: page.updated_at })
   async function save() {
     try {
-      await rpc('page_set', { task: String(t.id), body: text, base_version: page?.version })
-      setErr(''); setEdit(false)
+      await rpc('page_set', { task: String(t.id), body: text, base_version: base })
+      setErr(''); setEdit(false); setBase(null)
       await qc.invalidateQueries()
     } catch (e: any) { setErr(e.message) }
   }
@@ -43,7 +44,7 @@ export function DesignPage({ t }: { t: Pick<Task, 'id' | 'stage' | 'type'> }) {
         {page && <span className="callsign text-xs text-muted-foreground">v{shown?.version}</span>}
         {page && shown && <span className="text-xs text-muted-foreground">by <ActorChip actor={shown.by} /> {ago(shown.at)}</span>}
         {page && locked && <span className="ml-auto text-xs text-muted-foreground">Locked while it waits for your approval</span>}
-        {page && !locked && !edit && <button onClick={() => { setErr(''); setEdit(true) }} className="ml-auto rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Edit</button>}
+        {page && !locked && !edit && <button onClick={() => { setErr(''); setBase(page.version); setEdit(true) }} className="ml-auto rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-raised hover:text-foreground">Edit</button>}
       </div>
       {changed && (
         <p className="mb-2 flex flex-wrap items-center gap-2 text-xs text-lamp-ink">
@@ -55,11 +56,12 @@ export function DesignPage({ t }: { t: Pick<Task, 'id' | 'stage' | 'type'> }) {
       )}
       {edit ? (
         <div className="space-y-2">
+          {page && base != null && page.version !== base && <p role="status" className="text-sm text-lamp-ink">The page changed to v{page.version} while you were editing.</p>}
           <Textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} rows={12} className="font-mono text-xs" aria-label="Design page (markdown)" />
           {err && <p role="alert" className="text-sm text-st-blocked">{err}</p>}
           <div className="flex gap-2">
             <Button size="sm" onClick={save}>Save</Button>
-            <Button size="sm" variant="ghost" onClick={() => { setEdit(false); setErr('') }}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setEdit(false); setBase(null); setErr('') }}>Cancel</Button>
           </div>
         </div>
       ) : page ? approvedOn && !page.approved_body ? <p className="text-sm text-muted-foreground">The approved version is not available.</p>

@@ -28,6 +28,7 @@ test('a card change re-fetches the lists that show cards; a question change, the
   assert.ok(Array.isArray(card));
   for (const k of ['tasks', 'task', 'epics', 'epic', 'goals', 'goal', 'today', 'projects', 'me']) assert.ok(card.includes(k), k);
   assert.ok(!card.includes('users') && !card.includes('whoami'));
+  assert.ok(card.includes('page'), 'a card change re-reads the open design page');
   const q = keysFor(tables('questions'));
   assert.ok(Array.isArray(q));
   for (const k of ['questions', 'me', 'task', 'projects']) assert.ok(q.includes(k), k);
