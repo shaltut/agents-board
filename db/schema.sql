@@ -3693,6 +3693,10 @@ begin
                 count(*) filter (where t.stage = 'merge'), count(*) filter (where t.stage = 'qa'))
     into head from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled');
   with items(grp, p0, id, line) as (
+    -- 1: a P0 card created since the last digest, named so the "at once" digest says what it is about
+    select 1, true, t.id, format('#%s is P0: "%s": cb show %s', t.id, left(t.title, 80), t.id)
+      from cb.tasks t where t.project = p and t.priority = 'P0' and t.created_at > since and t.status not in ('done', 'cancelled')
+    union all
     -- 2: freed since the last digest
     select 2, t.priority = 'P0', t.id, format('#%s freed from %s (%s): cb session %s', t.id, m[1], m[2], m[1])
       from cb.events e join cb.tasks t on t.id = e.task_id
@@ -3715,6 +3719,7 @@ begin
                                   case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its session has been gone 10 minutes' end)
       from cb.questions q
      where q.project = p and q.status = 'answered' and q.approval_for is null and q.asked_by not in ('ahmed', 'board')
+       and q.answered_at > now() - interval '24 hours'  -- as the old copies: older answers are history
        and (cb._role(q.asked_by) = 'lead'
             or not exists (select 1 from cb.sessions s where s.actor = q.asked_by and s.last_seen > now() - interval '10 minutes'))
     union all
@@ -3741,7 +3746,7 @@ begin
            format('%s is down and holds %s: restore it, or cb edit %s --assignee <session>', t.assignee,
                   string_agg('#' || t.id, ', ' order by t.id), min(t.id))
       from cb.tasks t
-     where t.project = p and t.status in ('in_progress', 'next') and nullif(trim(t.assignee), '') is not null
+     where t.project = p and t.status in ('in_progress', 'next', 'blocked') and nullif(trim(t.assignee), '') is not null
        and not exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
        and (t.assignee like '%@%' or exists (select 1 from cb.sessions s where s.actor = t.assignee))
      group by t.assignee
@@ -3766,12 +3771,12 @@ begin
            and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
            and not cb._claimable(t, t.assignee)
         union all
-        -- a design card no live owner of its area and no area-less owner or architect could take, waiting time aside
-        select t.id, t.priority = 'P0', format('#%s (design, no owner or architect for it)', t.id)
+        -- an unheld staged card no live session of the project could take, the design wait aside (aged stage_since copy)
+        select t.id, t.priority = 'P0', format('#%s (%s, no live session can take it)', t.id, t.stage)
           from cb.tasks t
-         where t.project = p and t.stage = 'design' and t.status = 'next' and nullif(trim(t.assignee), '') is null
+         where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null
            and not exists (select 1 from cb.sessions s
-                            where s.project = p and s.role in ('owner', 'architect') and s.last_seen > now() - interval '10 minutes'
+                            where s.project = p and s.last_seen > now() - interval '10 minutes'
                               and cb._claimable(jsonb_populate_record(null::cb.tasks, to_jsonb(t) || jsonb_build_object('stage_since', now() - interval '1 day')), s.actor))
         union all
         select t.id, t.priority = 'P0', format('#%s (research, no investigator)', t.id)
@@ -3779,9 +3784,15 @@ begin
          where t.project = p and t.type = 'research' and t.status = 'next' and nullif(trim(t.assignee), '') is null
            and not exists (select 1 from cb.sessions s where s.project = p and s.role = 'investigator' and s.last_seen > now() - interval '10 minutes')
       ) n having count(*) > 0)
-  -- ponytail: the 20-line cap cuts the tail silently; a "+N more" line if the lead ever misses one
-  select coalesce(jsonb_agg(l.line order by l.p0 desc, l.grp, l.id), '[]') into rest
-    from (select i.* from items i order by i.p0 desc, i.grp, i.id limit 19) l;
+  -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
+  , capped as (
+    select x.grp, x.p0, x.id, case when x.rn = 5 and x.cnt > 5 then x.line || format(' +%s more', x.cnt - 5) else x.line end as line
+      from (select i.*, row_number() over (partition by i.grp order by i.p0 desc, i.id) rn, count(*) over (partition by i.grp) cnt from items i) x
+     where x.rn <= 5),
+  ranked as (select c.*, row_number() over (order by c.p0 desc, c.grp, c.id) o, count(*) over () total from capped c)
+  select coalesce(jsonb_agg(r.line order by r.o) filter (where r.total <= 19 or r.o <= 18), '[]')
+         || case when max(r.total) > 19 then jsonb_build_array(format('+%s more: cb digest %s', max(r.total) - 18, p)) else '[]'::jsonb end
+    into rest from ranked r;
   return jsonb_build_array(head) || rest;
 end $$;
 
@@ -3789,25 +3800,28 @@ end $$;
 -- last one, or a P0 card was created since. Only the stage line = nothing to say: no message, but the time is recorded.
 -- The digest is one message to each lead and writes nothing on any card, so it never counts as card activity.
 create function cb.digests_due() returns int language plpgsql as $$
-declare r record; leads text[]; last_at timestamptz; lines jsonb; txt text; l text; n int := 0;
+declare r record; leads text[]; last_at timestamptz; last_hash text; lines jsonb; txt text; h text; newp0 boolean; l text; n int := 0;
 begin
   for r in select pr.slug from cb.projects pr where pr.pipeline loop
     select array_agg(distinct s.actor) into leads from cb.sessions s
      where s.project = r.slug and cb._role(s.actor) = 'lead' and s.last_seen > now() - interval '1 day';
     continue when leads is null;
-    select (st.value ->> 'at')::timestamptz into last_at from cb.settings st where st.key = 'digest:' || r.slug;
-    continue when last_at is not null and last_at > now() - interval '15 minutes'
-              and not exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
+    select (st.value ->> 'at')::timestamptz, st.value ->> 'hash' into last_at, last_hash from cb.settings st where st.key = 'digest:' || r.slug;
+    newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
+    continue when last_at is not null and last_at > now() - interval '15 minutes' and not newp0;
     lines := cb.digest(r.slug, coalesce(last_at, now() - interval '15 minutes'));
-    if jsonb_array_length(lines) > 1 then
-      select string_agg(x.v, E'\n' order by x.n) into txt from jsonb_array_elements_text(lines) with ordinality x(v, n);
+    -- the body without its stage line: a byte-identical one is not sent again (a new P0 always is)
+    select string_agg(x.v, E'\n' order by x.n) into txt from jsonb_array_elements_text(lines) with ordinality x(v, n) where x.n > 1;
+    h := md5(coalesce(txt, ''));
+    if jsonb_array_length(lines) > 1 and (h is distinct from last_hash or newp0) then
+      txt := (lines ->> 0) || E'\n' || txt;
       foreach l in array leads loop
         insert into cb.events (actor, project, kind, summary, data)
         values ('board', r.slug, 'message', 'Digest for ' || r.slug || E':\n' || txt, jsonb_build_object('to', l, 'digest', true));
         n := n + 1;
       end loop;
     end if;
-    insert into cb.settings (key, value) values ('digest:' || r.slug, jsonb_build_object('at', now()))
+    insert into cb.settings (key, value) values ('digest:' || r.slug, jsonb_build_object('at', now(), 'hash', h))
     on conflict (key) do update set value = excluded.value;
   end loop;
   return n;
