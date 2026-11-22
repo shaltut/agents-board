@@ -451,7 +451,52 @@ await assert.rejects(() => sql`update cb.tasks set stage = 'coding'`, /stage/);
   expect PASS**
 - [ ] **Step 5: Commit** `feat(squad): lead digest replaces per-event copies in pipeline projects (#3598)`
 
-### Task 10: Board UI: stage chip, approval filter, design page, pipeline switch
+### Task 10: Agent-native output: `cb resume` and next-step lines
+
+**Files:**
+- Modify: `db/schema.sql` (squad section), `cli/cb.ts` (new `resume`; `pass`, `fail`, `stage`, `next`, `start`
+  output), `cli/help.ts`, `server/rpc.ts`
+- Test: `test/squad-stages.test.ts`, `test/help.test.ts`
+
+**Interfaces:**
+- Consumes: `_role`, `_area`, `page_get`, `stage_pass` requirements (Tasks 1-5)
+- Produces:
+  - `cb._stage_words(stage text) returns text`: the exact plain words from Global Constraints (`design` → "Design",
+    `approval` → "Waiting for your approval", `build` → "Building", `review` → "In review", `merge` → "Merging to
+    dev", `qa` → "Checking on dev against the design"; null → "Not staged"). Tasks 5, 8 and 10's UI use the same
+    words (the UI keeps its own copy in `StageChip`; a test pins both lists equal by reading `web/src/components/Chips.tsx`).
+  - `cb._finish_line(t cb.tasks) returns text`: the command that finishes the card's stage for its holder:
+    `design` → `cb page set <id> -f page.md, then cb pass <id> "<summary>"`; `build` → `cb pass <id> "<summary>"
+    --pr <url>`; `review` → `cb pass <id> "<verdict>" or cb fail <id> "<what is wrong>"`; `merge` → `merge it, then cb
+    pass <id> --commit <sha>`; `qa` → `cb pass <id> "<checked on dev>" or cb fail <id> "<what fails>"`; unstaged →
+    `cb done <id> "<summary>"`; `approval` → `waiting for Ahmed (Q<n>)`.
+  - `cb.resume(actor text default null) returns jsonb`: `{actor, role, area, model, project, cards: [{id, title,
+    stage, stage_words, status, finish, page: {version, body} | null, notes: [last 5 {at, actor, summary}],
+    questions: [open questions on the card {id, body}]}]}`. `page` is the approved version for builder, reviewer and
+    qa when one exists, else the current one. Cards = open cards assigned to the actor, newest activity first.
+  - CLI `cb resume [--json]`: a compact text block per card: line, `stage: <words>`, `finish with: <finish line>`,
+    the page body (indented), notes, open questions. `cb start` adds one line: `after a compaction or restart: cb
+    resume`.
+  - `cb pass`, `cb fail`, `cb stage` print `#<id> → <words>; <who takes it now>. You: cb next` (who: "an owner or
+    architect", "Ahmed", "a builder", "a reviewer", "the lead", "QA", or the held session's name).
+  - `cb next` for a staged card prints the card, its page (approved version for builder/reviewer/qa) and
+    `finish with: <finish line>`.
+  - Help entry `resume` in the START A SESSION group.
+
+- [ ] **Step 1: Write the failing tests**
+  - `resume gives back each card with its stage, finish line, page and notes`: builder holding a build card with an
+    approved v1 and a newer v2 → `cards[0].stage_words` = "Building", `finish` matches `/cb pass \d+ .*--pr/`,
+    `page.version` = 1, `notes` has the last note.
+  - `stage words are the same in SQL and in the UI chip`: read `web/src/components/Chips.tsx`, find each of the six
+    phrases; compare to `cb._stage_words` for every stage.
+  - CLI (spawnSync as `test/help.test.ts` does): `cb pass` output matches `/→ In review; a reviewer takes it\. You:
+    cb next/`; `cb resume` output contains `finish with:`; `cb start` output contains `cb resume`.
+- [ ] **Step 2: Run, expect FAIL**
+- [ ] **Step 3: Implement the functions, the `resume` case, the output changes and the help entry**
+- [ ] **Step 4: Run `test/squad-stages.test.ts`, `test/help.test.ts`, `test/cli.test.ts`, expect PASS**
+- [ ] **Step 5: Commit** `feat(squad): cb resume and next-step lines for agents (#3598)`
+
+### Task 11: Board UI: stage chip, approval filter, design page, pipeline switch
 
 **Files:**
 - Modify: `web/src/lib/api.ts` (`Task` gains `stage`, `crew`, `approved_version`; `Project` gains `pipeline`),
@@ -484,7 +529,7 @@ await assert.rejects(() => sql`update cb.tasks set stage = 'coding'`, /stage/);
   board locally against the test DB, open a pipeline project, confirm the chip, the filter, the page and the switch.
 - [ ] **Step 6: Commit** `feat(squad): stage chips, approval filter, design page, pipeline switch on the board (#3598)`
 
-### Task 11: Release check
+### Task 12: Release check
 
 **Files:** none new.
 

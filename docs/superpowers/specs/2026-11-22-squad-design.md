@@ -199,6 +199,29 @@ can't reach them: Ahmed runs the steps and pastes results). Long investigations 
 - Piece 1 carries the board side (role, routing, stall exemption, page editing in the UI); piece 2 carries the role
   prompt, the page template and the permission file.
 
+## Agent-native board (added 2026-11-22, Ahmed)
+
+The board is used mostly by agents, so it is built for them first: they lose context on compaction, pay for every
+line they read, and act on whatever the output tells them to do next.
+
+Already the rule, and kept: plain-text output with `--json` on everything, errors that say what to run next, one
+command per action, `cb tick` lines that end with their command.
+
+Added in piece 1:
+- **`cb resume`**: one call that gives a session back everything after a compaction or restart: its role, area and
+  model; each card it holds, the stage in plain words, what finishes that stage and the exact command; the design page
+  (the approved version for builders, reviewers and QA); the last notes; open questions on the card. The card is the
+  source of truth, and this is how a session reads it back. `cb start` tells every session to run it after a
+  compaction.
+- **Every stage move says what happens next**: `cb pass`, `cb fail`, `cb stage` and `cb next` end with who takes the
+  card now and the session's own next command (`#12 → In review; a reviewer takes it. You: cb next`).
+- **`cb next` hands over the whole job**: the card, its page, and the line that finishes it
+  (`finish with: cb pass 12 --pr <url>`), so a session never has to go looking.
+- New commands keep the house rules: short output, `--json`, errors with the next command.
+
+Added in piece 2: the board serves each role's instructions (`cb role <role>`), so both machines get the same
+up-to-date role text without copying files.
+
 ## Models per role
 
 Ahmed should never have to say "use Opus for this". The model is part of the role:
@@ -273,6 +296,7 @@ Two Sonnet sessions in auto mode replayed 14 git/node commands in a throwaway re
 - Q2325: models per role as in "Models per role" (Opus for judgment roles, Sonnet for builder and QA; Fable only
   when Ahmed names it).
 - Q2327: the pipeline is built one fresh agent per task, each checked by a fresh reviewer.
+- 2026-11-22 (terminal): the board must be agent-native: see "Agent-native board".
 - Q2324: no card is freed because its session or machine is down; Ahmed restores it.
 - Q2323: work with no code (ops, a data check) leaves the pipeline when the lead marks it, with a one-line reason
   (`cb stage <id> none --why "..."`); it shows in the digest.
