@@ -743,6 +743,7 @@ begin
   -- another claim changed while we waited, so they stay here
   select t.id into tid from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
    where t.status = 'next' and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
+     and cb._claimable(t, a)  -- re-checked on the locked row: a restage meanwhile must not hand it to the wrong role
    order by q.ordinality limit 1
    for update of t skip locked;
   if tid is null then return; end if;

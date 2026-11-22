@@ -568,4 +568,5 @@ test('--json on pass, fail and stage; resume header, answered questions', async 
   const r = cb(['resume']);
   assert.match(r.out, /\(builder\) in demo, area claims, sonnet/, r.err);
   assert.match(r.out, new RegExp(`Q${qid} answered: Which table`));
+  assert.match(cb(['resume'], { CB_ACTOR: 'R1@mac' }).out, /^R1@mac \(reviewer\) holds no cards\. Next: cb next/);
 });

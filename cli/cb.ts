@@ -692,7 +692,7 @@ ${body}`, json: pg };
     case 'resume': {
       const r: any = await callFn('resume', { actor });
       return { out: r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
-        : `${r.actor} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`, json: r };
+        : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`, json: r };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');
