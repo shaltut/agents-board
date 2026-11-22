@@ -521,3 +521,51 @@ test('start lists only cards this session can claim, in claim order', async () =
   assert.equal((head.match(/#\d+ /g) ?? []).length, 1, head);
   assert.deepEqual(await take(sql, 'B1@mac'), q);         // the preview is what next takes
 });
+
+test('claim order: start previews exactly what successive claims take (P0, then area first, then queue order)', async () => {
+  const sql = await setup();
+  await sql`update cb.sessions set area = 'claims' where actor = 'B1@mac'`;
+  const c1 = await atBuild(sql);
+  const c2 = await atBuild(sql); await sql`update cb.tasks set labels = '{claims}' where id = ${c2}`;
+  const c3 = await atBuild(sql); await sql`update cb.tasks set priority = 'P0' where id = ${c3}`;
+  const q = (await sql`select id from cb.task_queue('demo', 'B1@mac', 3)`).map((r: any) => Number(r.id));
+  assert.deepEqual(q, [c3, c2, c1]);
+  const s = cb(['start'], { HERDR_PANE_ID: 'p2' });
+  const shown = [...s.out.split('QUEUE HEAD')[1].split('\nNEXT')[0].matchAll(/#(\d+) /g)].map((m) => Number(m[1]));
+  assert.deepEqual(shown, q, s.err);
+  const taken = [...(await take(sql, 'B1@mac')), ...(await take(sql, 'B1@mac')), ...(await take(sql, 'B1@mac'))];
+  assert.deepEqual(taken, q);
+});
+
+test('pipeline off: a staged card is shown and finished the old way', async () => {
+  const sql = await setup();
+  const id = await atBuild(sql);
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  await sql`update cb.sessions set role = null where actor = 'B1@mac'`; // roleless: it can claim an unstaged card
+  const nx = cb(['next', 'demo']);
+  assert.equal(nx.code, 0, nx.err);
+  assert.match(nx.out, /stage: Not staged/);
+  assert.match(nx.out, new RegExp(`finish with: cb done ${id} "<summary>"`));
+  assert.ok(!/--pr/.test(nx.out), nx.out);
+  const r = JSON.parse(cb(['resume', '--json']).out).cards[0];
+  assert.deepEqual([r.stage, r.stage_words], [null, 'Not staged']);
+  assert.match((await sql`select cb.next_step(${String(id)}) as s`)[0].s.takes_it, /B1@mac/);
+});
+
+test('--json on pass, fail and stage; resume header, answered questions', async () => {
+  const sql = await setup();
+  const id = await atBuild(sql);
+  await sql`update cb.tasks set assignee = 'B1@mac', status = 'in_progress' where id = ${id}`;
+  const p = JSON.parse(cb(['pass', String(id), 'built', '--pr', PR, '--json']).out);
+  assert.deepEqual([p.id, p.stage, p.stage_words, p.takes_it], [id, 'review', 'In review', 'a reviewer']);
+  const b = await card(sql, { actor: 'orch@pc' });
+  assert.equal(JSON.parse(cb(['stage', String(b), 'build', '--why', 'small', '--json'], { CB_ACTOR: 'orch@pc' }).out).stage, 'build');
+  const c = await atBuild(sql);
+  await sql`update cb.tasks set assignee = 'B1@mac', status = 'in_progress' where id = ${c}`;
+  await sql`update cb.sessions set area = 'claims', model = 'sonnet' where actor = 'B1@mac'`;
+  const qid = Number((await sql`select cb.ask('demo', 'Which table holds it?', null, task_id => ${String(c)}, actor => 'B1@mac') as id`)[0].id);
+  await sql`select cb.answer(${String(qid)}, 'the claims table', 'ahmed')`;
+  const r = cb(['resume']);
+  assert.match(r.out, /\(builder\) in demo, area claims, sonnet/, r.err);
+  assert.match(r.out, new RegExp(`Q${qid} answered: Which table`));
+});

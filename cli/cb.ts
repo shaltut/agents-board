@@ -182,9 +182,12 @@ function cardBlock(c: any, head = true): string {
   return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`, `  finish with: ${c.finish}`,
     c.page && `  page (v${c.page.version}${c.page.approved ? ', approved' : ''}):\n${ind(c.page.body)}`,
     c.notes.length && `  notes:\n${c.notes.map((n: any) => `    ${new Date(n.at).toISOString().slice(0, 16).replace('T', ' ')} ${n.actor}: ${flat(n.summary)}`).join('\n')}`,
-    c.questions.length && `  open questions:\n${c.questions.map((q: any) => `    Q${q.id} ${flat(q.body)}`).join('\n')}`,
+    c.questions.length && `  questions:\n${c.questions.map((q: any) => `    Q${q.id}${q.status === 'answered' ? ' answered:' : ''} ${flat(q.body)}`).join('\n')}`,
   ].filter(Boolean).join('\n');
 }
+
+/** cb pass, fail and stage: where the card went and who takes it (cb.next_step), as a line and as json. */
+const stepOut = (s: any) => ({ out: s.takes_it ? `#${s.id} → ${s.stage_words}; ${s.takes_it} takes it. You: cb next` : `#${s.id} → ${s.stage_words}. You: cb next`, json: s });
 
 /** Projects are namespaces: a session bound to one project never changes another project's tasks. */
 
@@ -584,19 +587,19 @@ async function run(): Promise<unknown> {
     case 'stage': {
       need(2, 'stage <id> build|none --why "<why>"   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
       await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
-      return { out: await callFn('next_step', { id: args[0] }) };
+      return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'pass': {
       need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
       await guard(args[0]);
-      const stage = await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
-      return { out: await callFn('next_step', { id: args[0] }), json: stage };
+      await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
+      return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'fail': {
       need(2, 'fail <id> "<why>" [--to design]   e.g. cb fail 42 "the error path is missing"');
       await guard(args[0]);
-      const stage = await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor });
-      return { out: await callFn('next_step', { id: args[0] }), json: stage };
+      await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor });
+      return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'move':
       need(2, 'move <id> <status> ["<note>"]');
@@ -683,12 +686,12 @@ ${body}`, json: pg };
       const rows: any = await callFn('task_claim', { project, actor });
       if (!rows.length) return { out: 'nothing to claim', json: null };
       const t = rows[0];
-      const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null;
+      const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
       return { out: `${line(t)}${t.body ? '\n\n' + t.body : ''}${staged ? '\n\n' + cardBlock(staged, false) : ''}`, json: staged ? { ...t, ...staged } : t };
     }
     case 'resume': {
       const r: any = await callFn('resume', { actor });
-      return { out: r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
+      return { out: r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
         : `${r.actor} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`, json: r };
     }
     case 'show': {

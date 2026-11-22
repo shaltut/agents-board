@@ -739,12 +739,12 @@ returns setof cb.tasks language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.read_project(project); tid bigint;
 begin
-  select t.id into tid from cb.tasks t
-   where t.status = 'next' and (p is null or t.project = p)
-     and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
-     and cb._claimable(t, a)
-   order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(a) = any(t.labels), false) desc, case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit 1
-   for update skip locked;
+  -- the order and the claim rules are cb.task_queue's (cb start previews it); the outer filters are re-checked on a row
+  -- another claim changed while we waited, so they stay here
+  select t.id into tid from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
+   where t.status = 'next' and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
+   order by q.ordinality limit 1
+   for update of t skip locked;
   if tid is null then return; end if;
   perform set_config('cb.note', 'claimed by ' || a, true);
   return query update cb.tasks t set status = 'in_progress', assignee = a where t.id = tid returning t.*;
@@ -3671,8 +3671,7 @@ begin
       values ('board', r.project, r.id, 'message',
               format('#%s "%s" has had no update for %s at %s. Say where it stands (cb log %s "...") or it goes back to the queue in an hour.',
                      r.id, r.title, idle,
-                     case r.stage when 'design' then 'Design' when 'build' then 'Building' when 'review' then 'In review'
-                                  when 'merge' then 'Merging to dev' else 'Checking on dev against the design' end, r.id),
+                     cb._stage_words(r.stage), r.id),
               jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
       insert into cb.stage_nudges (task_id, nudged_at) values (r.id, now())
       on conflict (task_id) do update set nudged_at = excluded.nudged_at;
@@ -3849,7 +3848,7 @@ $$;
 
 -- The command that finishes this card's stage for whoever holds it.
 create function cb._finish_line(t cb.tasks) returns text language sql stable as $$
-  select case t.stage
+  select case when not cb._pipeline(t.project) then format('cb done %s "<summary>"', t.id) else case t.stage
     when 'design' then format('cb page set %s -f page.md, then cb pass %s "<summary>"', t.id, t.id)
     when 'build' then format('cb pass %s "<summary>" --pr <url>', t.id)
     when 'review' then format('cb pass %s "<verdict>" or cb fail %s "<what is wrong>"', t.id, t.id)
@@ -3857,29 +3856,32 @@ create function cb._finish_line(t cb.tasks) returns text language sql stable as 
     when 'qa' then format('cb pass %s "<checked on dev>" or cb fail %s "<what fails>"', t.id, t.id)
     when 'approval' then format('waiting for Ahmed (Q%s)',
       (select max(q.id) from cb.questions q where q.approval_for = t.id and q.status in ('open', 'answered')))
-    else format('cb done %s "<summary>"', t.id) end
+    else format('cb done %s "<summary>"', t.id) end end
 $$;
 
 -- Who takes the card now: its holder by name, else the role the stage needs.
 create function cb._takes_it(t cb.tasks) returns text language sql stable as $$
-  select coalesce(nullif(trim(t.assignee), ''), case t.stage when 'design' then 'an owner or architect' when 'approval' then 'Ahmed'
+  select coalesce(nullif(trim(t.assignee), ''), case (case when cb._pipeline(t.project) then t.stage end) when 'design' then 'an owner or architect' when 'approval' then 'Ahmed'
     when 'build' then 'a builder' when 'review' then 'a reviewer' when 'merge' then 'the lead' when 'qa' then 'QA'
     else 'the lead or a session without a role' end)
 $$;
 
--- The line cb pass, fail and stage print: where the card went, who takes it, what the caller does next.
-create function cb.next_step(id text) returns text language plpgsql stable as $$
+-- What cb pass, fail and stage print: where the card went and who takes it (a pipeline that is off leaves cards unstaged).
+create function cb.next_step(id text) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
-declare t cb.tasks%rowtype;
+declare t cb.tasks%rowtype; st text; fin boolean;
 begin
   select * into t from cb.tasks x where x.id = cb.norm_id(id);
   if not found then raise exception 'task % not found', id; end if;
-  if t.status = 'done' then return format('#%s → Done. You: cb next', t.id); end if;
-  return format('#%s → %s; %s takes it. You: cb next', t.id, cb._stage_words(t.stage), cb._takes_it(t));
+  fin := t.status = 'done';
+  st := case when cb._pipeline(t.project) then t.stage end;
+  return jsonb_build_object('id', t.id, 'stage', st, 'stage_words', case when fin then 'Done' else cb._stage_words(st) end,
+                            'takes_it', case when not fin then cb._takes_it(t) end);
 end $$;
 
 -- The design page as this actor should read it: builders, reviewers and qa get the approved version when there is one.
 create function cb._page_for(t cb.tasks, a text) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
 declare pg jsonb;
 begin
   pg := cb.page_get(task => t.id::text);
@@ -3898,24 +3900,25 @@ begin
   select * into s from cb.sessions x where x.actor = a order by x.last_seen desc limit 1;
   return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'project', s.project,
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
-        'id', t.id, 'title', t.title, 'stage', t.stage, 'stage_words', cb._stage_words(t.stage), 'status', t.status,
+        'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then t.stage end,
+        'stage_words', cb._stage_words(case when cb._pipeline(t.project) then t.stage end), 'status', t.status,
         'finish', cb._finish_line(t), 'page', cb._page_for(t, a),
         'notes', coalesce((select jsonb_agg(jsonb_build_object('at', n.at, 'actor', n.actor, 'summary', n.summary) order by n.id desc)
                              from (select e.id, e.at, e.actor, e.summary from cb.events e
                                     where e.task_id = t.id and (e.kind in ('note', 'done') or e.data ? 'stage') and e.summary <> ''
                                     order by e.id desc limit 5) n), '[]'),
-        'questions', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'body', q.body) order by q.id)
-                                 from cb.questions q where q.task_id = t.id and q.status = 'open'), '[]'))
+        'questions', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'body', q.body, 'status', q.status) order by q.id)
+                                 from cb.questions q where q.task_id = t.id and q.status in ('open', 'answered')), '[]'))
       order by t.updated_at desc)
       from cb.tasks t where t.assignee = a and t.status not in ('done', 'cancelled')), '[]'));
 end $$;
 
--- The queue this actor can claim, in the order cb.task_claim takes it (keep the two in step; test/squad-stages.test.ts pins it).
+-- The queue this actor can claim, in claim order: cb.task_claim takes its first row, cb start previews the first few (lim null = all).
 create function cb.task_queue(project text, actor text, lim int default 3) returns setof cb.tasks language plpgsql stable as $$
 #variable_conflict use_variable
 begin
   return query select t.* from cb.tasks t
-   where t.status = 'next' and t.project = cb.read_project(project) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
+   where t.status = 'next' and (project is null or t.project = cb.read_project(project)) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
    order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(actor) = any(t.labels), false) desc,
             case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit lim;
 end $$;
