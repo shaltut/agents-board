@@ -16,11 +16,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ActorChip, EpicChip, PriorityPicker, ProjectChip, TagChip, TaskId, TypeChip, WaitsOn } from '@/components/Chips'
+import { CardMenu } from '@/components/CardMenu'
 import { moveTask } from './Board'
 
 function Row({ t, showProject, place, selected, onSelect }: { t: ListTask; showProject: boolean; place?: number; selected?: boolean; onSelect?: (on: boolean) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: t.id, data: { status: t.status } })
-  return (
+  const row = (
     <li ref={setNodeRef} style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn('group flex min-h-11 items-center gap-2.5 border-b bg-card px-2 py-1.5 last:border-b-0 sm:gap-3',
         selected && 'bg-raised/70', isDragging && 'relative z-10 rounded-md border opacity-90 shadow-[0_12px_30px_-10px_rgb(0_0_0/0.4)]')}>
@@ -44,6 +45,7 @@ function Row({ t, showProject, place, selected, onSelect }: { t: ListTask; showP
       </span>
     </li>
   )
+  return <CardMenu t={t}>{row}</CardMenu>
 }
 
 function List({ status, tasks, children, empty }: { status: Status; tasks: ListTask[]; children: React.ReactNode; empty: string }) {

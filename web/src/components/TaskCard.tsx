@@ -3,6 +3,7 @@ import { GitCommitHorizontal, GitPullRequest, GitBranch } from 'lucide-react'
 import { useQuestions, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { CardMenu } from './CardMenu'
 import { ActorChip, EpicChip, GoalChip, PriorityPicker, ProjectChip, TagChip, TaskId, TypeChip, WaitsOn } from './Chips'
 
 type Props = { t: ListTask; showProject?: boolean; dragging?: boolean; overlay?: boolean } & React.HTMLAttributes<HTMLDivElement>
@@ -15,7 +16,7 @@ export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t,
   const holding = t.status === 'blocked' && t.blocked_on != null && open.some((q) => q.id === t.blocked_on && !q.assigned_to)
   const waits = t.status === 'done' || t.status === 'cancelled' ? [] : t.waits_on ?? []
   const edge = holding ? 'before:bg-lamp' : t.priority === 'P0' && t.status !== 'done' ? 'before:bg-st-blocked' : 'before:bg-transparent'
-  return (
+  const card = (
     <div ref={ref} {...rest}
       className={cn('group relative cursor-grab overflow-hidden rounded-md border bg-card py-2.5 pr-3 pl-3.5 text-left outline-none select-none active:cursor-grabbing',
         'before:absolute before:inset-y-0 before:left-0 before:w-[3px]', edge,
@@ -53,4 +54,5 @@ export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t,
       )}
     </div>
   )
+  return overlay ? card : <CardMenu t={t}>{card}</CardMenu>
 })
