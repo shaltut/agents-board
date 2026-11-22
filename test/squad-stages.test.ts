@@ -233,3 +233,12 @@ test('a changed approval answer never moves the card twice', async () => {
   assert.deepEqual([r.stage, r.assignee], ['build', 'B1@mac']);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and data ? 'digest'`)[0].n, 1);
 });
+
+test('a typed approval answer sends the design back', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  await sql`select cb.answer(${q}::text, 'tighten the error messages', 'ahmed')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.stage, r.assignee], ['design', 'O1@mac']);
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and summary like '%tighten the error messages%' and data ? 'stage'`)[0].n, 1);
+});

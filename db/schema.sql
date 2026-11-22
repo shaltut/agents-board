@@ -3537,10 +3537,8 @@ begin
     if 'Approve' = any (picked) then
       perform cb._stage_move(t.id, 'build', null, 'design approved');
       update cb.tasks x set approved_version = q.page_version where x.id = t.id;
-    elsif 'Changes needed' = any (picked) then
+    else  -- Changes needed, or any typed answer: never approve on an ambiguous one, never leave the card waiting
       perform cb._stage_move(t.id, 'design', t.crew ->> 'design', q.answer);
-    else
-      return;  -- a typed answer picks nothing: the card keeps waiting
     end if;
     update cb.questions x set status = 'delivered', delivered_at = now(), delivered_to = 'board' where x.id = qid;
   else
