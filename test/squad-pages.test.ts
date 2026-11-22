@@ -57,3 +57,13 @@ test('cb page set -f reads a long multi-line file', async () => {
     assert.match(s.stdout, /^design page for #1, v1 · W1@test · /);
   } finally { rmSync(f, { force: true }); }
 });
+
+test('page_set base_version: a stale base is refused, the right base saves, none keeps the old behaviour', async () => {
+  const sql = await seed();
+  const set = async (body: string, base: number | null) => (await sql`select cb.page_set(${body}, task => '1', actor => 'W1@mac', base_version => ${base}::int) as v`)[0].v;
+  assert.equal(await set('one', null), 1);
+  assert.equal(await set('two', 1), 2);
+  await assert.rejects(() => set('three', 1), /the page changed to v2 while you edited: reload it and edit again/);
+  assert.equal(await set('three', 2), 3);
+  assert.equal(await set('four', null), 4, 'no base: unchanged behaviour (the CLI)');
+});

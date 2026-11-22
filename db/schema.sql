@@ -3369,7 +3369,7 @@ begin
 end $$;
 
 -- Save a card's design page or an area page: one current body, every real save copied to page_versions.
-create function cb.page_set(body text, task text default null, area text default null, project text default null, actor text default null)
+create function cb.page_set(body text, task text default null, area text default null, project text default null, actor text default null, base_version int default null)
 returns int language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); hit text; pg cb.pages%rowtype; tid bigint; p text; st text;
@@ -3392,6 +3392,10 @@ begin
     if project is null then raise exception 'an area page needs a project'; end if;
     p := cb.read_project(project);
     select * into pg from cb.pages g where g.project = p and g.area = page_set.area for update;
+  end if;
+  -- the dashboard passes the version it loaded: a session's newer version is never silently replaced
+  if base_version is not null and pg.id is not null and pg.version <> base_version then
+    raise exception 'the page changed to v% while you edited: reload it and edit again', pg.version;
   end if;
   if pg.id is not null and pg.body = body then return pg.version; end if;
   if pg.id is null then
@@ -3773,14 +3777,14 @@ begin
         -- a hold by a live session whose role no longer fits the stage
         select t.id, t.priority = 'P0' as p0,
                format('#%s (held by %s, %s, at %s)', t.id, t.assignee,
-                      case when cb._role(t.assignee) is null then 'with no role' else 'a ' || cb._role(t.assignee) end, t.stage) as what
+                      case when cb._role(t.assignee) is null then 'with no role' else 'a ' || cb._role(t.assignee) end, cb._stage_words(t.stage)) as what
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is not null
            and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
            and not cb._claimable(t, t.assignee)
         union all
         -- an unheld staged card no live session of the project could take, the design wait aside (aged stage_since copy)
-        select t.id, t.priority = 'P0', format('#%s (%s, no live session can take it)', t.id, t.stage)
+        select t.id, t.priority = 'P0', format('#%s (%s, no live session can take it)', t.id, cb._stage_words(t.stage))
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null
            and not exists (select 1 from cb.sessions s

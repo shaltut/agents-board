@@ -444,7 +444,7 @@ test('stage words come from SQL only, and finish lines name the next command', a
   assert.equal(await w(null), 'Not staged');
   // the dashboard's chip keeps its own copy of the words (the web cannot call SQL per render): it must not drift
   const chips = readFileSync('web/src/components/Chips.tsx', 'utf8');
-  for (const st of ['design', 'approval', 'build', 'review', 'merge', 'qa']) assert.ok(chips.includes(`'${await w(st)}'`), `StageChip words for ${st}`);
+  for (const st of ['design', 'approval', 'build', 'review', 'merge', 'qa']) assert.ok(chips.includes(`${st}: '${await w(st)}'`), `StageChip maps ${st} to its words`);
   assert.ok(!/STAGE_WORDS/.test(readFileSync('cli/cb.ts', 'utf8')), 'the CLI keeps no copy of the words');
   const id = await atBuild(sql);
   const f = async (st: string | null) => (await sql`select cb._finish_line(jsonb_populate_record(null::cb.tasks,

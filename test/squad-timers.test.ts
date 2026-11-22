@@ -170,7 +170,7 @@ test('the digest names what needs the lead, each with its command', async () => 
   has(new RegExp(`^W1@mac is down and holds #${rebound}: restore it, or cb edit ${rebound} --assignee <session>$`));
   has(new RegExp(`^B2@mac is down and holds #${gone}: `));
   has(/^B1@mac is a builder on opus; the role runs sonnet: restart it with --model sonnet$/);
-  has(new RegExp(`^nobody can take: #${design} \\(held by B1@mac, a builder, at design\\), #${research} \\(research, no investigator\\), #${tagged} \\(design, no live session can take it\\)$`));
+  has(new RegExp(`^nobody can take: #${design} \\(held by B1@mac, a builder, at Design\\), #${research} \\(research, no investigator\\), #${tagged} \\(Design, no live session can take it\\)$`));
   assert.equal((await sql`select count(*)::int n from cb.tasks where id = ${appr} and assignee is not null`)[0].n, 0, 'the digest frees nothing');
   assert.equal((await sql`select count(*)::int n from cb.events where task_id is not null and (data ->> 'digest') = 'true'`)[0].n, 0, 'and writes nothing on cards');
 });
@@ -282,7 +282,7 @@ test('an unheld review card whose only live reviewer built it is named; a down h
   await sql`select cb.task_add(project => 'demo', title => 'blocked one', actor => 'orch@pc')`;
   await sql`update cb.tasks set stage = 'build', status = 'blocked', assignee = 'W7@mac' where id = 3`;
   const lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
-  assert.ok(lines.some((l) => /^nobody can take: #2 \(review, no live session can take it\)/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /^nobody can take: #2 \(In review, no live session can take it\)/.test(l)), lines.join('\n'));
   assert.ok(lines.some((l) => /^W7@mac is down and holds #3:/.test(l)), lines.join('\n'));
 });
 

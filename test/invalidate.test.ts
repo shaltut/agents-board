@@ -19,6 +19,7 @@ test('a history line alone (a note, a message) leaves the board, goals and accou
   const keys = keysFor(tables('events'));
   assert.ok(Array.isArray(keys));
   for (const k of ['events', 'today', 'task', 'huddle']) assert.ok(keys.includes(k), k);
+  assert.ok(keys.includes('page'), 'a design page save (its history line) re-reads the open page');
   for (const k of ['tasks', 'goals', 'epics', 'projects', 'users', 'whoami', 'telegram', 'questions']) assert.ok(!keys.includes(k), k);
 });
 
