@@ -95,6 +95,11 @@ function PanelBody({ data }: { data: NonNullable<ReturnType<typeof useTask>['dat
                 onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
             </Field>
           </div>
+          <label className="flex min-h-8 items-center gap-2 text-sm">
+            <input type="checkbox" checked={data.ping} onChange={(e) => call('task_ping_set', { enabled: e.target.checked }, e.target.checked ? `#${t.id}: the board will ask why it is not moving` : `#${t.id}: no more asks`)} />
+            <span>Ask why it is not moving</span>
+            <span className="text-xs text-muted-foreground">every 30 min, to its worker and orchestrator, once it is in progress with no update for 1 h</span>
+          </label>
         </div>
         {t.labels.length > 0 && (
           <div className="flex flex-wrap items-center gap-1">

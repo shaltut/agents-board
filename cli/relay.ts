@@ -114,7 +114,7 @@ function format(raw: any): string {
   }
   for (const b of i.broadcasts) lines.push(`Broadcast from ${b.actor}${b.project ? ` to ${b.project}` : ' to everyone'}: ${b.summary}`);
   // the GitHub watch (#1207) is not a session: nobody to reply to
-  for (const m of i.messages) lines.push(`Message from ${m.actor}: ${m.summary}`, ...(m.actor === 'github' ? [] : [`  (reply: cb tell ${m.actor} "...")`]));
+  for (const m of i.messages) lines.push(`Message from ${m.actor}: ${m.summary}`, ...(m.actor === 'github' || m.actor === 'board' ? [] : [`  (reply: cb tell ${m.actor} "...")`]));
   // Ahmed talks in huddles from the dashboard: his lines must read as him, not as a teammate.
   const huddles: any[] = i.huddles ?? [];
   const fromAhmed = huddles.filter((h) => h.actor === 'ahmed' && (h.action === 'open' || h.action === 'say'));

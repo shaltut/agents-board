@@ -29,14 +29,15 @@ function taskRows(project?: string, status?: string) {
 export async function task(id: number) {
   const [t] = await sql`select *, cb._waits_on(id) as waits_on from cb.tasks where id = ${id}`;
   if (!t) return null;
-  const [events, questions, blockers, blocks, [epic]] = await Promise.all([
+  const [events, questions, blockers, blocks, [epic], [{ ping }]] = await Promise.all([
     sql`select * from cb.events where task_id = ${id} order by at desc, id desc`,
     sql`select * from cb.questions where task_id = ${id} order by id desc`,
     sql`select t.id, t.title, t.status, t.assignee from cb.task_blockers b join cb.tasks t on t.id = b.blocker where b.task = ${id} order by t.id`,
     sql`select t.id, t.title, t.status, t.assignee from cb.task_blockers b join cb.tasks t on t.id = b.task where b.blocker = ${id} order by t.id`,
     sql`select id, title from cb.epics where id = ${t.epic_id ?? 0}`,
+    sql`select exists (select 1 from cb.task_pings where task_id = ${id}) as ping`,
   ]);
-  return { task: t, events, questions, blockers, blocks, epic: epic ?? null };
+  return { task: t, events, questions, blockers, blocks, epic: epic ?? null, ping };
 }
 
 export async function epics(project?: string) {

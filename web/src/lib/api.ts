@@ -109,7 +109,7 @@ export const useQuestions = (project?: string, status?: string) =>
 export const useTask = (id: number | null) =>
   useQuery({
     queryKey: ['task', id], enabled: id != null,
-    queryFn: () => get<{ task: Task; events: CbEvent[]; questions: Question[]; blockers: TaskRef[]; blocks: TaskRef[]; epic: { id: number; title: string } | null }>(`/api/tasks/${id}`),
+    queryFn: () => get<{ task: Task; events: CbEvent[]; questions: Question[]; blockers: TaskRef[]; blocks: TaskRef[]; epic: { id: number; title: string } | null; ping: boolean }>(`/api/tasks/${id}`),
   })
 export const useEpics = (project?: string) =>
   useQuery({ queryKey: ['epics', project], queryFn: () => get<Epic[]>(`/api/epics${qs({ project })}`) })

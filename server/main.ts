@@ -408,6 +408,8 @@ export async function start() {
   void lead(() => {
     if (token) void startBot(token, process.env.TELEGRAM_API || dotenv('TELEGRAM_API') || 'https://api.telegram.org');
     startGithub(); // #1207: polls the repos `cb github` lists (none: nothing is called)
+    // "why is this card not moving": the cards Ahmed pinged (cb.pings_due); one board sends them, like the pollers
+    setInterval(() => { void sql`select cb.pings_due()`.catch((e) => console.error(`pings: ${e?.message}`)) }, 60_000).unref()
   });
 }
 

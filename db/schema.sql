@@ -257,6 +257,8 @@ drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
 drop function if exists cb.type_to cascade;
+drop function if exists cb.task_ping_set cascade;
+drop function if exists cb.pings_due cascade;
 drop function if exists cb.huddle_open cascade;
 drop function if exists cb.huddle_add cascade;
 drop function if exists cb.huddle_say cascade;
@@ -1551,6 +1553,67 @@ begin
   values ('ahmed', p, 'message', message, jsonb_build_object('to', to_actor, 'raw', 'true'))
   returning cb.events.id into new_id;
   return new_id;
+end $$;
+
+-- "Why is this card not moving?" (Ahmed's opt-in, per card, from the dashboard). While a pinged card is in progress and
+-- nothing has happened on it for an hour (its fields or any event but the board's own pings: a cb log note counts),
+-- the board asks its assignee and its orchestrator every 30 minutes, until something happens. The server runs
+-- cb.pings_due() every minute. The asks are ordinary messages from `board`; the relay delivers them like cb tell.
+create table if not exists cb.task_pings (
+  task_id bigint primary key references cb.tasks(id) on delete cascade,
+  since timestamptz not null default now(),
+  last_ping_at timestamptz
+);
+
+create function cb.task_ping_set(id text, enabled boolean, actor text default null) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+declare tid bigint := cb.norm_id(id);
+begin
+  perform cb.dashboard_only('the card panel');
+  perform cb.set_actor(actor);
+  if not exists (select 1 from cb.tasks t where t.id = tid) then raise exception 'no task #%', tid; end if;
+  if enabled then
+    insert into cb.task_pings (task_id) values (tid) on conflict do nothing;
+  else
+    delete from cb.task_pings p where p.task_id = tid;
+  end if;
+  return enabled;
+end $$;
+
+-- Sends what is due, returns how many messages. A worker whose session has not checked in for 10 minutes is not pinged
+-- (its messages would pile up and arrive in a heap): its orchestrator is, and told so.
+create function cb.pings_due() returns int language plpgsql as $$
+declare r record; o text; n int := 0; mins int; idle text; live boolean;
+begin
+  for r in
+    select t.id, t.project, t.title, t.assignee,
+           greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
+      from cb.task_pings p join cb.tasks t on t.id = p.task_id
+     where t.status = 'in_progress' and t.assignee is not null
+       and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
+  loop
+    continue when r.last_at > now() - interval '1 hour';
+    mins := floor(extract(epoch from now() - r.last_at) / 60);
+    idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
+    live := exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
+    if live then
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message',
+              format('Card #%s "%s" has had no update for %s. Why is it not moving? Say where it stands with: cb log %s "<where it stands>" (any update stops these asks), or move or block it.', r.id, r.title, idle, r.id),
+              jsonb_build_object('to', r.assignee, 'nudge', true));
+      n := n + 1;
+    end if;
+    for o in select x from unnest(cb.triagers(r.project)) x where (x like 'orch@%' or x = 'orch') and x <> r.assignee loop
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message',
+              format('Card #%s "%s" (assigned to %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title, r.assignee, idle,
+                     case when live then '' else ' and its session has not checked in for 10 minutes' end),
+              jsonb_build_object('to', o, 'nudge', true));
+      n := n + 1;
+    end loop;
+    update cb.task_pings p set last_ping_at = now() where p.task_id = r.id;
+  end loop;
+  return n;
 end $$;
 
 -- Huddles: a discussion group of sessions on one topic (optionally one task). Lines are events

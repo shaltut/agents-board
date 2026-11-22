@@ -1,0 +1,75 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import postgres from 'postgres';
+import { freshDb, TEST_URL } from './helpers.ts';
+
+const clients: any[] = [];
+after(() => Promise.all(clients.map((c) => c.end())));
+
+// "Why is this card not moving?": opt-in per card; an hour of silence, then every 30 minutes, to the worker and its orchestrator.
+test('pings_due: stale pinged cards ask their worker and orchestrator every 30 minutes until something happens', async () => {
+  const sql = await freshDb(); clients.push(sql); // the dashboard connection (cb-web)
+  await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
+  await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Fix the thing', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+  const age = (mins: number) => sql`update cb.tasks set updated_at = now() - ${mins + ' minutes'}::interval where id = 1`
+    .then(() => sql`update cb.events set at = now() - ${mins + ' minutes'}::interval where task_id = 1 and not (data ? 'nudge')`);
+  const sent = async () => (await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'nudge' order by id`) as any[];
+
+  // not opted in: silence is not pinged
+  await age(120);
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+
+  // only the dashboard opts a card in
+  const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
+  await assert.rejects(() => session`select cb.task_ping_set('1', true, 'W1@pc')`, /only Ahmed/);
+  await sql`select cb.task_ping_set('1', true, 'ahmed')`;
+
+  // 30 minutes idle: under the hour, nothing yet
+  await age(30);
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+
+  // 2 hours idle: the worker and the orchestrator, once
+  await age(120);
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2);
+  let m = await sent();
+  assert.deepEqual(m.map((x) => x.to_).sort(), ['W1@pc', 'orch@pc']);
+  assert.match(m.find((x) => x.to_ === 'W1@pc').summary, /#1 "Fix the thing" has had no update for 2h 0m\. Why is it not moving\?.*cb log 1/);
+  assert.match(m.find((x) => x.to_ === 'orch@pc').summary, /assigned to W1@pc/);
+
+  // not again within 30 minutes; the board's own asks do not count as an update
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+  await sql`update cb.task_pings set last_ping_at = now() - interval '31 minutes'`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2);
+
+  // a note on the card is an update: the pings stop until another quiet hour
+  await sql`update cb.task_pings set last_ping_at = now() - interval '31 minutes'`;
+  await sql`select cb.log('demo', 'on it, waiting for CI', '1', '{}', 'W1@pc')`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+
+  // a card that is not in progress is not asked about; turning the option off stops it too
+  await age(120);
+  await sql`update cb.task_pings set last_ping_at = null`;
+  await sql`select cb.task_move('1', 'review', null, 'W1@pc')`;
+  await age(120);
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+  await sql`select cb.task_move('1', 'in_progress', null, 'W1@pc')`;
+  await age(120);
+  await sql`select cb.task_ping_set('1', false, 'ahmed')`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
+});
+
+test('pings_due: a worker whose session is gone is not pinged, its orchestrator is told so', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
+  await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Stuck', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+  await sql`update cb.sessions set last_seen = now() - interval '1 hour' where actor = 'W1@pc'`;
+  await sql`update cb.tasks set updated_at = now() - interval '3 hours' where id = 1`;
+  await sql`update cb.events set at = now() - interval '3 hours' where task_id = 1`;
+  await sql`select cb.task_ping_set('1', true, 'ahmed')`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 1);
+  const [m] = await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'nudge'`;
+  assert.equal(m.to_, 'orch@pc');
+  assert.match(m.summary, /its session has not checked in for 10 minutes/);
+});
