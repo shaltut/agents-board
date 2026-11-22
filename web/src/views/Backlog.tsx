@@ -96,6 +96,14 @@ export function Backlog({ route }: { route: Route }) {
     await qc.invalidateQueries()
   }
 
+  async function ping(enabled: boolean) {
+    try {
+      const n = await rpc<number>('task_ping_bulk', { ids: [...selected], enabled })
+      toast(enabled ? `The board will ask why ${n} ${n === 1 ? 'card is' : 'cards are'} not moving` : `No more asks on ${n} ${n === 1 ? 'card' : 'cards'}`)
+    } catch (err: any) { toast.error(err.message) }
+    await qc.invalidateQueries()
+  }
+
   async function quickAdd(e: React.FormEvent) {
     e.preventDefault()
     const project = route.project ?? proj
@@ -132,6 +140,8 @@ export function Backlog({ route }: { route: Route }) {
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">{selected.size} selected</span>
                 <Button size="sm" onClick={() => bulk('next')}>Move to Next</Button>
+                <Button size="sm" variant="ghost" onClick={() => ping(true)}>Ask why not moving</Button>
+                <Button size="sm" variant="ghost" onClick={() => ping(false)}>Stop asking</Button>
                 <Button size="sm" variant="ghost" onClick={() => bulk('cancelled')}>Cancel tasks</Button>
               </div>
             )}

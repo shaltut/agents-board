@@ -20,6 +20,7 @@ function taskRows(project?: string, status?: string) {
     : sql`status <> 'cancelled' and (status <> 'done' or done_at > now() - interval '7 days')`;
   // goal_rank / goal_id (#663): the active goal that lifts a card; the order is cb.task_claim's (web/src/lib/rank.ts byQueue)
   return sql`select *, cb._waits_on(id) as waits_on, cb._goal_rank(id) as goal_rank,
+      exists (select 1 from cb.task_pings p where p.task_id = t.id) as ping,
       (select gt.goal_id from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = t.id and gt.state = 'in' and g.status = 'active' order by g.rank, g.id limit 1) as goal_id
     from cb.tasks t where ${filter} ${proj(project)}

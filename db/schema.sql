@@ -258,6 +258,7 @@ drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
 drop function if exists cb.type_to cascade;
 drop function if exists cb.task_ping_set cascade;
+drop function if exists cb.task_ping_bulk cascade;
 drop function if exists cb.pings_due cascade;
 drop function if exists cb.huddle_open cascade;
 drop function if exists cb.huddle_add cascade;
@@ -1555,8 +1556,8 @@ begin
   return new_id;
 end $$;
 
--- "Why is this card not moving?" (Ahmed's opt-in, per card, from the dashboard). While a pinged card is in progress and
--- nothing has happened on it for an hour (its fields or any event but the board's own pings: a cb log note counts),
+-- "Why is this card not moving?" (Ahmed's opt-in, per card or in bulk, from the dashboard). While a pinged card is open (any
+-- status but done or cancelled) and nothing has happened on it for an hour (its fields or any event but the board's own pings: a cb log note counts),
 -- the board asks its assignee and its orchestrator every 30 minutes, until something happens. The server runs
 -- cb.pings_due() every minute. The asks are ordinary messages from `board`; the relay delivers them like cb tell.
 create table if not exists cb.task_pings (
@@ -1580,34 +1581,64 @@ begin
   return enabled;
 end $$;
 
+-- The same, for many cards: the ids given (jsonb array), or every open card of a project. Done and cancelled cards are
+-- skipped. Returns how many cards changed.
+create function cb.task_ping_bulk(ids jsonb default null, project text default null, enabled boolean default true, actor text default null)
+returns int language plpgsql as $$
+#variable_conflict use_variable
+declare n int;
+begin
+  perform cb.dashboard_only('the board');
+  perform cb.set_actor(actor);
+  if ids is null and coalesce(trim(project), '') = '' then raise exception 'say which cards: ids or a project'; end if;
+  if enabled then
+    with c as (
+      insert into cb.task_pings (task_id)
+      select t.id from cb.tasks t
+       where t.status not in ('done', 'cancelled')
+         and ((ids is not null and t.id in (select v::bigint from jsonb_array_elements_text(ids) v)) or (ids is null and t.project = project))
+      on conflict do nothing returning 1)
+    select count(*) into n from c;
+  else
+    with c as (
+      delete from cb.task_pings p using cb.tasks t
+       where t.id = p.task_id
+         and ((ids is not null and t.id in (select v::bigint from jsonb_array_elements_text(ids) v)) or (ids is null and t.project = project))
+      returning 1)
+    select count(*) into n from c;
+  end if;
+  return n;
+end $$;
+
 -- Sends what is due, returns how many messages. A worker whose session has not checked in for 10 minutes is not pinged
 -- (its messages would pile up and arrive in a heap): its orchestrator is, and told so.
 create function cb.pings_due() returns int language plpgsql as $$
 declare r record; o text; n int := 0; mins int; idle text; live boolean;
 begin
   for r in
-    select t.id, t.project, t.title, t.assignee,
+    select t.id, t.project, t.title, t.assignee, t.status,
            greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
-     where t.status = 'in_progress' and t.assignee is not null
+     where t.status not in ('done', 'cancelled')
        and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
   loop
     continue when r.last_at > now() - interval '1 hour';
     mins := floor(extract(epoch from now() - r.last_at) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
-    live := exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
+    live := r.assignee is not null and exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
     if live then
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
-              format('Card #%s "%s" has had no update for %s. Why is it not moving? Say where it stands with: cb log %s "<where it stands>" (any update stops these asks), or move or block it.', r.id, r.title, idle, r.id),
+              format('Card #%s "%s" (%s) has had no update for %s. Why is it not moving? Say where it stands with: cb log %s "<where it stands>" (any update stops these asks), or move or block it.', r.id, r.title, r.status, idle, r.id),
               jsonb_build_object('to', r.assignee, 'nudge', true));
       n := n + 1;
     end if;
-    for o in select x from unnest(cb.triagers(r.project)) x where (x like 'orch@%' or x = 'orch') and x <> r.assignee loop
+    for o in select x from unnest(cb.triagers(r.project)) x where (x like 'orch@%' or x = 'orch') and x is distinct from r.assignee loop
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
-              format('Card #%s "%s" (assigned to %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title, r.assignee, idle,
-                     case when live then '' else ' and its session has not checked in for 10 minutes' end),
+              format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
+                     case when r.assignee is null then 'unassigned' else 'assigned to ' || r.assignee end, r.status, idle,
+                     case when r.assignee is null or live then '' else ' and its session has not checked in for 10 minutes' end),
               jsonb_build_object('to', o, 'nudge', true));
       n := n + 1;
     end loop;

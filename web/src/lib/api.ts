@@ -10,6 +10,7 @@ export interface Task {
   rank: number; assignee: string | null; labels: string[]; links: Record<string, string | string[]>
   blocked_on: number | null; created_by: string; created_at: string; updated_at: string; done_at: string | null
   epic_id: number | null; epic_rank: number
+  ping?: boolean // Ahmed asked the board to chase it (task_pings), from /api/tasks
   goal_rank?: number | null; goal_id?: number | null // the active goal that lifts it in Next (#663), from /api/tasks
   waits_on?: number[] // open blockers (not done or cancelled): "waits on #12"
 }

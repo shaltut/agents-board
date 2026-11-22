@@ -6,7 +6,7 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { ChevronDown } from 'lucide-react'
+import { BellRing, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
 import { rpc, useTasks, type Status, type ListTask } from '@/lib/api'
 import { STATUS } from '@/lib/format'
@@ -52,6 +52,7 @@ function Column({ status, tasks, showProject }: { status: Status; tasks: ListTas
         <h2 className="callsign text-[15px]">{STATUS[status].label}</h2>
         <span className="text-[13px] text-muted-foreground tabular-nums">{tasks.length}</span>
         {HINT[status] && <span className="hidden truncate text-xs text-muted-foreground 2xl:inline">{HINT[status]}</span>}
+        {status !== 'done' && tasks.length > 0 && <PingAll tasks={tasks} />}
         {status === 'done' && (
           <button onClick={() => setCollapsed((c) => !c)} className="ml-auto grid size-6 place-items-center rounded text-muted-foreground hover:bg-raised hover:text-foreground"
             aria-label={collapsed ? 'Show done' : 'Hide done'} aria-expanded={!collapsed}>
@@ -71,6 +72,25 @@ function Column({ status, tasks, showProject }: { status: Status; tasks: ListTas
         {status === 'done' && !collapsed && tasks.length > 0 && <p className="px-2 pt-1 text-center text-[11px] text-muted-foreground">Last 7 days</p>}
       </div>
     </section>
+  )
+}
+
+/** Column header: ask why every card in it is not moving (bulk), or stop. All pinged already: the button stops them. */
+function PingAll({ tasks }: { tasks: ListTask[] }) {
+  const qc = useQueryClient()
+  const all = tasks.every((t) => t.ping)
+  async function toggle() {
+    try {
+      const n = await rpc<number>('task_ping_bulk', { ids: tasks.map((t) => t.id), enabled: !all })
+      toast(all ? `No more asks on ${tasks.length} ${tasks.length === 1 ? 'card' : 'cards'}` : `The board will ask why ${tasks.length === 1 ? 'this card is' : `these ${n} cards are`} not moving`)
+    } catch (e: any) { toast.error(e.message) }
+    await qc.invalidateQueries()
+  }
+  return (
+    <button onClick={toggle} aria-pressed={all} title={all ? 'Stop asking why these cards are not moving' : 'Ask why these cards are not moving: every 30 min after 1 h with no update'}
+      className={cn('ml-auto grid size-6 place-items-center rounded hover:bg-raised', all ? 'text-lamp' : 'text-muted-foreground hover:text-foreground')}>
+      <BellRing className="size-3.5" />
+    </button>
   )
 }
 
