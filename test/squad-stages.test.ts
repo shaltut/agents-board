@@ -242,3 +242,26 @@ test('a typed approval answer sends the design back', async () => {
   assert.deepEqual([r.stage, r.assignee], ['design', 'O1@mac']);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and summary like '%tighten the error messages%' and data ? 'stage'`)[0].n, 1);
 });
+
+test('only the current approval question moves the card', async () => {
+  const sql = await setup();
+  const { id, q: q1 } = await atApproval(sql);
+  await sql`select cb.answer(${q1}::text, 'Changes needed', 'ahmed')`;
+  await claim(sql, id, 'O1@mac');
+  await sql`select cb.page_set('the design v2', task => ${id}::text, actor => 'O1@mac')`;
+  await pass(sql, id, 'O1@mac', 'redesigned');
+  const [{ id: q2 }] = await sql`select id from cb.questions where approval_for = ${id} and id <> ${q1}`;
+  await sql`select cb.answer(${q1}::text, 'Approve', 'ahmed')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.stage, r.approved_version], ['approval', null]);
+  assert.equal((await sql`select status from cb.questions where id = ${q2}`)[0].status, 'open');
+  assert.equal((await sql`select status from cb.questions where id = ${q1}`)[0].status, 'delivered');
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and data ? 'digest'`)[0].n, 1);
+});
+
+test('a dashboard connection answering as a non-Ahmed name cannot approve', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  await assert.rejects(() => sql`select cb.answer(${q}::text, 'Approve', 'G1')`, /only Ahmed approves designs/);
+  assert.equal((await row(sql, id)).stage, 'approval');
+});

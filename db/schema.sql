@@ -3526,13 +3526,15 @@ end $$;
 -- Changes needed back to its designer. Moved on already: a note for the digest, the card is left alone.
 create function cb._approval_answered(qid bigint) returns void language plpgsql as $$
 #variable_conflict use_variable
-declare q cb.questions%rowtype; t cb.tasks%rowtype; picked text[];
+declare q cb.questions%rowtype; t cb.tasks%rowtype; picked text[]; latest bigint;
 begin
   select * into q from cb.questions x where x.id = qid;
   if q.approval_for is null then return; end if;
   select * into t from cb.tasks x where x.id = q.approval_for for update;
   if not found then return; end if;
-  if t.stage = 'approval' then
+  -- only the card's current approval question moves it: an older one, corrected later, is history
+  select max(x.id) into latest from cb.questions x where x.approval_for = t.id and x.status <> 'withdrawn';
+  if t.stage = 'approval' and qid = latest then
     picked := cb._picked(q.options, q.answer, false);
     if 'Approve' = any (picked) then
       perform cb._stage_move(t.id, 'build', null, 'design approved');
@@ -3540,10 +3542,10 @@ begin
     else  -- Changes needed, or any typed answer: never approve on an ambiguous one, never leave the card waiting
       perform cb._stage_move(t.id, 'design', t.crew ->> 'design', q.answer);
     end if;
-    update cb.questions x set status = 'delivered', delivered_at = now(), delivered_to = 'board' where x.id = qid;
   else
     insert into cb.events (actor, project, task_id, kind, summary, data)
     values (coalesce(nullif(current_setting('cb.actor', true), ''), 'unknown'), t.project, t.id, 'note',
             format('approval answer changed to "%s" after the card moved on', q.answer), '{"digest": true}');
   end if;
+  update cb.questions x set status = 'delivered', delivered_at = now(), delivered_to = 'board' where x.id = qid;
 end $$;
