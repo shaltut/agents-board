@@ -108,3 +108,10 @@ test('sessions_overview reports the stored role when the pipeline is off', async
   await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
   assert.equal(await role(), 'lead');
 });
+
+test('a staged new card never starts claimed: an explicit in_progress becomes next', async () => {
+  const sql = await setup();
+  const [{ id }] = await sql`select cb.task_add(project => 'demo', title => 'x', status => 'in_progress', actor => 'B1@mac') as id`;
+  const [t] = await sql`select stage, status, assignee from cb.tasks where id = ${id}`;
+  assert.deepEqual({ ...t }, { stage: 'design', status: 'next', assignee: null });
+});

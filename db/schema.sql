@@ -606,7 +606,9 @@ declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new
   piped boolean := cb._pipeline(p); ty text := cb.norm_type(type);
   -- pipeline projects: a new card starts at design (PR tracking cards and investigations stay unstaged) and waits in Next
   staged boolean := piped and a <> 'github' and ty <> 'research';
-  st text := cb.norm_status(coalesce(status, case when staged then 'next' else 'backlog' end));
+  -- a staged card waits in Next (or Backlog if asked): any other status would be a self-claim past the role-aware claim
+  st text := case when staged then (case when cb.norm_status(coalesce(status, 'next')) = 'backlog' then 'backlog' else 'next' end)
+                  else cb.norm_status(coalesce(status, 'backlog')) end;
 begin
   if coalesce(trim(title), '') = '' then raise exception 'title is required'; end if;
   if stage is not null and not piped then raise exception 'stage is only for projects with the pipeline on'; end if;
