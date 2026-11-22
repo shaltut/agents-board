@@ -3,13 +3,15 @@ import type { Ask } from './asks'
 
 export type Status = 'backlog' | 'next' | 'in_progress' | 'blocked' | 'review' | 'done' | 'cancelled'
 
-export interface Project { slug: string; name: string; color: string | null; repo_path: string | null; open_count: number; question_count: number }
+export interface Project { slug: string; name: string; color: string | null; repo_path: string | null; pipeline: boolean; open_count: number; question_count: number }
+export type Stage = 'design' | 'approval' | 'build' | 'review' | 'merge' | 'qa'
 export const TASK_TYPES = ['task', 'bug', 'feature', 'change', 'chore', 'research'] as const
 export interface Task {
   id: number; project: string; title: string; body: string; status: Status; priority: 'P0' | 'P1' | 'P2' | 'P3'; type: (typeof TASK_TYPES)[number]
   rank: number; assignee: string | null; labels: string[]; links: Record<string, string | string[]>
   blocked_on: number | null; created_by: string; created_at: string; updated_at: string; done_at: string | null
   epic_id: number | null; epic_rank: number
+  stage: Stage | null; crew: Record<string, string>; approved_version: number | null // the squad pipeline (#3598)
   ping?: boolean // Ahmed asked the board to chase it (task_pings), from /api/tasks
   goal_rank?: number | null; goal_id?: number | null // the active goal that lifts it in Next (#663), from /api/tasks
   waits_on?: number[] // open blockers (not done or cancelled): "waits on #12"
@@ -79,7 +81,7 @@ export async function get<T>(path: string): Promise<T> {
   return r.json()
 }
 
-const NO_ACTOR = new Set(['seen', 'goal_opened', 'goal_preview', 'goal_propose']) // functions without an actor argument
+const NO_ACTOR = new Set(['page_get', 'digest', 'seen', 'goal_opened', 'goal_preview', 'goal_propose']) // functions without an actor argument
 
 /** Every write goes through the same cb.* SQL functions Claude uses. The UI acts as "ahmed". */
 export async function rpc<T = unknown>(fn: string, args: Record<string, unknown>): Promise<T> {
@@ -134,3 +136,10 @@ export const useMemFind = (term: string, project?: string) =>
 export const useAsks = (project?: string) =>
   useQuery({ queryKey: ['asks', project], queryFn: () => get<Ask[]>(`/api/asks${qs({ project })}`) })
 export { qs }
+
+/** A card's design page (cb.page_get): null until someone writes it. approved_* is what Ahmed approved. */
+export interface DesignPage { version: number; body: string; updated_by: string; updated_at: string; approved_version: number | null; approved_body: string | null; approved_by: string | null; approved_at: string | null }
+export const usePage = (task: number, on: boolean) =>
+  useQuery({ queryKey: ['page', task], enabled: on, queryFn: () => rpc<DesignPage | null>('page_get', { task: String(task) }) })
+export const useDigest = (project: string | undefined, on: boolean) =>
+  useQuery({ queryKey: ['digest', project], enabled: on && !!project, refetchInterval: 60_000, queryFn: () => rpc<string[]>('digest', { project }) })

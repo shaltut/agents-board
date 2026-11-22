@@ -476,3 +476,14 @@ test('a LISTEN failure (say at boot) never rejects and is not cached: the server
     assert.equal(n, 2, 'a failed LISTEN is tried again, not remembered');
   } finally { console.error = orig; }
 });
+
+test('GET /api/projects includes pipeline, GET /api/tasks includes stage and crew', async () => {
+  const sql = await db();
+  await rpc('task_add', { project: 'demo', title: 'plain' });
+  assert.equal((await rpc('project_pipeline', { project: 'demo', enabled: true })).status, 200);
+  await sql`update cb.tasks set stage = 'approval', crew = '{"design":"A1@pc"}' where title = 'plain'`;
+  const [p] = (await (await app.request('/api/projects')).json()).filter((x: any) => x.slug === 'demo');
+  assert.equal(p.pipeline, true);
+  const [t] = await (await app.request('/api/tasks?project=demo')).json();
+  assert.deepEqual([t.stage, t.crew, t.approved_version], ['approval', { design: 'A1@pc' }, null]);
+});

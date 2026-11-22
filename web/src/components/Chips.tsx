@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import { Bug, Milestone, Target } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { splitActor, STATUS } from '@/lib/format'
-import { rpc, useEpics, useGoals, type Status, type Task } from '@/lib/api'
+import { rpc, useEpics, useGoals, type Stage, type Status, type Task } from '@/lib/api'
 import { go } from '@/lib/route'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 
@@ -214,4 +214,16 @@ export function TagChip({ tag, active, className }: { tag: string; active?: bool
       <span aria-hidden className="opacity-60">#</span>{tag}
     </button>
   )
+}
+
+/** Where a pipeline card is, in plain words. The same phrases as cb._stage_words (test/squad-stages.test.ts keeps
+ *  them equal). Amber, like a question, when the card waits for Ahmed. */
+export const STAGE_WORDS: Record<Stage, string> = {
+  design: 'Design', approval: 'Waiting for your approval', build: 'Building', review: 'In review',
+  merge: 'Merging to dev', qa: 'Checking on dev against the design',
+}
+export function StageChip({ stage, className }: { stage: Stage | null | undefined; className?: string }) {
+  if (!stage) return null
+  const wait = stage === 'approval'
+  return <span className={cn('inline-flex h-5 items-center rounded-[4px] bg-raised px-1.5 text-[11.5px] leading-none', wait ? 'font-medium text-lamp' : 'text-muted-foreground', className)}>{STAGE_WORDS[stage]}</span>
 }

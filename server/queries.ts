@@ -4,7 +4,7 @@ import { sql } from './db.ts';
 const proj = (p?: string) => (p ? sql`and project = ${p}` : sql``);
 
 export const projects = () => sql`
-  select p.slug, p.name, p.color, p.repo_path,
+  select p.slug, p.name, p.color, p.repo_path, p.pipeline,
     (select count(*)::int from cb.tasks t where t.project = p.slug and t.status not in ('done','cancelled','backlog')) as open_count,
     (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') as question_count
   from cb.projects p where not p.archived order by p.name`;

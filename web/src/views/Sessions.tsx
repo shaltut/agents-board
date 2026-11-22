@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ArrowLeft } from 'lucide-react'
-import { get, qs, rpc, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
+import { get, qs, rpc, useDigest, useProjects, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
 import { ago, splitActor, STATUS } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
@@ -25,6 +25,8 @@ export const useSessions = (project?: string) =>
 
 export function Sessions({ route }: { route: Route }) {
   const { data = [], isLoading } = useSessions(route.project)
+  const pipeline = !!useProjects().data?.find((p) => p.slug === route.project)?.pipeline
+  const { data: digest = [] } = useDigest(route.project, pipeline)
   if (route.actor) return <SessionDetail route={route} row={data.find((s) => s.actor === route.actor)} />
   const live = data.filter((s) => s.live).length
   const asking = data.filter((s) => s.open_questions > 0).length
@@ -37,6 +39,12 @@ export function Sessions({ route }: { route: Route }) {
           <p className="mt-1 text-sm text-muted-foreground">
             {data.length} known, {live} with a live relay{asking > 0 && <>; <span className="font-medium text-lamp">{asking} asking you</span></>}.
           </p>
+        )}
+        {digest.length > 0 && (
+          <div className="mt-3 text-sm" aria-label="Digest">
+            <p className="font-medium">Digest</p>
+            <ul className="mt-1 space-y-0.5 text-muted-foreground">{digest.map((l, i) => <li key={i}>{l}</li>)}</ul>
+          </div>
         )}
       </header>
       {isLoading ? <p className="text-sm text-muted-foreground">Loading sessions…</p>

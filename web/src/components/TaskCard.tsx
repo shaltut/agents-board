@@ -4,7 +4,7 @@ import { useQuestions, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { CardMenu } from './CardMenu'
-import { ActorChip, EpicChip, GoalChip, PriorityPicker, ProjectChip, TagChip, TaskId, TypeChip, WaitsOn } from './Chips'
+import { ActorChip, EpicChip, GoalChip, PriorityPicker, ProjectChip, StageChip, TagChip, TaskId, TypeChip, WaitsOn } from './Chips'
 
 type Props = { t: ListTask; showProject?: boolean; dragging?: boolean; overlay?: boolean } & React.HTMLAttributes<HTMLDivElement>
 
@@ -28,6 +28,7 @@ export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t,
         <PriorityPicker t={t} />
         {t.type === 'bug' && <TypeChip type={t.type} />}
         {showProject && <ProjectChip slug={t.project} />}
+        <StageChip stage={t.stage} />
         <span className="ml-auto shrink-0 text-[11px] text-muted-foreground tabular-nums">{ago(t.updated_at)}</span>
       </div>
       <p className={cn('mt-1 text-sm leading-snug font-medium text-pretty', t.status === 'done' && 'text-muted-foreground')}>{t.title}</p>

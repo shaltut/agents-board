@@ -11,9 +11,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { ActorChip, EpicChip, Priority, PRIORITIES, ProjectChip, StatusDot, TagChip, TaskId } from './Chips'
+import { ActorChip, EpicChip, Priority, PRIORITIES, ProjectChip, StageChip, StatusDot, TagChip, TaskId } from './Chips'
 import { EventRow } from './Timeline'
 import { Md } from './Md'
+import { DesignPage } from './DesignPage'
 
 const STATUSES: Status[] = ['backlog', 'next', 'in_progress', 'blocked', 'review', 'done', 'cancelled']
 
@@ -54,7 +55,7 @@ function PanelBody({ data }: { data: NonNullable<ReturnType<typeof useTask>['dat
     <div className="flex flex-col">
       <SheetHeader className="gap-3 border-b p-5 pr-12">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <TaskId id={t.id} className="text-[14px] text-foreground" /><ProjectChip slug={t.project} />
+          <TaskId id={t.id} className="text-[14px] text-foreground" /><ProjectChip slug={t.project} /><StageChip stage={t.stage} />
           {t.epic_id != null && <EpicChip id={t.epic_id} />}
           <span>created by <ActorChip actor={t.created_by} /> {ago(t.created_at)}</span>
         </div>
@@ -142,6 +143,8 @@ function PanelBody({ data }: { data: NonNullable<ReturnType<typeof useTask>['dat
           </div>
         )}
       </section>
+
+      <DesignPage t={t} />
 
       <Blockers t={t} blockers={data.blockers} blocks={data.blocks} />
 
