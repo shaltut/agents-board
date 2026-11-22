@@ -479,7 +479,22 @@ end $$;
 -- Before-row trigger: rank on entering a status, done_at, blocked_on, epic (same project, joins at the end), updated_at.
 create function cb.tasks_before() returns trigger language plpgsql as $$
 declare ep text;
+declare ac text; r text;
 begin
+  -- squad pipeline guard (#3598): a staged card leaves its flow only through Ahmed's dashboard, or the lead with a note
+  if tg_op = 'UPDATE' and old.stage is not null and cb._pipeline(old.project) and current_setting('cb.stage_ok', true) is distinct from 'on' then
+    if new.status in ('done', 'cancelled') and new.status is distinct from old.status then
+      ac := current_setting('cb.actor', true);
+      if cb._is_dashboard() or (cb._role(ac) = 'lead' and nullif(trim(coalesce(current_setting('cb.note', true), '')), '') is not null) then
+        new.stage := null; new.stage_since := null;
+      else
+        raise exception '#% is at %: finish it with cb pass % or cb fail % "<why>" (only Ahmed, or the lead with a note, closes it outside the pipeline)', old.id, old.stage, old.id, old.id;
+      end if;
+    end if;
+    if new.project is distinct from old.project and not cb._is_dashboard() then
+      raise exception '#% is at %: a staged card stays in its project (Ahmed can move it from the board)', old.id, old.stage;
+    end if;
+  end if;
   -- only when epic_id itself changes: a project slug rename cascades to both tables and must not trip it
   if new.epic_id is not null and (tg_op = 'INSERT' or new.epic_id is distinct from old.epic_id) then
     select e.project into ep from cb.epics e where e.id = new.epic_id;
@@ -1136,6 +1151,7 @@ returns void language plpgsql as $$
 declare qid bigint := cb.norm_id(id);
 begin
   perform cb.set_actor(actor);
+  perform cb._approval_guard(qid);
   if not cb._is_dashboard() and exists (select 1 from cb.questions q where q.id = qid and q.status = 'answered' and q.answer_history is not null) then
     raise exception 'Q% has a changed answer on its way to you: take it (cb pending) instead of withdrawing it', qid;
   end if;
@@ -1169,6 +1185,7 @@ declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]',
         n text := nullif(trim(regexp_replace(coalesce(note, ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
 begin
   perform cb.dashboard_only('Today');
+  perform cb._approval_guard(qid);
   if length(n) > 500 then raise exception 'the note is at most 500 characters (this one is %)', length(n); end if;
   hit := cb._sensitive(n);
   if hit is not null then
@@ -1996,6 +2013,7 @@ create function cb.question_assign(id text, to_user text, actor text default nul
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); qid bigint := cb.norm_id(id);
 begin
+  perform cb._approval_guard(qid);
   if to_user = 'ahmed' then to_user := null; end if; -- the owner's own queue (he is a user too, to sign in)
   if to_user is not null and not exists (select 1 from cb.users u where u.name = to_user) then
     raise exception 'unknown user %: see cb users', to_user;
@@ -3259,6 +3277,7 @@ drop function if exists cb._stage_move cascade;
 drop function if exists cb.stage_pass cascade;
 drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
+drop function if exists cb._approval_guard cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3514,12 +3533,26 @@ begin
   elsif t.stage = 'approval' and a = t.crew ->> 'design' then
     nxt := 'design';
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
+    perform set_config('cb.stage_ok', 'on', true);  -- lets cb._approval_guard pass the designer's own withdraw
     if qid is not null then perform cb.withdraw(qid::text, a); end if;
+    perform set_config('cb.stage_ok', '', true);
   else
     raise exception 'cb fail is for the holder of a card in review or qa, or the designer taking a card back from approval';
   end if;
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
   return nxt;
+end $$;
+
+-- An approval question is never withdrawn, sent back or reassigned on its own: the card would wait with no live question.
+-- Only cb.stage_fail (the designer taking the card back) gets through, with cb.stage_ok on.
+create function cb._approval_guard(qid bigint) returns void language plpgsql as $$
+declare tid bigint;
+begin
+  select q.approval_for into tid from cb.questions q
+   where q.id = qid and q.status in ('open', 'answered', 'dormant', 'sent_back');
+  if tid is not null and current_setting('cb.stage_ok', true) is distinct from 'on' then
+    raise exception 'Q% is the approval for #%: the designer takes it back with cb fail % "<why>"', qid, tid, tid;
+  end if;
 end $$;
 
 -- Ahmed answered an approval question (first answer or a change). Still at approval: Approve sends the card to build,

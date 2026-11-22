@@ -265,3 +265,52 @@ test('a dashboard connection answering as a non-Ahmed name cannot approve', asyn
   await assert.rejects(() => sql`select cb.answer(${q}::text, 'Approve', 'G1')`, /only Ahmed approves designs/);
   assert.equal((await row(sql, id)).stage, 'approval');
 });
+
+// --- the guard (Task 6): a staged card leaves the pipeline only through Ahmed or the lead
+const session = () => { const s = postgres(TEST_URL, { onnotice: () => {} }); clients.push(s); return s; }; // not the dashboard
+const atBuild = async (sql: any) => { const id = await card(sql); await sql`select cb.stage_set(${id}::text, 'build', 'small', 'orch@pc')`; return id; };
+
+test('done and cancel outside the pipeline', async () => {
+  const sql = await setup(); const s = session();
+  const a = await atBuild(sql);
+  await assert.rejects(() => s`select cb.task_done(${a}::text, 'done', '{}', 'B1@mac')`, /is at build: finish it with cb pass/);
+  await assert.rejects(() => s`select cb.task_move(${a}::text, 'cancelled', 'x', 'B1@mac')`, /is at build/);
+  await assert.rejects(() => s`select cb.task_move(${a}::text, 'cancelled', null, 'orch@pc')`, /is at build/); // lead needs a note
+  await s`select cb.task_move(${a}::text, 'cancelled', 'dup of #9', 'orch@pc')`;
+  assert.deepEqual([(await row(sql, a)).stage, (await row(sql, a)).status], [null, 'cancelled']);
+  const b = await atBuild(sql);
+  await sql`select cb.task_move(${b}::text, 'done', null, 'ahmed')`;
+  assert.deepEqual([(await row(sql, b)).stage, (await row(sql, b)).status], [null, 'done']);
+  assert.equal((await row(sql, await atBuild(sql))).stage, 'build'); // insert-time stage unaffected
+});
+
+test('a staged card cannot leave by a project move', async () => {
+  const sql = await setup(); const s = session();
+  await sql`select cb.ensure_project('other')`;
+  const id = await atBuild(sql);
+  await assert.rejects(() => s`select cb.task_update(${id}::text, '{"project":"other"}', 'B1@mac')`, /stays in its project/);
+  await sql`select cb.task_update(${id}::text, '{"project":"other"}', 'ahmed')`;
+  assert.equal((await sql`select project from cb.tasks where id = ${id}`)[0].project, 'other');
+});
+
+test('pipeline off: staged cards behave as normal cards', async () => {
+  const sql = await setup(); const s = session();
+  const id = await atBuild(sql);
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  await s`select cb.task_done(${id}::text, 'done', '{}', 'B1@mac')`;
+  assert.equal((await row(sql, id)).status, 'done');
+  await assert.rejects(() => pass(sql, id, 'B1@mac'), /pipeline is off/);
+  assert.equal((await row(sql, await card(sql))).stage, null);
+});
+
+test('an approval question is withdrawn, sent back or reassigned only by the designer taking the card back', async () => {
+  const sql = await setup(); const s = session();
+  const { id, q } = await atApproval(sql);
+  const msg = new RegExp(`Q${q} is the approval for #${id}: the designer takes it back with cb fail ${id} "<why>"`);
+  await assert.rejects(() => s`select cb.withdraw(${q}::text, 'B1@mac')`, msg);
+  await assert.rejects(() => sql`select cb.send_back(${q}::text, 'details', null, 'ahmed')`, msg);
+  await assert.rejects(() => sql`select cb.question_assign(${q}::text, 'ahmed', 'ahmed')`, msg);
+  assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'open');
+  await s`select cb.stage_fail(${id}::text, 'rework', null, 'O1@mac')`; // the designer's own path still withdraws it
+  assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'withdrawn');
+});
