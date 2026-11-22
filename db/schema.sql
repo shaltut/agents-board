@@ -3616,7 +3616,7 @@ $$;
 -- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
 -- event (the board's own nudges excluded) and no event by the holder anywhere. Returns messages sent plus cards freed.
 create function cb.stage_stalls_due() returns int language plpgsql as $$
-declare r record; n int := 0; mins int; idle text; why text; tid bigint;
+declare r record; n int := 0; mins int; idle text; why text; moved int;
 begin
   -- the close path leaves a card's nudge row behind: drop rows of cards that have no stage any more
   delete from cb.stage_nudges d where not exists (select 1 from cb.tasks t where t.id = d.task_id and t.stage is not null);
@@ -3625,7 +3625,9 @@ begin
       from cb.tasks t
       cross join lateral (select greatest(t.updated_at,
                                           coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at),
-                                          coalesce((select max(e.at) from cb.events e where e.actor = t.assignee), t.updated_at)) as quiet_since) q
+                                          coalesce((select max(e.at) from cb.events e where e.actor = t.assignee), t.updated_at),
+                                          -- a restored session starts afresh (cb.iam writes no event): Q2324
+                                          coalesce((select max(s.started_at) from cb.sessions s where s.actor = t.assignee), t.updated_at)) as quiet_since) q
       left join cb.stage_nudges nd on nd.task_id = t.id
      where t.stage is not null and t.stage <> 'approval' and nullif(trim(t.assignee), '') is not null
        and t.status in ('in_progress', 'next') and cb._pipeline(t.project)
@@ -3634,7 +3636,7 @@ begin
   loop
     mins := floor(extract(epoch from now() - r.quiet_since) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
-    if mins >= 90 and (r.status = 'next' or r.nudged_at > r.quiet_since) then
+    if mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since and r.nudged_at <= now() - interval '60 minutes')) then
       why := case when r.status = 'next' then format('held for %s with no activity', idle)
                   else format('no update for %s and the nudge went unanswered', idle) end;
       perform set_config('cb.actor', 'board', true);
@@ -3642,9 +3644,11 @@ begin
       perform set_config('cb.data', '{"stall": true}', true);
       update cb.tasks t set assignee = null, status = 'next',
              rank = (select coalesce(min(x.rank) - 1024, 0) from cb.tasks x where x.project = t.project and x.status = 'next' and x.id <> t.id)
-       where t.id = r.id;
+       where t.id = r.id and t.assignee = r.assignee and t.status = r.status;  -- claimed or moved since the select: leave it
+      get diagnostics moved = row_count;
       perform set_config('cb.note', '', true);
       perform set_config('cb.data', '', true);
+      continue when moved = 0;
       delete from cb.stage_nudges d where d.task_id = r.id;
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message', format('#%s went back to the queue: %s', r.id, why),

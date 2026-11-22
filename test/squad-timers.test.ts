@@ -14,6 +14,7 @@ async function setup(o: { type?: string } = {}) {
   await sql`select cb.task_add(project => 'demo', title => 'Fix the thing', type => ${o.type ?? 'bug'}, stage => ${o.type === 'research' ? null : 'build'}, why => 'small', actor => 'orch@pc')`;
   await sql`update cb.tasks set status = 'in_progress', assignee = 'B1@mac' where id = 1`;
   const age = (mins: number) => sql`update cb.tasks set updated_at = now() - ${mins + ' minutes'}::interval where id = 1`
+    .then(() => sql`update cb.sessions set started_at = now() - ${mins + ' minutes'}::interval where actor = 'B1@mac'`)
     .then(() => sql`update cb.events set at = now() - ${mins + ' minutes'}::interval where (task_id = 1 or actor = 'B1@mac') and not (data ? 'nudge')`);
   const nudges = async () => (await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'stall' and kind = 'message' order by id`) as any[];
   const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
@@ -110,4 +111,21 @@ test('nudge rows of cards that left the pipeline are cleaned up', async () => {
   await sql`update cb.tasks set stage = null where id = 1`;
   await due();
   assert.equal((await sql`select count(*)::int n from cb.stage_nudges`)[0].n, 0);
+});
+
+test('a restored session keeps its cards: nudged once, never freed a minute later', async () => {
+  const { sql, age, due } = await setup();
+  await sql`update cb.sessions set last_seen = now() - interval '3 hours' where actor = 'B1@mac'`;
+  await age(180);
+  assert.equal(await due(), 0);
+  await sql`update cb.sessions set last_seen = now(), started_at = now() where actor = 'B1@mac'`; // Ahmed restores it
+  assert.equal(await due(), 0, 'a fresh session is not quiet');
+  assert.equal(await due(), 0);
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac');
+  // a nudge sent under 60 minutes ago is not followed by a release, however quiet the card was
+  await age(180);
+  await sql`update cb.sessions set started_at = now() - interval '3 hours'`;
+  assert.equal(await due(), 1);
+  assert.equal(await due(), 0);
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac');
 });
