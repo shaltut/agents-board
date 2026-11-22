@@ -181,3 +181,13 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     await exited;
   }
 });
+
+test('a sql`` fragment passed as a value is refused with a clear error, not "#<Promise> could not be cloned"', async () => {
+  const { key, stop } = await served();
+  try {
+    const db: any = await openBridge(key, TEST_URL);
+    const frag = db`select 1`; frag.catch(() => {}); // a postgres.js fragment is a Promise
+    await assert.rejects(db`select ${frag}`, /cannot carry a sql`` fragment/);
+    assert.equal((await db`select ${2}::int as n`)[0].n, 2, 'plain values still work');
+  } finally { await stop(); }
+});

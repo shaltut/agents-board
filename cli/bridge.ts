@@ -136,7 +136,9 @@ export async function openBridge(key: string, url: string, openDirect: () => any
   }).finally(() => { if (!pending.size) sock.unref(); });
   let direct: any;
   const db: any = (strings: any, ...values: any[]) => Array.isArray(strings) && Array.isArray((strings as any).raw)
-    ? call({ strings: [...strings], values })
+    ? (values.some((v) => typeof v?.then === 'function')
+      ? Promise.reject(new Error('the relay bridge cannot carry a sql`` fragment (it is a Promise): write the condition inline'))
+      : call({ strings: [...strings], values }))
     : { [IN]: strings };
   db.unsafe = (text: string, values: any[] = []) => call({ text, values });
   db.begin = (...a: any[]) => (direct ??= openDirect()).begin(...a);

@@ -665,9 +665,10 @@ async function run(): Promise<unknown> {
       const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}` : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
       if (!o['reply-to']) {
-        const live = sql`last_seen > now() - interval '90 seconds'`; // same 90s as cb.sessions_overview
-        const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and ${live}) as live,
-          (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and ${live}) as mine`;
+        // same 90s as cb.sessions_overview. Written out twice, not as a shared sql`` fragment: a fragment is a Promise
+        // and the relay bridge cannot carry one ("#<Promise> could not be cloned", broke every ask with a live relay).
+        const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and last_seen > now() - interval '90 seconds') as live,
+          (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and last_seen > now() - interval '90 seconds') as mine`;
         if (!r.live) console.error(`warning: no relay listens on ${actor}, so the answer will wait in cb pending --as ${actor}` +
           (r.mine && r.mine !== actor ? `. This pane's relay is ${r.mine}: ask without --as, or add --reply-to` : ''));
       }
