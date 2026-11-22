@@ -595,22 +595,32 @@ create function cb._waits_on(tid bigint) returns bigint[] language sql stable as
                 where b.task = $1 and x.status not in ('done', 'cancelled') order by b.blocker)
 $$;
 
-create function cb.task_add(project text, title text, body text default '', status text default 'backlog',
+create function cb.task_add(project text, title text, body text default '', status text default null,
                             priority text default 'P2', labels jsonb default '[]', links jsonb default '{}',
-                            assignee text default null, actor text default null, type text default null, epic text default null)
+                            assignee text default null, actor text default null, type text default null, epic text default null,
+                            stage text default null, why text default null)
 returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
   l text[] := array(select distinct cb.norm_tag(x) from jsonb_array_elements_text(coalesce(labels, '[]')) x where cb.norm_tag(x) <> '');
+  piped boolean := cb._pipeline(p); ty text := cb.norm_type(type);
+  -- pipeline projects: a new card starts at design (PR tracking cards and investigations stay unstaged) and waits in Next
+  staged boolean := piped and a <> 'github' and ty <> 'research';
+  st text := cb.norm_status(coalesce(status, case when staged then 'next' else 'backlog' end));
 begin
   if coalesce(trim(title), '') = '' then raise exception 'title is required'; end if;
+  if stage is not null and not piped then raise exception 'stage is only for projects with the pipeline on'; end if;
+  if stage is not null and stage <> 'build' then raise exception 'a new card starts at design; the lead can send small work to build: stage => build'; end if;
   -- work added through an alias ("tawuniya") keeps that stream's tags
   l := l || array(select g from cb.project_aliases pa, unnest(pa.tags) g where pa.alias = cb.slug(project) and g <> all(l));
-  insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id)
-  values (p, trim(title), coalesce(body, ''), cb.norm_status(status), cb.norm_priority(priority),
+  insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since)
+  values (p, trim(title), coalesce(body, ''), st, cb.norm_priority(priority),
           l, coalesce(links, '{}'),
-          coalesce(assignee, case when cb.norm_status(status) = 'in_progress' then a end), a, cb.norm_type(type), cb.norm_epic(epic))
+          coalesce(assignee, case when st = 'in_progress' then a end), a, ty, cb.norm_epic(epic),
+          case when staged then 'design' end, case when staged then now() end)
   returning cb.tasks.id into new_id;
+  -- stage => build is the lead's restage, with the same checks (and the note) as cb.stage_set
+  if stage = 'build' then perform cb.stage_set(new_id::text, 'build', why, a); end if;
   return new_id;
 end $$;
 
@@ -1512,7 +1522,7 @@ begin
     select jsonb_build_object(
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
-      'role', cb._role(a.actor), 'area', s.area, 'model', s.model,
+      'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
       'doing', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) order by t.updated_at desc)
                            from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)), '[]'),
       'queued', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'next' and (p is null or t.project = p)),
@@ -3236,6 +3246,7 @@ drop function if exists cb._area cascade;
 drop function if exists cb.project_pipeline cascade;
 drop function if exists cb.page_set cascade;
 drop function if exists cb.page_get cascade;
+drop function if exists cb.stage_set cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
 
@@ -3366,4 +3377,33 @@ begin
   end if;
   return jsonb_build_object('project', pg.project, 'task_id', pg.task_id, 'area', pg.area, 'version', v.version, 'body', v.body,
     'updated_by', v.updated_by, 'updated_at', v.updated_at, 'approved_version', av, 'approved_body', ab);
+end $$;
+
+-- The lead restages an unclaimed card. build: small found work (a bug or chore) skips design (Q2315); none: work with
+-- no code (ops, a data check) leaves the pipeline and is worked the old way (Q2323).
+create function cb.stage_set(id text, stage text, why text, actor text default null) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(trim(coalesce(stage, '')));
+begin
+  select * into t from cb.tasks x where x.id = tid for update;
+  if not found then raise exception 'task #% not found', tid; end if;
+  if not cb._pipeline(t.project) then raise exception '% has no pipeline', t.project; end if;
+  if cb._role(a) is distinct from 'lead' then raise exception 'only the lead restages a card'; end if;
+  if s not in ('build', 'none') then raise exception 'stage is build or none'; end if;
+  if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line why this card skips the pipeline'; end if;
+  if t.assignee is not null or t.status not in ('next', 'backlog') then
+    raise exception '#% is not unclaimed (assignee or status): restage cards nobody holds', tid;
+  end if;
+  if s = 'build' then
+    if t.stage is distinct from 'design' then raise exception '#% is not at design: only a card at design can skip to build', tid; end if;
+    if t.type not in ('bug', 'chore') then raise exception '#% is a %: only a bug or chore can skip design', tid, t.type; end if;
+  end if;
+  perform set_config('cb.stage_ok', 'on', true);
+  update cb.tasks x set stage = case when s = 'build' then 'build' end, stage_since = case when s = 'build' then now() end where x.id = tid;
+  perform set_config('cb.stage_ok', '', true);
+  insert into cb.events (actor, project, task_id, kind, summary, data)
+  values (a, t.project, tid, 'note',
+          case when s = 'build' then 'small work, skipped design: ' || trim(why) else 'taken out of the pipeline: ' || trim(why) end,
+          case when s = 'build' then '{"small": true}'::jsonb else '{"unstaged": true}'::jsonb end);
+  return case when s = 'build' then 'build' end;
 end $$;

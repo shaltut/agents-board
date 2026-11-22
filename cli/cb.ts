@@ -22,7 +22,7 @@ const OPTIONS = {
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
-  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, admin: { type: 'boolean' },
+  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -550,8 +550,9 @@ async function run(): Promise<unknown> {
     case 'add': {
       need(2, 'add <project> "<title>" [-s next] [-p P1]   e.g. cb add ihop "Fix Hijri month parse" -s next');
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
-        status: o.status ?? 'backlog', priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
-        links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}) });
+        status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
+        links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}) });
       return { out: `#${id}`, json: id };
     }
     case 'bug': {
@@ -559,13 +560,20 @@ async function run(): Promise<unknown> {
       if (!o.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
       await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
-        priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug' });
-      const [{ project, all }] = await sql`select t.project, cb.triagers(t.project) as all from cb.tasks t where t.id = ${id}`;
+        priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}) });
+      const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
+      if (stage) return { out: `#${id} ${stage === 'build' ? 'is in build' : 'starts at design'}; a small fix can skip it: cb stage ${id} build --why "..."`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
         : all.length ? `you triage it: cb edit ${id} --assignee <worker>` : `no session works in ${project} yet: it waits in Next`;
       return { out: `#${id} bug filed in ${project}; ${who}`, json: { id, project, told } };
+    }
+    case 'stage': {
+      need(2, 'stage <id> build|none --why "<why>"   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
+      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
+      return { out: `#${args[0].replace('#', '')} ${args[1] === 'none' ? 'is out of the pipeline' : 'goes to build'}` };
     }
     case 'move':
       need(2, 'move <id> <status> ["<note>"]');
