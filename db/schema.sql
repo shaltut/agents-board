@@ -3219,3 +3219,82 @@ create table if not exists cb.telegram_messages (
   awaiting    text,
   prompt_id   bigint
 );
+-- ---------------------------------------------------------------- Squad pipeline (#3598)
+-- Cards move through stages (design, approval, build, review, merge, qa) and sessions have roles. Everything here is
+-- gated on cb._pipeline(project): a project with pipeline = false behaves exactly as before.
+drop function if exists cb._pipeline cascade;
+drop function if exists cb._role cascade;
+drop function if exists cb._area cascade;
+drop function if exists cb.project_pipeline cascade;
+
+alter table cb.projects add column if not exists pipeline boolean not null default false;
+
+alter table cb.tasks add column if not exists stage text;
+alter table cb.tasks drop constraint if exists tasks_stage_check;
+alter table cb.tasks add constraint tasks_stage_check check (stage is null or stage in ('design','approval','build','review','merge','qa'));
+-- crew: who designs, builds and reviews this card (keys design, build, review: actor names)
+alter table cb.tasks add column if not exists crew jsonb not null default '{}';
+alter table cb.tasks add column if not exists stage_since timestamptz;
+alter table cb.tasks add column if not exists approved_version int;
+
+alter table cb.sessions add column if not exists role text;
+alter table cb.sessions drop constraint if exists sessions_role_check;
+alter table cb.sessions add constraint sessions_role_check check (role is null or role in ('lead','architect','owner','builder','reviewer','qa','investigator'));
+alter table cb.sessions add column if not exists area text;
+alter table cb.sessions add column if not exists model text;
+
+alter table cb.questions add column if not exists approval_for bigint references cb.tasks(id) on delete set null;
+
+-- A card's page (task_id) or an area's page (area): one current body, older ones in page_versions.
+create table if not exists cb.pages (
+  id         bigint generated always as identity primary key,
+  project    text not null references cb.projects(slug) on update cascade,
+  task_id    bigint unique references cb.tasks(id) on delete cascade,
+  area       text,
+  body       text not null,
+  version    int not null,
+  updated_by text not null,
+  updated_at timestamptz not null default now(),
+  unique (project, area),
+  check ((task_id is null) <> (area is null))
+);
+create table if not exists cb.page_versions (
+  page_id    bigint references cb.pages(id) on delete cascade,
+  version    int,
+  body       text,
+  updated_by text,
+  updated_at timestamptz,
+  primary key (page_id, version)
+);
+-- the last stall nudge sent for a card in a stage
+create table if not exists cb.stage_nudges (
+  task_id   bigint primary key references cb.tasks(id) on delete cascade,
+  nudged_at timestamptz not null
+);
+
+create function cb._pipeline(p text) returns boolean language sql stable as $$
+  select coalesce((select pr.pipeline from cb.projects pr where pr.slug = p), false)
+$$;
+
+-- The role of the actor's most recently seen session; the orchestrator is the lead until it says otherwise.
+create function cb._role(a text) returns text language sql stable as $$
+  select coalesce((select s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1),
+                  case when a = 'orch' or a like 'orch@%' then 'lead' end)
+$$;
+
+create function cb._area(a text) returns text language sql stable as $$
+  select s.area from cb.sessions s where s.actor = a order by s.last_seen desc limit 1
+$$;
+
+-- Ahmed turns the squad pipeline on or off for a project, from the dashboard.
+create function cb.project_pipeline(project text, enabled boolean, actor text default null) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+declare a text; p text := cb.read_project(project);
+begin
+  perform cb.dashboard_only('Board');
+  a := cb.set_actor(coalesce(actor, 'ahmed'));
+  update cb.projects pr set pipeline = coalesce(enabled, false) where pr.slug = p;
+  insert into cb.events (actor, project, kind, summary)
+  values (a, p, 'note', format('pipeline %s for %s', case when coalesce(enabled, false) then 'on' else 'off' end, p));
+  return coalesce(enabled, false);
+end $$;
