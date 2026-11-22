@@ -1616,7 +1616,7 @@ create function cb.pings_due() returns int language plpgsql as $$
 declare r record; o text; n int := 0; mins int; idle text; live boolean;
 begin
   for r in
-    select t.id, t.project, t.title, t.assignee, t.status,
+    select t.id, t.project, left(t.title, 80) as title, nullif(trim(t.assignee), '') as assignee, t.status,  -- unassigned cards hold '' as well as null; a title is cut: GitHub cards carry strangers' text
            greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
      where t.status not in ('done', 'cancelled')

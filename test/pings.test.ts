@@ -68,6 +68,7 @@ test('task_ping_bulk: many cards at once, by ids or a whole project; unassigned 
   await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
   for (const [t, st] of [['A', 'backlog'], ['B', 'next'], ['C', 'blocked'], ['D', 'done']])
     await sql`select cb.task_add(project => 'demo', title => ${t}, status => ${st}, actor => 'orch@pc')`;
+  await sql`update cb.tasks set updated_at = now() - interval '3 hours', assignee = '' where id = 1`; // cards made unassigned hold ''
   await sql`update cb.tasks set updated_at = now() - interval '3 hours'`;
   await sql`update cb.events set at = now() - interval '3 hours'`;
   const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
@@ -77,7 +78,7 @@ test('task_ping_bulk: many cards at once, by ids or a whole project; unassigned 
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed') as n`)[0].n, 1, 'C only: A and B were on, D is done');
   assert.equal((await sql`select cb.pings_due() as n`)[0].n, 3, 'one line per card to the orchestrator; nobody is assigned');
   const m = await sql`select summary from cb.events where data ? 'nudge' order by id`;
-  assert.match(m[0].summary, /"A" \(unassigned, backlog\) has had no update for 3h 0m/);
+  assert.match(m[0].summary, /"A" \(unassigned, backlog\) has had no update for 3h 0m\./, 'no "assigned to ," and no session-gone note for a card nobody holds');
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', false, 'ahmed') as n`)[0].n, 3);
   assert.equal((await sql`select count(*)::int as n from cb.task_pings`)[0].n, 0);
 });
