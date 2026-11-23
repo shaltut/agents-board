@@ -78,3 +78,39 @@ test('only the lead may merge pull requests', () => {
     }
   }
 });
+
+test('every role denies the other push spellings: mirror, all, HEAD or @ as the ref, and pushes that name no branch', () => {
+  const bad = [
+    'git push --mirror', 'git push origin --mirror', 'git push --all', 'git push origin --all', 'git push origin --all --tags',
+    'git push origin HEAD', 'git push -u origin HEAD', 'git push origin HEAD --tags', 'git push origin @', 'git push origin @ -v',
+    'git push upstream', 'git push -u', 'git push -u origin',
+    'git -C wt push --mirror', 'git -C wt push origin --all', 'git -C wt push origin HEAD', 'git -C wt push -u origin HEAD', 'git -C wt push origin @',
+    'git -C wt push', 'git -C wt push origin', 'git -C wt push upstream', 'git -C wt push -u', 'git -C wt push -u origin',
+  ];
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const c of bad) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
+  }
+});
+
+test('a named-branch push stays allowed for the roles that may push', () => {
+  for (const r of ROLES.filter((x) => !READ_ONLY.includes(x))) {
+    const { deny } = load(r).permissions;
+    for (const c of ['git push -u origin feat/x', 'git push origin feat/x', 'git -C wt push -u origin feat/x', 'git -C wt push origin feat/x',
+      'git push origin HEAD:feat/x', 'git push origin feat/HEAD-fix', 'git push origin feat/all-in-one']) {
+      assert.deepEqual(deny.filter((d: string) => matches(d, c)), [], `${r}: ${c}`);
+    }
+  }
+});
+
+test('read-only roles also deny commit with git options in front', () => {
+  for (const r of READ_ONLY) {
+    const { deny } = load(r).permissions;
+    assert.ok(deny.includes('Bash(git * commit*)'), r);
+    assert.ok(denied(deny, 'git -C wt commit -m x') && denied(deny, 'git -c user.name=x commit -m y'), r);
+  }
+});
+
+test('no role may use the PowerShell tool: squad sessions work through Bash', () => {
+  for (const r of ROLES) assert.ok(load(r).permissions.deny.includes('PowerShell'), r);
+});

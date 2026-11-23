@@ -44,6 +44,8 @@ test('loadRoleTexts updates and deletes', async () => {
     await loadRoleTexts(sql, dir);
     assert.equal((await sql`select count(*)::int as n from cb.role_texts where role = 'builder'`)[0].n, 0);
     assert.equal((await sql`select count(*)::int as n from cb.role_texts`)[0].n, 1);
+    await loadRoleTexts(sql, join(dir, 'missing')); // a missing folder leaves the texts alone and does not throw
+    assert.equal((await sql`select count(*)::int as n from cb.role_texts`)[0].n, 1);
   } finally {
     rmSync(dir, { recursive: true });
     await loadRoleTexts(sql, 'prompts/roles'); // put the real texts back for later tests
