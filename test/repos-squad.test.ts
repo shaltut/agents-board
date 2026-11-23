@@ -273,3 +273,19 @@ test('squad_set refuses a session name over herdr\'s 32 characters', async () =>
   await sql`select cb.ensure_project('a-long-project-name-here')`;
   await assert.rejects(sql`select cb.squad_set('a-long-project-name-here', ${sql.json(flat)}, 'ahmed')`, msg('a-long-project-name-here-B1@macbook'));
 });
+
+test('squad_set name check: project-wide roles carry no repo in their name', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  const p = 'a-nineteen-char-prj'; // <p>-Q1@macbook is 30; a wrong main- infix would make it 35
+  await sql`select cb.ensure_project(${p})`;
+  const paths = (r: string) => ({ macbook: `/Users/me/Work/${r}`, pc: `C:/w/${r}` });
+  const sq = { machines: { macbook: { herdr: 'macbook', board: '/b' }, pc: { herdr: null, board: 'C:/b' } },
+    repos: { api: { home: true, paths: paths('api') }, x: { paths: paths('x') } },
+    areas: [{ name: 'a', repo: 'api' }, { name: 'x', repo: 'x' }],
+    roles: { lead: { count: 1, machine: 'pc' }, owner: { machine: 'pc' }, architect: { count: 1, machine: 'pc' }, investigator: { count: 1, machine: 'pc' },
+             builder: { count: { api: 1, x: 1 }, machine: 'macbook' }, reviewer: { count: { api: 1, x: 1 }, machine: 'macbook' },
+             qa: { count: 1, machine: 'macbook' } } };
+  // longest real names: <p>-x-B1@macbook and <p>-x-R1@macbook, 32 each
+  const s = (await sql`select cb.squad_set(${p}, ${sql.json(sq)}, 'ahmed') as s`)[0].s;
+  assert.equal(s.roles.qa.count, 1);
+});
