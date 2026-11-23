@@ -168,6 +168,16 @@ function run(argv: string[], o: { cwd: string; env: NodeJS.ProcessEnv; io: Io; m
   });
 }
 
+// Every *.lock under a slot clone's .git (objects aside), files or folders. Links are removed, never followed: Node's
+// recursive readdir would walk into a junction.
+function dropLocks(d: string, skip: string) {
+  for (const e of readdirSync(d, { withFileTypes: true })) {
+    const f = join(d, e.name);
+    if (e.name.endsWith('.lock')) rmSync(f, { recursive: true, force: true });
+    else if (e.isDirectory() && f !== skip) dropLocks(f, skip);
+  }
+}
+
 const isLists = (v: unknown): v is Record<string, string[]> =>
   typeof v === 'object' && v !== null && !Array.isArray(v) && Object.values(v).every((a) => Array.isArray(a) && a.every((x) => typeof x === 'string'));
 
@@ -243,10 +253,13 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     copyFileSync(join(gitDir, 'config'), saved);
   }
   io.reset = () => {
-    rmSync(join(gitDir, 'config'), { recursive: true, force: true }); // a planted link goes, not what it points at
-    copyFileSync(saved, join(gitDir, 'config'));
-    rmSync(join(gitDir, 'commondir'), { force: true }); // would point git at another config
-    rmSync(join(gitDir, 'config.lock'), { recursive: true, force: true }); // a planted lock would fail the URL set below
+    // a .git a job swapped for a link is left alone (the next job starts the slot over): nothing outside the clone goes
+    if (lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory()) {
+      rmSync(join(gitDir, 'config'), { recursive: true, force: true }); // a planted link goes, not what it points at
+      copyFileSync(saved, join(gitDir, 'config'));
+      rmSync(join(gitDir, 'commondir'), { force: true }); // would point git at another config
+      dropLocks(gitDir, join(gitDir, 'objects')); // a planted config.lock, index.lock, HEAD.lock or ref lock would fail the next git call
+    }
     if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
   io.reset();
