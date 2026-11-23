@@ -126,6 +126,11 @@ test('a cancel by someone else tells the requester; their own cancel does not', 
   const b = await add('B1@mac');
   await session`select cb.job_cancel(${b.id}, 'B1@mac')`;
   assert.equal((await told()).length, 1);
+  const c = await add('B1@mac');
+  await sql`select cb.job_cancel(${c.id}, 'ahmed')`; // the dashboard
+  const after = await told();
+  assert.equal(after.length, 2);
+  assert.ok(after.some((m: string) => m.startsWith(`job #${c.id} test at abcdef1: cancelled. cancelled by ahmed`)), after.join(' | '));
 });
 
 test('merging a project that ran a job moves the job', async () => {
