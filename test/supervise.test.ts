@@ -60,7 +60,8 @@ function fakeHerdr(o: { down?: string[]; start?: (c: Call) => any; prompt?: (c: 
   return { calls, run, live };
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
-const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0 });
+const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
+  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -153,7 +154,7 @@ test('a claim between mark and re-check stops the close', async () => {
   assert.equal((await events(sql, 'close')).length, 0);
 });
 
-test('a session that will not exit in 60 s keeps its pane and its mark is cleared', async () => {
+test('a session that will not exit in 60 s keeps its pane and its mark, which lapses by itself', async () => {
   const { sql, sup } = await setup();
   await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });
   const base = fakeHerdr();
@@ -168,7 +169,7 @@ test('a session that will not exit in 60 s keeps its pane and its mark is cleare
   assert.ok(gets <= 3, `${gets} agent gets: the wait is bounded by the clock, not by the number of polls`);
   assert.ok(out.includes('could not close sv-B1@macbook'), out.join('\n'));
   assert.ok(!has(base.calls, 'pane', 'close'));
-  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
+  assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // it may still be exiting
   assert.equal((await events(sql, 'close')).length, 0);
 });
 
@@ -189,14 +190,26 @@ test('blocked start tells the lead once', async () => {
   assert.match(tells[0].summary, /sv-B1@macbook .*pane p1 on macbook.*herdr --machine macbook agent prompt sv-b1-macbook/);
 });
 
-test('a blocked start with no lead session to tell is not marked told', async () => {
+test('a blocked start with no live lead tells nobody and is not marked told', async () => {
   const { sql, sup } = await setup();
   await card(sql);
   const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready"}}' }) });
   const d = deps(sup, h.run);
   const out = await tick(d);
-  assert.ok(out.some((l) => l.startsWith('could not tell orch@macbook')), out.join('\n'));
+  assert.ok(!out.some((l) => l.startsWith('could not tell')), out.join('\n'));
+  assert.equal((await sql`select count(*)::int as n from cb.events where kind = 'message'`)[0].n, 0);
+  assert.equal((await events(sql, 'blocked')).length, 1); // the digest's blocked line is the fallback
   assert.equal(d.memory.blockedTold.size, 0);
+});
+
+test('the lead told is the live lead session of the project, whatever its name', async () => {
+  const { sql, sup } = await setup();
+  await card(sql);
+  await session(sql, 'boss@macbook', 'lead');
+  const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready"}}' }) });
+  const out = await tick(deps(sup, h.run));
+  assert.equal((await tells(sql, 'boss@macbook')).length, 1, out.join('\n'));
+  assert.equal((await tells(sql)).length, 0);
 });
 
 test('a started session whose first prompt failed is blocked: the lead gets the command once', async () => {
@@ -243,7 +256,7 @@ test('a name that failed to start is not retried for 10 minutes', async () => {
   assert.equal(h.calls.filter((c) => c.args[1] === 'start' && c.args[2] === 'sv-b1-macbook').length, 1); // B2 is tried instead
   const f = (await events(sql, 'failed')).filter((e) => e.data.session === 'sv-B1@macbook');
   assert.equal(f.length, 1);
-  assert.equal(f[0].data.note, 'model missing');
+  assert.equal(f[0].data.note, 'start failed'); // herdr's error text stays in the PC log only
   assert.ok(d.memory.failedAt.has('sv-B1@macbook'));
 });
 
@@ -298,7 +311,12 @@ test('runner: a start that does not beat is not retried for 10 minutes; the lead
   assert.ok(out.includes('runner started 1 min ago and still not beating'), out.join('\n'));
   assert.equal((await tells(sql)).length, 1);
   await tick({ ...d, now: d.now + 11 * 60_000 });
-  assert.equal(h.calls.filter((c) => c.args[0] === 'tab').length, 2, 'started again after 10 minutes');
+  const tabs = h.calls.filter((c) => c.args[0] === 'tab');
+  assert.equal(tabs.length, 2, 'started again after 10 minutes');
+  // the dead runner tab it opened before is closed first: that pane only
+  const closes = h.calls.filter((c) => c.args[0] === 'pane' && c.args[1] === 'close');
+  assert.deepEqual(closes.map((c) => c.args[2]), ['p1']);
+  assert.ok(h.calls.indexOf(closes[0]!) < h.calls.indexOf(tabs[1]!));
 });
 
 test('runner: a held port is told to the lead, hourly', async () => {
@@ -310,6 +328,76 @@ test('runner: a held port is told to the lead, hourly', async () => {
   const t = await tells(sql);
   assert.equal(t.length, 1);
   assert.match(t[0].summary, /runner pc-test is not beating but its port is held/);
+});
+
+test('the hold re-check runs after herdr finds the pane, right before /exit', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  let found = false;
+  const run: Runner = (m, args) => { if (args[1] === 'get') found = true; return h.run(m, args); };
+  // a card lands while herdr is asked for the pane: the next state read must see it
+  const hooked = new Proxy(sup, {
+    apply(t, self, args: any[]) {
+      if (!found || !/supervise_state/.test(String(args[0]?.join?.('?')))) return Reflect.apply(t, self, args);
+      found = false;
+      return card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' }).then(() => Reflect.apply(t, self, args));
+    },
+  });
+  const out = await tick(deps(hooked, run));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
+});
+
+test('a name herdr lists but cannot find is not tried again for 10 minutes', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  let gets = 0;
+  const run: Runner = (m, args) => (args[1] === 'get' ? (gets++, GONE) : h.run(m, args));
+  const d = deps(sup, run);
+  const out = await tick(d);
+  assert.ok(out.includes('could not close sv-B1@macbook: herdr does not show it'), out.join('\n'));
+  await tick({ ...d, now: d.now + 60_000 });
+  assert.equal(gets, 1);
+  await tick({ ...d, now: d.now + 11 * 60_000 });
+  assert.equal(gets, 2);
+});
+
+test('a restore that fails still writes a restore event, so the 30-minute limit holds', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B2@macbook', 'builder', { live: false });
+  await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
+  const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: 'model missing' }) });
+  await tick(deps(sup, h.run));
+  const r = await events(sql, 'restore');
+  assert.equal(r.length, 1);
+  assert.equal(r[0].data.note, 'start failed');
+  assert.equal((await events(sql, 'failed')).length, 1);
+});
+
+test('one bad project does not stop the others', async () => {
+  const { sql, sup } = await setup(['sv', 'sw']);
+  await card(sql, { project: 'sw' });
+  await sql`update cb.projects set squad = '{"supervise": true}' where slug = 'sv'`;
+  const h = fakeHerdr();
+  const out = await tick(deps(sup, h.run));
+  assert.ok(out.some((l) => l.startsWith('sv: ')), out.join('\n'));
+  assert.ok(h.calls.some((c) => c.args[1] === 'start' && c.args[2] === 'sw-b1-macbook'), out.join('\n'));
+});
+
+test('a project whose own machine (herdr null) is not this machine is skipped, said once an hour', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, machines: { ...SQUAD.machines, 'not-this-pc': { herdr: null, repo: '/r', board: '/b' } } })}, 'ahmed')`;
+  await card(sql);
+  const h = fakeHerdr();
+  const d = deps(sup, h.run);
+  const out = [...await tick(d), ...await tick({ ...d, now: d.now + 60_000 })];
+  assert.equal(h.calls.length, 0, JSON.stringify(h.calls));
+  assert.equal(out.filter((l) => l.includes('not-this-pc')).length, 1, out.join('\n'));
+  assert.equal((await sql`select count(*)::int as n from cb.events where actor = 'supervisor'`)[0].n, 0);
 });
 
 test('a second supervisor exits', async () => {

@@ -197,3 +197,39 @@ test('down_again_logged after a restore then a down_again', async () => {
   b1 = (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook');
   assert.equal(b1.down_again_logged, true);
 });
+
+test('last_event: a name reused by a fresh bind starts its idle clock at the bind, not at an old event', async () => {
+  const { sql, sup } = await setup();
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('sv-B1@macbook', 'sv', 'note', 'old', now() - interval '2 hours')`;
+  await sql`update cb.sessions set started_at = now(), last_seen = now() where actor = 'sv-B1@macbook'`;
+  const b1 = (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook');
+  const [{ started_at }] = await sql`select started_at from cb.sessions where actor = 'sv-B1@macbook'`;
+  assert.equal(new Date(b1.last_event).getTime(), new Date(started_at).getTime());
+});
+
+test('asks: open dashboard asks to the session are counted, done ones are not', async () => {
+  const { sql, sup } = await setup();
+  await sql`insert into cb.asks (project, to_actor, body) values ('sv', 'sv-B1@macbook', 'x'), ('sv', 'sv-B1@macbook', 'y')`;
+  await sql`insert into cb.asks (project, to_actor, body, status) values ('sv', 'sv-B1@macbook', 'z', 'done')`;
+  const by = Object.fromEntries((await state(sup)).sessions.map((x: any) => [x.actor, x]));
+  assert.deepEqual([by['sv-B1@macbook'].asks, by['sv-B2@macbook'].asks], [2, 0]);
+});
+
+test('supervise_log refuses a session that is not a session name', async () => {
+  const { sup } = await setup();
+  for (const bad of ['sv B1', 'x'.repeat(65), "sv-B1@macbook'; --", 'sv/B1']) {
+    await assert.rejects(sup`select cb.supervise_log('sv', 'start', ${bad})`, /session must be/);
+  }
+  await sup`select cb.supervise_log('sv', 'start', ${'sv-B1@mac.book_x'})`;
+});
+
+test('down_again_since_bind: set by a down_again, cleared when the name binds again', async () => {
+  const { sql, sup } = await setup();
+  const b1 = async () => (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook').down_again_since_bind;
+  assert.equal(await b1(), false);
+  await sup`select cb.supervise_log('sv', 'restore', 'sv-B1@macbook')`;
+  await sup`select cb.supervise_log('sv', 'down_again', 'sv-B1@macbook')`;
+  assert.equal(await b1(), true);
+  await sql`select cb.iam('macbook', 'p1', 'sv-B1@macbook', 'sv', 'builder')`; // bound again by hand
+  assert.equal(await b1(), false);
+});

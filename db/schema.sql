@@ -4347,11 +4347,16 @@ begin
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled')),
         'questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open'),
         'jobs', (select count(*) from cb.jobs j where j.requester = a.actor and j.state in ('queued', 'running')),
-        'last_event', coalesce((select max(e.at) from cb.events e where e.actor = a.actor), s.started_at),
+        'asks', (select count(*) from cb.asks k where k.to_actor = a.actor and k.status = 'open'),
+        -- greatest: a squad name is reused, so its old events must not make a fresh bind look idle
+        'last_event', greatest((select max(e.at) from cb.events e where e.actor = a.actor), s.started_at),
         'closing', cb._closing(a.actor),
         'last_restore', r.at,
         'down_again_logged', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
-                                        and e.data ->> 'session' = a.actor and e.at > coalesce(r.at, '-infinity'))
+                                        and e.data ->> 'session' = a.actor and e.at > coalesce(r.at, '-infinity')),
+        -- a down_again since the name last bound: no automatic restore until it binds again (no crash loop)
+        'down_again_since_bind', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
+                                            and e.data ->> 'session' = a.actor and e.at > coalesce(s.started_at, '-infinity'))
       ) order by a.actor)
       from (select s2.actor from cb.sessions s2 where s2.project = p
             union select t.assignee from cb.tasks t where t.project = p and t.assignee is not null and t.status not in ('done', 'cancelled')) a
@@ -4384,6 +4389,7 @@ declare id bigint; hit text;
 begin
   perform cb._supervisor_only();
   if nullif(trim(session), '') is null then raise exception 'session is required'; end if;
+  if session !~ '^[A-Za-z0-9@._-]{1,64}$' then raise exception 'session must be a session name: letters, digits, @ . _ - (at most 64)'; end if;
   note := nullif(left(trim(note), 200), '');
   hit := cb._sensitive(note);
   if hit is not null then raise exception 'the note looks like %; the board keeps no such text', hit; end if;

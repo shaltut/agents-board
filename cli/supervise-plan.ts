@@ -2,12 +2,14 @@
 import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad-up.ts';
 
 export type Session = { actor: string; role: string; area: string | null; machine: string | null; pane: string | null; live: boolean;
-  holds: number; questions: number; jobs: number; last_event: string | null; closing: boolean; last_restore: string | null; down_again_logged: boolean };
+  holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
+  down_again_logged: boolean; down_again_since_bind: boolean };
 export type State = { project: string; squad: Squad; supervised: boolean;
   waiting: { builder: number; reviewer: number; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   sessions: Session[] };
 // launched: names this supervisor run started or restored that the board has not yet seen live
-export type TickInput = { state: State; herdrLive: Set<string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
+// herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only 'idle' may be closed
+export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[] };
 
 const MIN = 60_000, CLOSE_AFTER = 20 * MIN, RETRY_AFTER = 10 * MIN, RESTORE_EVERY = 30 * MIN, MAC = 'macbook', MAC_CAP = 8;
@@ -32,6 +34,7 @@ export function planTick(i: TickInput): TickPlan {
   for (const w of wanted) {
     const s = by.get(w.name);
     if (!s || !s.holds || isLive(w.name) || herdrDown.has(machineOf(w.name))) continue;
+    if (s.down_again_since_bind) continue; // down again after a restore: a person restores it; no loop until it binds again
     if (s.last_restore && now - Date.parse(s.last_restore) < RESTORE_EVERY) {
       if (!s.down_again_logged) plan.notes.push({ what: 'down_again', session: w.name });
       continue;
@@ -51,7 +54,7 @@ export function planTick(i: TickInput): TickPlan {
   }
   for (const g of groups.values()) {
     const mine = state.sessions.filter((s) => s.role === g.role && (g.area === undefined || s.area === g.area));
-    const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.closing;
+    const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.asks && !s.closing;
     // a name this run launched that herdr runs but the board does not see yet (still starting, or on a startup
     // dialog) counts as started: live, and about to take work, so the next tick does not start another for the same
     // card. Only this run's launches: any other herdr-only name would cancel waiting work for as long as its pane lives.
@@ -69,7 +72,8 @@ export function planTick(i: TickInput): TickPlan {
     if (g.waiting > 0) continue;
     for (const w of g.names) {
       const s = by.get(w.name);
-      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
+      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && i.herdrStatus[herdrName(w.name)] === 'idle'
+        && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }
   return plan;

@@ -235,21 +235,25 @@ A project is supervised only when its pipeline is on and its squad file says `"s
 The squad `count` per role is then the most the supervisor keeps up. Every 60 s it:
 
 - restores a squad session that is down but holds open cards, under the same name with `cb resume` (at most once
-  per 30 minutes per name; down again within 30 minutes: a `down_again` event, restore it by hand);
+  per 30 minutes per name, failed or not; down again within 30 minutes: a `down_again` event, and no automatic
+  restore until the name binds again: restore it by hand);
 - starts sessions for waiting cards, like `cb squad up` (names, models, permission files), at most 3 a tick, 8 on
   the Mac in all; a name that failed to start waits 10 minutes;
-- closes a squad session idle 20 minutes that holds nothing (no card, question or job) when its role has no
-  waiting work: it marks it closing, checks again, sends `/exit`, then closes the pane;
+- closes a squad session idle 20 minutes that holds nothing (no card, question, job or open dashboard ask), that herdr
+  shows `idle`, when its role has no waiting work: it marks it closing, finds its pane, checks again, sends `/exit`,
+  then closes the pane (not gone in 60 s: the pane stays and the mark lapses in 5 minutes);
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
-  for 3 minutes, at most once per 10 minutes. A start that does not beat, or a log port still held by an old
+  for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
+- skips a project whose squad puts its own machine (`"herdr": null`) on another machine than this one, saying so
+  in its log once an hour.
 
 It never:
 
 - starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
-- answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead once, with the
-  pane and the command to send the first prompt afterwards (the same when a session started but its first prompt
-  was not sent);
+- answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
+  live session in the lead role; none live: the digest's blocked line) once, with the pane and the command to send
+  the first prompt afterwards (the same when a session started but its first prompt was not sent);
 - frees a card held by a down session, or runs anything heavy itself.
 
 ## Tests

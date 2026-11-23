@@ -17,10 +17,10 @@ const squad = {
   areas: ['claims', 'kb'], supervise: true,
 };
 const sess = (actor: string, role: string, o: Partial<Session> = {}): Session => ({ actor, role, area: null, machine: 'macbook', pane: 'p', live: true,
-  holds: 0, questions: 0, jobs: 0, last_event: ago(1), closing: false, last_restore: null, down_again_logged: false, ...o });
+  holds: 0, questions: 0, jobs: 0, asks: 0, last_event: ago(1), closing: false, last_restore: null, down_again_logged: false, down_again_since_bind: false, ...o });
 const state = (o: { waiting?: Record<string, any>; sessions?: Session[]; supervised?: boolean } = {}): State => ({ project: 'sv', squad, supervised: o.supervised ?? true,
   waiting: { builder: 0, reviewer: 0, qa: 0, investigator: 0, architect: 0, owner: { claims: 0, kb: 0 }, ...o.waiting }, sessions: o.sessions ?? [] });
-const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, herdrLive: new Set(), herdrDown: new Set(), launched: new Set(), macLive: 0, startsLeft: 3, failedAt: new Map(), now: NOW, ...o });
+const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, herdrLive: new Set(), herdrStatus: {}, herdrDown: new Set(), launched: new Set(), macLive: 0, startsLeft: 3, failedAt: new Map(), now: NOW, ...o });
 const names = (l: { name: string }[]) => l.map((x) => x.name);
 
 test('not supervised: empty plan', () => {
@@ -75,12 +75,13 @@ test('a recently failed name is skipped, the next number is used', () => {
 });
 
 test('close rules', () => {
-  const c = (s: Session, w = {}) => tick(state({ sessions: [s], waiting: w })).close;
+  const c = (s: Session, w = {}) => tick(state({ sessions: [s], waiting: w }), { herdrStatus: { 'sv-b1-macbook': 'idle' } }).close;
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21) })), ['sv-B1@macbook']);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(19) })), []);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21), holds: 1 })), []);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21), questions: 1 })), []);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21), jobs: 1 })), []);
+  assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21), asks: 1 })), []);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21), closing: true })), []);
   assert.deepEqual(c(sess('sv-B1@macbook', 'builder', { last_event: ago(21) }), { builder: 1 }), []);
   assert.deepEqual(c(sess('orch@shaltoot', 'lead', { last_event: ago(90) })), []);
@@ -104,8 +105,9 @@ test('restore, down_again, herdr down, and no reuse of a holding name', () => {
   assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(31) }] })).restore.length, 1);
   assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [] });
   const quiet = sess('sv-B2@macbook', 'builder', { last_event: ago(21) });
-  assert.deepEqual(tick(state({ sessions: [quiet] }), { herdrDown: new Set(['macbook']) }).close, []);
-  assert.deepEqual(tick(state({ sessions: [quiet] })).close, ['sv-B2@macbook']);
+  const idleB2 = { herdrStatus: { 'sv-b2-macbook': 'idle' } };
+  assert.deepEqual(tick(state({ sessions: [quiet] }), { ...idleB2, herdrDown: new Set(['macbook']) }).close, []);
+  assert.deepEqual(tick(state({ sessions: [quiet] }), idleB2).close, ['sv-B2@macbook']);
   assert.equal(tick(state({ sessions: [down] }), { herdrLive: new Set(['sv-b1-macbook']) }).restore.length, 0);
   assert.deepEqual(names(tick(state({ sessions: [down], waiting: { builder: 2 } })).start), ['sv-B2@macbook']);
 });
@@ -120,4 +122,23 @@ test('restores use up startsLeft', () => {
   const p = tick(state({ sessions: [down], waiting: { builder: 5 } }), { startsLeft: 2 });
   assert.equal(p.restore.length, 1);
   assert.equal(p.start.length, 1);
+});
+
+test('close only when herdr reports the agent idle', () => {
+  const quiet = state({ sessions: [sess('sv-B1@macbook', 'builder', { last_event: ago(21) })] });
+  assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': 'idle' } }).close, ['sv-B1@macbook']);
+  for (const st of ['working', 'blocked', 'done', 'unknown']) assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': st } }).close, [], st);
+  assert.deepEqual(tick(quiet).close, [], 'not in herdr: no close');
+});
+
+test('a session with an open ask is not idle: it cancels no waiting work', () => {
+  const asked = sess('sv-B1@macbook', 'builder', { asks: 1 });
+  assert.deepEqual(names(tick(state({ waiting: { builder: 1 }, sessions: [asked] })).start), ['sv-B2@macbook']);
+});
+
+test('down again since it last bound: never restored again until it binds', () => {
+  const down = sess('sv-B1@macbook', 'builder', { live: false, holds: 1, last_restore: ago(31), down_again_logged: true, down_again_since_bind: true });
+  const p = tick(state({ sessions: [down] }));
+  assert.deepEqual([p.restore, p.notes], [[], []]);
+  assert.equal(tick(state({ sessions: [{ ...down, down_again_since_bind: false }] })).restore.length, 1);
 });

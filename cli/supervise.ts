@@ -11,11 +11,15 @@ import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, startOne, type Launch, type Runner } from './squad-up.ts';
 import { planTick, type State, type TickPlan } from './supervise-plan.ts';
 
-const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000;
+const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
+  CLOSE_RETRY = 10 * 60_000;
 const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC: the runner tab's folder
 
 // launched: names this run started or restored that the board has not yet seen live (planTick counts them as started)
-export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number };
+// closeSkipAt: names herdr lists but could not find for a close (an unnamed pane), skipped 10 minutes
+// elsewhereToldAt: per project, when "its PC is another machine" was last said; runnerPane: the runner tab this run opened
+export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
+  closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
@@ -31,14 +35,23 @@ export async function tick(d: Deps): Promise<string[]> {
   };
   const states: State[] = [];
   for (const { slug } of await sql`select slug from cb.projects where squad ->> 'supervise' = 'true' order by slug`) {
-    const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
-    if (s.supervised) states.push(s);
+    try {
+      const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
+      if (!s.supervised) continue;
+      // herdr null = the machine the supervisor runs on: a squad that puts it elsewhere is not this supervisor's
+      const pc = Object.entries(s.squad.machines).find(([k, m]) => m.herdr === null && k.toLowerCase() !== machine())?.[0];
+      if (pc === undefined) { states.push(s); continue; }
+      if (now - (memory.elsewhereToldAt.get(slug) ?? -Infinity) >= HOUR) {
+        memory.elsewhereToldAt.set(slug, now);
+        out.push(`${slug}: skipped: its squad's own machine (herdr null) is ${pc}, this is ${machine()}`);
+      }
+    } catch (e) { out.push(`${slug}: could not read its state: ${msg(e)}`); }
   }
 
   // herdr: one agent list per herdr label (null = this PC) used by any supervised squad
   const keysOf = new Map<string | null, Set<string>>();
   for (const s of states) for (const [k, m] of Object.entries(s.squad.machines)) (keysOf.get(m.herdr) ?? keysOf.set(m.herdr, new Set()).get(m.herdr)!).add(k);
-  const herdrLive = new Set<string>(), herdrDown = new Set<string>(), mac = new Set<string>();
+  const herdrLive = new Set<string>(), herdrDown = new Set<string>(), mac = new Set<string>(), herdrStatus: Record<string, string> = {};
   let macAgents = 0;
   for (const [label, keys] of keysOf) {
     let agents: any;
@@ -48,7 +61,10 @@ export async function tick(d: Deps): Promise<string[]> {
       out.push(`herdr ${label ?? 'on this PC'} did not answer: nothing starts there this tick`);
       continue;
     }
-    for (const a of agents) if (typeof a?.name === 'string') { herdrLive.add(a.name); if (label === MAC) mac.add(a.name); }
+    for (const a of agents) if (typeof a?.name === 'string') {
+      herdrLive.add(a.name); herdrStatus[a.name] = String(a.agent_status);
+      if (label === MAC) mac.add(a.name);
+    }
     if (label === MAC) macAgents = agents.length;
   }
   // the Mac cap counts every live session there, any project (as cb squad up)
@@ -67,7 +83,7 @@ export async function tick(d: Deps): Promise<string[]> {
 
   for (const state of states) {
     try {
-      const plan = planTick({ state, herdrLive, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now });
+      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length;
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -76,12 +92,14 @@ export async function tick(d: Deps): Promise<string[]> {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
     }
   }
-  const leads = [...new Set(states.flatMap((s) => (s.squad.roles.lead ? [`orch@${s.squad.roles.lead.machine}`] : [])))];
+  const leads = [...new Set(states.map(leadOf).filter((x) => x !== undefined))];
   try { await runnerCheck(d, out, log, leads); } catch (e) { out.push(`runner check failed: ${msg(e)}`); }
   return out;
 }
 
 type Log = (project: string | null, what: string, session: string, note?: string) => Promise<void>;
+// the live session bound to the project in the lead role, whatever its name
+const leadOf = (s: State) => s.sessions.find((x) => x.role === 'lead' && x.live)?.actor;
 
 async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Log) {
   const { run, dryRun, now, memory } = d, project = state.project;
@@ -94,19 +112,22 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
       const r = startOne(l, run, tabs);
       out.push(r.line);
       if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
-      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once
-      const stuck = r.blocked ? 'dialog' : !r.ok && r.pane ? 'prompt' : null;
-      if (stuck) {
-        await log(project, 'blocked', l.name, stuck === 'dialog' ? r.pane : `prompt not sent, pane ${r.pane}`);
-        if (!memory.blockedTold.has(l.name) && await tellLead(d, state, l, r.pane!, stuck, out)) memory.blockedTold.add(l.name);
-      } else if (r.ok) await log(project, what, l.name, l.role);
-      else {
+      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once.
+      // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
+      const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
+      if (kind === 'start failed') {
         memory.failedAt.set(l.name, now);
-        await log(project, 'failed', l.name, r.line.slice(r.line.indexOf(': ') + 2).slice(0, 80));
+        await log(project, 'failed', l.name, kind);
+      } else if (kind) {
+        await log(project, 'blocked', l.name, r.blocked ? r.pane : `${kind}, pane ${r.pane}`);
+        if (!memory.blockedTold.has(l.name) && await tellLead(d, state, l, r.pane!, r.blocked ? 'dialog' : 'prompt', out)) memory.blockedTold.add(l.name);
       }
+      // a restore is logged however it ended, so its 30-minute limit holds across failures and supervisor restarts
+      if (!kind || what === 'restore') await log(project, what, l.name, kind ?? l.role);
     }
   }
   for (const name of plan.close) {
+    if (now - (memory.closeSkipAt.get(name) ?? -Infinity) < CLOSE_RETRY) continue;
     if (dryRun) out.push(`would close ${name}`);
     else out.push(await closeOne(d, state, name, log));
   }
@@ -117,32 +138,34 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
 }
 
 // A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per name per run, with
-// the pane and the command to finish. False when there is no lead or the tell failed (then the next tick tries again).
+// the pane and the command to finish. False when no lead session is live or the tell failed: it is not retried (the
+// name now runs in herdr, so it is not launched again); the digest's blocked line is the fallback.
 async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'dialog' | 'prompt', out: string[]) {
-  const lead = state.squad.roles.lead;
-  if (!lead) return false;
+  const lead = leadOf(state);
+  if (!lead) { out.push(`${state.project}: no live lead to tell about ${l.name}`); return false; }
   const where = `herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}`;
   const text = why === 'dialog'
     ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run: ${promptCommand(l)}`
     : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it: ${promptCommand(l)}`;
-  return tell(d, `orch@${lead.machine}`, text, out);
+  return tell(d, lead, text, out);
 }
 
 async function tell(d: Deps, to: string, text: string, out: string[]) {
   try { await d.sql`select cb.tell(${to}, ${text}, 'supervisor')`; return true; } catch (e) { out.push(`could not tell ${to}: ${msg(e)}`); return false; }
 }
 
-// Mark closing, re-check on a fresh statement, /exit, wait for herdr to drop the agent, close its pane.
+// Mark closing, find its pane, re-check on a fresh statement, /exit, wait for herdr to drop the agent, close its pane.
 async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<string> {
   const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
   if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return `skip closing ${name}: it holds work or has no session`;
-  const s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
-  if (!s || s.holds || s.questions || s.jobs) { await unmark(); return `skip closing ${name}: it took work`; }
   const m = state.squad.machines[name.split('@')[1]!]?.herdr ?? null, hn = herdrName(name);
   let pane: string | undefined;
   try { pane = find(herdrJson(run, m, ['agent', 'get', hn], 30_000), 'pane_id'); } catch {}
-  if (!pane) { await unmark(); return `could not close ${name}: herdr does not show it`; }
+  if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return `could not close ${name}: herdr does not show it`; }
+  // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
+  const s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
+  if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return `skip closing ${name}: it took work`; }
   if (run(m, ['agent', 'prompt', hn, '/exit'], 30_000).status !== 0) { await unmark(); return `could not close ${name}: /exit was not sent`; }
   for (const until = clock() + CLOSE_WAIT; clock() < until;) { // wall time: one agent get can take 30 s
     await sleep(POLL);
@@ -151,7 +174,7 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
     await log(state.project, 'close', name, s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
     return closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`;
   }
-  await unmark();
+  // /exit was sent and it may still be exiting: the mark stays and lapses in 5 minutes, so no card lands on it meanwhile
   return `could not close ${name}`;
 }
 
@@ -186,9 +209,19 @@ async function runnerCheck(d: Deps, out: string[], log: Log, leads: string[]) {
   }
   if (d.dryRun) { out.push('would start the runner'); return; }
   d.memory.runnerStartedAt = d.now;
+  // the runner tab this run opened before is dead (no beat, port free): close that pane only, if it still exists.
+  // herdr never reuses a closed pane id; the terminal id also guards against a herdr restart
+  const old = d.memory.runnerPane;
+  d.memory.runnerPane = undefined;
+  if (old) try {
+    const t = find(herdrJson(d.run, null, ['pane', 'get', old.pane], 30_000), 'terminal_id');
+    if (!old.terminal || t === old.terminal) herdrJson(d.run, null, ['pane', 'close', old.pane], 30_000);
+  } catch {} // gone already
   try {
-    const pane = find(herdrJson(d.run, null, ['tab', 'create', '--cwd', BOARD, '--label', 'runner', '--no-focus']), 'pane_id');
+    const created = herdrJson(d.run, null, ['tab', 'create', '--cwd', BOARD, '--label', 'runner', '--no-focus']);
+    const pane = find(created, 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
+    d.memory.runnerPane = { pane, terminal: find(created, 'terminal_id') };
     herdrJson(d.run, null, ['pane', 'run', pane, 'cb runner']);
     out.push(`started the runner in herdr pane ${pane}`);
     await log(null, 'runner', name, 'started');
@@ -224,7 +257,8 @@ if (import.meta.main) {
     say(`supervisor up (cb-supervisor/${version})`);
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
-  const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0 };
+  const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
+    closeSkipAt: new Map(), elsewhereToldAt: new Map() };
   let code = 0;
   for (;;) {
     try {
