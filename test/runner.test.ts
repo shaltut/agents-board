@@ -485,3 +485,16 @@ test('a changed git URL in runner.json reaches an existing slot clone', async ()
   const b = await direct('moved', ORIGIN2, 900003, M);
   assert.equal(b?.state, 'passed', b?.summary);
 });
+
+test('an origin that does not answer keeps the slot clone and what is in it', async () => {
+  const ORIGIN3 = join(TMP, 'origin3.git');
+  execFileSync('git', ['clone', '-q', '--bare', ORIGIN, ORIGIN3], { env: gitEnv });
+  const a = await direct('kept', ORIGIN3, 900004);
+  assert.equal(a?.state, 'passed', a?.summary);
+  const marker = join(TMP, 'direct', 'kept-1', 'marker.txt');
+  writeFileSync(marker, '1');
+  rmSync(ORIGIN3, { recursive: true, force: true });
+  const b = await direct('kept', ORIGIN3, 900005);
+  assert.equal(b?.summary, 'error: could not fetch from origin');
+  assert.ok(existsSync(marker), 'the slot was wiped for an outside problem');
+});

@@ -247,8 +247,8 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     }
     if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
-  // A fetch that fails in an existing clone (a job may have left garbage under .git, e.g. a non-ref file in refs) starts
-  // the slot over once: a fresh clone, then the fetch again. rmSync removes links, never what they point at.
+  // A fetch that fails in an existing clone while origin answers (a job may have left garbage under .git, e.g. a non-ref
+  // file in refs) starts the slot over once: a fresh clone, then the fetch again. rmSync removes links, never what they point at.
   for (let again = false; ; again = true) {
     if (again || !lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() || !existsSync(saved)) { // missing, or a link: start over
       rmSync(dir, { recursive: true, force: true });
@@ -276,6 +276,11 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     if (stop.aborted) return null;
     if (f.code === 0) break;
     if (again) return err('error: could not fetch from origin');
+    // start over only when origin answers (the clone is what broke); an outside problem (network, credentials) keeps
+    // the slot and its install. --exit-code: 2 = origin answered with no HEAD (a bare origin's unborn default branch)
+    const ls = await git(['ls-remote', '--exit-code', 'origin', 'HEAD'], true);
+    if (stop.aborted) return null;
+    if (ls.code !== 0 && ls.code !== 2) return err('error: could not fetch from origin');
   }
   const rv = await git(['rev-parse', '--verify', '--quiet', `${j.sha}^{commit}`], true);
   if (stop.aborted) return null;
