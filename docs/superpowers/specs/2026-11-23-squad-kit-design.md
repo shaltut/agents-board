@@ -38,8 +38,13 @@ its fences and its model, and makes a whole squad start with one command, for an
 - Everyone: deny push to `main`/`master` in every spelling (`origin main`, `HEAD:main`, `+main`), force push (`-f`,
   `--force`, `--force-with-lease`). The lead lands work with `gh pr merge`, allowed for the lead only. claude-board's
   own release (fast-forward and push main) stays with Ahmed's terminal or the orchestrator outside the squad. My call.
-- These cover the Bash tool. Squad sessions run on the Mac or Linux, so the Windows PowerShell tool is out of scope.
-- Reviewer, QA, investigator: also deny Edit, Write, NotebookEdit, `git commit`, `git push`, `gh pr merge`.
+- Also denied in every spelling: `--mirror` and `--all` anywhere in a push; `HEAD` or `@` as the pushed ref (`git push
+  origin HEAD`); a push that names no branch (`git push`, `git push origin`, `git push upstream`, `git push -u`,
+  `git push -u origin`); each with its `git -C <dir> push` twin. `git push -u origin feat/x` stays allowed.
+- These cover the Bash tool. The whole **PowerShell tool is denied** for every role (a PC lead in bypass mode would
+  otherwise have no fence there): squad sessions work through Bash.
+- Reviewer, QA, investigator: also deny Edit, Write, NotebookEdit, `git commit` (and `git -C <dir> commit`), `git push`,
+  `gh pr merge`.
 - Builder, owner, architect: everything else; `gh pr merge` denied. Lead: `gh pr merge` allowed.
 - Deny rules are the fence (the 2026-11-22 permission test): the auto-mode classifier is not.
 
@@ -68,26 +73,32 @@ habit: the owner role keeps its area page current; every role reads the area pag
   `--settings`). Each pane opens in the checkout; a builder makes its own worktree per card, as its role prompt and the
   project's CLAUDE.md say. Machine names are checked against `herdr machine list` when `squad up` runs (the board can't
   see herdr). My call.
+- Every machine entry has a `herdr` key (the herdr machine name, or `null` for this PC); a missing key is refused.
+  Machine keys are slugs (`^[a-z][a-z0-9-]{0,31}$`). `repo` and `board` are **absolute paths only** (`/...` or
+  `C:/...`), with no spaces, `~` or shell characters: they go into a herdr command line, where `~` would not expand.
 - Live means: the board saw the session in the last 90 seconds, or herdr has an agent with that name on that machine
   (a compacting session can look quiet to the board). A name that is down is started again under the same name: when
   Ahmed runs `squad up`, that is him restoring it (Q2324). My call.
 - The Mac cap (8) counts every live session on the machine, all projects, not only this squad file. My call.
+  The machine is recognised by its **herdr label** (`macbook`), whatever key the squad file gives it, both when the
+  squad is saved and when `squad up` plans.
 - It never closes or restarts a live session, never goes over the cap, and `--dry-run` prints the plan only.
   Starting and stopping on demand is the supervisor (piece 4).
 
 ### 5. The dangerous-commands hook (Q2318)
 
-- The hook moves into the kit: `kit/hooks/block-dangerous-commands.sh`, with `kit/hooks/test-dangerous.sh`: a list
-  of commands that must block and texts that must pass (e.g. `cb tell orch "the shutdown is planned"`, a heredoc
+- The hook moves into the kit: `kit/hooks/block-dangerous.mjs` (Node; it needs no `.sh`), with
+  `test/dangerous.test.ts`: a list of commands that must block and texts that must pass (e.g. `cb tell orch "the shutdown is planned"`, a heredoc
   that mentions `git reset --hard`).
 - Only **message text** is removed before matching: the text arguments of `cb tell|ask|log|add|done|move|fail|pass`,
   `git commit -m`, `gh pr create|comment --body`, and heredocs fed to `cb`, `cat > <file>` or `git commit -F -`.
   Every other quoted string and heredoc is still checked, so `psql -c "drop table x"`, a
   heredoc into `psql`, `ssh vps1 "sudo reboot"`, `bash -c "rm -rf /"`, `node -e`, `python -c` stay blocked. My call:
   the builder check showed that stripping every quoted string would let those through.
-- Shell-command patterns (`rm -rf /`, `git reset --hard`, power-off and reboot commands ...) match only where a
-  command starts: line start, after `;`, `&&`, `||`, `|`, `$(`, or the start of a quoted string. SQL patterns
-  (`DROP DATABASE`, `DROP TABLE`) match anywhere outside message text.
+- Patterns match **anywhere** after the message text is stripped (controller ruling: fail closed, so `ssh host
+  <power-off word>`, `nohup`, `xargs` stay blocked), not only at a command start. Patterns that span words (`mv ...
+  /dev/null`, force push, hard reset) stay inside one command segment: they never cross `;`, `&`, `|` or a newline.
+  The power-off words are not matched inside file names (`graceful-shutdown.ts`, `shutdown.test.ts`).
 - While writing this design, today's hook blocked a design edit because the text named a power-off command: the
   exact problem this fixes.
 - Installed to `~/.claude/hooks/` on the PC only after Ahmed says yes **in the terminal** (Q2318), then to the Mac.

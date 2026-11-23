@@ -77,7 +77,12 @@ Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on
    `bash ~/.claude/hooks/block-dangerous-commands.sh` to `node ~/.claude/hooks/block-dangerous.mjs`.
 3. Keep the old `.sh` file in place; it is the way back.
 4. Check it:
-   `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`.
+   `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`, and
+   `echo '{"tool_input":{"command":"git reset --hard"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints the block JSON
+   (`{"decision":"block","reason":"Blocked dangerous command: git reset --hard"}`).
+5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
+   treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
+   command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
 
 On the Mac, the same, copying from `kit/hooks/` in its board checkout (`~/Work/claude-board`, after the tar step above).
 
