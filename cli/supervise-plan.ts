@@ -45,7 +45,7 @@ export function planTick(i: TickInput): TickPlan {
   const groups = new Map<string, { role: string; area?: string; waiting: number; names: typeof wanted }>();
   for (const w of wanted) {
     const key = w.role + (w.area ? `/${w.area}` : '');
-    const waiting = w.role === 'owner' ? state.waiting.owner[w.area!] ?? 0 : (state.waiting as any)[w.role] ?? 0;
+    const waiting = w.role === 'owner' ? state.waiting.owner[w.area!] ?? 0 : state.waiting[w.role as Exclude<keyof State['waiting'], 'owner'>] ?? 0;
     (groups.get(key) ?? groups.set(key, { role: w.role, area: w.area, waiting, names: [] }).get(key)!).names.push(w);
   }
   for (const g of groups.values()) {
@@ -63,7 +63,7 @@ export function planTick(i: TickInput): TickPlan {
     if (g.waiting > 0) continue;
     for (const w of g.names) {
       const s = by.get(w.name);
-      if (s && idle(s) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
+      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }
   return plan;

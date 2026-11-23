@@ -75,6 +75,7 @@ test('sessions carry busy facts', async () => {
   assert.deepEqual([b1.role, b1.live, b1.holds, b1.questions, b1.jobs, b1.closing, b1.machine, b1.pane], ['builder', true, 1, 1, 1, false, 'macbook', 'p1']);
   assert.deepEqual([b2.live, b2.holds, b2.closing, b2.last_restore, b2.down_again_logged], [false, 0, true, null, false]);
   assert.ok(b2.last_event);
+  assert.equal(new Date(b1.last_event).getTime(), new Date((await sql`select started_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].started_at).getTime()); // no events: the session's start
   assert.equal(by['sv-B9@macbook'].holds, 1);
   assert.equal(by['sv-B9@macbook'].live, false);
 });

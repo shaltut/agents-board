@@ -4345,7 +4345,7 @@ begin
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled')),
         'questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open'),
         'jobs', (select count(*) from cb.jobs j where j.requester = a.actor and j.state in ('queued', 'running')),
-        'last_event', (select max(e.at) from cb.events e where e.actor = a.actor),
+        'last_event', coalesce((select max(e.at) from cb.events e where e.actor = a.actor), s.started_at),
         'closing', cb._closing(a.actor),
         'last_restore', r.at,
         'down_again_logged', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'

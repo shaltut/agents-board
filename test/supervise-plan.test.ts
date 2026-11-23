@@ -92,6 +92,21 @@ test('restore, down_again, herdr down, and no reuse of a holding name', () => {
   assert.deepEqual(tick(state({ sessions: [{ ...down, last_restore: ago(10), down_again_logged: true }] })).notes, []);
   assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(31) }] })).restore.length, 1);
   assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [] });
+  const quiet = sess('sv-B2@macbook', 'builder', { last_event: ago(21) });
+  assert.deepEqual(tick(state({ sessions: [quiet] }), { herdrDown: new Set(['macbook']) }).close, []);
+  assert.deepEqual(tick(state({ sessions: [quiet] })).close, ['sv-B2@macbook']);
   assert.equal(tick(state({ sessions: [down] }), { herdrLive: new Set(['sv-b1-macbook']) }).restore.length, 0);
   assert.deepEqual(names(tick(state({ sessions: [down], waiting: { builder: 2 } })).start), ['sv-B2@macbook']);
+});
+
+test('a holding name is not reused for a start even when its restore is held back', () => {
+  const down = sess('sv-B1@macbook', 'builder', { live: false, holds: 1, last_restore: ago(10), down_again_logged: true });
+  assert.deepEqual(names(tick(state({ sessions: [down], waiting: { builder: 2 } })).start), ['sv-B2@macbook']);
+});
+
+test('restores use up startsLeft', () => {
+  const down = sess('sv-R1@macbook', 'reviewer', { live: false, holds: 1 });
+  const p = tick(state({ sessions: [down], waiting: { builder: 5 } }));
+  assert.equal(p.restore.length, 1);
+  assert.equal(p.start.length, 2);
 });
