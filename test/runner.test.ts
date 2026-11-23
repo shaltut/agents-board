@@ -88,6 +88,7 @@ const recipes = {
   plant: { steps: [node('plant.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
+  headless: { steps: [node('-e', "require('fs').writeFileSync('.git/HEAD', '')")], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
 const CFG = join(TMP, 'runner.json');
@@ -456,6 +457,15 @@ test('a non-ref file a job leaves under .git/refs starts the slot over, not a fa
   const jq = await ended(id);
   assert.equal(jq.state, 'passed', jq.summary);
   assert.match(logOf(id), /git clone/); // the fetch failed, the slot was cloned again
+});
+
+test('a job that empties .git/HEAD does not fault the slot: the next job starts it over', async () => {
+  const jp = await ended(await add('headless'));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const id = await add('ok');
+  const jq = await ended(id);
+  assert.equal(jq.state, 'passed', jq.summary);
+  assert.match(logOf(id), /git clone/); // git could not read the clone: it was cloned again
 });
 
 // runJob in this process, with its own home and slot folders: no board, no daemon

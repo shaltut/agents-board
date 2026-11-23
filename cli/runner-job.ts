@@ -231,8 +231,9 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   const lockState = join(home, 'state', `${j.project}-${slot}.lock`);
   const genv = jobEnv(process.env, cfg, { env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_NO_REPLACE_OBJECTS: '1' } });
   // Job code owns the clone's worktree and .git between our git calls: no hook (lefthook's included) or fsmonitor runs,
-  // and .git/config goes back to the copy saved at clone time (no planted filter, credential helper, sshCommand, url
-  // rewrite, include) before each job's first git call and after each job.
+  // and .git/config goes back to the saved copy (no planted filter, credential helper, sshCommand, url rewrite,
+  // include) before each job's first git call and after each job. The copy is saved at clone time and again each job,
+  // right after the runner sets runner.json's git URL in it.
   const G = ['git', '-c', `core.hooksPath=${WIN ? 'NUL' : '/dev/null'}`, '-c', 'core.fsmonitor=false'];
   const git = (args: string[], capture = false) => run([...G, ...args], { cwd: dir, env: genv, io, ms: GIT_MS, stop, capture });
   const saved = join(home, 'state', `${j.project}-${slot}.gitconfig`);
@@ -267,18 +268,23 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
       again = true; // a fresh clone gets no second start-over
     }
     io.reset();
-    // runner.json's git URL wins over the one saved at clone time (a moved origin reaches existing slot clones)
+    // runner.json's git URL wins over the one saved at clone time (a moved origin reaches existing slot clones); a clone
+    // git no longer reads (a job emptied .git/HEAD) fails here like a failed fetch
     const u = await run([...G, 'config', 'remote.origin.url', p.git], { cwd: dir, env: genv, io, ms: GIT_MS, stop, show: 'git config remote.origin.url <origin>' });
     if (stop.aborted) return null;
-    if (u.code !== 0) throw new Error(`git config exited ${u.code}`);
-    copyFileSync(join(gitDir, 'config'), saved);
-    const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
-    if (stop.aborted) return null;
-    if (f.code === 0) break;
+    let fetched = false;
+    if (u.code === 0) {
+      copyFileSync(join(gitDir, 'config'), saved);
+      const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
+      if (stop.aborted) return null;
+      fetched = f.code === 0;
+    }
+    if (fetched) break;
     if (again) return err('error: could not fetch from origin');
     // start over only when origin answers (the clone is what broke); an outside problem (network, credentials) keeps
-    // the slot and its install. --exit-code: 2 = origin answered with no HEAD (a bare origin's unborn default branch)
-    const ls = await git(['ls-remote', '--exit-code', 'origin', 'HEAD'], true);
+    // the slot and its install. Asked outside the clone, which may be what broke. --exit-code: 2 = origin answered with
+    // no HEAD (a bare origin's unborn default branch)
+    const ls = await run([...G, 'ls-remote', '--exit-code', p.git, 'HEAD'], { cwd: p.base, env: genv, io, ms: GIT_MS, stop, capture: true, show: 'git ls-remote --exit-code <origin> HEAD' });
     if (stop.aborted) return null;
     if (ls.code !== 0 && ls.code !== 2) return err('error: could not fetch from origin');
   }
