@@ -3980,3 +3980,67 @@ begin
   end if;
   return coalesce((select c.body || E'\n\n' from cb.role_texts c where c.role = '_common'), '') || t;
 end $$;
+
+-- The squad file: who runs a project's squad, on which machines. null = no squad. Task 4's cb squad up reads it.
+drop function if exists cb.squad_set cascade;
+drop function if exists cb.squad_get cascade;
+alter table cb.projects add column if not exists squad jsonb;
+
+create function cb.squad_get(project text) returns jsonb language sql stable as $$
+  select p.squad from cb.projects p where p.slug = cb.read_project(project)
+$$;
+
+-- Validate and save. Ahmed (dashboard) or the lead only. Every refusal names the field.
+create function cb.squad_set(project text, squad jsonb, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare
+  a text := cb.set_actor(actor); p text := cb.read_project(project);
+  r record; m record; ar text; seen text[] := '{}'; c int; mac int := 0; n_areas int;
+begin
+  if not (cb._is_dashboard() or cb._role(a) = 'lead') then raise exception 'only Ahmed or the lead sets the squad'; end if;
+  if jsonb_typeof(squad) is distinct from 'object' or jsonb_typeof(squad->'machines') is distinct from 'object'
+     or jsonb_typeof(squad->'roles') is distinct from 'object' then
+    raise exception 'squad needs machines and roles objects';
+  end if;
+  for m in select * from jsonb_each(squad->'machines') loop
+    if jsonb_typeof(m.value) is distinct from 'object' or coalesce(m.value->>'repo', '') = '' then raise exception 'machine % needs a repo', m.key; end if;
+    if coalesce(m.value->>'board', '') = '' then raise exception 'machine % needs a board', m.key; end if;
+  end loop;
+  if jsonb_typeof(coalesce(squad->'areas', '[]'::jsonb)) is distinct from 'array' then raise exception 'areas must be a list'; end if;
+  n_areas := jsonb_array_length(coalesce(squad->'areas', '[]'::jsonb));
+  for ar in select jsonb_array_elements_text(coalesce(squad->'areas', '[]'::jsonb)) loop
+    if ar !~ '^[a-z][a-z0-9-]*$' then raise exception 'area "%" must be a slug: lower-case letters, digits, dashes', ar; end if;
+    if ar = any(seen) then raise exception 'area "%" is listed twice', ar; end if;
+    seen := seen || ar;
+  end loop;
+  for r in select * from jsonb_each(squad->'roles') loop
+    if r.key not in ('lead','architect','owner','builder','reviewer','qa','investigator') then
+      raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', r.key;
+    end if;
+    if jsonb_typeof(r.value) is distinct from 'object' then raise exception 'role % must be an object', r.key; end if;
+    if r.value->>'model' is not null and r.value->>'model' not in ('opus','sonnet','haiku','fable') then
+      raise exception '% model "%" must be opus, sonnet, haiku or fable', r.key, r.value->>'model';
+    end if;
+    if not (squad->'machines' ? coalesce(r.value->>'machine', '')) then
+      raise exception '% machine "%" is not in machines', r.key, coalesce(r.value->>'machine', '');
+    end if;
+    if r.key = 'owner' then
+      c := n_areas;
+    else
+      if jsonb_typeof(r.value->'count') is distinct from 'number' or (r.value->>'count') !~ '^[0-9]+$'
+         or (r.value->>'count')::int not between 1 and 8 then
+        raise exception '% count must be a whole number from 1 to 8', r.key;
+      end if;
+      c := (r.value->>'count')::int;
+      if r.key = 'lead' and c <> 1 then raise exception 'lead count must be 1'; end if;
+    end if;
+    if r.value->>'machine' = 'macbook' then mac := mac + c; end if;
+  end loop;
+  if (squad->'roles' ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
+  if n_areas > 0 and not (squad->'roles' ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
+  if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
+  update cb.projects pr set squad = squad_set.squad where pr.slug = p;
+  -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
+  insert into cb.events (actor, project, kind, summary) values (a, p, 'updated', 'squad updated');
+  return squad;
+end $$;

@@ -700,6 +700,22 @@ ${body}`, json: pg };
       return { out: (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
         : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine, json: r };
     }
+    case 'squad': {
+      if ((args[0] !== 'show' && args[0] !== 'set') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->');
+      if (args[0] === 'set') {
+        if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
+        const text = o.file === '-' ? await fromStdin('-', 'squad') : readFileSync(o.file, 'utf8');
+        let squad: unknown;
+        try { squad = JSON.parse(text as string); } catch { throw new Error('the squad file is not valid JSON'); }
+        const saved = await callFn('squad_set', { project: args[1], squad, actor });
+        return { out: `squad saved for ${args[1]}`, json: saved };
+      }
+      const sq = await callFn('squad_get', { project: args[1] }) as any;
+      if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
+      const lines = Object.entries(sq.roles as Record<string, any>).map(([r, v]) =>
+        `${r}  ${r === 'owner' ? sq.areas.length : v.count} × ${v.model ?? 'default model'} on ${v.machine}`);
+      return { out: [...lines, `areas: ${sq.areas.length ? sq.areas.join(', ') : 'none'}`].join('\n'), json: sq };
+    }
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');
       const text = await callFn('role_text', { role: args[0] }) as string;

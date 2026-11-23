@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { loadRoleTexts } from '../db/roles.ts';
 
@@ -92,4 +93,66 @@ test('cb resume ends with the role line in a pipeline project', async () => {
   const r = cb(['resume'], { CB_ACTOR: 'B8@mac' });
   assert.equal(r.code, 0, r.err);
   assert.equal(r.out.split('\n').at(-1), 'Your role: cb role builder');
+});
+
+const SQUAD = {
+  machines: { macbook: { herdr: 'macbook', repo: '~/Work/x', board: '~/Work/claude-board' }, shaltoot: { herdr: null, repo: 'F:/Work/x', board: 'F:/Work/claude-board' } },
+  roles: { lead: { count: 1, model: 'opus', machine: 'shaltoot' }, builder: { count: 3, model: 'sonnet', machine: 'macbook' }, owner: { model: 'opus', machine: 'macbook' } },
+  areas: ['claims', 'preauth'],
+};
+const mod = (f: (s: any) => void) => { const s = structuredClone(SQUAD); f(s); return s; };
+
+test('squad_set saves a valid squad and squad_get returns it', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s, null);
+  await sql`select cb.squad_set('demo', ${sql.json(SQUAD)}, 'ahmed')`;
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, SQUAD);
+  assert.equal((await sql`select count(*)::int as n from cb.events where summary = 'squad updated'`)[0].n, 1);
+});
+
+test('squad_set refuses each invalid squad with the field named', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const bad: [any, RegExp][] = [
+    [mod((s) => { s.roles.wizard = { count: 1, machine: 'macbook' }; }), /role wizard/],
+    [mod((s) => { s.roles.builder.count = 0; }), /builder count/],
+    [mod((s) => { s.roles.builder.count = 9; }), /builder count/],
+    [mod((s) => { s.roles.lead.count = 2; }), /lead count/],
+    [mod((s) => { s.roles.builder.model = 'gpt'; }), /builder model/],
+    [mod((s) => { s.roles.builder.machine = 'nowhere'; }), /builder machine/],
+    [mod((s) => { delete s.machines.macbook.repo; }), /macbook.*repo/],
+    [mod((s) => { s.areas = []; }), /owner.*areas/],
+    [mod((s) => { delete s.roles.owner; }), /areas.*owner/],
+    [mod((s) => { s.areas = ['Bad Area']; }), /area/],
+    [mod((s) => { s.areas = ['claims', 'claims']; }), /area/],
+    [mod((s) => { s.roles.builder.count = 7; }), /macbook/],
+  ];
+  for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re);
+});
+
+test('squad_set: a builder session is refused; the lead is allowed', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p1','W1@mac','demo','builder'), ('pc','p2','orch@pc','demo',null)`;
+  const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
+  await assert.rejects(() => session`select cb.squad_set('demo', ${session.json(SQUAD)}, 'W1@mac')`, /only Ahmed or the lead/);
+  await session`select cb.squad_set('demo', ${session.json(SQUAD)}, 'orch@pc')`;
+});
+
+test('cb squad set / show', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p2','orch@pc','demo',null)`;
+  const dir = mkdtempSync(join(tmpdir(), 'squad-'));
+  try {
+    writeFileSync(join(dir, 's.json'), JSON.stringify(SQUAD));
+    const set = cb(['squad', 'set', 'demo', '-f', join(dir, 's.json')], { CB_ACTOR: 'orch@pc' });
+    assert.equal(set.code, 0, set.err);
+    const show = cb(['squad', 'show', 'demo']);
+    assert.equal(show.code, 0, show.err);
+    assert.match(show.out, /builder {2}3 × sonnet on macbook/);
+    assert.match(show.out, /areas: claims, preauth/);
+    assert.deepEqual(JSON.parse(cb(['squad', 'show', 'demo', '--json']).out), SQUAD);
+  } finally { rmSync(dir, { recursive: true }); }
 });
