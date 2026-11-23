@@ -113,8 +113,8 @@ function format(raw: any): string {
     lines.push(`  → cb reply A${a.id} "<your reply>"   (Ahmed reads replies on the board, not here; add --done with the final one)`);
   }
   for (const b of i.broadcasts) lines.push(`Broadcast from ${b.actor}${b.project ? ` to ${b.project}` : ' to everyone'}: ${b.summary}`);
-  // the GitHub watch (#1207), the board and the job runner (#3600) are not sessions: nobody to reply to
-  for (const m of i.messages) lines.push(`Message from ${m.actor}: ${m.summary}`, ...(['github', 'board', 'runner'].includes(m.actor) ? [] : [`  (reply: cb tell ${m.actor} "...")`]));
+  // the GitHub watch (#1207), the board, the job runner (#3600) and the supervisor (#3601) are not sessions: nobody to reply to
+  for (const m of i.messages) lines.push(`Message from ${m.actor}: ${m.summary}`, ...(['github', 'board', 'runner', 'supervisor'].includes(m.actor) ? [] : [`  (reply: cb tell ${m.actor} "...")`]));
   // Ahmed talks in huddles from the dashboard: his lines must read as him, not as a teammate.
   const huddles: any[] = i.huddles ?? [];
   const fromAhmed = huddles.filter((h) => h.actor === 'ahmed' && (h.action === 'open' || h.action === 'say'));

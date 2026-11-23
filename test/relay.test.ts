@@ -105,6 +105,11 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     for (let i = 0; i < 50 && !/job #4/.test(inbox.got.at(-1)?.message.content ?? ''); i++) await new Promise((r) => setTimeout(r, 100));
     assert.match(inbox.got.at(-1).message.content, /Message from runner: job #4/);
     assert.doesNotMatch(inbox.got.at(-1).message.content, /cb tell runner/);
+    // nor do the supervisor's (#3601)
+    await sql`select cb.tell(${me}, 'sv-B1@macbook waits on a startup dialog', 'supervisor')`;
+    for (let i = 0; i < 50 && !/startup dialog/.test(inbox.got.at(-1)?.message.content ?? ''); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.match(inbox.got.at(-1).message.content, /Message from supervisor: sv-B1@macbook waits/);
+    assert.doesNotMatch(inbox.got.at(-1).message.content, /cb tell supervisor/);
     // a huddle line from another member is pushed too
     await sql`select cb.iam('testbox', 'p9', ${me}, 'demo')`;
     await sql`select cb.iam('pc', 'w2:p2', 'orch', 'demo')`;
