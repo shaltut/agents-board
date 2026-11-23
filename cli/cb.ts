@@ -260,7 +260,11 @@ async function start() {
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
   if (qs.some((q: any) => q.status === 'answered')) out.push('  cb pending                      an answer to your question is waiting: act on it, then cb delivered <qid> <you>');
   if (!doing) out.push(`  already working on something not listed? register it first: cb add ${project ?? '<project>'} "<title>" -s in_progress -b "<context>"`);
-  if (doing) out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, cb done ${doing.id} "<summary>" --commit <sha> when finished`);
+  if (doing) {
+    // a staged card in a pipeline project finishes with its stage's command, never cb done
+    const [st] = await sql`select cb._finish_line(t) as finish from cb.tasks t where t.id = ${doing.id} and t.stage is not null and cb._pipeline(t.project)`;
+    out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
+  }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
@@ -579,13 +583,14 @@ async function run(): Promise<unknown> {
       const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
-      if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: cb stage ${id} build --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
+      if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
         : all.length ? `you triage it: cb edit ${id} --assignee <worker>` : `no session works in ${project} yet: it waits in Next`;
       return { out: `#${id} bug filed in ${project}; ${who}`, json: { id, project, told } };
     }
     case 'stage': {
       need(2, 'stage <id> build|none --why "<why>"   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
+      await guard(args[0]);
       await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
       return stepOut(await callFn('next_step', { id: args[0] }));
     }

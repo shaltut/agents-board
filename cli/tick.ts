@@ -17,7 +17,7 @@ const cut = (s: any, n = 100) => { const v = String(s ?? '').replace(/\s+/g, ' '
 export const q = (s: any) => { const v = String(s); return /^\w[\w@.:/=-]*$/.test(v) ? v : `'${v.replace(/['‘’‚‛]/g, "''")}'`; };
 
 type Item = { section: string; who: string; text: string; cmd: string | null; detail?: string };
-type Pr = { state: string; head: string; mergeable: string };
+type Pr = { state: string; head: string; mergeable: string; merge?: string };
 
 const SECTIONS: [string, string][] = [
   ['asks', "AHMED'S ASKS, LATE"], ['answers', 'ANSWERS NOT ACTED ON'], ['questions', 'YOUR OPEN QUESTIONS'], ['ready', 'READY TO MERGE'],
@@ -57,7 +57,7 @@ function github(refs: { repo: string; n: string }[], ttl: (key: string) => numbe
     if (typeof failed?.error === 'string' && age(failed) < 60_000) { skipped.push(`${repo}: ${failed.error}`); continue; }
     const [owner, name] = repo.split('/'), list = [...ns];
     for (let i = 0; i < list.length; i += 50) {
-      const fields = list.slice(i, i + 50).map((n) => `p${n}: pullRequest(number: ${n}) { state headRefOid mergeable }`).join(' ');
+      const fields = list.slice(i, i + 50).map((n) => `p${n}: pullRequest(number: ${n}) { state headRefOid mergeable mergeCommit { oid } }`).join(' ');
       const args = ['api', 'graphql', '-f', `query=query { repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { ${fields} } }`];
       // CB_GH: a node script standing in for gh (tests)
       const r = process.env.CB_GH ? spawnSync(process.execPath, [process.env.CB_GH, ...args], { encoding: 'utf8', timeout: 20_000 })
@@ -72,7 +72,7 @@ function github(refs: { repo: string; n: string }[], ttl: (key: string) => numbe
         break;
       }
       for (const [k, v] of Object.entries<any>(data)) {
-        const pr = { state: v?.state, head: String(v?.headRefOid ?? '').toLowerCase(), mergeable: v?.mergeable };
+        const pr = { state: v?.state, head: String(v?.headRefOid ?? '').toLowerCase(), mergeable: v?.mergeable, merge: String(v?.mergeCommit?.oid ?? '').toLowerCase() };
         if (!isPr(pr)) continue;
         prs[`${repo}#${k.slice(1)}`] = pr;
         // GitHub computes mergeability lazily: an open PR's UNKNOWN is asked again next time, never cached
@@ -177,8 +177,11 @@ export async function tick(project: string, actor: string) {
   // Idle: the first unassigned Next task sharing a tag, else the first unassigned one; each task offered once.
   const free = b.next.filter((t: any) => !t.assignee), workless: string[] = [];
   for (const s of b.idle) {
-    const i = Math.max(0, free.findIndex((t: any) => t.labels.some((l: string) => s.tags.includes(l))));
-    const t = free.splice(i, 1)[0];
+    // s.can: the Next cards this session's role may claim (a pipeline project); a card it cannot take is never offered
+    const can = (t: any) => !s.can || s.can.includes(Number(t.id));
+    const tagged = free.findIndex((t: any) => can(t) && t.labels.some((l: string) => s.tags.includes(l)));
+    const i = tagged >= 0 ? tagged : free.findIndex(can);
+    const t = i >= 0 ? free.splice(i, 1)[0] : undefined;
     if (t) add('idle', s.actor, `${s.actor} idle`, `cb tell ${q(s.actor)} ${q(`take #${t.id} ${cut(t.title, 60)}`)}`);
     else workless.push(s.actor);
   }
@@ -188,7 +191,11 @@ export async function tick(project: string, actor: string) {
     const pr = stateOf(t);
     if (!pr) continue;
     const n = t.ref.n, open = !['done', 'cancelled'].includes(t.status);
-    if (open && pr.state === 'MERGED') add('github', actor, `#${t.id} ${t.status} but PR #${n} merged`, `cb done ${t.id} ${q(`PR #${n} merged`)}`);
+    // a staged card is never closed with cb done: at merge the lead passes it, at any other stage its holder's stage command moves it
+    if (open && pr.state === 'MERGED' && t.stage) {
+      if (t.stage === 'merge')
+        add('github', actor, `#${t.id} ${t.status} but PR #${n} merged`, SHA.test(pr.merge ?? '') ? `cb pass ${t.id} ${q(`PR #${n} merged`)} --commit ${pr.merge}` : t.finish);
+    } else if (open && pr.state === 'MERGED') add('github', actor, `#${t.id} ${t.status} but PR #${n} merged`, `cb done ${t.id} ${q(`PR #${n} merged`)}`);
     else if (open && pr.state === 'CLOSED') add('github', actor, `#${t.id} ${t.status} but PR #${n} closed unmerged`, `cb move ${t.id} cancelled ${q(`PR #${n} closed unmerged`)}`);
     else if (t.status === 'cancelled' && pr.state === 'OPEN') add('github', actor, `#${t.id} cancelled but PR #${n} open`, `gh pr close ${n} ${R(t)}`);
     else if (t.status === 'done' && !t.review && pr.state === 'CLOSED') add('github', actor, `#${t.id} done but PR #${n} closed unmerged`, `cb move ${t.id} next ${q(`PR #${n} closed unmerged`)}`);
