@@ -106,11 +106,13 @@ test('a two-repo card enters build with two parts', async () => {
 test('each builder claims its own repo\'s part', async () => {
   const sql = await setup();
   const id = await approved(sql);
+  const rank = async () => Number((await sql`select rank from cb.tasks where id = ${id}`)[0].rank);
+  const r0 = await rank();
   assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [id]);
   let p = await parts(sql, id);
   assert.deepEqual([p[0].status, p[0].assignee, p[1].status, p[1].assignee], ['in_progress', 'qhs-B1@mac', 'next', null]);
   let c = await card(sql, id);
-  assert.deepEqual([c.stage, c.status, c.assignee], ['build', 'in_progress', null]);
+  assert.deepEqual([c.stage, c.status, c.assignee], ['build', 'next', null]);
   // B2 has no repo: it is the home repo (api), whose part is taken; it never gets the dashboard part
   assert.deepEqual(await claim(sql, 'qhs-B2@mac'), []);
   assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), [id]);
@@ -118,8 +120,42 @@ test('each builder claims its own repo\'s part', async () => {
   assert.deepEqual([p[1].status, p[1].assignee], ['in_progress', 'qhs-dashboard-B1@mac']);
   assert.deepEqual(await claim(sql, 'qhs-B2@mac'), []);
   c = await card(sql, id);
-  assert.deepEqual([c.status, c.assignee], ['in_progress', null]);
+  // the parts carry the status: the card stays in Next, in its place
+  assert.deepEqual([c.status, c.assignee, await rank()], ['next', null, r0]);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and summary = 'claimed by qhs-dashboard-B1@mac (part dashboard)'`)[0].n, 1);
+});
+
+test('pipeline off: a parts card is claimed as a card', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await sql`select cb.project_pipeline('qhs', false, 'ahmed')`;
+  assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), [id]);
+  const c = await card(sql, id);
+  assert.deepEqual([c.status, c.assignee], ['in_progress', 'qhs-dashboard-B1@mac']);
+  assert.deepEqual((await parts(sql, id)).map((p: any) => p.assignee), [null, null]);
+});
+
+test('a parts card leaves the pipeline only with no part in work, and takes its parts with it', async () => {
+  const sql = await setup();
+  const none = (id: number) => sql`select cb.stage_set(${id}::text, 'none', 'ops only', 'orch@pc')`;
+  const count = async (id: number) => (await sql`select count(*)::int n from cb.task_parts where task_id = ${id}`)[0].n;
+  // a reviewer still holding its part while the card is back at build, and the builder's hold after the NO-GO
+  const b = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await fail(sql, b, 'qhs-dashboard-R1@mac', 'wrong');
+  assert.equal((await card(sql, b)).stage, 'build');
+  await assert.rejects(() => none(b), /#\d+ has parts in work: api \(qhs-R1@mac\), dashboard \(qhs-dashboard-B1@mac\)/);
+  const a = await approved(sql);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [a]);
+  await assert.rejects(() => none(a), /#\d+ has parts in work: api \(qhs-B1@mac\)/);
+  // nobody holds a part: none drops them
+  const c = await approved(sql);
+  assert.equal(await count(c), 2);
+  await none(c);
+  assert.deepEqual([(await card(sql, c)).stage, await count(c)], [null, 0]);
+  // closed from the dashboard: the parts go too
+  await sql`select cb.task_move(${a}::text, 'cancelled', 'not needed', 'ahmed')`;
+  assert.deepEqual([(await card(sql, a)).status, await count(a)], ['cancelled', 0]);
 });
 
 test('two builders of different repos claiming one card: each gets its own part or nothing, never the other\'s', async () => {
@@ -151,9 +187,12 @@ test('a one-repo card goes only to builders and reviewers of its repo', async ()
   assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), [id]);
   const c = await card(sql, id);
   assert.deepEqual([c.status, c.assignee], ['in_progress', 'qhs-dashboard-B1@mac']);
+  // no parts: --repo is refused, not ignored
+  await assert.rejects(() => pass(sql, id, 'qhs-dashboard-B1@mac', 'built', { pr: '#5' }, 'dashboard'), /#\d+ has no parts: drop --repo/);
   assert.equal((await pass(sql, id, 'qhs-dashboard-B1@mac', 'built', { pr: '#5' }))[0].r, 'review');
   assert.deepEqual(await claim(sql, 'qhs-R1@mac'), []);
   assert.deepEqual(await claim(sql, 'qhs-dashboard-R1@mac'), [id]);
+  await assert.rejects(() => fail(sql, id, 'qhs-dashboard-R1@mac', 'wrong', null, 'dashboard'), /#\d+ has no parts: drop --repo/);
   // a staged card with no repos in a multi-repo project: no builder takes it
   const bare = Number((await sql`select cb.task_add(project => 'qhs', title => 'b', type => 'bug', actor => 'orch@pc') as id`)[0].id);
   await sql`select cb._stage_move(${bare}, 'build', null, 'x')`;
@@ -171,7 +210,7 @@ test('the card leaves build when every part has its PR', async () => {
   await assert.rejects(() => pass(sql, id, 'qhs-B2@mac', 'built', { pr: API }), /you hold no part of #\d+: claim it first \(cb next\)/);
   assert.equal((await pass(sql, id, 'qhs-B1@mac', 'built', { pr: API }))[0].r, 'build');
   let c = await card(sql, id);
-  assert.deepEqual([c.stage, c.status, c.assignee, c.links.pr, c.links['pr:api']], ['build', 'in_progress', null, API, API]);
+  assert.deepEqual([c.stage, c.status, c.assignee, c.links.pr, c.links['pr:api']], ['build', 'next', null, API, API]);
   assert.deepEqual((await parts(sql, id)).map((p: any) => [p.stage, p.status, p.assignee, p.pr]),
     [['review', 'next', null, API], ['build', 'in_progress', 'qhs-dashboard-B1@mac', null]]);
   // the part's pass is on the card's history although the card stayed
@@ -205,6 +244,8 @@ test('review is per part', async () => {
     [['api', 'merge', 'next', null], ['dashboard', 'build', 'next', 'qhs-dashboard-B1@mac']]);
   const c = await card(sql, id);
   assert.deepEqual([c.stage, c.status, c.assignee], ['build', 'next', null]);
+  // the api part waits at merge, but the card is not there yet
+  await assert.rejects(() => pass(sql, id, 'orch@pc', 'merged', { commit: 'abc1234' }, 'api'), /#\d+ is at Building, not merging yet/);
   assert.deepEqual(await claim(sql, 'qhs-B1@mac'), []);
   assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), [id]);
 });
@@ -235,6 +276,10 @@ test('merge is the lead\'s, per repo', async () => {
   assert.deepEqual([c.stage, c.status, c.assignee], ['qa', 'next', null]);
   assert.deepEqual([c.links.commit, c.links['commit:api'], c.links['commit:dashboard']], ['abc1234', 'abc1234', 'def5678']);
   assert.deepEqual((await parts(sql, id)).map((p: any) => [p.stage, p.commit]), [['merged', 'abc1234'], ['merged', 'def5678']]);
+  // a qa session that built a part does not check the card
+  await sql`update cb.sessions set role = 'qa' where actor = 'qhs-dashboard-B1@mac'`;
+  assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), []);
+  assert.deepEqual(await claim(sql, 'qhs-Q1@mac'), [id]);
 });
 
 test('a QA fail names the repo', async () => {
@@ -247,8 +292,8 @@ test('a QA fail names the repo', async () => {
     /name the repo that fails: cb fail \d+ --repo <repo> "<why>" \(parts: api, dashboard\)/);
   const r = cb(['fail', String(id), 'the date is wrong', '--repo', 'dashboard'], 'qhs-Q1@mac');
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual((await parts(sql, id)).map((p: any) => [p.repo, p.stage, p.status, p.assignee]),
-    [['api', 'merged', 'next', null], ['dashboard', 'build', 'next', 'qhs-dashboard-B1@mac']]);
+  assert.deepEqual((await parts(sql, id)).map((p: any) => [p.repo, p.stage, p.status, p.assignee, p.commit]),
+    [['api', 'merged', 'next', null, 'abc1234'], ['dashboard', 'build', 'next', 'qhs-dashboard-B1@mac', null]]);
   let c = await card(sql, id);
   assert.deepEqual([c.stage, c.status, c.assignee], ['build', 'next', null]);
   // the follow-up PR, its review and merge bring the card back to qa
@@ -257,9 +302,16 @@ test('a QA fail names the repo', async () => {
   assert.equal((await pass(sql, id, 'qhs-dashboard-B1@mac', 'fixed', { pr: DASH2 }))[0].r, 'review');
   assert.deepEqual(await claim(sql, 'qhs-dashboard-R1@mac'), [id]);
   assert.equal((await pass(sql, id, 'qhs-dashboard-R1@mac', 'GO'))[0].r, 'merge');
+  await assert.rejects(() => pass(sql, id, 'orch@pc', 'merged', {}, 'dashboard'), /give the merge commit: --commit <sha>/);
   assert.equal((await pass(sql, id, 'orch@pc', 'merged', { commit: 'fff0001' }, 'dashboard'))[0].r, 'qa');
   c = await card(sql, id);
   assert.deepEqual([c.stage, c.links.pr, c.links['pr:dashboard'], c.links['commit:dashboard'], c.links.commit], ['qa', API, DASH2, 'fff0001', 'abc1234']);
+  // back to design from qa: re-approval reopens every part without its old commit
+  assert.deepEqual(await claim(sql, 'qhs-Q1@mac'), [id]);
+  await fail(sql, id, 'qhs-Q1@mac', 'the design misses a case', 'design');
+  await pass(sql, id, 'qhs-O1@pc', 'redesigned');
+  await approve(sql, id);
+  assert.deepEqual((await parts(sql, id)).map((p: any) => [p.stage, p.commit, p.pr]), [['build', null, API], ['build', null, DASH2]]);
 });
 
 test('--to design resets the card; re-approval reopens every part with its builder and PR', async () => {

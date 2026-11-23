@@ -513,12 +513,14 @@ begin
       raise exception '#% is at %: a staged card stays in its project (Ahmed can move it from the board)', old.id, old.stage;
     end if;
   end if;
-  -- a closed card is out of the pipeline whatever the pipeline switch says; one waiting at approval takes its question with it
+  -- a closed card is out of the pipeline whatever the pipeline switch says; one waiting at approval takes its question with it,
+  -- and one of several repos its parts (#3703: they would count as held work forever)
   if tg_op = 'UPDATE' and old.stage is not null and new.status in ('done', 'cancelled') and new.status is distinct from old.status then
     new.stage := null; new.stage_since := null;
     if old.stage = 'approval' then
       update cb.questions q set status = 'withdrawn' where q.approval_for = old.id and q.status in ('open', 'sent_back', 'dormant');
     end if;
+    delete from cb.task_parts p where p.task_id = old.id;
   end if;
   -- a task page follows its task to another project (an area page is moved by cb.project_alias)
   if tg_op = 'UPDATE' and new.project is distinct from old.project then
@@ -781,21 +783,20 @@ $$;
 create function cb.task_claim(project text default null, actor text default null)
 returns setof cb.tasks language plpgsql as $$
 #variable_conflict use_variable
-declare a text := cb.set_actor(actor); p text := cb.read_project(project); tid bigint; st text; rp text;
+declare a text := cb.set_actor(actor); p text := cb.read_project(project); tid bigint; st text; tproj text; rp text;
 begin
   -- the order and the claim rules are cb.task_queue's (cb start previews it); the outer filters are re-checked on a row
   -- another claim changed while we waited, so they stay here
-  select t.id, t.stage into tid, st from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
-   where (t.status = 'next' or (t.status = 'in_progress' and t.stage in ('build', 'review')  -- a parts card: see cb.task_queue
-                                and cb._pipeline(t.project) and exists (select 1 from cb.task_parts tp where tp.task_id = t.id)))
-     and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
+  select t.id, t.stage, t.project into tid, st, tproj from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
+   where t.status = 'next' and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
      and cb._claimable(t, a)  -- re-checked on the locked row: a restage meanwhile must not hand it to the wrong role
    order by q.ordinality limit 1
    for update of t skip locked;
   if tid is null then return; end if;
-  -- a card with parts (#3703): claim the actor's repo part, never the card. The where is the real guard: a part claimed
-  -- by a claim that committed while this one waited is not taken again (nothing this once).
-  if st in ('build', 'review') and exists (select 1 from cb.task_parts tp where tp.task_id = tid) then
+  -- a card with parts (#3703): claim the actor's repo part, never the card (it stays in Next: the parts carry the
+  -- status). The where is the real guard: a part a claim took while this one waited is not taken again (nothing this
+  -- once). Pipeline off: the card is claimed as a card.
+  if st in ('build', 'review') and cb._pipeline(tproj) and exists (select 1 from cb.task_parts tp where tp.task_id = tid) then
     update cb.task_parts tp set status = 'in_progress', assignee = a, since = now(), nudged_at = null
      where tp.task_id = tid and tp.repo = cb._repo(a) and tp.stage = st and tp.status = 'next' and (tp.assignee is null or tp.assignee = a)
     returning tp.repo into rp;
@@ -3552,6 +3553,12 @@ begin
   if t.assignee is not null or t.status not in ('next', 'backlog') then
     raise exception '#% is not unclaimed (assignee or status): restage cards nobody holds', tid;
   end if;
+  -- a card of several repos is held by its parts (#3703)
+  if s = 'none' and exists (select 1 from cb.task_parts p where p.task_id = tid and p.assignee is not null) then
+    raise exception '#% has parts in work: %; restage it once nobody holds a part', tid,
+      (select string_agg(p.repo || ' (' || p.assignee || ')', ', ' order by array_position(t.repos, p.repo), p.repo)
+         from cb.task_parts p where p.task_id = tid and p.assignee is not null);
+  end if;
   if s = 'build' then
     if t.stage is distinct from 'design' then raise exception '#% is not at design: only a card at design can skip to build', tid; end if;
     if t.type not in ('bug', 'chore') then raise exception '#% is a %: only a bug or chore can skip design', tid, t.type; end if;
@@ -3569,7 +3576,7 @@ begin
   values (a, t.project, tid, 'note',
           case when s = 'build' then 'small work, skipped design: ' || trim(why) else 'taken out of the pipeline: ' || trim(why) end,
           case when s = 'build' then '{"small": true}'::jsonb else '{"unstaged": true}'::jsonb end);
-  if s = 'build' then perform cb._parts_open(tid); end if;
+  if s = 'build' then perform cb._parts_open(tid); else delete from cb.task_parts p where p.task_id = tid; end if;
   return case when s = 'build' then 'build' end;
 end $$;
 
@@ -3613,7 +3620,11 @@ begin
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
     raise exception 'waiting for Ahmed''s answer on Q%', qid;
   end if;
+  if rp is not null and not exists (select 1 from cb.task_parts p where p.task_id = tid) then
+    raise exception '#% has no parts: drop --repo', tid;
+  end if;
   if t.stage in ('build', 'review', 'merge') and exists (select 1 from cb.task_parts p where p.task_id = tid) then
+    if t.stage <> 'merge' and r = 'lead' then raise exception '#% is at %, not merging yet', tid, cb._stage_words(t.stage); end if;
     if t.stage = 'merge' then
       if r is distinct from 'lead' then raise exception 'merging is the lead''s'; end if;
       if rp is null then
@@ -3720,6 +3731,7 @@ begin
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
   select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) into parts from cb.task_parts p where p.task_id = tid;
+  if rp is not null and parts is null then raise exception '#% has no parts: drop --repo', tid; end if;
   if parts is not null and t.stage in ('build', 'review', 'merge') then
     -- the reviewer's part, at its own stage (the card may be back at build already)
     select * into pt from cb.task_parts p
@@ -3744,7 +3756,8 @@ begin
     raise exception 'cb fail is for the holder of a card in review or qa, or the designer taking a card back from approval';
   end if;
   if pt.repo is not null and nxt = 'build' then
-    update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', since = now(), nudged_at = null
+    -- back to its builder; a merged part reopened by qa needs a new merge commit
+    update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null, since = now(), nudged_at = null
      where p.task_id = tid and p.repo = pt.repo;
     perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
     return 'build';
@@ -3842,6 +3855,8 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
                          and cb._repo_fits(t, a)
       when 'merge' then cb._role(a) = 'lead'
       when 'qa' then cb._role(a) = 'qa' and a is distinct from t.crew ->> 'build'
+                     -- a parts card keeps its builders on the parts (#3703)
+                     and not exists (select 1 from cb.task_parts p where p.task_id = t.id and p.crew ->> 'build' = a)
       else false end, false)
     end
 $$;
@@ -4149,14 +4164,11 @@ begin
 end $$;
 
 -- The queue this actor can claim, in claim order: cb.task_claim takes its first row, cb start previews the first few (lim null = all).
--- A card with parts is in_progress while one part is worked; its other parts are still free (cb._repo_fits says which).
 create function cb.task_queue(project text, actor text, lim int default 3) returns setof cb.tasks language plpgsql stable as $$
 #variable_conflict use_variable
 begin
   return query select t.* from cb.tasks t
-   where (t.status = 'next' or (t.status = 'in_progress' and t.stage in ('build', 'review')
-                                and cb._pipeline(t.project) and exists (select 1 from cb.task_parts tp where tp.task_id = t.id)))
-     and (project is null or t.project = cb.read_project(project)) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
+   where t.status = 'next' and (project is null or t.project = cb.read_project(project)) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
    order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(actor) = any(t.labels), false) desc,
             case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit lim;
 end $$;
@@ -4402,12 +4414,13 @@ end $$;
 drop function if exists cb._parts_open cascade;
 drop function if exists cb._parts_sync cascade;
 
--- The card's stage := its least advanced part's (all merged: qa, unassigned). At build or review the card is unheld,
--- in_progress while a part at its stage is. note and data (links merged into the card) go on the card's history either
--- way, so a part's pass is recorded even when the card stays.
+-- The card's stage := its least advanced part's (all merged: qa, unassigned). A stage change goes through _stage_move
+-- (unheld, Next). The card's status never follows its parts: they carry their own, and a flip would re-rank the card.
+-- note and data (links merged into the card) go on the card's history either way, so a part's pass is recorded even
+-- when the card stays.
 create function cb._parts_sync(tid bigint, note text default null, data jsonb default '{}') returns void language plpgsql as $$
 #variable_conflict use_variable
-declare cur text; lo int; nxt text; busy boolean;
+declare cur text; lo int; nxt text;
 begin
   select t.stage into cur from cb.tasks t where t.id = tid for update;
   select min(array_position('{build,review,merge,merged}'::text[], p.stage)) into lo from cb.task_parts p where p.task_id = tid;
@@ -4415,23 +4428,21 @@ begin
   nxt := ('{build,review,merge,qa}'::text[])[lo];
   if nxt is distinct from cur then
     perform cb._stage_move(tid, nxt, null, note, data);
-    note := null; data := '{}';
+    return;
   end if;
-  busy := exists (select 1 from cb.task_parts p where p.task_id = tid and p.stage = nxt and p.status = 'in_progress');
+  if note is null then return; end if;
   perform set_config('cb.stage_ok', 'on', true);
-  perform set_config('cb.note', coalesce(note, ''), true);
+  perform set_config('cb.note', note, true);
   perform set_config('cb.data', coalesce(data, '{}')::text, true);
-  update cb.tasks t set status = case when nxt in ('build', 'review') then case when busy then 'in_progress' else 'next' end else t.status end,
-         assignee = case when nxt in ('build', 'review') then null else t.assignee end,
-         links = t.links || coalesce(data -> 'links', '{}')
-   where t.id = tid;
+  update cb.tasks t set links = t.links || coalesce(data -> 'links', '{}') where t.id = tid;
   perform set_config('cb.stage_ok', '', true);
   perform set_config('cb.note', '', true);
   perform set_config('cb.data', '', true);
 end $$;
 
 -- On entering build: one part per repo at build. A part kept from before goes back to its builder (status next) with its
--- PR; a part whose repo left the list is dropped with a note for the lead to close its PR. One repo and no parts: nothing.
+-- PR, not its commit (its merge needs a new one); a part whose repo left the list is dropped with a note for the lead
+-- to close its PR. One repo and no parts: nothing.
 create function cb._parts_open(tid bigint) returns void language plpgsql as $$
 #variable_conflict use_variable
 declare t cb.tasks%rowtype; r record;
@@ -4444,7 +4455,8 @@ begin
             'part ' || r.repo || ' dropped' || coalesce(': close its PR ' || r.pr, ''), '{"digest": true}');
   end loop;
   insert into cb.task_parts as p (task_id, repo, stage) select tid, x, 'build' from unnest(t.repos) x
-  on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', since = now(), nudged_at = null;
+  on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null,
+                                            since = now(), nudged_at = null;
   perform cb._parts_sync(tid);
 end $$;
 
