@@ -26,6 +26,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
+  repo: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -558,10 +559,10 @@ async function run(): Promise<unknown> {
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {
-      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>]   e.g. cb iam W1@macbook ihop --role builder');
+      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>]   e.g. cb iam W1@macbook ihop --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
       const p = await callFn('iam', { machine: machine(), pane, actor: args[0], project: args[1] ?? null,
-        role: o.role ?? null, area: o.area ?? null, model: o.model ?? null });
+        role: o.role ?? null, area: o.area ?? null, model: o.model ?? null, repo: o.repo ?? null });
       const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
       const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
       const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
@@ -575,7 +576,7 @@ async function run(): Promise<unknown> {
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
-        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}) });
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: o.repo.split(',') } : {}) });
       return { out: `#${id}`, json: id };
     }
     case 'bug': {
@@ -585,7 +586,7 @@ async function run(): Promise<unknown> {
       await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
-        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}) });
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: o.repo.split(',') } : {}) });
       const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
@@ -595,9 +596,10 @@ async function run(): Promise<unknown> {
       return { out: `#${id} bug filed in ${project}; ${who}`, json: { id, project, told } };
     }
     case 'stage': {
-      need(2, 'stage <id> build|none --why "<why>"   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
+      need(2, 'stage <id> build|none --why "<why>" [--repo <repo,repo>]   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
       await guard(args[0]);
-      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor });
+      // stage_set takes text[]: callFn sends a JS array as jsonb, so the list goes as an array literal
+      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor, ...(o.repo ? { repos: `{${o.repo}}` } : {}) });
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'pass': {
@@ -647,6 +649,7 @@ async function run(): Promise<unknown> {
       const fields: Record<string, unknown> = {};
       for (const k of ['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic'] as const) if (o[k] !== undefined) fields[k] = o[k];
       if (o.labels) fields.labels = o.labels.split(',');
+      if (o.repo !== undefined) fields.repos = o.repo ? o.repo.split(',') : null;
       const l = links(); if (Object.keys(l).length) fields.links = l;
       await callFn('task_update', { id: args[0], fields, actor });
       return { out: `#${args[0].replace('#', '')} updated` };
@@ -719,9 +722,13 @@ ${body}`, json: pg };
       }
       const sq = await callFn('squad_get', { project: args[1] }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
+      // with repos, builder and reviewer counts are per repo ({"api": 2}) and areas are {name, repo}
+      const count = (c: any) => typeof c === 'object' ? Object.entries(c).map(([k, n]) => `${k} ${n}`).join(', ') : c;
       const lines = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'].filter((r) => sq.roles[r]).map((r) =>
-        `${r}  ${r === 'owner' ? sq.areas.length : sq.roles[r].count} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
-      return { out: [...lines, `areas: ${sq.areas.length ? sq.areas.join(', ') : 'none'}`].join('\n'), json: sq };
+        `${r}  ${r === 'owner' ? sq.areas.length : count(sq.roles[r].count)} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
+      const repos = sq.repos ? [`repos: ${Object.entries(sq.repos).sort(([a, x]: any, [b, y]: any) => (y.home - x.home) || a.localeCompare(b))
+        .map(([k, v]: any) => v.home ? `${k} (home)` : k).join(', ')}`] : [];
+      return { out: [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`].join('\n'), json: sq };
     }
     case 'run': return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);

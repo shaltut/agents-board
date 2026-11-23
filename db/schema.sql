@@ -642,7 +642,7 @@ $$;
 create function cb.task_add(project text, title text, body text default '', status text default null,
                             priority text default 'P2', labels jsonb default '[]', links jsonb default '{}',
                             assignee text default null, actor text default null, type text default null, epic text default null,
-                            stage text default null, why text default null)
+                            stage text default null, why text default null, repos jsonb default null)
 returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
@@ -659,13 +659,13 @@ begin
   if sg is not null and sg <> 'build' then raise exception 'a new card starts at design; the lead can send small work to build: stage => build'; end if;
   -- work added through an alias ("tawuniya") keeps that stream's tags
   l := l || array(select g from cb.project_aliases pa, unnest(pa.tags) g where pa.alias = cb.slug(project) and g <> all(l));
-  insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since)
+  insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since, repos)
   values (p, trim(title), coalesce(body, ''), st, cb.norm_priority(priority),
           l, coalesce(links, '{}'),
           coalesce(assignee, case when st = 'in_progress' then a end), a, ty, cb.norm_epic(epic),
-          case when staged then 'design' end, case when staged then now() end)
+          case when staged then 'design' end, case when staged then now() end, cb._check_repos(p, cb._repo_list(repos)))
   returning cb.tasks.id into new_id;
-  -- stage => build is the lead's restage, with the same checks (and the note) as cb.stage_set
+  -- stage => build is the lead's restage, with the same checks (and the note) as cb.stage_set; it reads the repos just stored
   if sg = 'build' then perform cb.stage_set(new_id::text, 'build', why, a); end if;
   return new_id;
 end $$;
@@ -685,16 +685,23 @@ end $$;
 create function cb.task_update(id text, fields jsonb, actor text default null)
 returns void language plpgsql as $$
 #variable_conflict use_variable
-declare tid bigint := cb.norm_id(id); bad text; cur cb.tasks; ep bigint;
+declare tid bigint := cb.norm_id(id); bad text; cur cb.tasks; ep bigint; rs text[];
 begin
   perform cb.set_actor(actor);
   select string_agg(k, ', ') into bad from jsonb_object_keys(coalesce(fields, '{}')) k
-   where k not in ('title','body','priority','assignee','labels','links','project','rank','type','epic','epic_rank');
+   where k not in ('title','body','priority','assignee','labels','links','project','rank','type','epic','epic_rank','repos');
   if bad is not null then
-    raise exception 'unknown field(s) %; allowed: title, body, priority, assignee, labels, links, project, rank, type, epic, epic_rank', bad;
+    raise exception 'unknown field(s) %; allowed: title, body, priority, assignee, labels, links, project, rank, type, epic, epic_rank, repos', bad;
   end if;
   select * into cur from cb.tasks t where t.id = tid;
   if not found then raise exception 'task #% not found', tid; end if;
+  if fields ? 'repos' then
+    -- repos lock from approval on: Ahmed approved a design for these repos, and builders may already work in them
+    if cur.stage in ('approval', 'build', 'review', 'merge', 'qa') and cb._pipeline(cur.project) then
+      raise exception '#% is at %: repos lock at build; send it back with cb fail % --to design', tid, cur.stage, tid;
+    end if;
+    rs := cb._check_repos(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end, cb._repo_list(fields -> 'repos'));
+  end if;
   ep := case when fields ? 'epic' then cb.norm_epic(fields ->> 'epic') else cur.epic_id end;
   -- an epic and its blockers stay in one project: moving the task alone would split them
   if fields ? 'project' and cb.resolve(fields ->> 'project') <> cur.project then
@@ -721,7 +728,8 @@ begin
     labels   = case when fields ? 'labels' then array(select jsonb_array_elements_text(fields -> 'labels')) else t.labels end,
     links    = case when fields ? 'links' then t.links || (fields -> 'links') else t.links end,
     project  = case when fields ? 'project' then cb.ensure_project(fields ->> 'project') else t.project end,
-    rank     = case when fields ? 'rank' then (fields ->> 'rank')::double precision else t.rank end
+    rank     = case when fields ? 'rank' then (fields ->> 'rank')::double precision else t.rank end,
+    repos    = case when fields ? 'repos' then rs else t.repos end
   where t.id = tid;
   perform set_config('cb.note', '', true);
 end $$;
@@ -1401,26 +1409,37 @@ begin
 end $$;
 
 -- Bind a session (machine + herdr pane) to an actor. Machine names compare case-insensitively.
-create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null) returns text language plpgsql as $$
+create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null, repo text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);  -- unknown project raises; null keeps the session's current one
         ar text := nullif(cb.norm_tag(area), '');
         mo text := nullif(trim(model), '');
+        rp text := nullif(trim(repo), '');
+        pp text;
 begin
+  -- the repo is one of the project's (a one-repo project: main)
+  if rp is not null then
+    pp := coalesce(p, (select s.project from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane)));
+    if pp is null then raise exception 'a repo needs a project: cb iam <name> <project> --repo %', rp; end if;
+    perform cb._check_repos(pp, array[rp]);
+  end if;
   if role is not null and role not in ('lead','architect','owner','builder','reviewer','qa','investigator') then
     raise exception 'role must be one of lead, architect, owner, builder, reviewer, qa, investigator (got %)', role;
   end if;
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
-  insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model)
-  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo)
+  insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo)
+  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo, rp)
   on conflict on constraint sessions_pkey do update
     set actor = excluded.actor, project = coalesce(excluded.project, cb.sessions.project), started_at = now(), last_seen = now(),
         -- the same name re-binding keeps what it said before; a pane taken over by another actor starts clean
         role = case when excluded.actor = cb.sessions.actor then coalesce(excluded.role, cb.sessions.role) else excluded.role end,
         area = case when excluded.actor = cb.sessions.actor then coalesce(excluded.area, cb.sessions.area) else excluded.area end,
-        model = case when excluded.actor = cb.sessions.actor then coalesce(excluded.model, cb.sessions.model) else excluded.model end;
+        model = case when excluded.actor = cb.sessions.actor then coalesce(excluded.model, cb.sessions.model) else excluded.model end,
+        -- a repo belongs to its project: moving to another project drops it
+        repo = case when excluded.actor = cb.sessions.actor and coalesce(excluded.project, cb.sessions.project) is not distinct from cb.sessions.project
+                    then coalesce(excluded.repo, cb.sessions.repo) else excluded.repo end;
   -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
   update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
   return trim(actor);
@@ -3353,6 +3372,10 @@ alter table cb.sessions add column if not exists area text;
 alter table cb.sessions add column if not exists model text;
 -- the supervisor marks a session it is about to close: no card may land on it for 5 minutes (#3601)
 alter table cb.sessions add column if not exists closing_at timestamptz;
+-- several repos in one project (#3703): the repo a session works in (null: the project's home repo), and the repos a
+-- card touches (null: not named yet; one-repo projects leave it null)
+alter table cb.sessions add column if not exists repo text;
+alter table cb.tasks add column if not exists repos text[];
 
 alter table cb.questions add column if not exists approval_for bigint references cb.tasks(id) on delete set null;
 alter table cb.questions add column if not exists page_version int;
@@ -3479,9 +3502,10 @@ end $$;
 
 -- The lead restages an unclaimed card. build: small found work (a bug or chore) skips design (Q2315); none: work with
 -- no code (ops, a data check) leaves the pipeline and is worked the old way (Q2323).
-create function cb.stage_set(id text, stage text, why text, actor text default null) returns text language plpgsql as $$
+create function cb.stage_set(id text, stage text, why text, actor text default null, repos text[] default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(trim(coalesce(stage, '')));
+        rs text[];
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
@@ -3496,9 +3520,15 @@ begin
   if s = 'build' then
     if t.stage is distinct from 'design' then raise exception '#% is not at design: only a card at design can skip to build', tid; end if;
     if t.type not in ('bug', 'chore') then raise exception '#% is a %: only a bug or chore can skip design', tid, t.type; end if;
+    -- a card never defaults to a repo (#3703): in a project of several, the lead names them
+    rs := coalesce(cb._check_repos(t.project, repos), t.repos);
+    if rs is null and cb._multi_repo(t.project) then raise exception 'give the repos: cb stage % build --repo <repo> --why "<why>"', tid; end if;
+  elsif repos is not null then
+    raise exception 'repos go with build: cb stage % build --repo <repo> --why "<why>"', tid;
   end if;
   perform set_config('cb.stage_ok', 'on', true);
-  update cb.tasks x set stage = case when s = 'build' then 'build' end, stage_since = case when s = 'build' then now() end where x.id = tid;
+  update cb.tasks x set stage = case when s = 'build' then 'build' end, stage_since = case when s = 'build' then now() end,
+         repos = case when s = 'build' then rs else x.repos end where x.id = tid;
   perform set_config('cb.stage_ok', '', true);
   insert into cb.events (actor, project, task_id, kind, summary, data)
   values (a, t.project, tid, 'note',
@@ -3534,7 +3564,7 @@ end $$;
 create function cb.stage_pass(id text, summary text, links jsonb default '{}', actor text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); r text := cb._role(a);
-        lk jsonb := coalesce(links, '{}'); nxt text; hold text; extra jsonb := '{}'; v int; qid bigint; pgbody text;
+        lk jsonb := coalesce(links, '{}'); nxt text; hold text; extra jsonb := '{}'; v int; qid bigint; pgbody text; rs text[];
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
@@ -3555,6 +3585,16 @@ begin
   if t.stage = 'design' then
     select g.version, g.body into v, pgbody from cb.pages g where g.task_id = tid;
     if v is null then raise exception 'write the design page first: cb page set % -f <file>', tid; end if;
+    -- several repos (#3703): the card names its repos before approval; unnamed, they come from its area tags, in squad order
+    if t.repos is null and cb._multi_repo(t.project) then
+      select array_agg(z.rname order by z.ix) into rs
+        from (select e.el ->> 'repo' as rname, min(e.ix) as ix
+                from cb.projects pr, jsonb_array_elements(pr.squad -> 'areas') with ordinality e(el, ix)
+               where pr.slug = t.project and jsonb_typeof(e.el) = 'object' and e.el ->> 'name' = any(t.labels)
+               group by 1) z;
+      if rs is null then raise exception 'name the repos first: cb edit % --repo <repo,repo>', tid; end if;
+      update cb.tasks x set repos = rs where x.id = tid;
+    end if;
     extra := jsonb_build_object('crew', jsonb_build_object('design', a));
   elsif t.stage = 'build' then
     if nullif(lk ->> 'pr', '') is null and nullif(t.links ->> 'pr', '') is null then raise exception 'give the pull request: --pr <url>'; end if;
@@ -4017,11 +4057,50 @@ end $$;
 -- The squad file: who runs a project's squad, on which machines. null = no squad. Task 4's cb squad up reads it.
 drop function if exists cb.squad_set cascade;
 drop function if exists cb.squad_get cascade;
+drop function if exists cb._repos_of cascade;
+drop function if exists cb._home_repo cascade;
+drop function if exists cb._multi_repo cascade;
+drop function if exists cb._repo cascade;
+drop function if exists cb._check_repos cascade;
+drop function if exists cb._repo_list cascade;
 alter table cb.projects add column if not exists squad jsonb;
 
 create function cb.squad_get(project text) returns jsonb language sql stable as $$
   select p.squad from cb.projects p where p.slug = cb.read_project(project)
 $$;
+
+-- A project's repos (#3703), home first, then by name. A squad without repos (or no squad) is one repo: main.
+create function cb._repos_of(p text) returns text[] language sql stable as $$
+  select coalesce((select array_agg(r.key order by r.value -> 'home' = 'true' desc nulls last, r.key)
+                     from cb.projects pr, jsonb_each(pr.squad -> 'repos') r where pr.slug = p), '{main}')
+$$;
+create function cb._home_repo(p text) returns text language sql stable as $$ select (cb._repos_of(p))[1] $$;
+create function cb._multi_repo(p text) returns boolean language sql stable as $$ select cardinality(cb._repos_of(p)) > 1 $$;
+
+-- The repo an actor works in: its latest session's, else that session's project's home repo, else main.
+create function cb._repo(a text) returns text language sql stable as $$
+  select coalesce((select coalesce(s.repo, cb._home_repo(s.project)) from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'main')
+$$;
+
+-- Repo names checked against the project's repos; duplicates dropped, given order kept. null or empty: null (not named).
+create function cb._check_repos(p text, r text[]) returns text[] language plpgsql stable as $$
+declare known text[] := cb._repos_of(p); x text; res text[] := '{}';
+begin
+  foreach x in array coalesce(r, '{}') loop
+    x := trim(x);
+    if not coalesce(x = any(known), false) then raise exception 'repo % is not a repo of %: %', x, p, array_to_string(known, ', '); end if;
+    if x <> all(res) then res := res || x; end if;
+  end loop;
+  return nullif(res, '{}');
+end $$;
+
+-- A JSON list of repo names (cb add/edit --repo) as text[]; JSON null or absent: null.
+create function cb._repo_list(j jsonb) returns text[] language plpgsql immutable as $$
+begin
+  if j is null or jsonb_typeof(j) = 'null' then return null; end if;
+  if jsonb_typeof(j) <> 'array' then raise exception 'repos is a list of repo names, e.g. ["api","dashboard"]'; end if;
+  return array(select jsonb_array_elements_text(j));
+end $$;
 
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
 -- Every refusal names the field.
@@ -4031,6 +4110,8 @@ declare
   a text := cb.set_actor(actor); p text := cb.read_project(project);
   r record; m record; ar jsonb; seen text[] := '{}'; c int; mac int := 0; n_areas int;
   areas jsonb; roles jsonb := '{}'; ns jsonb;
+  -- repos (#3703): rp as given, rs as saved (home on every repo), hm the home repo, area_repos the areas' repos
+  rp jsonb := squad->'repos'; rs jsonb := '{}'; x record; hm text; nm text; need text[]; area_repos text[] := '{}';
 begin
   if not cb._is_dashboard() and cb._role(a) is distinct from 'lead' then raise exception 'only Ahmed or the lead sets the squad'; end if;
   if p is null then raise exception 'project is required'; end if;
@@ -4038,8 +4119,8 @@ begin
      or jsonb_typeof(squad->'roles') is distinct from 'object' then
     raise exception 'squad needs machines and roles objects';
   end if;
-  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise')) then
-    raise exception 'squad has an unknown key: only machines, roles, areas and supervise';
+  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise','repos')) then
+    raise exception 'squad has an unknown key: only machines, roles, areas and supervise (and repos, for a project of several repos)';
   end if;
   if squad ? 'supervise' and jsonb_typeof(squad->'supervise') is distinct from 'boolean' then
     raise exception 'supervise must be true or false';
@@ -4048,29 +4129,70 @@ begin
   if jsonb_typeof(areas) is distinct from 'array' then raise exception 'areas must be a list'; end if;
   for m in select * from jsonb_each(squad->'machines') loop
     if jsonb_typeof(m.value) is distinct from 'object' then raise exception 'machine % must be an object', m.key; end if;
+    if rp is not null and m.value ? 'repo' then raise exception 'machine % repo: with repos, each repo lists its own paths', m.key; end if;
     if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('herdr','repo','board')) then
       raise exception 'machine % has an unknown key: only herdr, repo and board', m.key;
     end if;
     if m.key !~ '^[a-z][a-z0-9-]{0,31}$' then raise exception 'machine % must be a slug: lower-case letters, digits, dashes', m.key; end if;
     if not (m.value ? 'herdr') then raise exception 'machine % needs a herdr key: the herdr machine name, or null for this PC', m.key; end if;
     if jsonb_typeof(m.value->'herdr') not in ('string', 'null') then raise exception 'machine % herdr must be a text or null', m.key; end if;
-    if jsonb_typeof(m.value->'repo') is distinct from 'string' or m.value->>'repo' = '' then raise exception 'machine % needs a repo', m.key; end if;
+    if rp is null and (jsonb_typeof(m.value->'repo') is distinct from 'string' or m.value->>'repo' = '') then raise exception 'machine % needs a repo', m.key; end if;
     if jsonb_typeof(m.value->'board') is distinct from 'string' or m.value->>'board' = '' then raise exception 'machine % needs a board', m.key; end if;
     -- absolute, no spaces or shell characters: these go into a herdr command line (a ~ would not expand there)
-    if m.value->>'repo' !~ '^(/|[A-Za-z]:[/\\])' or m.value->>'repo' ~ '[[:space:];&|$`<>()''"*?~]' then
+    if rp is null and (m.value->>'repo' !~ '^(/|[A-Za-z]:[/\\])' or m.value->>'repo' ~ '[[:space:];&|$`<>()''"*?~]') then
       raise exception 'machine % repo must be an absolute path with no spaces, ~ or shell characters', m.key;
     end if;
     if m.value->>'board' !~ '^(/|[A-Za-z]:[/\\])' or m.value->>'board' ~ '[[:space:];&|$`<>()''"*?~]' then
       raise exception 'machine % board must be an absolute path with no spaces, ~ or shell characters', m.key;
     end if;
   end loop;
+  -- repos: each a slug with a path per machine (the machine repo rule), exactly one home (a lone repo is home by default)
+  if rp is not null then
+    if jsonb_typeof(rp) is distinct from 'object' or rp = '{}' then
+      raise exception 'repos must be an object of repos: {"<name>": {"home": true, "paths": {"<machine>": "<absolute path>"}}}';
+    end if;
+    for m in select * from jsonb_each(rp) loop
+      if m.key !~ '^[a-z][a-z0-9-]{0,31}$' then raise exception 'repo % must be a slug: lower-case letters, digits, dashes', m.key; end if;
+      if jsonb_typeof(m.value) is distinct from 'object' then raise exception 'repo % must be an object', m.key; end if;
+      if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('home','paths')) then
+        raise exception 'repo % has an unknown key: only home and paths', m.key;
+      end if;
+      if m.value ? 'home' and jsonb_typeof(m.value->'home') is distinct from 'boolean' then raise exception 'repo % home must be true or false', m.key; end if;
+      if jsonb_typeof(m.value->'paths') is distinct from 'object' then raise exception 'repo % needs paths: {"<machine>": "<absolute path>"}', m.key; end if;
+      for x in select * from jsonb_each(m.value->'paths') loop
+        if not (squad->'machines' ? x.key) then raise exception 'repo % path on %: % is not in machines', m.key, x.key, x.key; end if;
+        if jsonb_typeof(x.value) is distinct from 'string' or (x.value #>> '{}') !~ '^(/|[A-Za-z]:[/\\])' or (x.value #>> '{}') ~ '[[:space:];&|$`<>()''"*?~]' then
+          raise exception 'repo % path on % must be an absolute path with no spaces, ~ or shell characters', m.key, x.key;
+        end if;
+      end loop;
+      rs := rs || jsonb_build_object(m.key, jsonb_build_object('home', coalesce((m.value->>'home')::boolean, (select count(*) from jsonb_object_keys(rp)) = 1), 'paths', m.value->'paths'));
+    end loop;
+    need := array(select k from jsonb_object_keys(rs) k where rs->k->>'home' = 'true');
+    if cardinality(need) <> 1 then raise exception 'exactly one repo is home: mark it "home": true (lead, architect, qa and investigator start there)'; end if;
+    hm := need[1];
+  end if;
   n_areas := jsonb_array_length(areas);
   for ar in select jsonb_array_elements(areas) loop
-    if jsonb_typeof(ar) is distinct from 'string' or (ar #>> '{}') !~ '^[a-z][a-z0-9-]*$' then
-      raise exception 'area % must be a slug: lower-case letters, digits, dashes', ar;
+    if rp is null then
+      if jsonb_typeof(ar) is distinct from 'string' or (ar #>> '{}') !~ '^[a-z][a-z0-9-]*$' then
+        raise exception 'area % must be a slug: lower-case letters, digits, dashes', ar;
+      end if;
+      nm := ar #>> '{}';
+    else
+      if jsonb_typeof(ar) is distinct from 'object' or exists (select 1 from jsonb_object_keys(ar) k where k not in ('name','repo')) then
+        raise exception 'area %: with repos, each area is {"name", "repo"}', ar;
+      end if;
+      nm := ar->>'name';
+      if jsonb_typeof(ar->'name') is distinct from 'string' or nm !~ '^[a-z][a-z0-9-]*$' then
+        raise exception 'area % must be a slug: lower-case letters, digits, dashes', ar->'name';
+      end if;
+      if jsonb_typeof(ar->'repo') is distinct from 'string' or not (rp ? (ar->>'repo')) then
+        raise exception 'area % names repo %, which is not in repos', nm, coalesce(ar->>'repo', 'null');
+      end if;
+      if (ar->>'repo') <> all(area_repos) then area_repos := area_repos || (ar->>'repo'); end if;
     end if;
-    if (ar #>> '{}') = any(seen) then raise exception 'area % is listed twice', ar #>> '{}'; end if;
-    seen := seen || (ar #>> '{}');
+    if nm = any(seen) then raise exception 'area % is listed twice', nm; end if;
+    seen := seen || nm;
   end loop;
   for r in select * from jsonb_each(squad->'roles') loop
     if r.key not in ('lead','architect','owner','builder','reviewer','qa','investigator') then
@@ -4089,12 +4211,34 @@ begin
     if r.key = 'owner' then
       if r.value ? 'count' then raise exception 'owner takes no count: one owner per area'; end if;
       c := n_areas;
+      need := area_repos;  -- an owner starts in its area's repo
+    elsif rp is not null and r.key in ('builder', 'reviewer') then
+      -- repo-bound: a count per repo
+      if jsonb_typeof(r.value->'count') is distinct from 'object' or r.value->'count' = '{}' then
+        raise exception '% count must be a count per repo: {"<repo>": 1-8}', r.key;
+      end if;
+      c := 0;
+      for x in select * from jsonb_each(r.value->'count') loop
+        if not (rp ? x.key) then raise exception '% count names repo %, which is not in repos', r.key, x.key; end if;
+        if jsonb_typeof(x.value) is distinct from 'number' or (x.value #>> '{}') !~ '^[1-8]$' then
+          raise exception '% count for % must be a whole number from 1 to 8', r.key, x.key;
+        end if;
+        c := c + (x.value #>> '{}')::int;
+      end loop;
+      need := array(select jsonb_object_keys(r.value->'count'));
     else
       if jsonb_typeof(r.value->'count') is distinct from 'number' or (r.value->>'count') !~ '^[1-8]$' then
         raise exception '% count must be a whole number from 1 to 8', r.key;
       end if;
       c := (r.value->>'count')::int;
       if r.key = 'lead' and c <> 1 then raise exception 'lead count must be 1'; end if;
+      need := array[hm];  -- project-wide: starts in the home repo
+    end if;
+    -- every session starts inside its repo: the role's machine needs a path in each repo it works in
+    if rp is not null then
+      foreach nm in array need loop
+        if not (rp->nm->'paths' ? (r.value->>'machine')) then raise exception 'repo % has no path on %', nm, r.value->>'machine'; end if;
+      end loop;
     end if;
     if squad->'machines'->(r.value->>'machine')->>'herdr' = 'macbook' then mac := mac + c; end if; -- the Mac cap counts by herdr label, whatever the key
     roles := roles || jsonb_build_object(r.key,
@@ -4102,8 +4246,14 @@ begin
   end loop;
   if (roles ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
   if n_areas > 0 and not (roles ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
+  -- a part with nobody to review it would sit in review forever
+  if rp is not null then
+    select min(k) into nm from jsonb_object_keys(coalesce(roles->'builder'->'count', '{}')) k where not coalesce(roles->'reviewer'->'count' ? k, false);
+    if nm is not null then raise exception 'repo % has builders but no reviewers: add a reviewer count for %', nm, nm; end if;
+  end if;
   if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
   ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
+        || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
         || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;
   update cb.projects pr set squad = ns where pr.slug = p;
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
