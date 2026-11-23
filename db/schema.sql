@@ -4208,9 +4208,10 @@ begin
   select * into j from cb.jobs x where x.id = id for update;
   if not found then raise exception 'no job #%', id; end if;
   if not cb._is_dashboard() and j.requester <> a
-     -- the lead of the job's project: a session bound to it whose role is lead (cb._role's orch default when unset)
-     and not exists (select 1 from cb.sessions s where s.actor = a and s.project = j.project
-                     and coalesce(s.role, case when a = 'orch' or a like 'orch@%' then 'lead' end) = 'lead') then
+     -- the lead of the job's project: the actor's latest session (as cb._role reads it) is bound to that project and its
+     -- role is lead (cb._role's orch default when unset)
+     and not exists (select 1 from (select s.project, s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1) s
+                     where s.project = j.project and coalesce(s.role, case when a = 'orch' or a like 'orch@%' then 'lead' end) = 'lead') then
     raise exception 'only the requester, the project''s lead or Ahmed can cancel job #%', id;
   end if;
   if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;

@@ -137,6 +137,18 @@ test('cancel: the lead of another project cannot', async () => {
   assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'cancelled');
 });
 
+test('cancel: only the lead\'s latest session counts, not an older one on the project', async () => {
+  const { sql, session, add } = await setup();
+  await sql`select cb.ensure_project('other')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, last_seen) values
+    ('pc','p7','L1@pc','demo','lead', now() - interval '1 hour'), ('pc','p8','L1@pc','other','builder', now())`;
+  const { id } = await add('B1@mac');
+  await assert.rejects(session`select cb.job_cancel(${id}, 'L1@pc')`, /only the requester/);
+  await sql`update cb.sessions set last_seen = now() + interval '1 minute' where pane = 'p7'`;
+  await session`select cb.job_cancel(${id}, 'L1@pc')`;
+  assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'cancelled');
+});
+
 test('a cancel by someone else tells the requester; their own cancel does not', async () => {
   const { sql, session, add } = await setup();
   const told = async () => (await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`).map((e: any) => e.summary);
