@@ -26,6 +26,12 @@ test('every role has a permission file that parses, with no defaultMode', () => 
   }
 });
 
+// Board messages (answers, tells, next-work pushes) reach a squad session through its relay; Claude Code holds them
+// as "unidentified session" messages unless crossSessionInbound is accept (found in the 3601 live check, Q2390).
+test('every role accepts board messages from its relay', () => {
+  for (const r of ROLES) assert.equal(load(r).crossSessionInbound, 'accept', r);
+});
+
 test('every role denies push to main/master in every spelling, and force pushes', () => {
   const bad = [
     'git push', 'git push origin', 'git push origin main', 'git push origin main --tags', 'git push -u origin main',
