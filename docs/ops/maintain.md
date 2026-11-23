@@ -273,6 +273,9 @@ squad file (`cb squad set <project> -f <file>`):
 - Exactly one repo is `home`; lead, architect, qa and investigator start there.
 - Machines then give only `herdr` and `board`; each repo carries its own `paths`.
 - Areas become `{"name": "api", "repo": "api"}`; builder and reviewer counts go per repo (`{"api": 2, "dashboard": 1}`).
+- Every repo with builders needs a reviewer count for that repo (`repo X has builders but no reviewers`).
+- The Mac cap of 8 counts all sessions on the Mac, across repos.
+- An owner starts in its area's repo, so the owner's machine needs a path for that repo. Lead, architect, qa and investigator need a path for the home repo on their machine.
 - No `repos` key: one repo named `main`, as before. A `cb run` for a repo the PC runner does not have is refused.
 
 ## Tests

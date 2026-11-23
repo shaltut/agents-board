@@ -27,7 +27,7 @@ Ahmed is often away: you never wait on him.
 - A session is idle and the queue has work: give it the next card (`cb next --as <name>`).
 
 ## A digest line "#N has no repo"
-- The card names no repo yet: fix it with `cb edit <id> --repo <repo,repo>`.
+- The card names no repo yet: fix it with `cb edit <id> --repo <repo,repo>`. A card at review takes one repo (`cb edit <id> --repo <repo>`); several repos only at build.
 
 ## A GO for an older head
 - There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid`. If they differ,
