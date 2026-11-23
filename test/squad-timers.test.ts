@@ -162,7 +162,7 @@ test('the digest names what needs the lead, each with its command', async () => 
   const has = (re: RegExp) => assert.ok(lines.some((l) => re.test(l)), `${re}\n${lines.join('\n')}`);
   has(new RegExp(`^#${freed} freed from B1@mac \\(held for 1h 40m with no activity\\): cb session B1@mac$`));
   has(/^1 designs wait for Ahmed's approval, oldest 3h \(#\d+\)/);
-  has(new RegExp(`^#${merge} reviewed: merge it, then cb pass ${merge} --commit <sha>$`));
+  has(new RegExp(`^#${merge} reviewed: merge it, then cb pass ${merge} "<what merged>" --commit <sha>$`));
   has(/^Q1 answered for orch@pc \(.*\): cb pending$/);
   has(new RegExp(`^#${tagged} has no area owner \\(tags: billing\\): an architect takes it after 15 min, or cb tag ${tagged} <area>`));
   has(/small work, skipped design: tiny: cb show 1$/);

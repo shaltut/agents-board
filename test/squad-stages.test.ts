@@ -573,3 +573,114 @@ test('--json on pass, fail and stage; resume header, answered questions', async 
   assert.match(r.out, new RegExp(`Q${qid} answered: Which table`));
   assert.match(cb(['resume'], { CB_ACTOR: 'R1@mac' }).out, /^R1@mac \(reviewer\) holds no cards\. Next: cb next/);
 });
+
+// --- final-review fix wave (#3598)
+test('fix 2: a leftover approval question never reopens a closed card, and closing withdraws it', async () => {
+  const sql = await setup(); const s = session();
+  const { id, q } = await atApproval(sql);
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  await sql`select cb.task_done(${id}::text, 'done anyway', '{}', 'B1@mac')`;
+  assert.deepEqual([(await row(sql, id)).status, (await row(sql, id)).stage], ['done', null]);
+  assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'withdrawn');
+  // the answer path itself: a stale open question answered later leaves the closed card alone
+  await sql`update cb.questions set status = 'open' where id = ${q}`;
+  await sql`select cb.answer(${q}::text, 'Approve', 'ahmed')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.status, r.stage], ['done', null]);
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and data ? 'digest'`)[0].n, 0);
+  assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'delivered');
+  // pipeline on: the dashboard closes a card at approval, its question leaves Today
+  await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+  const b = await atApproval(sql);
+  await sql`select cb.task_move(${b.id}::text, 'cancelled', 'not needed', 'ahmed')`;
+  assert.equal((await sql`select status from cb.questions where id = ${b.q}`)[0].status, 'withdrawn');
+  assert.equal((await row(sql, b.id)).stage, null);
+  // the guard still holds while a card waits at approval
+  const c = await atApproval(sql);
+  await assert.rejects(() => s`select cb.withdraw(${c.q}::text, 'B1@mac')`, /is the approval for/);
+});
+
+test('fix 3: re-binding a pane as another actor takes the new role, area and model', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('mac', 'p1', 'W1@mac', 'demo', role => 'builder', area => 'claims', model => 'sonnet')`;
+  await sql`select cb.iam('mac', 'p1', 'orch@mac', 'demo', model => 'opus')`;
+  assert.equal((await sql`select cb._role('orch@mac') as r`)[0].r, 'lead');
+  const [s] = await sql`select role, area, model from cb.sessions where pane = 'p1'`;
+  assert.deepEqual({ ...s }, { role: null, area: null, model: 'opus' });
+});
+
+test('fix 4: re-approval after a send back to design goes to the same builder', async () => {
+  const sql = await setup();
+  const { id, q } = await atApproval(sql);
+  await sql`select cb.answer(${q}::text, 'Approve', 'ahmed')`;
+  assert.equal((await row(sql, id)).assignee, null); // first approval: unassigned
+  await claim(sql, id, 'B1@mac'); await pass(sql, id, 'B1@mac', 'built', { pr: '#1' });
+  await claim(sql, id, 'R1@mac'); await pass(sql, id, 'R1@mac');
+  await claim(sql, id, 'orch@pc'); await pass(sql, id, 'orch@pc', 'm', { commit: 'abc' });
+  await claim(sql, id, 'Q1@mac');
+  await sql`select cb.stage_fail(${id}::text, 'design is off', 'design', 'Q1@mac')`;
+  await claim(sql, id, 'O1@mac'); await pass(sql, id, 'O1@mac', 'redesigned');
+  const [{ id: q2 }] = await sql`select id from cb.questions where approval_for = ${id} and status = 'open'`;
+  await sql`select cb.answer(${q2}::text, 'Approve', 'ahmed')`;
+  const r = await row(sql, id);
+  assert.deepEqual([r.stage, r.status, r.assignee], ['build', 'next', 'B1@mac']);
+});
+
+test('fix 5: the lead passes a merge card without holding it, and every printed cb pass/fail has its argument', async () => {
+  const sql = await setup();
+  const id = await card(sql);
+  await toStage(sql, id, 'merge');
+  await sql`update cb.tasks set crew = '{"build":"B1@mac","review":"R1@mac"}' where id = ${id}`;
+  await assert.rejects(() => pass(sql, id, 'R1@mac', 'x', { commit: 'abc' }), /merging is the lead's/);
+  const lines: string[] = [];
+  for (const st of ['design', 'build', 'review', 'merge', 'qa']) {
+    await toStage(sql, id, st);
+    lines.push((await sql`select cb._finish_line(t) as l from cb.tasks t where t.id = ${id}`)[0].l);
+  }
+  await toStage(sql, id, 'merge');
+  lines.push(...(await sql`select cb.digest('demo') as d`)[0].d);
+  for (const l of lines) for (const m of l.matchAll(/cb (pass|fail) \d+(?! "[^"]+")/g)) assert.fail(`bare ${m[0]} in: ${l}`);
+  assert.ok(lines.some((l) => /reviewed: merge it, then cb pass \d+ "<what merged>" --commit <sha>/.test(l)), 'digest line 4 prints a valid pass');
+  assert.equal((await pass(sql, id, 'orch@pc', 'merged', { commit: 'abc' }))[0].r, 'qa'); // not holding it
+});
+
+test('fix 6, 8, 9, 11: role-less pass, review move, close refusal wording, pipeline off message', async () => {
+  const sql = await setup(); const s = session();
+  const id = await atDesign(sql);
+  await sql`insert into cb.sessions (machine, pane, actor, project) values ('mac','p20','X9@mac','demo')`;
+  await sql`update cb.tasks set assignee = 'X9@mac' where id = ${id}`;
+  await assert.rejects(() => pass(sql, id, 'X9@mac'), /owner or architect/);
+  const b = await atBuild(sql);
+  await assert.rejects(() => s`select cb.task_move(${b}::text, 'review', 'pr up', 'B1@mac')`, /is at Building: finish it with cb pass \d+ "<summary>" --pr <url>/);
+  assert.equal((await row(sql, b)).status, 'next');
+  await assert.rejects(() => s`select cb.task_done(${b}::text, 'done', '{}', 'B1@mac')`, /is at build: finish it with cb pass \d+ "<summary>" --pr <url> \(only Ahmed/);
+  const d = await card(sql);
+  await assert.rejects(() => s`select cb.task_move(${d}::text, 'cancelled', 'x', 'B1@mac')`, /is at design: finish it with cb page set/);
+  const { id: a } = await atApproval(sql);
+  await assert.rejects(() => s`select cb.task_move(${a}::text, 'done', 'x', 'B1@mac')`, /waiting for Ahmed/);
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  await assert.rejects(() => pass(sql, b, 'B1@mac'), /pipeline is off for demo: finish it with cb done \d+/);
+  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'R1@mac')`, /pipeline is off for demo: finish it with cb done \d+/);
+});
+
+test('fix 12: aliasing a project that has pages moves them, and a dashboard project move follows', async () => {
+  const sql = await setup();
+  await sql`select cb.ensure_project('old')`;
+  await sql`select cb.project_pipeline('old', true, 'ahmed')`;
+  const [{ id }] = await sql`select cb.task_add(project => 'old', title => 'x', actor => 'ahmed') as id`;
+  await sql`select cb.page_set('the design', task => ${id}::text, actor => 'O1@mac')`;
+  await sql`select cb.page_set('area notes', area => 'claims', project => 'old', actor => 'O1@mac')`;
+  await sql`select cb.page_set('area notes demo', area => 'claims', project => 'demo', actor => 'O1@mac')`;
+  await sql`select cb.project_alias('old', 'demo')`;
+  assert.deepEqual((await sql`select distinct project from cb.pages`).map((r: any) => r.project), ['demo']);
+  assert.equal((await sql`select count(*)::int n from cb.pages`)[0].n, 3);
+  await sql`select cb.ensure_project('other')`;
+  await sql`select cb.task_update(${id}::text, '{"project":"other"}', 'ahmed')`;
+  assert.equal((await sql`select project from cb.pages where task_id = ${id}`)[0].project, 'other');
+});
+
+test('fix 14: the events index by actor exists', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  assert.equal((await sql`select count(*)::int n from pg_indexes where schemaname = 'cb' and indexname = 'events_actor_at'`)[0].n, 1);
+});

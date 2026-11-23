@@ -92,6 +92,7 @@ create table if not exists cb.events (
   summary     text not null default '',
   data        jsonb not null default '{}'
 );
+create index if not exists events_actor_at on cb.events (actor, at desc);
 alter table cb.events drop constraint if exists events_kind_check;
 alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask'));
 
@@ -434,6 +435,10 @@ begin
     get diagnostics n = row_count;
     update cb.questions q set project = t where q.project = a;
     update cb.events e set project = t where e.project = a;
+    -- pages follow (cb.pages.project is a foreign key): an area the target already has a page for keeps the old one under a new name
+    update cb.pages g set project = t,
+           area = case when exists (select 1 from cb.pages x where x.project = t and x.area = g.area) then g.area || '-' || a else g.area end
+     where g.project = a;
     update cb.epics e set project = t where e.project = a; -- epics follow their steps
     update cb.goals g set project = t where g.project = a;
     update cb.project_aliases pa set slug = t where pa.slug = a;
@@ -485,15 +490,29 @@ begin
   if tg_op = 'UPDATE' and old.stage is not null and cb._pipeline(old.project) and current_setting('cb.stage_ok', true) is distinct from 'on' then
     if new.status in ('done', 'cancelled') and new.status is distinct from old.status then
       ac := current_setting('cb.actor', true);
-      if cb._is_dashboard() or (cb._role(ac) = 'lead' and nullif(trim(coalesce(current_setting('cb.note', true), '')), '') is not null) then
-        new.stage := null; new.stage_since := null;
-      else
-        raise exception '#% is at %: finish it with cb pass % or cb fail % "<why>" (only Ahmed, or the lead with a note, closes it outside the pipeline)', old.id, old.stage, old.id, old.id;
+      if not (cb._is_dashboard() or (cb._role(ac) = 'lead' and nullif(trim(coalesce(current_setting('cb.note', true), '')), '') is not null)) then
+        raise exception '#% is at %: % (only Ahmed, or the lead with a note, closes it outside the pipeline)', old.id, old.stage,
+          case when old.stage = 'approval' then cb._finish_line(old) else 'finish it with ' || cb._finish_line(old) end;
       end if;
+    end if;
+    -- review is the status of a card waiting at approval; any other staged card parked there would fall out of every list
+    if new.status = 'review' and new.status is distinct from old.status and new.stage is distinct from 'approval' then
+      raise exception '#% is at %: finish it with %', old.id, cb._stage_words(old.stage), cb._finish_line(old);
     end if;
     if new.project is distinct from old.project and not cb._is_dashboard() then
       raise exception '#% is at %: a staged card stays in its project (Ahmed can move it from the board)', old.id, old.stage;
     end if;
+  end if;
+  -- a closed card is out of the pipeline whatever the pipeline switch says; one waiting at approval takes its question with it
+  if tg_op = 'UPDATE' and old.stage is not null and new.status in ('done', 'cancelled') and new.status is distinct from old.status then
+    new.stage := null; new.stage_since := null;
+    if old.stage = 'approval' then
+      update cb.questions q set status = 'withdrawn' where q.approval_for = old.id and q.status in ('open', 'sent_back', 'dormant');
+    end if;
+  end if;
+  -- a task page follows its task to another project (an area page is moved by cb.project_alias)
+  if tg_op = 'UPDATE' and new.project is distinct from old.project then
+    update cb.pages g set project = new.project where g.task_id = old.id;
   end if;
   -- only when epic_id itself changes: a project slug rename cascades to both tables and must not trip it
   if new.epic_id is not null and (tg_op = 'INSERT' or new.epic_id is distinct from old.epic_id) then
@@ -1388,8 +1407,10 @@ begin
   values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo)
   on conflict on constraint sessions_pkey do update
     set actor = excluded.actor, project = coalesce(excluded.project, cb.sessions.project), started_at = now(), last_seen = now(),
-        role = coalesce(excluded.role, cb.sessions.role), area = coalesce(excluded.area, cb.sessions.area),
-        model = coalesce(excluded.model, cb.sessions.model);
+        -- the same name re-binding keeps what it said before; a pane taken over by another actor starts clean
+        role = case when excluded.actor = cb.sessions.actor then coalesce(excluded.role, cb.sessions.role) else excluded.role end,
+        area = case when excluded.actor = cb.sessions.actor then coalesce(excluded.area, cb.sessions.area) else excluded.area end,
+        model = case when excluded.actor = cb.sessions.actor then coalesce(excluded.model, cb.sessions.model) else excluded.model end;
   return trim(actor);
 end $$;
 
@@ -2148,6 +2169,8 @@ begin
        and (t.blocked_on is not null or cardinality(cb._waits_on(t.id)) = 0)), '[]'),
     'unreviewed', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'pr', t.links ->> 'pr') order by t.id)
       from cb.tasks t where t.status = 'review' and (p is null or t.project = p)
+       -- a staged card in review is an approval card: the pipeline reviews it, not a "Review #N" card
+       and not (t.stage is not null and cb._pipeline(t.project))
        and not cb._is_review(t.labels, t.title) and not cb._has_reviewer(t)
        -- held by Ahmed, a user or an orchestrator, "review" means waiting on a person, not on a code review
        and coalesce(t.assignee, '') not in ('ahmed', 'orch') and coalesce(t.assignee, '') not like 'orch@%'
@@ -2161,7 +2184,10 @@ begin
        and l.actor not in (select u.name from cb.users u)), '[]'),
     -- live sessions (relay within 90s) holding nothing in progress; tags = what they worked on this week
     'idle', coalesce((select jsonb_agg(jsonb_build_object('actor', s.actor, 'tags',
-          (select coalesce(jsonb_agg(distinct g), '[]') from cb.tasks t, unnest(t.labels) g where t.assignee = s.actor and t.updated_at > now() - interval '7 days'))
+          (select coalesce(jsonb_agg(distinct g), '[]') from cb.tasks t, unnest(t.labels) g where t.assignee = s.actor and t.updated_at > now() - interval '7 days'),
+          -- the Next cards this session's role may claim: never told to take one it cannot
+          'can', (select coalesce(jsonb_agg(t.id order by t.id), '[]') from cb.tasks t
+                   where t.status = 'next' and t.assignee is null and (p is null or t.project = p) and cb._claimable(t, s.actor)))
         order by s.actor)
       from (select distinct s2.actor from cb.sessions s2 where (p is null or s2.project = p) and s2.last_seen > now() - interval '90 seconds') s
      where s.actor <> me and s.actor <> 'orch' and s.actor not like 'orch@%'
@@ -2178,6 +2204,7 @@ begin
     -- tasks with a PR, open or touched this week: the CLI asks GitHub about these
     'prs', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'status', t.status, 'assignee', t.assignee, 'labels', t.labels,
         'pr', t.links ->> 'pr', 'commit', t.links ->> 'commit', 'done_at', t.done_at,
+        'stage', case when cb._pipeline(t.project) then t.stage end, 'finish', case when cb._pipeline(t.project) and t.stage is not null then cb._finish_line(t) end,
         'review', cb._is_review(t.labels, t.title), 'reviewed', cb._has_reviewer(t),
         'go', v.summary ~ '\mGO\M' and v.summary !~ 'NO[- ]?GO', 'verdict', v.summary)
         order by t.id)
@@ -3495,18 +3522,19 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %', t.project; end if;
+  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
   if t.stage is null then raise exception '#% is not in the pipeline', tid; end if;
   if t.stage = 'approval' then
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
     raise exception 'waiting for Ahmed''s answer on Q%', qid;
   end if;
-  if t.stage = 'design' and r not in ('owner', 'architect') then raise exception 'design is passed by an owner or architect session'; end if;
+  if t.stage = 'design' and (r is null or r not in ('owner', 'architect')) then raise exception 'design is passed by an owner or architect session'; end if;
   if t.stage = 'build' and r is distinct from 'builder' then raise exception 'build is passed by a builder session'; end if;
   if t.stage = 'review' and r is distinct from 'reviewer' then raise exception 'review is passed by a reviewer session'; end if;
   if t.stage = 'merge' and r is distinct from 'lead' then raise exception 'merging is the lead''s'; end if;
   if t.stage = 'qa' and r is distinct from 'qa' then raise exception 'checking on dev is a qa session''s'; end if;
-  if t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
+  -- merging is the lead's stage: the lead passes it without claiming it first
+  if t.stage <> 'merge' and t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
   if coalesce(trim(summary), '') = '' then raise exception 'summary is required: say in one line what you did'; end if;
   if t.stage = 'design' then
     select g.version, g.body into v, pgbody from cb.pages g where g.task_id = tid;
@@ -3545,7 +3573,7 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %', t.project; end if;
+  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
   if t.stage in ('review', 'qa') then
@@ -3567,10 +3595,12 @@ end $$;
 -- An approval question is never withdrawn, sent back or reassigned on its own: the card would wait with no live question.
 -- Only cb.stage_fail (the designer taking the card back) gets through, with cb.stage_ok on.
 create function cb._approval_guard(qid bigint) returns void language plpgsql as $$
+#variable_conflict use_variable
 declare tid bigint;
 begin
-  select q.approval_for into tid from cb.questions q
-   where q.id = qid and q.status in ('open', 'answered', 'dormant', 'sent_back');
+  select q.approval_for into tid from cb.questions q join cb.tasks t on t.id = q.approval_for
+   where q.id = qid and q.status in ('open', 'answered', 'dormant', 'sent_back')
+     and t.stage = 'approval' and t.status not in ('done', 'cancelled') and cb._pipeline(t.project);
   if tid is not null and current_setting('cb.stage_ok', true) is distinct from 'on' then
     raise exception 'Q% is the approval for #%: the designer takes it back with cb fail % "<why>"', qid, tid, tid;
   end if;
@@ -3588,15 +3618,16 @@ begin
   if not found then return; end if;
   -- only the card's current approval question moves it: an older one, corrected later, is history
   select max(x.id) into latest from cb.questions x where x.approval_for = t.id and x.status <> 'withdrawn';
-  if t.stage = 'approval' and qid = latest then
+  if t.stage = 'approval' and t.status not in ('done', 'cancelled') and cb._pipeline(t.project) and qid = latest then
     picked := cb._picked(q.options, q.answer, false);
     if 'Approve' = any (picked) then
-      perform cb._stage_move(t.id, 'build', null, 'design approved');
+      -- a first approval leaves the card unassigned; one after a send back to design returns it to its builder
+      perform cb._stage_move(t.id, 'build', t.crew ->> 'build', 'design approved');
       update cb.tasks x set approved_version = q.page_version where x.id = t.id;
     else  -- Changes needed, or any typed answer: never approve on an ambiguous one, never leave the card waiting
       perform cb._stage_move(t.id, 'design', t.crew ->> 'design', q.answer);
     end if;
-  else
+  elsif t.status not in ('done', 'cancelled') and cb._pipeline(t.project) then
     insert into cb.events (actor, project, task_id, kind, summary, data)
     values (coalesce(nullif(current_setting('cb.actor', true), ''), 'unknown'), t.project, t.id, 'note',
             format('approval answer changed to "%s" after the card moved on', q.answer), '{"digest": true}');
@@ -3723,7 +3754,7 @@ begin
       from cb.tasks t where t.project = p and t.stage = 'approval' and t.status not in ('done', 'cancelled') having count(*) > 0
     union all
     -- 4: reviewed, waiting for the lead to merge
-    select 4, t.priority = 'P0', t.id, format('#%s reviewed: merge it, then cb pass %s --commit <sha>', t.id, t.id)
+    select 4, t.priority = 'P0', t.id, format('#%s reviewed: merge it, then cb pass %s "<what merged>" --commit <sha>', t.id, t.id)
       from cb.tasks t where t.project = p and t.stage = 'merge' and t.status not in ('done', 'cancelled')
     union all
     -- 5: answers nobody collected: the lead asked, or the asker's relay has been gone for 10 minutes
