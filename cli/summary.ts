@@ -44,8 +44,12 @@ export function summarize(output: string): { text: string; ran: number | null } 
 
   // code-frame lines (a linted file's source: oxlint, prettier's `[error] 2 | code`, Babel's `> 12 | code`) stay off the
   // board; so do pnpm's trailer lines, which would push the one real error out of the tail
-  const drop = /^\s*(?:\[\w+\]\s*)?>?\s*(?:\d+\s*[│|]|[│|·╭╰─])|ERR_PNPM_|^\s*Exit status \d+|^\s*WARN\s|^\s*(?:[A-Za-z]:)?[\\/]\S*:\s*$/;
-  return { text: cut(lines.filter((l) => l.trim() && !drop.test(l)).slice(-5).join('\n')), ran: null };
+  const frame = /^\s*(?:\[\w+\]\s*)?>?\s*(?:\d+\s*[│|]|[│|·╭╰─])/;
+  const drop = /ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL|^\s*Exit status \d+|^\s*WARN\s|^\s*(?:[A-Za-z]:)?[\\/]\S*:\s*$/;
+  const kept = lines.filter((l) => l.trim() && !frame.test(l));
+  // nothing left but trailer lines: the last line that is not a code frame, never an empty summary
+  const tail = kept.filter((l) => !drop.test(l)).slice(-5);
+  return { text: cut((tail.length ? tail : kept.slice(-1)).join('\n') || '(no output)'), ran: null };
 }
 
 const MASK = '[masked]';

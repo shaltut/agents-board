@@ -48,6 +48,16 @@ test('pnpm trailer lines do not hide the tsc error', () => {
   assert.match(summarize(out).text, /TS2322/);
 });
 
+test('a failed install keeps its cause line', () => {
+  const out = [' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json', 'Exit status 1'].join('\n');
+  assert.match(summarize(out).text, /ERR_PNPM_OUTDATED_LOCKFILE/);
+});
+
+test('a log that is all dropped lines still gives a summary', () => {
+  assert.equal(summarize(' WARN  x\nExit status 1').text, 'Exit status 1');
+  assert.equal(summarize('  301 │   expect(x)\n     ╰────').text, '(no output)');
+});
+
 test('a NUL byte is stripped (the board refuses it)', () => {
   assert.doesNotMatch(summarize('a\0b').text, /\0/);
 });

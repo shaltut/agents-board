@@ -140,7 +140,7 @@
 
 **Interfaces:**
 - Produces:
-  - `summarize(output: string): { text: string; ran: number | null }` — `ran` is passed + failed when counts were found, else null. Strips ANSI; node:test (a line ending `pass N` / `fail N` / `skipped N` with any or no prefix: `ℹ`, `#`, or a mangled glyph; last occurrence wins; failing names from `✖ <name> (<n>ms)` lines and TAP `not ok N - <name>`, skipping the `failing tests:` header, de-duplicated) → `<p> passed, <f> failed, <s> skipped. Failing: <n1>; <n2>...`; vitest (` Tests  1 failed | 1 passed | 1 skipped (3)` and ` FAIL  <file> > <suite> > <name>`) → same shape; neither → the last 10 non-empty lines joined by newlines. At most 5 failing names, then `and <k> more`. Never longer than 1,000 characters (cut with `…`). `Failing:` only when there are failures.
+  - `summarize(output: string): { text: string; ran: number | null }` — `ran` is passed + failed when counts were found, else null. Strips ANSI; node:test (a line ending `pass N` / `fail N` / `skipped N` with any or no prefix: `ℹ`, `#`, or a mangled glyph; last occurrence wins; failing names from `✖ <name> (<n>ms)` lines and TAP `not ok N - <name>`, skipping the `failing tests:` header, de-duplicated) → `<p> passed, <f> failed, <s> skipped. Failing: <n1>; <n2>...`; vitest (` Tests  1 failed | 1 passed | 1 skipped (3)` and ` FAIL  <file> > <suite> > <name>`) → same shape; neither → the last 5 non-empty lines joined by newlines, after dropping code-frame lines and pnpm trailer lines (the run wrapper, `Exit status`, `WARN`, a lone path line); `(no output)` when nothing is left. At most 5 failing names, then `and <k> more`. Never longer than 1,000 characters (cut with `…`). `Failing:` only when there are failures.
   - `mask(text: string): string` — replaces every match of the `cb._sensitive` patterns (copy them from `db/schema.sql`, function `cb._sensitive`: tokens, bearer, JWT, private key header, URL with password, credential assignments and `--password`-style flags, 10-digit IDs except `2147483647`/`2147483648`, emails except the listed system users, phone numbers) with `[masked]`.
   - `logTail(path: string, bytes = 1_048_576): string` — the last `bytes` of a file as text.
 
@@ -150,7 +150,7 @@
   - `ran is null without counts and 0 when nothing ran`: plain text → null; `ℹ pass 0` / `ℹ fail 0` / `ℹ skipped 4` → 0.
   - `vitest output gives counts and the failing path`: `.text` === `1 passed, 1 failed, 1 skipped. Failing: c.test.ts > suite > breaks on purpose`.
   - `TAP output works too`: a hand-written TAP sample with `not ok 2 - b` and `# pass 1`/`# fail 1` → `1 passed, 1 failed, 0 skipped. Failing: b`.
-  - `other output gives the last 10 lines`: 30 numbered lines → lines 21-30.
+  - `other output gives the last 5 lines`: 30 numbered lines → lines 26-30.
   - `at most 5 failing names`: 8 `✖ tN (1ms)` lines → names t1..t5 then `and 3 more`.
   - `huge output stays within 1000 characters`: a 5 MB string with no newline → length ≤ 1000.
   - `mask hides what the board would refuse` (uses the test DB): for each of `ghp_` + 30 chars, `Bearer abcdefghijklmnopqrstuvwxyz123`, a JWT, `postgres://u:pw@h/db`, `password=hunter2!x`, `--token abc123`, `ID 1234567890`, `mail a.person@example.org`, `+966 55 123 4567`: `mask(x)` contains `[masked]` and `select cb._sensitive(${mask(x)})` is null; `mask('1 passed, 2 failed')` is unchanged.
