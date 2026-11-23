@@ -4017,9 +4017,18 @@ begin
     if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('herdr','repo','board')) then
       raise exception 'machine % has an unknown key: only herdr, repo and board', m.key;
     end if;
-    if jsonb_typeof(m.value->'herdr') not in ('string', 'null') and m.value ? 'herdr' then raise exception 'machine % herdr must be a text or null', m.key; end if;
+    if m.key !~ '^[a-z][a-z0-9-]{0,31}$' then raise exception 'machine % must be a slug: lower-case letters, digits, dashes', m.key; end if;
+    if not (m.value ? 'herdr') then raise exception 'machine % needs a herdr key: the herdr machine name, or null for this PC', m.key; end if;
+    if jsonb_typeof(m.value->'herdr') not in ('string', 'null') then raise exception 'machine % herdr must be a text or null', m.key; end if;
     if jsonb_typeof(m.value->'repo') is distinct from 'string' or m.value->>'repo' = '' then raise exception 'machine % needs a repo', m.key; end if;
     if jsonb_typeof(m.value->'board') is distinct from 'string' or m.value->>'board' = '' then raise exception 'machine % needs a board', m.key; end if;
+    -- absolute, no spaces or shell characters: these go into a herdr command line (a ~ would not expand there)
+    if m.value->>'repo' !~ '^(/|[A-Za-z]:[/\\])' or m.value->>'repo' ~ '[[:space:];&|$`<>()''"*?~]' then
+      raise exception 'machine % repo must be an absolute path with no spaces, ~ or shell characters', m.key;
+    end if;
+    if m.value->>'board' !~ '^(/|[A-Za-z]:[/\\])' or m.value->>'board' ~ '[[:space:];&|$`<>()''"*?~]' then
+      raise exception 'machine % board must be an absolute path with no spaces, ~ or shell characters', m.key;
+    end if;
   end loop;
   n_areas := jsonb_array_length(areas);
   for ar in select jsonb_array_elements(areas) loop
@@ -4053,7 +4062,7 @@ begin
       c := (r.value->>'count')::int;
       if r.key = 'lead' and c <> 1 then raise exception 'lead count must be 1'; end if;
     end if;
-    if r.value->>'machine' = 'macbook' then mac := mac + c; end if;
+    if squad->'machines'->(r.value->>'machine')->>'herdr' = 'macbook' then mac := mac + c; end if; -- the Mac cap counts by herdr label, whatever the key
     roles := roles || jsonb_build_object(r.key,
       jsonb_strip_nulls(jsonb_build_object('count', r.value->'count', 'model', coalesce(r.value->>'model', cb._role_model(r.key)), 'machine', r.value->>'machine')));
   end loop;

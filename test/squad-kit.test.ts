@@ -96,7 +96,7 @@ test('cb resume ends with the role line in a pipeline project', async () => {
 });
 
 const SQUAD = {
-  machines: { macbook: { herdr: 'macbook', repo: '~/Work/x', board: '~/Work/claude-board' }, shaltoot: { herdr: null, repo: 'F:/Work/x', board: 'F:/Work/claude-board' } },
+  machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' }, shaltoot: { herdr: null, repo: 'F:/Work/x', board: 'F:/Work/claude-board' } },
   roles: { lead: { count: 1, model: 'opus', machine: 'shaltoot' }, builder: { count: 3, model: 'sonnet', machine: 'macbook' }, owner: { model: 'opus', machine: 'macbook' } },
   areas: ['claims', 'preauth'],
 };
@@ -135,11 +135,28 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.machines.macbook.extra = 1; }), /machine macbook has an unknown key/],
     [mod((s) => { s.roles.owner.count = 2; }), /owner takes no count/],
     [mod((s) => { s.machines.macbook.herdr = 5; }), /herdr must be a text or null/],
+    [mod((s) => { delete s.machines.macbook.herdr; }), /machine macbook needs a herdr key/],
+    [mod((s) => { s.machines.Mac_Book = s.machines.macbook; delete s.machines.macbook; s.roles.builder.machine = 'Mac_Book'; s.roles.owner.machine = 'Mac_Book'; }), /machine Mac_Book must be a slug/],
+    [mod((s) => { s.machines.macbook.repo = '~/Work/x'; }), /machine macbook repo must be an absolute path/],
+    [mod((s) => { s.machines.macbook.board = '~/Work/claude-board'; }), /machine macbook board must be an absolute path/],
+    [mod((s) => { s.machines.macbook.repo = 'Work/x'; }), /machine macbook repo must be an absolute path/],
+    [mod((s) => { s.machines.macbook.repo = '/Users/me/my work'; }), /machine macbook repo must be an absolute path/],
+    [mod((s) => { s.machines.macbook.repo = '/x; rm -rf y'; }), /machine macbook repo must be an absolute path/],
+    [mod((s) => { s.machines.macbook.board = '/x\ny'; }), /machine macbook board must be an absolute path/],
+    // the Mac cap counts by the herdr label, whatever the machine key
+    [mod((s) => { s.machines.mac = { ...s.machines.macbook }; s.roles.builder.machine = 'mac'; s.roles.builder.count = 7; s.roles.owner.machine = 'mac'; }), /macbook would run 9 sessions/],
     [[1, 2] as any, /squad needs machines and roles objects/],
   ];
   await assert.rejects(() => sql`select cb.squad_set('', ${sql.json(SQUAD)}, 'ahmed')`, /project is required|unknown project/);
   assert.equal((await sql`select count(*)::int as n from cb.events where summary = 'squad updated'`)[0].n, 0);
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re);
+});
+
+test('squad_set accepts absolute paths on both OS shapes', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const s = mod((x) => { x.machines.shaltoot.repo = 'C:/Work/x'; x.machines.shaltoot.board = 'F:/Work/claude-board'; });
+  await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
 });
 
 test('squad_set: only the dashboard or a lead; role-less and unknown callers are refused', async () => {

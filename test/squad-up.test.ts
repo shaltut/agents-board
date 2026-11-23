@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, type Runner } from '../cli/squad-up.ts';
 
-const mach = (herdr: string | null, board: string) => ({ herdr, repo: '~/Work/demo', board });
+const mach = (herdr: string | null, board: string) => ({ herdr, repo: '/Users/me/Work/demo', board });
 const squad = {
-  machines: { shaltoot: mach(null, 'C:/b'), macbook: mach('macbook', '~/board') },
+  machines: { shaltoot: mach(null, 'C:/b'), macbook: mach('macbook', '/Users/me/board') },
   roles: {
     lead: { count: 1, model: 'opus', machine: 'shaltoot' },
     builder: { count: 2, model: 'sonnet', machine: 'macbook' },
@@ -23,8 +23,8 @@ test('plans every role with its name, model, machine, settings and prompt', () =
   const b = p.start.find((l) => l.name === 'demo-B1@macbook')!;
   assert.equal(b.model, 'sonnet');
   assert.equal(b.herdr, 'macbook');
-  assert.equal(b.cwd, '~/Work/demo');
-  assert.equal(b.settings, '~/board/kit/permissions/builder.json');
+  assert.equal(b.cwd, '/Users/me/Work/demo');
+  assert.equal(b.settings, '/Users/me/board/kit/permissions/builder.json');
   assert.equal(b.prompt, 'cb iam demo-B1@macbook demo --role builder --model sonnet, then cb role builder, then cb next');
   const lead = p.start.find((l) => l.role === 'lead')!;
   assert.equal(lead.herdr, null);
@@ -66,4 +66,82 @@ test('agent get: exit 0 live, agent_not_found absent, anything else unknown', ()
   assert.equal(classifyAgentGet({ status: 1, stderr: '{"error":{"code":"agent_not_found"}}' }), 'absent');
   assert.equal(classifyAgentGet({ status: 1, stderr: 'machine unreachable' }), 'unknown');
   assert.equal(classifyAgentGet({ status: null, error: new Error('ETIMEDOUT') }), 'unknown');
+});
+
+test('the Mac cap counts by the herdr label, whatever the machine key', () => {
+  const sq = { ...squad, machines: { shaltoot: squad.machines.shaltoot, mac: squad.machines.macbook },
+    roles: { ...squad.roles, builder: { count: 2, model: 'sonnet', machine: 'mac' }, reviewer: { count: 1, model: 'opus', machine: 'mac' }, owner: { model: 'sonnet', machine: 'mac' } } };
+  const live = Array.from({ length: 6 }, (_, i) => ({ actor: `other-B${i}@mac`, machine: 'mac' }));
+  const p = planSquad('demo', sq, live, {});
+  assert.equal(p.start.filter((l) => l.machine === 'mac').length, 2);
+  assert.equal(p.refused.length, 2);
+});
+
+test('a second project cannot take the lead name another project holds', () => {
+  const p = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other' }], {});
+  assert.deepEqual(p.heldBy, { 'orch@shaltoot': 'other' });
+  assert.ok(!names(p).includes('orch@shaltoot'));
+});
+
+// ---- squadUp with a fake herdr: nothing real is started ----
+const OK = { status: 0, stdout: '{}', stderr: '' };
+const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
+type Call = { m: string | null; args: string[]; timeout?: number };
+function fake(handler: (c: Call) => any) {
+  const calls: Call[] = [];
+  const run: Runner = (m, args, timeout) => { const c = { m, args, timeout }; calls.push(c); return handler(c) ?? OK; };
+  return { calls, run };
+}
+const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
+const rows = (list: [string, string, boolean][]) => list.map(([actor, project, live]) => ({ actor, project, live, machine: actor.split('@')[1] }));
+const callFn = (r: any[]) => async (fn: string) => (fn === 'squad_get' ? squad : r);
+const paneOut = (id: string) => ({ status: 0, stdout: JSON.stringify({ result: { pane_id: id } }), stderr: '' });
+
+test('squad up: a quiet session that herdr lists is not started a second time', async () => {
+  const mac7 = { status: 0, stdout: JSON.stringify({ agents: Array.from({ length: 7 }, (_, i) => ({ name: `a${i}` })) }), stderr: '' };
+  const f = fake((c) => {
+    if (c.args[0] === 'agent' && c.args[1] === 'list') return mac7;
+    if (c.args[0] === 'agent' && c.args[1] === 'get') return /B1@macbook|O-claims@macbook/.test(c.args[2]!) ? OK : GONE;
+    if (c.args[0] === 'tab') return paneOut('p1');
+  });
+  // B1 and O-claims are in herdr but quiet on the board (not live)
+  const out = await squadUp('demo', false, callFn(rows([['demo-B1@macbook', 'demo', false], ['demo-O-claims@macbook', 'demo', false]])), f.run);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-B1@macbook'), out);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-O-claims@macbook'), out);
+  assert.ok(has(f.calls, 'agent', 'get', 'demo-B1@macbook') && has(f.calls, 'agent', 'get', 'demo-R1@macbook'));
+  assert.match(out, /skip demo-B1@macbook: running in herdr but not on the board \(not bound\?\)\n  herdr --machine macbook agent prompt demo-B1@macbook "cb iam demo-B1@macbook demo --role builder/);
+  assert.match(out, /started demo-B2@macbook/);
+  assert.match(out, /refused demo-R1@macbook/); // 7 on the Mac + B2 = the cap of 8
+  assert.ok(f.calls.filter((c) => c.args[1] === 'list').every((c) => c.timeout === 30_000));
+});
+
+test('squad up: a started session whose prompt failed prints the command to send it', async () => {
+  const f = fake((c) => {
+    if (c.args[1] === 'get') return GONE;
+    if (c.args[0] === 'tab') return paneOut('p1');
+    if (c.args[1] === 'prompt' && c.args[2] === 'orch@shaltoot') return { status: 1, stderr: 'boom' };
+  });
+  const out = await squadUp('demo', false, callFn([]), f.run);
+  assert.match(out, /^started orch@shaltoot, prompt not sent: herdr agent prompt orch@shaltoot "cb iam orch@shaltoot demo --role lead --model opus, then cb role lead, then cb next"$/m);
+  assert.ok(!has(f.calls, 'pane', 'close'));
+});
+
+test('squad up: a launch that fails closes only the pane this run made for it', async () => {
+  let n = 0;
+  const f = fake((c) => {
+    if (c.args[1] === 'get') return GONE;
+    if (c.args[0] === 'tab' || c.args[0] === 'pane' && c.args[1] === 'split') return paneOut(`p${++n}`);
+    if (c.args[1] === 'start' && c.args[2] === 'demo-B2@macbook') return { status: 1, stderr: 'no model' };
+  });
+  const out = await squadUp('demo', false, callFn([]), f.run);
+  assert.match(out, /failed demo-B2@macbook: no model/);
+  const closes = f.calls.filter((c) => c.args[0] === 'pane' && c.args[1] === 'close');
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0]!.args[2], 'p4'); // the fourth pane made this run is B2's: no earlier pane is closed
+});
+
+test('squad up: the lead name held by another project is reported, not started', async () => {
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
+  const out = await squadUp('demo', true, callFn(rows([['orch@shaltoot', 'other', true]])), f.run);
+  assert.match(out, /skip orch@shaltoot: lead name held by project other/);
 });
