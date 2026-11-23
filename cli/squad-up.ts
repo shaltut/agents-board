@@ -132,9 +132,20 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
       if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
       else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
       if (!pane) throw new Error('herdr returned no pane id');
-      herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+      let blocked = false;
+      try {
+        herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+      } catch (e) {
+        // agent_not_ready: Claude Code waits on a startup dialog (folder trust, bypass warning). The agent exists: keep the pane.
+        if (!/agent_not_ready/.test((e as Error).message)) throw e;
+        blocked = true;
+      }
       started = true;
       if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
+      if (blocked) {
+        lines.push(`blocked ${l.name}: a startup dialog is waiting (folder trust or bypass warning). Answer it in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}, then run: ${promptCommand(l)}`);
+        continue;
+      }
       herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), l.prompt]);
       lines.push(`started ${l.name}`);
     } catch (e) {

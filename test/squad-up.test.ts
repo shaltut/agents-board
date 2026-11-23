@@ -170,3 +170,22 @@ test('squad up: a name that makes the herdr name too long fails up front, no pan
   assert.match(out, new RegExp(`failed ${long}-B1@shaltoot: herdr name ${long}-b1-shaltoot is invalid`));
   assert.ok(!f.calls.some((c) => c.args[0] === 'tab' || c.args[1] === 'start'));
 });
+
+test('squad up: agent_not_ready keeps the pane and prints how to finish; any other start error closes it', async () => {
+  const sq = { ...squad, roles: { builder: { count: 1, model: 'sonnet', machine: 'macbook' } }, areas: [] };
+  const mk = (err: string) => fake((c) => {
+    if (c.args[1] === 'get') return GONE;
+    if (c.args[0] === 'tab') return paneOut('p7');
+    if (c.args[1] === 'start') return { status: 1, stderr: err };
+  });
+  const cf = async (fn: string) => (fn === 'squad_get' ? sq : []);
+  const a = mk('{"error":{"code":"agent_not_ready","message":"blocked during startup"}}');
+  const out = await squadUp('demo', false, cf, a.run);
+  assert.ok(!has(a.calls, 'pane', 'close'));
+  assert.ok(!a.calls.some((c) => c.args[1] === 'prompt'));
+  assert.match(out, /blocked demo-B1@macbook: a startup dialog is waiting \(folder trust or bypass warning\)\. Answer it in herdr pane p7 on macbook, then run: herdr --machine macbook agent prompt demo-b1-macbook "cb iam demo-B1@macbook demo/);
+  const b = mk('{"error":{"code":"model_missing"}}');
+  const out2 = await squadUp('demo', false, cf, b.run);
+  assert.match(out2, /failed demo-B1@macbook/);
+  assert.ok(has(b.calls, 'pane', 'close', 'p7'));
+});
