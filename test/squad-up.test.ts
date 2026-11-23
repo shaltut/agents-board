@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet } from '../cli/squad-up.ts';
 
 const mach = (herdr: string | null, board: string) => ({ herdr, repo: '~/Work/demo', board });
 const squad = {
@@ -45,6 +45,25 @@ test('the Mac cap of 8 counts other live sessions: the rest are refused', () => 
   const live = Array.from({ length: 6 }, (_, i) => ({ actor: `other-B${i}@macbook`, machine: 'macbook' }));
   const p = planSquad('demo', squad, live, {});
   assert.equal(p.start.filter((l) => l.machine === 'macbook').length, 2);
-  assert.equal(p.refused.length, 2);
+  assert.deepEqual(p.refused, ['demo-B2@macbook', 'demo-R1@macbook']);
   assert.ok(names(p).includes('orch@shaltoot'));
+});
+
+test('the Mac cap also counts the agents herdr lists on the Mac (quiet or unnamed)', () => {
+  const p = planSquad('demo', squad, [], {}, 7);
+  assert.equal(p.start.filter((l) => l.machine === 'macbook').length, 1);
+  assert.equal(p.refused.length, 3);
+});
+
+test('a live session named exactly orch is the lead, on any machine', () => {
+  const p = planSquad('demo', squad, [{ actor: 'orch', machine: 'shaltoot' }], {});
+  assert.ok(p.skip.includes('orch@shaltoot'));
+  assert.ok(!names(p).includes('orch@shaltoot'));
+});
+
+test('agent get: exit 0 live, agent_not_found absent, anything else unknown', () => {
+  assert.equal(classifyAgentGet({ status: 0 }), 'live');
+  assert.equal(classifyAgentGet({ status: 1, stderr: '{"error":{"code":"agent_not_found"}}' }), 'absent');
+  assert.equal(classifyAgentGet({ status: 1, stderr: 'machine unreachable' }), 'unknown');
+  assert.equal(classifyAgentGet({ status: null, error: new Error('ETIMEDOUT') }), 'unknown');
 });
