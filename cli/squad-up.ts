@@ -32,6 +32,15 @@ export function promptCommand(l: { herdr: string | null; name: string; prompt: s
   return `herdr${l.herdr ? ` --machine ${l.herdr}` : ''} agent prompt ${herdrName(l.name)} "${l.prompt}"`;
 }
 
+export function launchFor(project: string, squad: Squad, w: { name: string; role: string; area?: string }, first: 'next' | 'resume' = 'next'): Launch {
+  const machine = w.name.split('@')[1], mc = squad.machines[machine], role = squad.roles[w.role];
+  return {
+    ...w, model: role.model, machine, herdr: mc.herdr, cwd: mc.repo,
+    settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
+    prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}, then cb role ${w.role}, then cb ${first}`,
+  };
+}
+
 export function planSquad(project: string, squad: Squad, live: Live[], herdrAgents: Record<string, string[]>, macAgents = 0) {
   // the Mac cap counts by the herdr label: a machine whose herdr is 'macbook' is the Mac, whatever its key
   const isMac = (key: string) => key === MAC || squad.machines[key]?.herdr === MAC;
@@ -42,12 +51,8 @@ export function planSquad(project: string, squad: Squad, live: Live[], herdrAgen
     ...Object.entries(herdrAgents).filter(([k]) => isMac(k)).flatMap(([, v]) => v)]).size, macAgents);
   const out = { start: [] as Launch[], skip: [] as string[], refused: [] as string[], heldBy: {} as Record<string, string>, herdrOnly: [] as Launch[] };
   for (const w of wantList(project, squad)) {
-    const machine = w.name.split('@')[1], mc = squad.machines[machine], role = squad.roles[w.role];
-    const l: Launch = {
-      ...w, model: role.model, machine, herdr: mc.herdr, cwd: mc.repo,
-      settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
-      prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}, then cb role ${w.role}, then cb next`,
-    };
+    const machine = w.name.split('@')[1];
+    const l = launchFor(project, squad, w);
     const onBoard = live.find((x) => x.actor === w.name || (w.role === 'lead' && x.actor === 'orch'));
     if (onBoard) {
       out.skip.push(w.name);
