@@ -465,3 +465,23 @@ test('the lock survives a dropped board connection: the next check takes it agai
     await lock.end();
   }
 });
+
+test('a throw between the mark and /exit clears the mark', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  let found = false;
+  const run: Runner = (m, args) => { if (args[1] === 'get') found = true; return h.run(m, args); };
+  // the re-check after herdr found the pane fails (the board dropped the connection)
+  const hooked = new Proxy(sup, {
+    apply(t, self, args: any[]) {
+      if (found && /supervise_state/.test(String(args[0]?.join?.('?')))) return Promise.reject(new Error('connection lost'));
+      return Reflect.apply(t, self, args);
+    },
+  });
+  const out = await tick(deps(hooked, run));
+  assert.ok(out.some((l) => /sv: tick failed: connection lost/.test(l)), out.join('\n'));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
+});
