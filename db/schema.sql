@@ -3934,7 +3934,7 @@ begin
                                           (select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')),
                                           (select max(e.at) from cb.events e where e.actor = h.assignee),
                                           (select max(s.started_at) from cb.sessions s where s.actor = h.assignee)) as quiet_since) q
-     where cb._pipeline(t.project) and q.quiet_since <= now() - interval '30 minutes'
+     where t.status in ('in_progress', 'next') and cb._pipeline(t.project) and q.quiet_since <= now() - interval '30 minutes'
        and exists (select 1 from cb.sessions s where s.actor = h.assignee and s.last_seen > now() - interval '10 minutes')
        and not exists (select 1 from cb.questions qq where qq.task_id = t.id and qq.status = 'open')
   loop
@@ -4249,12 +4249,11 @@ begin
   select * into s from cb.sessions x where x.actor = a order by x.last_seen desc limit 1;
   return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'project', s.project,
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
-        'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then t.stage end,
-        'stage_words', cb._stage_words(case when cb._pipeline(t.project) then t.stage end), 'status', t.status,
-        'finish', cb._finish_line(t), 'page', cb._page_for(t, a),
+        'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then (w.v).stage end,
+        'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', t.status,
+        'finish', cb._finish_line(w.v), 'page', cb._page_for(t, a),
         -- a parts card (#3703): the part this actor holds, and every part in words
-        'part', (select jsonb_build_object('repo', h.repo, 'stage', h.stage, 'pr', h.pr) from cb._held_parts() h
-                  where h.task_id = t.id and h.assignee = a order by h.repo limit 1),
+        'part', case when hp.repo is not null then jsonb_build_object('repo', hp.repo, 'stage', hp.stage, 'pr', hp.pr) end,
         'parts', cb._parts_words(t.id),
         'notes', coalesce((select jsonb_agg(jsonb_build_object('at', n.at, 'actor', n.actor, 'summary', n.summary) order by n.id desc)
                              from (select e.id, e.at, e.actor, e.summary from cb.events e
@@ -4263,8 +4262,11 @@ begin
         'questions', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'body', q.body, 'status', q.status) order by q.id)
                                  from cb.questions q where q.task_id = t.id and q.status in ('open', 'answered')), '[]'))
       order by t.updated_at desc)
-      from cb.tasks t where (t.assignee = a or t.id in (select h.task_id from cb._held_parts() h where h.assignee = a))
-                         and t.status not in ('done', 'cancelled')), '[]'));
+      from cb.tasks t
+      left join lateral (select h.repo, h.stage, h.pr from cb._held_parts() h where h.task_id = t.id and h.assignee = a order by h.repo limit 1) hp on true
+      -- the card at the stage of the part this actor holds: a reviewer's part may be ahead of the card (a NO-GO pulled it back)
+      cross join lateral (select jsonb_populate_record(t, jsonb_build_object('stage', coalesce(hp.stage, t.stage))) as v) w
+     where (t.assignee = a or hp.repo is not null) and t.status not in ('done', 'cancelled')), '[]'));
 end $$;
 
 -- The queue this actor can claim, in claim order: cb.task_claim takes its first row, cb start previews the first few (lim null = all).

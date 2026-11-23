@@ -113,6 +113,19 @@ test('resume lists a card by its part', async () => {
   assert.deepEqual([c.part, c.parts], [null, null]);
 });
 
+test('a reviewer whose part is ahead of the card resumes at its part\'s stage', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, 'qhs-B1@mac'); await claim(sql, D);
+  await pass(sql, id, 'qhs-B1@mac', 'built', { pr: API }); await pass(sql, id, D, 'built', { pr: DASH });
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await sql`select cb.stage_fail(${id}::text, 'wrong', null, 'qhs-dashboard-R1@mac')`;
+  const [c] = (await resume(sql, 'qhs-R1@mac')).cards;
+  assert.deepEqual([c.id, c.stage, c.stage_words, c.finish], [id, 'review', 'In review', `cb pass ${id} "<verdict>" or cb fail ${id} "<what is wrong>"`]);
+  assert.deepEqual(c.part, { repo: 'api', stage: 'review', pr: API });
+  assert.equal(c.parts, 'build: api done (PR #12), dashboard building (qhs-dashboard-B1@mac)');
+});
+
 test('part holders count as holding', async () => {
   const sql = await setup();
   const sup = conn('cb-supervisor/test');
@@ -172,6 +185,10 @@ test('a quiet part holder is nudged, then freed', async () => {
     await sql`update cb.events set at = now() - ${i}::interval where (task_id = ${id} or actor = ${D}) and not (data ? 'nudge')`;
   };
   const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
+  await sql`update cb.tasks set status = 'blocked' where id = ${id}`;
+  await age(31);
+  assert.equal(await due(), 0, 'a blocked card is not chased');
+  await sql`update cb.tasks set status = 'next' where id = ${id}`;
   await age(20);
   assert.equal(await due(), 0);
   await age(31);
