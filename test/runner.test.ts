@@ -531,6 +531,9 @@ test('loadConfig: a project\'s repos', async () => {
     /projects\.qhs: unknown key "git"/);
   assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: { ...repoOf(ORIGIN), base: TMP } } } } })),
     /projects\.qhs\.repos\.api: unknown key "base"/);
+  // a flat qhs-api and qhs's repo api would share slot clones and install records: refused
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: repoOf(ORIGIN) } }, 'qhs-api': project(ORIGIN, { ok: recipes.ok }) } })),
+    /projects: qhs-api and qhs repo api would share the slot clones qhs-api-<slot>/);
   const pub = published(cfg);
   assert.ok(pub.every((r) => typeof r.repo === 'string'));
   assert.deepEqual(pub.map((r) => `${r.project}/${r.repo}/${r.recipe}`), ['qhs/api/ok', 'qhs/dashboard/ok', 'qhs/dashboard/fail', 'demo/main/ok']);

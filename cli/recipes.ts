@@ -112,6 +112,7 @@ export function loadConfig(text: string): RunnerConfig {
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
   if (!isObj(raw.projects) || !Object.keys(raw.projects).length) fail('projects', 'must hold at least one project');
   const projects: Record<string, Project> = {};
+  const stems = new Map<string, string>();
   for (const [pn, p] of Object.entries(raw.projects)) {
     const pp = `projects.${pn}`;
     if (!NAME.test(pn)) fail('projects', `name "${pn}" must match ${NAME}`);
@@ -131,6 +132,12 @@ export function loadConfig(text: string): RunnerConfig {
       }
     }
     projects[pn] = { base: str(p.base, `${pp}.base`), repos };
+    // slot clones and install records are named <project>-<slot> (main) or <project>-<repo>-<slot>: one name, one owner
+    for (const rn of Object.keys(repos)) {
+      const stem = rn === 'main' ? pn : `${pn}-${rn}`, who = rn === 'main' ? pn : `${pn} repo ${rn}`;
+      if (stems.has(stem)) fail('projects', `${who} and ${stems.get(stem)} would share the slot clones ${stem}-<slot>: rename one`);
+      stems.set(stem, who);
+    }
   }
   return {
     ...(raw.name === undefined ? {} : { name: str(raw.name, 'name') }),
