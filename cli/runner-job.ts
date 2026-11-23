@@ -13,7 +13,7 @@ const WIN = process.platform === 'win32';
 const SHA = /^[0-9a-f]{7,40}$/;
 const GIT_MS = 600_000, FINALLY_MS = 300_000, DOCKER_MS = 60_000, TAIL = 1_048_576;
 
-export type JobRow = { id: number; project: unknown; recipe: unknown; sha: unknown; params: unknown };
+export type JobRow = { id: number; project: unknown; repo?: unknown; recipe: unknown; sha: unknown; params: unknown };
 export type Result = { state: 'passed' | 'failed' | 'error'; exit_code: number | null; summary: string };
 type Ran = { code: number | null; out: string; timedOut: boolean; startFailed: boolean; stopped: boolean };
 // a job's log fd, its slot's pid record (<home>/state/slot-<n>.pids: the commands running now, pid → program) and the
@@ -207,8 +207,13 @@ export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; sl
 
 async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; stop: AbortSignal }, io: Io, log: string): Promise<Draft> {
   const { cfg, home, slot, stop } = o;
-  // 1. trust nothing in the row: sha shape, project and recipe from this PC's own config, params a map of string lists
-  const p = typeof j.project === 'string' && Object.hasOwn(cfg.projects, j.project) ? cfg.projects[j.project]! : undefined;
+  // 1. trust nothing in the row: sha shape, project, repo and recipe from this PC's own config, params a map of string
+  // lists. A row without a repo (a board before #3703) is main.
+  const proj = typeof j.project === 'string' && Object.hasOwn(cfg.projects, j.project) ? cfg.projects[j.project]! : undefined;
+  const repo = j.repo ?? 'main';
+  const p = proj && typeof repo === 'string' && Object.hasOwn(proj.repos, repo) ? { ...proj.repos[repo]!, base: proj.base } : undefined;
+  // a repo name the board let through but this PC lacks is named (the shape of a runner.json name only: it reaches the requester)
+  if (proj && !p && typeof repo === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(repo)) return err(`error: bad job row: no repo ${repo} for ${j.project} on this PC`);
   const recipe = p && typeof j.recipe === 'string' && Object.hasOwn(p.recipes, j.recipe) ? p.recipes[j.recipe]! : undefined;
   const params = j.params;
   if (typeof j.sha !== 'string' || !SHA.test(j.sha) || !p || !recipe || !isLists(params)) return err('error: bad job row');
@@ -227,8 +232,10 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 
   // 2. the slot clone at the sha. Git and docker run with the job's base env (the user's profile, so git's
   // credentials, but never the runner's CB_* or database URL) and no prompts.
-  const dir = join(p.base, `${j.project}-${slot}`);
-  const lockState = join(home, 'state', `${j.project}-${slot}.lock`);
+  // one clone per project, repo and slot: main keeps the one-repo name (<project>-<slot>), others <project>-<repo>-<slot>
+  const stem = `${repo === 'main' ? j.project : `${j.project}-${repo}`}-${slot}`;
+  const dir = join(p.base, stem);
+  const lockState = join(home, 'state', `${stem}.lock`);
   const genv = jobEnv(process.env, cfg, { env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_NO_REPLACE_OBJECTS: '1' } });
   // Job code owns the clone's worktree and .git between our git calls: no hook (lefthook's included) or fsmonitor runs,
   // and .git/config goes back to the saved copy (no planted filter, credential helper, sshCommand, url rewrite,
@@ -236,7 +243,7 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   // right after the runner sets runner.json's git URL in it.
   const G = ['git', '-c', `core.hooksPath=${WIN ? 'NUL' : '/dev/null'}`, '-c', 'core.fsmonitor=false'];
   const git = (args: string[], capture = false) => run([...G, ...args], { cwd: dir, env: genv, io, ms: GIT_MS, stop, capture });
-  const saved = join(home, 'state', `${j.project}-${slot}.gitconfig`);
+  const saved = join(home, 'state', `${stem}.gitconfig`);
   const gitDir = join(dir, '.git');
   io.reset = () => {
     // a .git a job swapped for a link is left alone (the next job starts the slot over): nothing outside the clone goes

@@ -50,12 +50,22 @@ test('cb run queues and prints the job', async () => {
   assert.equal(r.out, 'job #1 queued (0 ahead)');
 });
 
-test('cb run --repo refuses until the runner knows repos (#3703)', async () => {
-  const { sql } = await setup();
-  const r = cb(['run', 'test', '--sha', 'abc1234', '--files', 'a.test.ts', '--project', 'demo', '--repo', 'api']);
-  assert.equal(r.code, 1);
-  assert.match(r.err, /--repo for cb run comes with the runner's repos \(not yet\)/);
-  assert.equal((await sql`select count(*)::int n from cb.jobs`)[0].n, 0);
+test('cb jobs lists recipes per repo; cb run --repo sends the repo (#3703)', async () => {
+  const { sql, runner } = await setup();
+  await sql`select cb.ensure_project('qhs')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p3','Q1@mac','qhs','builder','api')`;
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1/', ${runner.json([...RECIPES,
+    { project: 'qhs', repo: 'api', recipe: 'test', params: {}, db: false },
+    { project: 'qhs', repo: 'dashboard', recipe: 'test', params: {}, db: false }] as any)})`;
+  const l = cb(['jobs', 'qhs']).out;
+  assert.match(l, /^recipes \(api\): test$/m);
+  assert.match(l, /^recipes \(dashboard\): test$/m);
+  assert.match(cb(['jobs', 'demo']).out, /^recipes: check \(ws\), test \(files\)$/m); // one repo: as before
+  const r = cb(['run', 'test', '--sha', 'abc1234', '--project', 'qhs', '--repo', 'dashboard'], { CB_ACTOR: 'Q1@mac' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal((await sql`select repo from cb.jobs`)[0].repo, 'dashboard');
+  assert.match(cb(['jobs', 'qhs']).out, /^#1 queued qhs\/dashboard test at abc1234 by Q1@mac$/m);
+  assert.match(cb(['run', 'test', '--sha', 'abc1234', '--project', 'qhs', '--repo', 'bot'], { CB_ACTOR: 'Q1@mac' }).err, /no repo bot for qhs: it has api, dashboard/);
 });
 
 test('cb run refuses flag- and path-shaped values by name', async () => {

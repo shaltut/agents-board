@@ -233,3 +233,58 @@ test('jobs_list shows queued and running jobs and the runner\'s last beat', asyn
   assert.equal(l.runners[0].recipes.length, 2);
   assert.ok(Date.now() - new Date(l.runners[0].last_seen).getTime() < 60_000);
 });
+
+// #3703: a project of several repos; the runner publishes its recipes per repo
+const QHS = [
+  { project: 'qhs', repo: 'api', recipe: 'test', params: {}, db: false },
+  { project: 'qhs', repo: 'dashboard', recipe: 'test', params: {}, db: false },
+];
+async function setupRepos() {
+  const s = await setup();
+  await s.sql`select cb.ensure_project('qhs')`;
+  await s.sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p9','qhs-dashboard-B1@mac','qhs','builder','dashboard')`;
+  await s.runner`select cb.runner_hello('pc', 'http://127.0.0.1:1', ${s.runner.json([...RECIPES, ...QHS] as any)})`;
+  const addRepo = (repo: string | null, actor = 'qhs-dashboard-B1@mac') =>
+    s.session`select cb.job_add('qhs', 'test', 'abcdef1234', '{}'::jsonb, null, ${actor}, ${repo}) as r`.then((r: any) => r[0].r);
+  return { ...s, addRepo };
+}
+
+test('jobs per repo', async () => {
+  const { sql, runner, addRepo } = await setupRepos();
+  const d = await addRepo(null); // the session's repo
+  assert.equal((await sql`select repo from cb.jobs where id = ${d.id}`)[0].repo, 'dashboard');
+  const a = await addRepo('api');
+  assert.equal((await sql`select repo from cb.jobs where id = ${a.id}`)[0].repo, 'api');
+  await assert.rejects(addRepo('bot'), /the runner has no repo bot for qhs: it has api, dashboard/);
+  // Ahmed has no session there: the project's home repo (main, no squad repos), which this runner does not have
+  await assert.rejects(sql`select cb.job_add('qhs', 'test', 'abcdef1', '{}'::jsonb, null, 'ahmed')`, /the runner has no repo main for qhs: it has api, dashboard/);
+  // a runner that published only api's test never gets the dashboard job
+  const r2 = runnerConn();
+  await r2`select cb.runner_hello('pc2', 'http://127.0.0.1:2', ${r2.json([QHS[0]] as any)})`;
+  const j2 = (await r2`select cb.job_claim('pc2', false) as j`)[0].j;
+  assert.equal(j2.id, a.id);
+  assert.equal(j2.repo, 'api');
+  assert.equal((await r2`select cb.job_claim('pc2', false) as j`)[0].j, null);
+  const j = (await runner`select cb.job_claim('pc', false) as j`)[0].j;
+  assert.equal(j.id, d.id);
+  await runner`select cb.job_finish(${d.id}, 'pc', 'passed', 0, '3 passed')`;
+  const ev = await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'qhs-dashboard-B1@mac'`;
+  assert.equal(ev.length, 1);
+  assert.ok(ev[0].summary.startsWith(`job #${d.id} test (dashboard) at abcdef1: passed (exit 0).`), ev[0].summary);
+  const l = (await sql`select cb.jobs_list('qhs') as l`)[0].l;
+  assert.deepEqual(l.runners.find((r: any) => r.name === 'pc').recipes.filter((x: any) => x.project === 'qhs').map((x: any) => x.repo), ['api', 'dashboard']);
+});
+
+test('merging a project moves its recipes per repo, so a moved queued repo job is claimed', async () => {
+  const { sql, runner, addRepo } = await setupRepos();
+  // the target already offers test, for another repo: the moved dashboard row must stay
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1', ${runner.json([...QHS, { project: 'qhs2', repo: 'api', recipe: 'test', params: {}, db: false }] as any)})`;
+  const { id } = await addRepo(null);
+  await sql`select cb.project_alias('qhs', 'qhs2')`;
+  const rows = await sql`select project, repo, recipe from cb.runner_recipes order by project, repo, recipe`;
+  assert.deepEqual(rows.map((r: any) => `${r.project}/${r.repo}/${r.recipe}`), ['qhs2/api/test', 'qhs2/dashboard/test']);
+  const j = (await runner`select cb.job_claim('pc', false) as j`)[0].j;
+  assert.equal(j?.id, id);
+  assert.equal(j.project, 'qhs2');
+  assert.equal(j.repo, 'dashboard');
+});

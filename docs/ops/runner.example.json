@@ -102,6 +102,33 @@
           "timeout": 900
         }
       }
+    },
+    "qhs": {
+      "base": "C:/r",
+      "repos": {
+        "api": {
+          "git": "https://github.com/example/qhs-api.git",
+          "lockfile": "pnpm-lock.yaml",
+          "install": ["pnpm", "install", "--frozen-lockfile"],
+          "installTimeout": 1200,
+          "recipes": {
+            "test": {
+              "params": { "files": { "pattern": "^tests/[A-Za-z0-9._/-]+\\.test\\.ts$", "min": 1, "max": 20 } },
+              "steps": [["node", "--test", "--test-concurrency=1", "{files}"]],
+              "timeout": 1200
+            }
+          }
+        },
+        "dashboard": {
+          "git": "https://github.com/example/qhs-dashboard.git",
+          "lockfile": "pnpm-lock.yaml",
+          "install": ["pnpm", "install", "--frozen-lockfile"],
+          "installTimeout": 1200,
+          "recipes": {
+            "build": { "steps": [["pnpm", "build"]], "timeout": 1200 }
+          }
+        }
+      }
     }
   }
 }

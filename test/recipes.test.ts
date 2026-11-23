@@ -16,12 +16,15 @@ const cfgWith = (recipe: object, extra: object = {}) =>
 
 test('the iHop example loads and publishes names only', () => {
   const cfg = example();
-  const pub = published(cfg);
+  const all = published(cfg);
+  const pub = all.filter((p) => p.project === 'ihop');
   assert.deepEqual(pub.map((p) => p.recipe).sort(), ['build', 'check', 'guards', 'install', 'itest', 'kbtest', 'lint', 'test', 'vitest']);
-  assert.ok(pub.every((p) => p.project === 'ihop'));
-  assert.deepEqual(pub.find((p) => p.recipe === 'check'), { project: 'ihop', recipe: 'check', params: { ws: { min: 1, max: 6 } }, db: false });
+  assert.ok(pub.every((p) => p.repo === 'main'));
+  assert.deepEqual(pub.find((p) => p.recipe === 'check'), { project: 'ihop', repo: 'main', recipe: 'check', params: { ws: { min: 1, max: 6 } }, db: false });
+  // the second project is in the repos shape (#3703)
+  assert.deepEqual(all.filter((p) => p.project === 'qhs').map((p) => `${p.repo}/${p.recipe}`), ['api/test', 'dashboard/build']);
   assert.equal(pub.find((p) => p.recipe === 'itest')!.db, true);
-  const s = JSON.stringify(pub);
+  const s = JSON.stringify(all);
   for (const bad of ['pnpm', 'node', 'pattern', 'TEST_STACK']) assert.ok(!s.includes(bad), bad);
 });
 
@@ -54,7 +57,7 @@ test('loadConfig refuses a misspelled key, an empty install and an optional cwd 
 });
 
 test('checkParams refuses flag- and path-shaped values and the pattern', () => {
-  const test_ = example().projects.ihop!.recipes.test!;
+  const test_ = example().projects.ihop!.repos.main!.recipes.test!;
   const bad = (files: string[]) => checkParams(test_, { app: ['claims-api'], files });
   for (const v of ['-r', '../x', 'tests/../x.test.ts', 'C:/x', '/etc', 'a b', 'tests/a.ts', 'tests/a.integration.test.ts'])
     assert.match(bad([v])!, /^error: bad parameter files:/, v);
@@ -70,7 +73,7 @@ test('expand repeats an element per value and drops empty params', () => {
 });
 
 test('jobCwd stays inside the slot', () => {
-  const r = example().projects.ihop!.recipes.test!;
+  const r = example().projects.ihop!.repos.main!.recipes.test!;
   const slot = resolve('C:/r/ihop-1');
   assert.equal(jobCwd(slot, r, { app: ['claims-api'] }), resolve(slot, 'apps/claims-api'));
   assert.throws(() => jobCwd(slot, { ...r, cwd: '../x' }, {}), /outside/);
@@ -80,7 +83,7 @@ test('jobCwd stays inside the slot', () => {
 
 test('jobEnv starts empty', () => {
   const cfg = example();
-  const recipe = { ...cfg.projects.ihop!.recipes.guards!, env: { A: '1' } };
+  const recipe = { ...cfg.projects.ihop!.repos.main!.recipes.guards!, env: { A: '1' } };
   const from = { PATH: 'p', CB_DATABASE_URL: 'x', DATABASE_URL: 'y', SECRET: 's', TEMP: 't' };
   // NoDefaultCurrentDirectoryInExePath: Windows must not run a program from the cwd (a committed git.exe) before PATH
   assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', A: '1' });
@@ -90,7 +93,7 @@ test('jobEnv starts empty', () => {
 test('prototype names are not parameters', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{constructor}']] })), /steps\[0\].*constructor/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{__proto__}']] })), /__proto__/);
-  const r = example().projects.ihop!.recipes.check!;
+  const r = example().projects.ihop!.repos.main!.recipes.check!;
   assert.equal(checkParams(r, { ws: ['@ihop/a'], constructor: ['x'] }), 'error: bad parameter constructor: unknown');
   assert.equal(checkParams(r, JSON.parse('{"ws":["@ihop/a"],"__proto__":["-rf"]}')), 'error: bad parameter __proto__: unknown');
   assert.deepEqual(expand(['a', '{toString}'], {}), ['a']);
