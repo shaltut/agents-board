@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, type Runner } from '../cli/squad-up.ts';
 
 const mach = (herdr: string | null, board: string) => ({ herdr, repo: '/Users/me/Work/demo', board });
 const squad = {
@@ -101,15 +101,15 @@ test('squad up: a quiet session that herdr lists is not started a second time', 
   const mac7 = { status: 0, stdout: JSON.stringify({ agents: Array.from({ length: 7 }, (_, i) => ({ name: `a${i}` })) }), stderr: '' };
   const f = fake((c) => {
     if (c.args[0] === 'agent' && c.args[1] === 'list') return mac7;
-    if (c.args[0] === 'agent' && c.args[1] === 'get') return /B1@macbook|O-claims@macbook/.test(c.args[2]!) ? OK : GONE;
+    if (c.args[0] === 'agent' && c.args[1] === 'get') return /b1-macbook|o-claims-macbook/.test(c.args[2]!) ? OK : GONE;
     if (c.args[0] === 'tab') return paneOut('p1');
   });
   // B1 and O-claims are in herdr but quiet on the board (not live)
   const out = await squadUp('demo', false, callFn(rows([['demo-B1@macbook', 'demo', false], ['demo-O-claims@macbook', 'demo', false]])), f.run);
-  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-B1@macbook'), out);
-  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-O-claims@macbook'), out);
-  assert.ok(has(f.calls, 'agent', 'get', 'demo-B1@macbook') && has(f.calls, 'agent', 'get', 'demo-R1@macbook'));
-  assert.match(out, /skip demo-B1@macbook: running in herdr but not on the board \(not bound\?\)\n  herdr --machine macbook agent prompt demo-B1@macbook "cb iam demo-B1@macbook demo --role builder/);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-b1-macbook'), out);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-o-claims-macbook'), out);
+  assert.ok(has(f.calls, 'agent', 'get', 'demo-b1-macbook') && has(f.calls, 'agent', 'get', 'demo-r1-macbook'));
+  assert.match(out, /skip demo-B1@macbook: running in herdr but not on the board \(not bound\?\)\n  herdr --machine macbook agent prompt demo-b1-macbook "cb iam demo-B1@macbook demo --role builder/);
   assert.match(out, /started demo-B2@macbook/);
   assert.match(out, /refused demo-R1@macbook/); // 7 on the Mac + B2 = the cap of 8
   assert.ok(f.calls.filter((c) => c.args[1] === 'list').every((c) => c.timeout === 30_000));
@@ -119,10 +119,10 @@ test('squad up: a started session whose prompt failed prints the command to send
   const f = fake((c) => {
     if (c.args[1] === 'get') return GONE;
     if (c.args[0] === 'tab') return paneOut('p1');
-    if (c.args[1] === 'prompt' && c.args[2] === 'orch@shaltoot') return { status: 1, stderr: 'boom' };
+    if (c.args[1] === 'prompt' && c.args[2] === 'orch-shaltoot') return { status: 1, stderr: 'boom' };
   });
   const out = await squadUp('demo', false, callFn([]), f.run);
-  assert.match(out, /^started orch@shaltoot, prompt not sent: herdr agent prompt orch@shaltoot "cb iam orch@shaltoot demo --role lead --model opus, then cb role lead, then cb next"$/m);
+  assert.match(out, /^started orch@shaltoot, prompt not sent: herdr agent prompt orch-shaltoot "cb iam orch@shaltoot demo --role lead --model opus, then cb role lead, then cb next"$/m);
   assert.ok(!has(f.calls, 'pane', 'close'));
 });
 
@@ -131,7 +131,7 @@ test('squad up: a launch that fails closes only the pane this run made for it', 
   const f = fake((c) => {
     if (c.args[1] === 'get') return GONE;
     if (c.args[0] === 'tab' || c.args[0] === 'pane' && c.args[1] === 'split') return paneOut(`p${++n}`);
-    if (c.args[1] === 'start' && c.args[2] === 'demo-B2@macbook') return { status: 1, stderr: 'no model' };
+    if (c.args[1] === 'start' && c.args[2] === 'demo-b2-macbook') return { status: 1, stderr: 'no model' };
   });
   const out = await squadUp('demo', false, callFn([]), f.run);
   assert.match(out, /failed demo-B2@macbook: no model/);
@@ -144,4 +144,29 @@ test('squad up: the lead name held by another project is reported, not started',
   const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
   const out = await squadUp('demo', true, callFn(rows([['orch@shaltoot', 'other', true]])), f.run);
   assert.match(out, /skip orch@shaltoot: lead name held by project other/);
+});
+
+test('herdrName: lowercase slug of the board name', () => {
+  assert.equal(herdrName('kitlive-B1@shaltoot'), 'kitlive-b1-shaltoot');
+  assert.equal(herdrName('orch@shaltoot'), 'orch-shaltoot');
+  assert.equal(herdrName('demo-O-claims@macbook'), 'demo-o-claims-macbook');
+});
+
+test('squad up: herdr gets the slug name, the prompt keeps the board name', async () => {
+  const sq = { ...squad, roles: { lead: squad.roles.lead, builder: { count: 1, model: 'sonnet', machine: 'shaltoot' } }, areas: [] };
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : c.args[0] === 'tab' || c.args[0] === 'pane' ? paneOut('p1') : undefined));
+  const out = await squadUp('kitlive', false, async (fn: string) => (fn === 'squad_get' ? sq : []), f.run);
+  for (const v of ['get', 'start', 'prompt']) assert.ok(f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === v && c.args[2] === 'kitlive-b1-shaltoot'), v + out);
+  assert.ok(f.calls.some((c) => c.args[1] === 'prompt' && c.args[2] === 'orch-shaltoot'));
+  assert.ok(f.calls.some((c) => c.args[1] === 'prompt' && c.args[3]!.startsWith('cb iam kitlive-B1@shaltoot kitlive')));
+  assert.match(out, /started kitlive-B1@shaltoot/);
+});
+
+test('squad up: a name that makes the herdr name too long fails up front, no pane made', async () => {
+  const sq = { ...squad, roles: { builder: { count: 1, model: 'sonnet', machine: 'shaltoot' } }, areas: [] };
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : paneOut('p1')));
+  const long = 'a-very-long-project-name-indeed';
+  const out = await squadUp(long, false, async (fn: string) => (fn === 'squad_get' ? sq : []), f.run);
+  assert.match(out, new RegExp(`failed ${long}-B1@shaltoot: herdr name ${long}-b1-shaltoot is invalid`));
+  assert.ok(!f.calls.some((c) => c.args[0] === 'tab' || c.args[1] === 'start'));
 });

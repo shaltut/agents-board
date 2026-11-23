@@ -24,8 +24,12 @@ export function wantList(project: string, squad: Squad) {
   return want;
 }
 
+// herdr agent names: a lowercase letter, then lowercase letters, digits, '-' or '_', 1-32 chars. The board name stays the actor.
+export const herdrName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+const validHerdrName = (n: string) => /^[a-z][a-z0-9_-]{0,31}$/.test(n);
+
 export function promptCommand(l: { herdr: string | null; name: string; prompt: string }) {
-  return `herdr${l.herdr ? ` --machine ${l.herdr}` : ''} agent prompt ${l.name} "${l.prompt}"`;
+  return `herdr${l.herdr ? ` --machine ${l.herdr}` : ''} agent prompt ${herdrName(l.name)} "${l.prompt}"`;
 }
 
 export function planSquad(project: string, squad: Squad, live: Live[], herdrAgents: Record<string, string[]>, macAgents = 0) {
@@ -101,7 +105,8 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
     if (onBoard.has(w.name) || (w.role === 'lead' && onBoard.has('orch'))) continue;
     const machine = w.name.split('@')[1];
     if (isMac(machine) && macDown) { unknown.add(w.name); continue; }
-    const c = classifyAgentGet(run(squad.machines[machine].herdr, ['agent', 'get', w.name], 30_000));
+    if (!validHerdrName(herdrName(w.name))) continue; // fails at launch with a clear line
+    const c = classifyAgentGet(run(squad.machines[machine].herdr, ['agent', 'get', herdrName(w.name)], 30_000));
     if (c === 'live') (herdrAgents[machine] ??= []).push(w.name);
     else if (c === 'unknown') unknown.add(w.name);
   }
@@ -121,15 +126,16 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const tabs: Record<string, { pane: string; panes: number }> = {};
   for (const l of toStart) {
     let pane: string | undefined, started = false;
+    if (!validHerdrName(herdrName(l.name))) { lines.push(`failed ${l.name}: herdr name ${herdrName(l.name)} is invalid`); continue; }
     try {
       const t = tabs[l.machine];
       if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
       else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
       if (!pane) throw new Error('herdr returned no pane id');
-      herdr(l.herdr, ['agent', 'start', l.name, '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+      herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
       started = true;
       if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
-      herdr(l.herdr, ['agent', 'prompt', l.name, l.prompt]);
+      herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), l.prompt]);
       lines.push(`started ${l.name}`);
     } catch (e) {
       if (started) lines.push(`started ${l.name}, prompt not sent: ${promptCommand(l)}`);
