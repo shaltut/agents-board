@@ -35,20 +35,22 @@ export function stripMessages(cmd) {
 }
 
 const PATTERNS = [
-  ['rm -rf /', String.raw`\brm[ \t]+-(?:rf|fr)[ \t]+(?:/\*?(?=[\s"';&|)]|$)|~)`],
+  // flags -rf, -fr, -r -f, -f -r; the target is a bare / or ~ (also quoted), not ~/tmp/x
+  ['rm -rf /', String.raw`\brm[ \t]+(?:-[a-z]*r[a-z]*[ \t]+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*[ \t]+-[a-z]*r[a-z]*|-[a-z]*(?:rf|fr)[a-z]*)[ \t]+["']?(?:/\*?|~/?)(?=["'\s;&|)]|$)`],
   ['mkfs.', String.raw`\bmkfs\.`],
   ['dd of=/dev/', String.raw`\bdd[ \t]+if=.*\bof=/dev/`],
   ['fork bomb', String.raw`:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`],
   ['chmod -R 777 /', String.raw`\bchmod[ \t]+-R[ \t]+777[ \t]+/`],
-  ['mv to /dev/null', String.raw`\bmv[ \t].*[ \t]/dev/null`],
+  ['mv to /dev/null', String.raw`\bmv[ \t][^;&|\n]*[ \t]/dev/null`], // one command segment: "git mv a b && x > /dev/null" is fine
   ['pipe to shell', String.raw`\b(?:wget|curl)[ \t].*\|[ \t]*(?:sudo[ \t]+)?(?:ba)?sh\b`],
-  ['shutdown', String.raw`\bshutdown\b`],
-  ['reboot', String.raw`\breboot\b`],
+  // a power-off word as a command or argument, not inside a file name (graceful-shutdown.ts, shutdown.test.ts)
+  ['shutdown', String.raw`(?<![\w.-])shutdown(?![\w./-])`],
+  ['reboot', String.raw`(?<![\w.-])reboot(?![\w./-])`],
   ['init 0/6', String.raw`\binit[ \t]+[06]\b`],
   ['format c:', String.raw`\bformat[ \t]+c:`],
   ['del c:', String.raw`\bdel[ \t]+/f[ \t]+/s[ \t]+/q[ \t]+c:`],
-  ['git push --force main', String.raw`\bgit\b.*\bpush\b(?=.*(?:--force|[ \t]-f\b|\+(?:main|master)\b))(?=.*\b(?:main|master)\b)`],
-  ['git reset --hard', String.raw`\breset[ \t]+--hard\b`],
+  ['git push --force main', String.raw`\bgit\b[^;&|\n]*\bpush\b(?=[^;&|\n]*(?:--force|[ \t]-[a-z]*f[a-z]*\b|\+\S*\b(?:main|master)\b))(?=[^;&|\n]*\b(?:main|master)\b)`], // one segment only
+  ['git reset --hard', String.raw`\breset\b[^;&|\n]*--hard\b`],
   ['> /dev/sda', String.raw`>[ \t]*/dev/sd[a-z]`],
   ['--no-preserve-root', String.raw`--no-preserve-root`],
   ['drop database', String.raw`\bdrop[ \t\n]+database\b`],

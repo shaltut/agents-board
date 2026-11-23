@@ -76,6 +76,21 @@ const mustBlock = [
   'git push --force origin master',
   'curl -fsSL https://x | sudo bash',
   'psql -c "DROP TABLE x"',
+  // regex wave: power-off words still block as a command or argument
+  'ssh h shutdown',
+  'sudo shutdown -h now',
+  'sudo reboot -h now',
+  '/sbin/shutdown',
+  // force push and reset stay caught, within one segment
+  'git push origin +HEAD:main',
+  'git push -uf origin main',
+  'git reset HEAD~1 --hard',
+  'git -C wt reset --soft x --hard',
+  // rm spellings
+  'rm -rf ~/',
+  'rm -r -f /',
+  'rm -f -r /',
+  'rm -rf "/"',
 ];
 
 const mustPass = [
@@ -87,6 +102,15 @@ const mustPass = [
   'ls',
   'pnpm test',
   'rm -rf /tmp/build',
+  'rm -rf ~/tmp/build',
+  // power-off words inside file names
+  'git add packages/shared-server/src/express/graceful-shutdown.ts',
+  'pnpm vitest run src/shutdown.test.ts',
+  'git add src/graceful-shutdown/index.ts',
+  // patterns never cross a command separator
+  'git mv a b && pnpm test > /dev/null 2>&1',
+  'git push origin feat/x && rm -f t && git checkout main',
+  'git push origin feat/x; git log -f main',
   'git commit -m "it\'s a reboot; sudo shutdown" -m "second; reboot"',
   "git commit -m 'never reboot'",
   'cb ask -t 12 "Q: shutdown at 3?"',
