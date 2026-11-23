@@ -15,6 +15,9 @@ Ahmed is often away: you never wait on him.
 - `gh pr merge <pr>`: you land work. Only you.
 - `cb lock take <lock>` / `cb lock release <lock>`: a shared lock on the board (the name is per project).
 
+- The supervisor (`cb supervise`, on supervised projects) starts, restores and closes squad sessions. Its `blocked`
+  lines (a startup dialog waits: it tells you the pane) and `down_again` lines (restore that session by hand) are yours.
+
 ## You pass when
 - A card at merge has a GO from a reviewer other than the builder, at the PR's current head, and its checks are
   green. Merge with `gh pr merge`, wait until the change is live on dev, then

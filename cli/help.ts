@@ -156,6 +156,9 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       more: 'A fact or gotcha you add is live at once, labelled team (not Ahmed), and drops out after 14 days unless renewed (--review sets the days); --propose holds it for Ahmed instead. A rule, ruling, runbook, a global entry, or anything that reads like an instruction or carries a URL is a proposal until Ahmed confirms it. Never secrets or personal data: they are refused; write where the value lives. cb mem find searches your bound project; when it has nothing it searches every other project and says so (--project pins it).' },
   }],
   ['ORCHESTRATE', {
+    supervise: { use: 'cb supervise [--dry-run|--once]', topic: 'orchestrate',
+      does: 'The PC only: the supervisor, in herdr tab supervisor. Every 60 s it starts squad sessions for waiting cards (up to the role count, 8 on the Mac, 3 a tick), restores a down session that holds cards (cb resume), closes squad sessions idle 20 min with nothing held, and restarts the PC runner when it stops beating. Only projects whose squad says "supervise": true; never the lead. --dry-run prints the plan and acts on nothing; --once acts once and exits. One supervisor at a time. Setup: docs/ops/maintain.md, "Supervisor".',
+      eg: 'cb supervise --dry-run' },
     tick: { use: 'cb tick [project]', topic: 'orchestrate',
       does: 'The actions due now, most urgent first, one person and one command per line: Ahmed\'s late asks to you, answers to act on, questions without options, PRs ready to merge, stuck/silent/blocked tasks, idle workers, PR state drift, held locks, quiet huddles. Prints nothing when nothing is due. Read-only.',
       eg: 'cb tick',

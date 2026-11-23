@@ -69,7 +69,7 @@ export function planSquad(project: string, squad: Squad, live: Live[], herdrAgen
 
 type Res = { status: number | null; stdout?: string | null; stderr?: string | null; error?: Error };
 export type Runner = (m: string | null, args: string[], timeout?: number) => Res;
-const realRun: Runner = (m, args, timeout = 180_000) => spawnSync('herdr', [...(m ? ['--machine', m] : []), ...args], { encoding: 'utf8', timeout });
+export const realRun: Runner = (m, args, timeout = 180_000) => spawnSync('herdr', [...(m ? ['--machine', m] : []), ...args], { encoding: 'utf8', timeout });
 
 // `herdr agent get <name>`: exit 0 = running, agent_not_found = not running, anything else = could not tell.
 export function classifyAgentGet(r: { status: number | null; stderr?: string | null; error?: unknown }): 'live' | 'absent' | 'unknown' {
@@ -78,19 +78,54 @@ export function classifyAgentGet(r: { status: number | null; stderr?: string | n
   return r.status === 1 && /agent_not_found/.test(r.stderr ?? '') ? 'absent' : 'unknown';
 }
 
-const find = (o: any, key: string): any => {
+export const find = (o: any, key: string): any => {
   if (o && typeof o === 'object') {
     if (key in o) return o[key];
     for (const v of Object.values(o)) { const f = find(v, key); if (f !== undefined) return f; }
   }
 };
 
+/** One herdr call: its JSON (null when not JSON); throws herdr's own error text on a non-zero exit. */
+export function herdrJson(run: Runner, m: string | null, args: string[], timeout?: number) {
+  const r = run(m, args, timeout);
+  if (r.status !== 0) throw new Error((r.error?.message || r.stderr || r.stdout || 'herdr failed').trim());
+  try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
+}
+
+/** Start one session: a pane (a new tab, or a split of a tab in `tabs`, two panes per tab), the agent, its first
+ *  prompt. ok: the agent is up (blocked: up but waiting on a startup dialog; the pane is kept). A launch that did not
+ *  come up has its own pane closed, never any other. "started, prompt not sent" is ok: false with its pane. */
+export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: string; panes: number }>): { line: string; pane?: string; blocked?: boolean; ok: boolean } {
+  const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
+  if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
+  let pane: string | undefined, started = false;
+  try {
+    const t = tabs[l.machine];
+    if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
+    else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
+    if (!pane) throw new Error('herdr returned no pane id');
+    let blocked = false;
+    try {
+      herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+    } catch (e) {
+      // agent_not_ready: Claude Code waits on a startup dialog (folder trust, bypass warning). The agent exists: keep the pane.
+      if (!/agent_not_ready/.test((e as Error).message)) throw e;
+      blocked = true;
+    }
+    started = true;
+    if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
+    if (blocked) return { ok: true, blocked, pane, line: `blocked ${l.name}: a startup dialog is waiting (folder trust or bypass warning). Answer it in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}, then run: ${promptCommand(l)}` };
+    herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), l.prompt]);
+    return { ok: true, pane, line: `started ${l.name}` };
+  } catch (e) {
+    if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
+    if (pane) try { herdr(l.herdr, ['pane', 'close', pane]); } catch {}
+    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` };
+  }
+}
+
 export async function squadUp(project: string, dryRun: boolean, callFn: (fn: string, a: any) => Promise<unknown>, run: Runner = realRun): Promise<string> {
-  const herdr = (m: string | null, args: string[], timeout?: number) => {
-    const r = run(m, args, timeout);
-    if (r.status !== 0) throw new Error((r.error?.message || r.stderr || r.stdout || 'herdr failed').trim());
-    try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
-  };
+  const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
   const rows = await callFn('sessions_overview', { project: null }) as any[];
@@ -129,38 +164,6 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   if (dryRun) return lines.join('\n');
   // Only tabs made in this run are reused: two panes per tab, never an existing pane.
   const tabs: Record<string, { pane: string; panes: number }> = {};
-  for (const l of toStart) {
-    let pane: string | undefined, started = false;
-    if (!validHerdrName(herdrName(l.name))) { lines.push(`failed ${l.name}: herdr name ${herdrName(l.name)} is invalid`); continue; }
-    try {
-      const t = tabs[l.machine];
-      if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
-      else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
-      if (!pane) throw new Error('herdr returned no pane id');
-      let blocked = false;
-      try {
-        herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
-      } catch (e) {
-        // agent_not_ready: Claude Code waits on a startup dialog (folder trust, bypass warning). The agent exists: keep the pane.
-        if (!/agent_not_ready/.test((e as Error).message)) throw e;
-        blocked = true;
-      }
-      started = true;
-      if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
-      if (blocked) {
-        lines.push(`blocked ${l.name}: a startup dialog is waiting (folder trust or bypass warning). Answer it in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}, then run: ${promptCommand(l)}`);
-        continue;
-      }
-      herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), l.prompt]);
-      lines.push(`started ${l.name}`);
-    } catch (e) {
-      if (started) lines.push(`started ${l.name}, prompt not sent: ${promptCommand(l)}`);
-      else {
-        lines.push(`failed ${l.name}: ${(e as Error).message}`);
-        // a pane this run made for a launch that did not come up: close it, never any other pane
-        if (pane) try { herdr(l.herdr, ['pane', 'close', pane]); } catch {}
-      }
-    }
-  }
+  for (const l of toStart) lines.push(startOne(l, run, tabs).line);
   return lines.join('\n');
 }

@@ -219,6 +219,37 @@ What each result means:
 | `no tests ran: <summary>` | the command exited 0 but ran nothing | the file list or app is wrong |
 | `summary withheld: see cb job log <id>` | the output looked sensitive, so none of it went to the board | read the log from the PC or the MacBook |
 
+## Supervisor
+
+`cb supervise` keeps each supervised project's squad sessions in line with its queues, and restarts the PC runner
+when it stops. Card #3601; design: `docs/superpowers/specs/2026-11-23-supervisor-design.md`.
+
+Start it by hand on the PC, in a herdr tab named `supervisor`, and leave it: `cb supervise`. Only one runs at a time,
+on any machine (a Postgres advisory lock); a second says `another supervisor is running` and exits. Check the plan
+first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing); `cb supervise
+--once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
+`CB_SUPERVISOR_HOME`), one file a day, kept 7 days. Every start, close, restore and runner start is also a board event by actor
+`supervisor` (session names, roles and counts only).
+
+A project is supervised only when its pipeline is on and its squad file says `"supervise": true` (`cb squad set`).
+The squad `count` per role is then the most the supervisor keeps up. Every 60 s it:
+
+- restores a squad session that is down but holds open cards, under the same name with `cb resume` (at most once
+  per 30 minutes per name; down again within 30 minutes: a `down_again` event, restore it by hand);
+- starts sessions for waiting cards, like `cb squad up` (names, models, permission files), at most 3 a tick, 8 on
+  the Mac in all; a name that failed to start waits 10 minutes;
+- closes a squad session idle 20 minutes that holds nothing (no card, question or job) when its role has no
+  waiting work: it marks it closing, checks again, sends `/exit`, then closes the pane;
+- restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
+  for 3 minutes; if the runner's log port is still held, it reports that once an hour instead.
+
+It never:
+
+- starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
+- answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead once, with the
+  pane and the command to send the first prompt afterwards;
+- frees a card held by a down session, or runs anything heavy itself.
+
 ## Tests
 
 Never on the VPS. The suite truncates whatever database it is given and expects the PC's layout (127.0.0.1:5434);

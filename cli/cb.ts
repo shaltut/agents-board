@@ -25,7 +25,7 @@ const OPTIONS = {
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
-  sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' },
+  sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -731,6 +731,11 @@ ${body}`, json: pg };
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'runner.ts')], { stdio: 'inherit' });
+      return { code: r.status ?? 1 };
+    }
+    case 'supervise': { // the supervisor daemon (node cli/supervise.ts), run in herdr tab `supervisor` on the PC
+      const flags = [...(o['dry-run'] ? ['--dry-run'] : []), ...(o.once ? ['--once'] : [])];
+      const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'supervise.ts'), ...flags], { stdio: 'inherit' });
       return { code: r.status ?? 1 };
     }
     case 'role': {

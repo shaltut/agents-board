@@ -51,8 +51,12 @@ export function planTick(i: TickInput): TickPlan {
   for (const g of groups.values()) {
     const mine = state.sessions.filter((s) => s.role === g.role && (g.area === undefined || s.area === g.area));
     const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.closing;
-    const liveCount = mine.filter((s) => (s.live || herdrLive.has(herdrName(s.actor))) && !s.closing).length + g.names.filter((w) => restored.has(w.name)).length;
-    let n = Math.min(g.waiting - mine.filter(idle).length, g.names.length - liveCount);
+    // a squad name herdr runs but the board does not see yet (still starting, or on a startup dialog) counts as
+    // started: live, and about to take work, so the next tick does not start another for the same card
+    const pending = g.names.filter((w) => herdrLive.has(herdrName(w.name)) && !by.get(w.name)?.live && !by.get(w.name)?.holds);
+    const liveCount = mine.filter((s) => (s.live || herdrLive.has(herdrName(s.actor))) && !s.closing).length
+      + pending.filter((w) => !mine.some((s) => s.actor === w.name)).length + g.names.filter((w) => restored.has(w.name)).length;
+    let n = Math.min(g.waiting - mine.filter(idle).length - pending.length, g.names.length - liveCount);
     for (const w of g.names) {
       if (n <= 0) break;
       if (isLive(w.name) || restored.has(w.name) || by.get(w.name)?.holds || !ok(w.name) || !room(w.name)) continue;

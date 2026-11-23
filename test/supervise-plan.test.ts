@@ -57,6 +57,14 @@ test('3 starts per tick', () => {
   assert.equal(p.start.length, 3);
 });
 
+test('a squad name herdr runs but the board does not see yet counts as started', () => {
+  const live = new Set(['sv-b1-macbook']); // started last tick, not bound yet (or on a startup dialog)
+  assert.equal(tick(state({ waiting: { builder: 1 } }), { herdrLive: live }).start.length, 0);
+  assert.deepEqual(names(tick(state({ waiting: { builder: 2 } }), { herdrLive: live }).start), ['sv-B2@macbook']);
+  const old = sess('sv-B1@macbook', 'builder', { live: false }); // an old board row, not live
+  assert.equal(tick(state({ waiting: { builder: 1 }, sessions: [old] }), { herdrLive: live }).start.length, 0);
+});
+
 test('a recently failed name is skipped, the next number is used', () => {
   const p = tick(state({ waiting: { builder: 1 } }), { failedAt: new Map([['sv-B1@macbook', NOW - 5 * 60_000]]) });
   assert.deepEqual(names(p.start), ['sv-B2@macbook']);
