@@ -115,29 +115,68 @@ test('squad_set refuses each invalid squad with the field named', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
   const bad: [any, RegExp][] = [
-    [mod((s) => { s.roles.wizard = { count: 1, machine: 'macbook' }; }), /role wizard/],
-    [mod((s) => { s.roles.builder.count = 0; }), /builder count/],
-    [mod((s) => { s.roles.builder.count = 9; }), /builder count/],
-    [mod((s) => { s.roles.lead.count = 2; }), /lead count/],
-    [mod((s) => { s.roles.builder.model = 'gpt'; }), /builder model/],
-    [mod((s) => { s.roles.builder.machine = 'nowhere'; }), /builder machine/],
-    [mod((s) => { delete s.machines.macbook.repo; }), /macbook.*repo/],
-    [mod((s) => { s.areas = []; }), /owner.*areas/],
-    [mod((s) => { delete s.roles.owner; }), /areas.*owner/],
-    [mod((s) => { s.areas = ['Bad Area']; }), /area/],
-    [mod((s) => { s.areas = ['claims', 'claims']; }), /area/],
-    [mod((s) => { s.roles.builder.count = 7; }), /macbook/],
+    [mod((s) => { s.roles.wizard = { count: 1, machine: 'macbook' }; }), /unknown role wizard/],
+    [mod((s) => { s.roles.builder.count = 0; }), /builder count must be/],
+    [mod((s) => { s.roles.builder.count = 9; }), /builder count must be/],
+    [mod((s) => { s.roles.builder.count = 99999999999; }), /builder count must be/],
+    [mod((s) => { s.roles.lead.count = 2; }), /lead count must be 1/],
+    [mod((s) => { s.roles.builder.model = 'gpt'; }), /builder model must be/],
+    [mod((s) => { s.roles.builder.machine = 'nowhere'; }), /builder machine is not in machines/],
+    [mod((s) => { delete s.machines.macbook.repo; }), /machine macbook needs a repo/],
+    [mod((s) => { delete s.machines.macbook.board; }), /machine macbook needs a board/],
+    [mod((s) => { s.areas = []; }), /owner needs areas/],
+    [mod((s) => { delete s.roles.owner; }), /areas need an owner role/],
+    [mod((s) => { s.areas = ['Bad Area']; }), /area "Bad Area" must be a slug/],
+    [mod((s) => { s.areas = [null]; }), /area null must be a slug/],
+    [mod((s) => { s.areas = ['claims', 'claims']; }), /area claims is listed twice/],
+    [mod((s) => { s.roles.builder.count = 7; }), /macbook would run 9 sessions/],
+    [mod((s) => { s.extra = 1; }), /unknown key: only machines, roles and areas/],
+    [mod((s) => { s.roles.builder.extra = 1; }), /role builder has an unknown key/],
+    [mod((s) => { s.machines.macbook.extra = 1; }), /machine macbook has an unknown key/],
+    [mod((s) => { s.roles.owner.count = 2; }), /owner takes no count/],
+    [mod((s) => { s.machines.macbook.herdr = 5; }), /herdr must be a text or null/],
+    [[1, 2] as any, /squad needs machines and roles objects/],
   ];
+  await assert.rejects(() => sql`select cb.squad_set('', ${sql.json(SQUAD)}, 'ahmed')`, /project is required|unknown project/);
+  assert.equal((await sql`select count(*)::int as n from cb.events where summary = 'squad updated'`)[0].n, 0);
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re);
 });
 
-test('squad_set: a builder session is refused; the lead is allowed', async () => {
+test('squad_set: only the dashboard or a lead; role-less and unknown callers are refused', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p1','W1@mac','demo','builder'), ('pc','p2','orch@pc','demo',null)`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values
+    ('mac','p1','W1@mac','demo','builder'), ('mac','p3','W2@mac','demo',null), ('pc','p2','orch@pc','demo',null), ('pc','p4','L1@pc','demo','lead')`;
   const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
-  await assert.rejects(() => session`select cb.squad_set('demo', ${session.json(SQUAD)}, 'W1@mac')`, /only Ahmed or the lead/);
+  for (const who of ['W1@mac', 'W2@mac', 'nobody@nowhere'])
+    await assert.rejects(() => session`select cb.squad_set('demo', ${session.json(SQUAD)}, ${who})`, /only Ahmed or the lead/);
   await session`select cb.squad_set('demo', ${session.json(SQUAD)}, 'orch@pc')`;
+  await session`select cb.squad_set('demo', ${session.json(SQUAD)}, 'L1@pc')`;
+});
+
+test('squad_set saves complete: areas [] and models filled; show prints', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const s = { machines: SQUAD.machines, roles: { lead: { count: 1, machine: 'shaltoot' }, builder: { count: 2, machine: 'macbook' }, reviewer: { count: 1, machine: 'macbook' } } };
+  const saved = (await sql`select cb.squad_set('demo', ${sql.json(s as any)}, 'ahmed') as s`)[0].s;
+  assert.deepEqual(saved.areas, []);
+  assert.equal(saved.roles.lead.model, 'opus');
+  assert.equal(saved.roles.builder.model, 'sonnet');
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved);
+  assert.deepEqual((await sql`select data from cb.events where summary = 'squad updated'`)[0].data, { squad: saved });
+  const show = cb(['squad', 'show', 'demo']);
+  assert.equal(show.code, 0, show.err);
+  assert.equal(show.out, 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nreviewer  1 × opus on macbook\nareas: none');
+});
+
+test('cb squad set reads stdin', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p2','orch@pc','demo',null)`;
+  const r = spawnSync('node', ['cli/cb.ts', 'squad', 'set', 'demo', '-f', '-'], { encoding: 'utf8', input: JSON.stringify(SQUAD),
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'orch@pc', HERDR_PANE_ID: '' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, SQUAD);
 });
 
 test('cb squad set / show', async () => {

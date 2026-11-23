@@ -712,8 +712,8 @@ ${body}`, json: pg };
       }
       const sq = await callFn('squad_get', { project: args[1] }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
-      const lines = Object.entries(sq.roles as Record<string, any>).map(([r, v]) =>
-        `${r}  ${r === 'owner' ? sq.areas.length : v.count} × ${v.model ?? 'default model'} on ${v.machine}`);
+      const lines = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'].filter((r) => sq.roles[r]).map((r) =>
+        `${r}  ${r === 'owner' ? sq.areas.length : sq.roles[r].count} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
       return { out: [...lines, `areas: ${sq.areas.length ? sq.areas.join(', ') : 'none'}`].join('\n'), json: sq };
     }
     case 'role': {

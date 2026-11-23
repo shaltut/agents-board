@@ -3990,57 +3990,77 @@ create function cb.squad_get(project text) returns jsonb language sql stable as 
   select p.squad from cb.projects p where p.slug = cb.read_project(project)
 $$;
 
--- Validate and save. Ahmed (dashboard) or the lead only. Every refusal names the field.
+-- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
+-- Every refusal names the field.
 create function cb.squad_set(project text, squad jsonb, actor text default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare
   a text := cb.set_actor(actor); p text := cb.read_project(project);
-  r record; m record; ar text; seen text[] := '{}'; c int; mac int := 0; n_areas int;
+  r record; m record; ar jsonb; seen text[] := '{}'; c int; mac int := 0; n_areas int;
+  areas jsonb; roles jsonb := '{}'; ns jsonb;
 begin
-  if not (cb._is_dashboard() or cb._role(a) = 'lead') then raise exception 'only Ahmed or the lead sets the squad'; end if;
+  if not cb._is_dashboard() and cb._role(a) is distinct from 'lead' then raise exception 'only Ahmed or the lead sets the squad'; end if;
+  if p is null then raise exception 'project is required'; end if;
   if jsonb_typeof(squad) is distinct from 'object' or jsonb_typeof(squad->'machines') is distinct from 'object'
      or jsonb_typeof(squad->'roles') is distinct from 'object' then
     raise exception 'squad needs machines and roles objects';
   end if;
+  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas')) then
+    raise exception 'squad has an unknown key: only machines, roles and areas';
+  end if;
+  areas := coalesce(squad->'areas', '[]'::jsonb);
+  if jsonb_typeof(areas) is distinct from 'array' then raise exception 'areas must be a list'; end if;
   for m in select * from jsonb_each(squad->'machines') loop
-    if jsonb_typeof(m.value) is distinct from 'object' or coalesce(m.value->>'repo', '') = '' then raise exception 'machine % needs a repo', m.key; end if;
-    if coalesce(m.value->>'board', '') = '' then raise exception 'machine % needs a board', m.key; end if;
+    if jsonb_typeof(m.value) is distinct from 'object' then raise exception 'machine % must be an object', m.key; end if;
+    if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('herdr','repo','board')) then
+      raise exception 'machine % has an unknown key: only herdr, repo and board', m.key;
+    end if;
+    if jsonb_typeof(m.value->'herdr') not in ('string', 'null') and m.value ? 'herdr' then raise exception 'machine % herdr must be a text or null', m.key; end if;
+    if jsonb_typeof(m.value->'repo') is distinct from 'string' or m.value->>'repo' = '' then raise exception 'machine % needs a repo', m.key; end if;
+    if jsonb_typeof(m.value->'board') is distinct from 'string' or m.value->>'board' = '' then raise exception 'machine % needs a board', m.key; end if;
   end loop;
-  if jsonb_typeof(coalesce(squad->'areas', '[]'::jsonb)) is distinct from 'array' then raise exception 'areas must be a list'; end if;
-  n_areas := jsonb_array_length(coalesce(squad->'areas', '[]'::jsonb));
-  for ar in select jsonb_array_elements_text(coalesce(squad->'areas', '[]'::jsonb)) loop
-    if ar !~ '^[a-z][a-z0-9-]*$' then raise exception 'area "%" must be a slug: lower-case letters, digits, dashes', ar; end if;
-    if ar = any(seen) then raise exception 'area "%" is listed twice', ar; end if;
-    seen := seen || ar;
+  n_areas := jsonb_array_length(areas);
+  for ar in select jsonb_array_elements(areas) loop
+    if jsonb_typeof(ar) is distinct from 'string' or (ar #>> '{}') !~ '^[a-z][a-z0-9-]*$' then
+      raise exception 'area % must be a slug: lower-case letters, digits, dashes', ar;
+    end if;
+    if (ar #>> '{}') = any(seen) then raise exception 'area % is listed twice', ar #>> '{}'; end if;
+    seen := seen || (ar #>> '{}');
   end loop;
   for r in select * from jsonb_each(squad->'roles') loop
     if r.key not in ('lead','architect','owner','builder','reviewer','qa','investigator') then
       raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', r.key;
     end if;
     if jsonb_typeof(r.value) is distinct from 'object' then raise exception 'role % must be an object', r.key; end if;
-    if r.value->>'model' is not null and r.value->>'model' not in ('opus','sonnet','haiku','fable') then
-      raise exception '% model "%" must be opus, sonnet, haiku or fable', r.key, r.value->>'model';
+    if exists (select 1 from jsonb_object_keys(r.value) k where k not in ('count','model','machine')) then
+      raise exception 'role % has an unknown key: only count, model and machine', r.key;
     end if;
-    if not (squad->'machines' ? coalesce(r.value->>'machine', '')) then
-      raise exception '% machine "%" is not in machines', r.key, coalesce(r.value->>'machine', '');
+    if r.value ? 'model' and (jsonb_typeof(r.value->'model') is distinct from 'string' or r.value->>'model' not in ('opus','sonnet','haiku','fable')) then
+      raise exception '% model must be opus, sonnet, haiku or fable', r.key;
+    end if;
+    if jsonb_typeof(r.value->'machine') is distinct from 'string' or not (squad->'machines' ? (r.value->>'machine')) then
+      raise exception '% machine is not in machines', r.key;
     end if;
     if r.key = 'owner' then
+      if r.value ? 'count' then raise exception 'owner takes no count: one owner per area'; end if;
       c := n_areas;
     else
-      if jsonb_typeof(r.value->'count') is distinct from 'number' or (r.value->>'count') !~ '^[0-9]+$'
-         or (r.value->>'count')::int not between 1 and 8 then
+      if jsonb_typeof(r.value->'count') is distinct from 'number' or (r.value->>'count') !~ '^[1-8]$' then
         raise exception '% count must be a whole number from 1 to 8', r.key;
       end if;
       c := (r.value->>'count')::int;
       if r.key = 'lead' and c <> 1 then raise exception 'lead count must be 1'; end if;
     end if;
     if r.value->>'machine' = 'macbook' then mac := mac + c; end if;
+    roles := roles || jsonb_build_object(r.key,
+      jsonb_strip_nulls(jsonb_build_object('count', r.value->'count', 'model', coalesce(r.value->>'model', cb._role_model(r.key)), 'machine', r.value->>'machine')));
   end loop;
-  if (squad->'roles' ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
-  if n_areas > 0 and not (squad->'roles' ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
+  if (roles ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
+  if n_areas > 0 and not (roles ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
   if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
-  update cb.projects pr set squad = squad_set.squad where pr.slug = p;
+  ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas);
+  update cb.projects pr set squad = ns where pr.slug = p;
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
-  insert into cb.events (actor, project, kind, summary) values (a, p, 'updated', 'squad updated');
-  return squad;
+  insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
+  return ns;
 end $$;
