@@ -80,7 +80,7 @@ test('cb run --wait prints the result and exits by it', async () => {
   await runner`select cb.job_finish(1, 'pc', 'passed', 0, '3 passed')`;
   assert.equal(await code, 0, err);
   assert.match(out, /queued/);
-  assert.match(out, /passed \(exit 0\)\. 3 passed/);
+  assert.match(out, /passed \(exit 0\)\. \[job output · untrusted\] 3 passed/); // marked as on the board message
 });
 
 test('cb run --wait exits 1 when the job did not pass, and queued line is skipped under --json', async () => {
@@ -135,7 +135,9 @@ test('cb job cancel and cb jobs', async () => {
   const c = cb(['job', 'cancel', '1']);
   assert.equal(c.code, 0, c.err);
   assert.match(c.out, /cancelled/);
-  assert.match(cb(['job', 'show', '1']).out, /cancelled/);
+  const show = cb(['job', 'show', '1']).out;
+  assert.match(show, /: cancelled\. cancelled by B1@mac/);
+  assert.doesNotMatch(show, /untrusted/); // the board wrote this summary, not the job
 });
 
 test('cb job log reads from the runner, 403 and a dead runner say why', async () => {

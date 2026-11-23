@@ -28,7 +28,9 @@ function recipeLine(list: any, project: string) {
 }
 
 const sha7 = (j: any) => String(j.sha).slice(0, 7);
-const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${j.summary ?? ''}`.trim();
+// the summary is the job's output, marked as in the board's message, unless the board wrote it (a cancel, a runner restart)
+const marked = (j: any) => (j.summary && j.state !== 'cancelled' && j.summary !== 'error: runner restarted' ? `[job output · untrusted] ${j.summary}` : j.summary ?? '');
+const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${marked(j)}`.trim();
 
 export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
   if (!o.project) throw new Error('no project: say which (--project <slug>) or bind this session once (cb iam <name> <project>)');
