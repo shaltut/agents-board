@@ -2,7 +2,7 @@
 // the recipe's steps and finally steps, and build the board summary. The daemon (cli/runner.ts) claims and finishes.
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
-  appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
+  closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
@@ -15,8 +15,17 @@ const GIT_MS = 600_000, FINALLY_MS = 300_000, DOCKER_MS = 60_000, TAIL = 1_048_5
 export type JobRow = { id: number; project: unknown; recipe: unknown; sha: unknown; params: unknown };
 export type Result = { state: 'passed' | 'failed' | 'error'; exit_code: number | null; summary: string };
 type Ran = { code: number | null; out: string; timedOut: boolean; startFailed: boolean; stopped: boolean };
-// a job's log fd, its slot's pid record (<home>/state/slot-<n>.pids) and the `$ argv` lines written to its log
-type Io = { fd: number; pids: string; headers: Set<string> };
+// a job's log fd, its slot's pid record (<home>/state/slot-<n>.pids: the commands running now, pid → program) and the
+// `$ argv` lines written to its log
+type Io = { fd: number; pids: string; nostart: string; live: Map<number, string>; headers: Set<string> };
+
+// The record holds only live roots: rewritten on every spawn and exit, gone when none runs (one job per slot).
+function record(io: Io) {
+  try {
+    if (io.live.size) writeFileSync(io.pids, [...io.live].map(([pid, img]) => `${pid} ${img}\n`).join(''));
+    else rmSync(io.pids, { force: true });
+  } catch {}
+}
 
 /** Kills a process and everything it started. */
 export function treeKill(pid: number | undefined) {
@@ -42,9 +51,9 @@ export function reap(stateDir: string): number {
       if (!m) continue;
       try {
         if (WIN) {
-          const row = execFileSync('tasklist', ['/FI', `PID eq ${m[1]}`, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8' });
+          const row = execFileSync('tasklist', ['/FI', `PID eq ${m[1]}`, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 10_000 });
           if (row.split(',')[0]!.replaceAll('"', '').trim().toLowerCase() !== m[2]!.toLowerCase()) continue;
-          execFileSync('taskkill', ['/pid', m[1]!, '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+          execFileSync('taskkill', ['/pid', m[1]!, '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
         } else {
           process.kill(-Number(m[1]), 'SIGKILL'); // its own process group (spawned detached)
         }
@@ -66,24 +75,40 @@ function header(io: Io, text: string) {
   writeSync(io.fd, `${line}\n`);
 }
 
+// Windows launcher, `node -e LAUNCH -- <nostart file> <argv...>`: starts the command without a shell, hidden, with the
+// launcher's handles, forwards its exit code, and marks a command that cannot start (ENOENT, EINVAL for a .cmd) by
+// creating the nostart file (an exit code cannot say it: a real one may be anything).
+const LAUNCH = "const{spawn}=require('child_process'),fs=require('fs');const[mark,cmd,...args]=process.argv.slice(1);"
+  + "const no=()=>{fs.writeFileSync(mark,'');process.exit(1)};let c;"
+  + "try{c=spawn(cmd,args,{stdio:'inherit',windowsHide:true})}catch{no()}"
+  + "c.on('error',no);c.on('exit',(code)=>process.exit(code??1))";
+
 // One command, no shell, output appended to the job log (stdout captured instead when asked). Ends on exit, on its
-// time cap or when `stop` fires; both kill the whole tree.
+// time cap or when `stop` fires; both kill the whole tree. The recorded root must outlive a runner crash, so the next
+// runner's reap can walk its live tree. POSIX: the command itself, detached (its own process group). Windows: a
+// non-detached child sits in libuv's kill-on-close job and dies with the runner, while what it started through a
+// non-libuv program (cmd, the pnpm shim, git, docker) lives on under a dead parent no tree kill reaches; a detached
+// command has no console, so such grandchildren get a console of their own and their output never reaches the log.
+// So Windows runs a detached launcher (the root) that starts the command non-detached and hidden.
 function run(argv: string[], o: { cwd: string; env: NodeJS.ProcessEnv; io: Io; ms: number; stop?: AbortSignal; capture?: boolean; show?: string }): Promise<Ran> {
   header(o.io, o.show ?? argv.join(' '));
   const r: Ran = { code: null, out: '', timedOut: false, startFailed: false, stopped: false };
+  const [file, args] = WIN ? [process.execPath, ['-e', LAUNCH, '--', o.io.nostart, ...argv]] : [argv[0]!, argv.slice(1)];
+  if (WIN) rmSync(o.io.nostart, { force: true });
   return new Promise((done) => {
     let child: ChildProcess;
     try {
-      child = spawn(argv[0]!, argv.slice(1), {
-        cwd: o.cwd, env: o.env, shell: false, windowsHide: true, detached: !WIN,
+      child = spawn(file, args, {
+        cwd: o.cwd, env: o.env, shell: false, windowsHide: true, detached: true,
         stdio: ['ignore', o.capture ? 'pipe' : o.io.fd, o.io.fd],
       });
-    } catch { // a .cmd / .bat without a shell throws EINVAL here
+    } catch { // a .cmd / .bat without a shell throws EINVAL here (POSIX: never; Windows: inside the launcher)
       r.startFailed = true;
       return done(r);
     }
     // the record a restarted runner kills from, should this runner die first
-    if (child.pid) try { appendFileSync(o.io.pids, `${child.pid} ${image(argv[0]!)}\n`); } catch {}
+    const pid = child.pid;
+    if (pid) { o.io.live.set(pid, image(file)); record(o.io); }
     let over = false;
     const timer = setTimeout(() => { r.timedOut = true; treeKill(child.pid); }, o.ms);
     const onStop = () => { r.stopped = true; treeKill(child.pid); };
@@ -91,13 +116,18 @@ function run(argv: string[], o: { cwd: string; env: NodeJS.ProcessEnv; io: Io; m
     const end = () => {
       if (over) return;
       over = true;
+      if (pid && o.io.live.delete(pid)) record(o.io);
       clearTimeout(timer);
       o.stop?.removeEventListener('abort', onStop);
       done(r);
     };
     child.stdout?.on('data', (b) => { r.out += b; });
     child.on('error', () => { r.startFailed = true; end(); }); // ENOENT: missing program
-    child.on('close', (code) => { r.code = code === null ? null : code | 0; end(); }); // | 0: a Windows crash code (0xC0000409) fits the board's int
+    child.on('close', (code) => {
+      if (WIN && existsSync(o.io.nostart)) { r.startFailed = true; rmSync(o.io.nostart, { force: true }); }
+      r.code = code === null ? null : code | 0; // | 0: a Windows crash code (0xC0000409) fits the board's int
+      end();
+    });
     if (o.stop?.aborted) onStop();
   });
 }
@@ -111,7 +141,7 @@ const err = (text: string): Draft => ({ state: 'error', exit_code: null, text })
 /** Runs one claimed job. Returns its result, or null when it was cancelled (the board already holds its end). */
 export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; stop: AbortSignal }): Promise<Result | null> {
   const log = join(o.home, 'logs', `${j.id}.log`);
-  const io: Io = { fd: -1, pids: join(o.home, 'state', `slot-${o.slot}.pids`), headers: new Set() };
+  const io: Io = { fd: -1, pids: join(o.home, 'state', `slot-${o.slot}.pids`), nostart: join(o.home, 'state', `slot-${o.slot}.nostart`), live: new Map(), headers: new Set() };
   try {
     mkdirSync(join(o.home, 'logs'), { recursive: true });
     mkdirSync(join(o.home, 'state'), { recursive: true });

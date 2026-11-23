@@ -2,7 +2,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +78,10 @@ const recipes = {
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
+  twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
+  multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
+  // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
+  wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
@@ -238,6 +242,22 @@ test('cancel stops a running job', async () => {
   assert.equal((await get(id)).state, 'cancelled');
 });
 
+test('the pid record holds only live roots and goes with the job', async () => {
+  const records = () => readdirSync(join(HOME, 'state')).filter((f) => f.endsWith('.pids'));
+  assert.equal((await ended(await add('twice'))).state, 'passed');
+  assert.deepEqual(records(), []);
+  const id = await add('multi');
+  await pidOf(id); // slow.mjs runs, after two steps that ended
+  const [file, ...more] = records();
+  assert.equal(more.length, 0);
+  const lines = readFileSync(join(HOME, 'state', file!), 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1, lines.join(' | '));
+  assert.ok(alive(Number(lines[0]!.split(' ')[0])), 'the recorded root is live');
+  await session`select cb.job_cancel(${id}, 'B1@mac')`;
+  await until('the runner to drop the job', () => runner.out.includes(`job #${id} cancelled`), 10_000);
+  assert.deepEqual(records(), []);
+});
+
 test('bad parameters end the job before any git work', async () => {
   const id = await add('pick', MAIN, { files: ['ok.mjs', 'fail.mjs'] });
   const j = await ended(id);
@@ -307,23 +327,21 @@ test('a second runner refuses to start', async () => {
 });
 
 test('a restarted runner ends its running job, kills what it left running and runs the queue', async () => {
-  const id = await add('slow');
+  const id = await add('wrapped');
   const pid = await pidOf(id);
-  // the runner alone dies (no tree kill), as in a crash: its slow.mjs lives on in the slot
+  // the runner alone dies (no tree kill), as in a crash: slow.mjs, under cmd.exe / sh, lives on in the slot
   if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
   else runner.child.kill('SIGKILL');
   await runner.exited;
-  // POSIX: the detached slow.mjs outlives the runner. Windows kills a dead parent's job object with it, so plant a
-  // process that escaped (spawned detached) in the record instead, and a decoy whose pid runs another program.
-  if (!WIN) assert.ok(alive(pid), 'the orphan is still running before the restart');
-  const stray = () => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
-  const planted = stray(), decoy = stray();
-  pids.push(planted.pid!, decoy.pid!);
-  writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${planted.pid} node.exe\n${decoy.pid} ${WIN ? 'other.exe' : 'node'}\n`);
+  await sleep(500);
+  assert.ok(alive(pid), 'the orphan is still running before the restart');
+  // a decoy record whose pid now runs another program: a reused pid is left alone (Windows checks the program)
+  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+  pids.push(decoy.pid!);
+  writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'other.exe' : 'node'}\n`);
   const ok = await add('ok');
   runner = startRunner();
   await up(runner);
-  await until('the planted process to go', () => !alive(planted.pid!), 10_000);
   if (WIN) assert.ok(alive(decoy.pid!), 'a pid that runs another program is left alone');
   const j = await ended(id);
   assert.equal(j.state, 'error');
