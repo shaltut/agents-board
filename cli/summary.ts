@@ -5,7 +5,7 @@ const MAX = 1000;
 const MAX_NAMES = 5;
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
-const cut = (s: string) => (s.length > MAX ? s.slice(0, MAX - 1) + '…' : s);
+export const cut = (s: string, max = MAX) => (s.length > max ? s.slice(0, max - 1) + '…' : s);
 
 function shape(counts: { passed: number; failed: number; skipped: number }, names: string[]) {
   const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
@@ -20,9 +20,10 @@ function shape(counts: { passed: number; failed: number; skipped: number }, name
 
 /** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 10 lines. */
 export function summarize(output: string): { text: string; ran: number | null } {
-  const lines = output.replace(ANSI, '').split(/\r?\n/);
+  // each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
+  const lines = output.replace(ANSI, '').split(/\r?\n/).map((l) => l.slice(0, 2000));
 
-  const vt = lines.map((l) => /^\s*Tests\s+(.*)$/.exec(l)?.[1]).filter((v): v is string => v !== undefined).at(-1);
+  const vt = lines.map((l) => /^\s*Tests\s+(\d+ (?:failed|passed|skipped|todo)\b.*|no tests)\s*$/.exec(l)?.[1]).filter((v): v is string => v !== undefined).at(-1);
   if (vt !== undefined) {
     const n = (w: string) => Number(new RegExp(`(\\d+) ${w}\\b`).exec(vt)?.[1] ?? 0);
     const names = lines.flatMap((l) => /^\s*FAIL\s+(.+?)\s*$/.exec(l)?.[1] ?? []);
@@ -32,7 +33,7 @@ export function summarize(output: string): { text: string; ran: number | null } 
   const c: Record<string, number> = {};
   const names: string[] = [];
   for (const l of lines) {
-    const m = /^\s*\S{0,4}\s*(pass|fail|skipped)\s+(\d+)\s*$/.exec(l);
+    const m = /^\s*(?:\S{1,4}\s+)?(pass|fail|skipped)\s+(\d+)\s*$/.exec(l);
     if (m) c[m[1]!] = Number(m[2]); // last occurrence wins
     const name = /^\s*✖ (.+?) \(\d+(?:\.\d+)?ms\)\s*$/.exec(l)?.[1] ?? /^\s*not ok \d+ - (.+?)(?:\s+#.*)?\s*$/.exec(l)?.[1];
     if (name) names.push(name);

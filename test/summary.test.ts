@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { summarize, mask, logTail } from '../cli/summary.ts';
+import * as summary from '../cli/summary.ts';
 import { freshDb } from './helpers.ts';
 
 const fx = (n: string) => readFileSync(new URL(`./fixtures/runner/${n}`, import.meta.url), 'utf8');
@@ -74,4 +75,24 @@ test('logTail reads only the end', () => {
   const t = logTail(p);
   assert.ok(t.length <= 1_048_576);
   assert.ok(t.endsWith('the last line\n'));
+});
+
+test('a stray "Tests" line does not hide node counts', () => {
+  const r = summarize('Tests skipped: no db\nℹ pass 5\nℹ fail 0');
+  assert.equal(r.text, '5 passed, 0 failed, 0 skipped.');
+  assert.equal(r.ran, 5);
+});
+
+test('cut keeps masked text within 1000 characters', () => {
+  const emails = Array.from({ length: 200 }, () => 'a@b.cc').join(' ');
+  const out = summary.cut('no tests ran: ' + mask(emails));
+  assert.ok(out.length <= 1000);
+  assert.ok(out.endsWith('…'));
+});
+
+test('a huge whitespace line is linear', () => {
+  const t = Date.now();
+  summarize(' '.repeat(1_000_000) + 'x');
+  summarize('FAIL' + ' '.repeat(1_000_000) + 'x');
+  assert.ok(Date.now() - t < 1000);
 });
