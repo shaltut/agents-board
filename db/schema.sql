@@ -442,6 +442,14 @@ begin
     update cb.epics e set project = t where e.project = a; -- epics follow their steps
     update cb.goals g set project = t where g.project = a;
     update cb.jobs j set project = t where j.project = a; -- runner jobs (#3600): a foreign key that does not cascade a delete
+    -- the runners' recipes follow, so moved queued jobs are claimed (no foreign key); a recipe the runner already offers
+    -- the target keeps the target's row. runner.json must follow the merge too: a runner restart publishes its projects again
+    delete from cb.runner_recipes rr where rr.project = a
+      and exists (select 1 from cb.runner_recipes x where x.runner = rr.runner and x.project = t and x.recipe = rr.recipe);
+    update cb.runner_recipes rr set project = t where rr.project = a;
+    -- asks and bound sessions follow: their foreign keys set null on the delete below
+    update cb.asks k set project = t where k.project = a;
+    update cb.sessions s set project = t where s.project = a;
     update cb.project_aliases pa set slug = t where pa.slug = a;
     -- people on the merged project follow their work (#315 review); the FK cascade would drop them
     insert into cb.user_projects (user_name, project) select up.user_name, t from cb.user_projects up where up.project = a
@@ -4123,12 +4131,14 @@ begin
 end $$;
 
 -- "job #N recipe at sha7: state (exit n). summary" + log hint (once it started: no log before), to the requester.
+-- untrusted: the summary is the job's output (code from any origin branch), marked like GitHub lines; the head is not.
 -- Best effort: an unknown requester (session gone, no events) must not stop the job from ending.
-create function cb._job_tell(j cb.jobs) returns void language plpgsql as $$
+create function cb._job_tell(j cb.jobs, untrusted boolean default false) returns void language plpgsql as $$
 begin
   perform cb.tell(j.requester,
-    format('job #%s %s at %s: %s%s. %s', j.id, j.recipe, left(j.sha, 7), j.state,
-           case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end, coalesce(j.summary, ''))
+    format('job #%s %s at %s: %s%s. %s%s', j.id, j.recipe, left(j.sha, 7), j.state,
+           case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end,
+           case when untrusted and coalesce(j.summary, '') <> '' then '[job output · untrusted] ' else '' end, coalesce(j.summary, ''))
     || case when j.started_at is not null then E'\nLog: cb job log ' || j.id else '' end, 'runner');
 exception when others then null;
 end $$;
@@ -4196,8 +4206,9 @@ declare a text := cb.set_actor(actor); j cb.jobs;
 begin
   select * into j from cb.jobs x where x.id = id for update;
   if not found then raise exception 'no job #%', id; end if;
-  if not cb._is_dashboard() and j.requester <> a and cb._role(a) is distinct from 'lead' then
-    raise exception 'only the requester, the lead or Ahmed can cancel job #%', id;
+  if not cb._is_dashboard() and j.requester <> a
+     and not exists (select 1 from cb.sessions s where s.actor = a and s.project = j.project and s.role = 'lead') then
+    raise exception 'only the requester, the project''s lead or Ahmed can cancel job #%', id;
   end if;
   if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;
   update cb.jobs x set state = 'cancelled', summary = 'cancelled by ' || a, finished_at = now() where x.id = id returning x.* into j;
@@ -4258,6 +4269,6 @@ begin
   update cb.jobs x set state = job_finish.state, exit_code = job_finish.exit_code, summary = job_finish.summary, finished_at = now()
   where x.id = job_finish.id and x.state = 'running' and x.runner = job_finish.runner returning x.* into j;
   if not found then return false; end if;
-  perform cb._job_tell(j);
+  perform cb._job_tell(j, true);
   return true;
 end $$;

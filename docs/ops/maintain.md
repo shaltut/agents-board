@@ -197,6 +197,10 @@ Set up, once, on the PC:
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
 3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
+4. runner.json must follow a project merge (`cb.project_alias`): rename that project's key to the target and restart
+   `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the
+   runner has no config for the new name (a claimed job ends `error: bad job row`), and a restart under the old name
+   publishes the old name again (the moved jobs stay queued).
 
 What each result means:
 

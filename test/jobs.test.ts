@@ -85,9 +85,8 @@ test('finish sends the requester one message and ends the job once', async () =>
   const ev = await sql`select actor, summary, data from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`;
   assert.equal(ev.length, 1);
   assert.equal(ev[0].actor, 'runner');
-  for (const frag of [`job #${id}`, 'test', 'abcdef1', 'failed (exit 1)', '1 passed, 1 failed. Failing: breaks', `cb job log ${id}`]) {
-    assert.ok(ev[0].summary.includes(frag), `${frag} in ${ev[0].summary}`);
-  }
+  // the job's output is marked untrusted; the head the board wrote is not
+  assert.equal(ev[0].summary, `job #${id} test at abcdef1: failed (exit 1). [job output · untrusted] 1 passed, 1 failed. Failing: breaks\nLog: cb job log ${id}`);
   assert.equal((await runner`select cb.job_finish(${id}, 'pc', 'passed', 0, 'x') as ok`)[0].ok, false);
 });
 
@@ -115,6 +114,15 @@ test('cancel: requester, lead or dashboard; queued or running only', async () =>
   assert.equal((await sql`select state from cb.jobs where id = ${b.id}`)[0].state, 'cancelled');
 });
 
+test('cancel: the lead of another project cannot', async () => {
+  const { sql, session, add } = await setup();
+  await sql`select cb.ensure_project('other')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p5','orch2@pc','other','lead')`;
+  const { id } = await add('B1@mac');
+  await assert.rejects(session`select cb.job_cancel(${id}, 'orch2@pc')`, /only the requester/);
+  assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'queued');
+});
+
 test('a cancel by someone else tells the requester; their own cancel does not', async () => {
   const { sql, session, add } = await setup();
   const told = async () => (await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`).map((e: any) => e.summary);
@@ -138,6 +146,23 @@ test('merging a project that ran a job moves the job', async () => {
   const { id } = await add('B1@mac');
   await sql`select cb.project_alias('demo', 'demo2')`;
   assert.equal((await sql`select project from cb.jobs where id = ${id}`)[0].project, 'demo2');
+});
+
+test('merging a project moves the runner recipes, so a moved queued job is claimed', async () => {
+  const { sql, add, runner } = await setup();
+  const { id } = await add('B1@mac');
+  await sql`select cb.project_alias('demo', 'demo2')`;
+  const j = (await runner`select cb.job_claim('pc', false) as j`)[0].j;
+  assert.equal(j?.id, id);
+  assert.equal(j.project, 'demo2');
+});
+
+test('merging into a project whose runner already offers the recipe keeps the target row', async () => {
+  const { sql, runner } = await setup();
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1', ${runner.json([...RECIPES, { project: 'demo2', recipe: 'test', params: {}, db: false }] as any)})`;
+  await sql`select cb.project_alias('demo', 'demo2')`;
+  const rows = await sql`select project, recipe, params from cb.runner_recipes order by project, recipe`;
+  assert.deepEqual(rows.map((r: any) => [r.project, r.recipe, r.params]), [['demo2', 'itest', { files: { min: 1, max: 20 } }], ['demo2', 'test', {}]]);
 });
 
 test('runner restart ends its running jobs and tells the requesters; queued jobs stay', async () => {

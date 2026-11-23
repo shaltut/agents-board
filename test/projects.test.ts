@@ -153,6 +153,16 @@ test('projects: an alias merge or a slug rename keeps a guest on their work', as
   assert.deepEqual((await sql`select project from cb.user_projects order by 1`).map((r: any) => r.project), ['ihop2', 'qhs']);
 });
 
+test('projects: an alias merge moves the asks and bound sessions, not nulls them', async () => {
+  const { sql } = await setup();
+  await sql`select cb.task_add(project => 'acme', title => 'seed acme')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc', 'p9', 'B9@pc', 'acme', 'builder')`;
+  await sql`insert into cb.asks (project, to_actor, body) values ('acme', 'B9@pc', 'merged ask')`;
+  await sql`select cb.project_alias('acme', 'qhs')`;
+  assert.equal((await sql`select project from cb.asks where body = 'merged ask'`)[0].project, 'qhs');
+  assert.equal((await sql`select project from cb.sessions where actor = 'B9@pc'`)[0].project, 'qhs');
+});
+
 test('login: five wrong tries lock the name for two minutes; a success resets the count', async () => {
   const { sql } = await setup();
   loginFails.clear();
