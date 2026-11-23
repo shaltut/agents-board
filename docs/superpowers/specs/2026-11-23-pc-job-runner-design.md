@@ -104,7 +104,7 @@ Recipes fence the command, but `install`, `test`, `build` and the rest run whate
   when the lockfile changed since that slot's last install (an `install` step counts in the job's time).
 - **Timeouts:** per recipe; a job over its timeout is killed (whole process tree) and ends `error: timed out`.
 - **Summary:** for node:test and vitest, the pass / fail / skip counts and the names of up to 5 failing tests; for
-  others, the last 10 lines. **The runner masks** what the board's `cb._sensitive` patterns would flag (token-like
+  others, the last 5 lines once code-frame lines (a linted file's source) and pnpm trailer lines are dropped. **The runner masks** what the board's `cb._sensitive` patterns would flag (token-like
   strings, emails, 10-digit IDs …) with `[masked]` before it writes the summary; if the board still refuses the
   text, the summary becomes `summary withheld: see cb job log <id>`. The job's result is never changed by this.
   My call: masking keeps the counts, which is what the requester needs.

@@ -49,4 +49,5 @@ test('a POSIX root matches on the program or, behind a shebang, the script', () 
   assert.equal(rootMatches('node /x/pnpm i', 'pnpm'), true);
   assert.equal(rootMatches('/usr/bin/pnpm i', 'pnpm'), true);
   assert.equal(rootMatches('node x.js', 'pnpm'), false);
+  assert.equal(rootMatches('less /x/pnpm', 'pnpm'), false);
 });

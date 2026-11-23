@@ -58,7 +58,10 @@ function commandLines(pids: string[]): Map<string, string> | null {
 }
 
 /** POSIX: whether a command line is the recorded program, as the first word or, behind a shebang (`node /x/pnpm i`), the second. */
-export const rootMatches = (cmd: string, img: string) => cmd.split(' ').slice(0, 2).some((w) => basename(w) === img);
+export const rootMatches = (cmd: string, img: string) => {
+  const [a = '', b = ''] = cmd.split(' ');
+  return basename(a) === img || (['node', 'sh', 'bash', 'env'].includes(basename(a)) && basename(b) === img);
+};
 
 /** Kills what a runner that died left running: every pid recorded in <stateDir>/*.pids, then forgets the records. A pid
  *  may have been reused since, so a record is acted on only when written since the last boot and while the pid still
@@ -73,7 +76,8 @@ export function reap(stateDir: string, say: (m: string) => void = () => {}): num
     const file = join(stateDir, f);
     try {
       if (statSync(file).mtimeMs >= boot) {
-        for (const m of readFileSync(file, 'utf8').matchAll(/^(\d{1,10}) (.+)$/gm)) recs.push({ pid: m[1]!, img: m[2]!.trim(), mark: file.replace(/\.pids$/, '.nostart').toLowerCase() });
+        // a pid over uint32 (or 0) would make the CIM query below fail for every record
+        for (const m of readFileSync(file, 'utf8').matchAll(/^(\d{1,10}) (.+)$/gm)) if (Number(m[1]) > 0 && Number(m[1]) <= 4294967295) recs.push({ pid: m[1]!, img: m[2]!.trim(), mark: file.replace(/\.pids$/, '.nostart').toLowerCase() });
       }
     } catch {}
     try { rmSync(file, { force: true }); } catch {}

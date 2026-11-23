@@ -31,9 +31,25 @@ test('TAP output works too', () => {
   assert.equal(summarize('ok 1 - a\nnot ok 2 - b\n# pass 1\n# fail 1').text, '1 passed, 1 failed, 0 skipped. Failing: b');
 });
 
-test('other output gives the last 3 lines', () => {
+test('other output gives the last 5 lines', () => {
   const all = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
-  assert.equal(summarize(all.join('\n')).text, all.slice(27).join('\n'));
+  assert.equal(summarize(all.join('\n')).text, all.slice(25).join('\n'));
+});
+
+test('prettier frames are dropped, the error line stays', () => {
+  const out = ['[error] x.ts: SyntaxError: Unexpected token (1:11)', '[error] > 1 | const x = = 1;', '[error]     |           ^', '[error]   2 | const y = 2;', '[error]   3 |', 'Error occurred when checking code style in the above file.'].join('\n');
+  const t = summarize(out).text;
+  assert.doesNotMatch(t, /\| /);
+  assert.match(t, /SyntaxError: Unexpected token \(1:11\)/);
+});
+
+test('pnpm trailer lines do not hide the tsc error', () => {
+  const out = ["src/a.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'.", 'C:\\r\\x\\packages\\y:', ' ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @syn/x@0.0.0 check: `tsc`', 'Exit status 2', ' WARN  Local package.json exists, but node_modules missing'].join('\n');
+  assert.match(summarize(out).text, /TS2322/);
+});
+
+test('a NUL byte is stripped (the board refuses it)', () => {
+  assert.doesNotMatch(summarize('a\0b').text, /\0/);
 });
 
 test('lint output drops code-frame lines, so no source reaches the board', () => {

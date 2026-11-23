@@ -18,10 +18,10 @@ function shape(counts: { passed: number; failed: number; skipped: number }, name
   return { text: cut(text), ran: counts.passed + counts.failed };
 }
 
-/** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 3 lines that are not code frames. */
+/** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 5 lines that are not code frames or pnpm trailer lines. */
 export function summarize(output: string): { text: string; ran: number | null } {
   // each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
-  const lines = output.replace(ANSI, '').split(/\r?\n/).map((l) => l.slice(0, 2000));
+  const lines = output.replace(ANSI, '').replaceAll('\0', '').split(/\r?\n/).map((l) => l.slice(0, 2000));
 
   const vt = lines.map((l) => /^\s*Tests\s+(\d+ (?:failed|passed|skipped|todo)\b.*|no tests)\s*$/.exec(l)?.[1]).filter((v): v is string => v !== undefined).at(-1);
   if (vt !== undefined) {
@@ -42,9 +42,10 @@ export function summarize(output: string): { text: string; ran: number | null } 
     return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0 }, names);
   }
 
-  // code-frame lines (a linted file's source) stay off the board
-  const frame = /^\s*(?:\d+\s*[│|]|[·│╭╰─])/;
-  return { text: cut(lines.filter((l) => l.trim() && !frame.test(l)).slice(-3).join('\n')), ran: null };
+  // code-frame lines (a linted file's source: oxlint, prettier's `[error] 2 | code`, Babel's `> 12 | code`) stay off the
+  // board; so do pnpm's trailer lines, which would push the one real error out of the tail
+  const drop = /^\s*(?:\[\w+\]\s*)?>?\s*(?:\d+\s*[│|]|[│|·╭╰─])|ERR_PNPM_|^\s*Exit status \d+|^\s*WARN\s|^\s*(?:[A-Za-z]:)?[\\/]\S*:\s*$/;
+  return { text: cut(lines.filter((l) => l.trim() && !drop.test(l)).slice(-5).join('\n')), ran: null };
 }
 
 const MASK = '[masked]';

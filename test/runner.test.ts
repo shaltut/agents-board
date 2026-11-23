@@ -370,7 +370,7 @@ test('an over-long pid line does not switch reaping off', async () => {
   await runner.exited;
   await sleep(500);
   const rec = readFileSync(join(HOME, 'state', 'slot-1.pids'), 'utf8');
-  writeFileSync(join(HOME, 'state', 'slot-1.pids'), `${'9'.repeat(20)} node\n${rec}`);
+  writeFileSync(join(HOME, 'state', 'slot-1.pids'), `9999999999 node\n${'9'.repeat(20)} node\n${rec}`);
   runner = startRunner();
   await up(runner);
   await until('the orphan to go', () => !alive(pid), 10_000);
@@ -422,8 +422,9 @@ test('hooks and config a job plants in the slot clone never run', async () => {
 });
 
 test('a NUL folder a job plants in the slot does not break the next job', { skip: !WIN && 'Windows only' }, async () => {
+  git('checkout', '-q', '-b', 'folder', 'main');
   const P = commit('nul', { 'folder.mjs': String.raw`import { mkdirSync, writeFileSync } from 'node:fs'; import { resolve } from 'node:path'; const d = '\\\\?\\' + resolve('NUL'); mkdirSync(d, { recursive: true }); writeFileSync(d + '\\x', '1'); console.log('planted');` });
-  git('push', '-q', 'origin', 'HEAD:refs/heads/folder');
+  git('push', '-q', 'origin', 'folder');
   git('checkout', '-q', 'main');
   const jp = await ended(await add('nulplant', P));
   assert.equal(jp.state, 'passed', jp.summary);

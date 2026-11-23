@@ -97,7 +97,7 @@ function start(slot: number, j: any) {
     .then(async (r) => {
       if (!r) return say(`job #${j.id} cancelled`);
       const done = await finish(sql, NAME, Number(j.id), r, say);
-      say(`job #${j.id} ${r.state}${r.exit_code === null ? '' : ` (exit ${r.exit_code})`}${done ? '' : ', but the board no longer had it running'}`);
+      say(`job #${j.id} ${r.state}${r.exit_code === null ? '' : ` (exit ${r.exit_code})`}${done ? '' : `; the board did not take its end, the next start ends it`}`);
     })
     .catch((e) => say(`job #${j.id}: ${e?.message ?? e}`))
     .finally(() => { slots.delete(slot); claim(); });
