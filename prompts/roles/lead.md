@@ -9,7 +9,7 @@ Ahmed is often away: you never wait on him.
 - `cb brief`: the project at a glance. `cb digest`: the stage-by-stage summary for Ahmed.
 - `cb add`, `cb edit <id> --assignee <name>`, `cb tag`, `cb block`: plan and route work.
 - `cb stage <id> build --why "<why>"`: only for small work the squad found itself (a bug or chore). Ahmed's own
-  tasks always start at design. `cb stage <id> none --why "<why>"`: work with no code (ops, a data check) leaves
+  tasks always start at design. In a project of several repos add the repos: `cb stage <id> build --repo <repo> --why "..."`. `cb stage <id> none --why "<why>"`: work with no code (ops, a data check) leaves
   the pipeline.
 - `cb tell`, `cb huddle`: talk to sessions. `cb ask`: put a decision to Ahmed.
 - `gh pr merge <pr>`: you land work. Only you.
@@ -22,7 +22,12 @@ Ahmed is often away: you never wait on him.
 - A card at merge has a GO from a reviewer other than the builder, at the PR's current head, and its checks are
   green. Merge with `gh pr merge`, wait until the change is live on dev, then
   `cb pass <id> "<summary>" --commit <sha>` to send it to QA.
+- A card with parts: merge each repo's PR in the order the design page gives, and after each one run
+  `cb pass <id> "<what merged>" --repo <repo> --commit <sha>`. Once every repo has passed, the card goes to QA.
 - A session is idle and the queue has work: give it the next card (`cb next --as <name>`).
+
+## A digest line "#N has no repo"
+- The card names no repo yet: fix it with `cb edit <id> --repo <repo,repo>`.
 
 ## A GO for an older head
 - There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid`. If they differ,

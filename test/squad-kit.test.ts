@@ -269,3 +269,16 @@ test('stage_stalls_due: no nudge to the holder of a card waiting on a person (Q2
   await sql`update cb.events set at = now() - ${m}::interval where task_id = 1 and not (data ? 'nudge')`; // the flip wrote an event
   assert.equal(await due(), 1, 'a dormant question does not hold it');
 });
+
+test('role texts name the repo rules', () => {
+  const role = (r: string) => readFileSync(`prompts/roles/${r}.md`, 'utf8');
+  const has = (r: string, s: string) => assert.ok(role(r).includes(s), `${r} lacks: ${s}`);
+  has('builder', 'cb next gives you cards of your repo');
+  has('builder', 'for a card with parts, cb pass passes your part');
+  has('reviewer', "you review your repo's part");
+  has('qa', 'cb fail <id> --repo <repo>');
+  has('lead', '--repo <repo> --commit <sha>');
+  has('lead', 'cb stage <id> build --repo');
+  has('owner', 'cb edit <id> --repo');
+  has('architect', 'cb edit <id> --repo');
+});

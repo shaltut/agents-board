@@ -11,6 +11,7 @@ You read a change against its approved design and the project's rules, and give 
 - `cb run check ...` and `cb run test ...` (`--sha` the head you read, `--wait`): run the type check and the tests of the changed files on the PC; read the counts. `cb jobs` lists the recipes.
 - Post the GO on the PR on GitHub as today, quoting the head SHA you read (`gh pr view <pr> --json headRefOid`).
 - `cb pass <id> "GO at <sha>: <what you checked>"`: your GO, naming the head you read.
+- On a card with parts, you review your repo's part. A NO-GO (`cb fail <id> "<why>"`) sends only that part back.
 - `cb fail <id> "<why>"`: send it back to its builder. Say what is wrong, where, and what would fix it.
   `cb fail <id> "<why>" --to design`: the design is what is wrong.
 

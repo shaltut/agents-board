@@ -257,6 +257,24 @@ It never:
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
 - frees a card held by a down session, or runs anything heavy itself.
 
+## Squad file: several repos
+
+One board project can hold several git repos. QHS is four: `api`, `dashboard`, `app`, `bot`. Add a `repos` key to the
+squad file (`cb squad set <project> -f <file>`):
+
+```json
+"repos": {
+  "api":       { "home": true, "paths": { "shaltoot": "F:/Work/QHS/api", "macbook": "/Users/ahmedshaltoot/Work/QHS/api" } },
+  "dashboard": { "paths": { "shaltoot": "F:/Work/QHS/dashboard", "macbook": "/Users/ahmedshaltoot/Work/QHS/dashboard" } }
+}
+```
+
+- A repo name is a slug: lower-case letters, digits and dashes, starting with a letter, 32 characters at most.
+- Exactly one repo is `home`; lead, architect, qa and investigator start there.
+- Machines then give only `herdr` and `board`; each repo carries its own `paths`.
+- Areas become `{"name": "api", "repo": "api"}`; builder and reviewer counts go per repo (`{"api": 2, "dashboard": 1}`).
+- No `repos` key: one repo named `main`, as before. A `cb run` for a repo the PC runner does not have is refused.
+
 ## Tests
 
 Never on the VPS. The suite truncates whatever database it is given and expects the PC's layout (127.0.0.1:5434);
