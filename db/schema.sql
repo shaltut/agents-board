@@ -4075,3 +4075,186 @@ begin
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
   return ns;
 end $$;
+
+
+
+-- PC job runner (#3600): jobs queued on the board, run by a daemon on Ahmed's PC. The daemon connects as application
+-- name 'cb-runner/<version>'; runner-only functions refuse any other name (a deterrent like cb-web, not auth).
+create table if not exists cb.runners (
+  name text primary key, log_url text, started_at timestamptz, last_seen timestamptz
+);
+-- params: {"<name>": {"min": int, "max": int}} = how many values the recipe takes
+create table if not exists cb.runner_recipes (
+  runner text references cb.runners(name) on delete cascade, project text, recipe text,
+  params jsonb not null default '{}', db boolean not null default false,
+  primary key (runner, project, recipe)
+);
+create table if not exists cb.jobs (
+  id bigserial primary key,
+  project text not null references cb.projects(slug) on update cascade,
+  recipe text not null,
+  params jsonb not null default '{}',  -- {"<name>": ["v", ...]}
+  sha text not null,
+  requester text not null,
+  task_id bigint references cb.tasks(id) on delete set null,
+  state text not null default 'queued' check (state in ('queued','running','passed','failed','error','cancelled')),
+  exit_code int, summary text, runner text,
+  created_at timestamptz not null default now(), started_at timestamptz, finished_at timestamptz
+);
+create index if not exists jobs_open_idx on cb.jobs (state, id) where state in ('queued','running');
+
+drop function if exists cb._is_runner cascade;
+drop function if exists cb._runner_only cascade;
+drop function if exists cb._job_tell cascade;
+drop function if exists cb.job_add cascade;
+drop function if exists cb.job_get cascade;
+drop function if exists cb.jobs_list cascade;
+drop function if exists cb.job_cancel cascade;
+drop function if exists cb.runner_hello cascade;
+drop function if exists cb.runner_beat cascade;
+drop function if exists cb.job_claim cascade;
+drop function if exists cb.job_finish cascade;
+
+create function cb._is_runner() returns boolean language sql stable as $$ select current_setting('application_name') like 'cb-runner%' $$;
+create function cb._runner_only() returns void language plpgsql stable as $$
+begin
+  if not cb._is_runner() then raise exception 'only the runner can do this'; end if;
+end $$;
+
+-- "job #N recipe at sha7: state (exit n). summary" + log hint, to the requester. Best effort: an unknown requester
+-- (session gone, no events) must not stop the job from ending.
+create function cb._job_tell(j cb.jobs) returns void language plpgsql as $$
+begin
+  perform cb.tell(j.requester,
+    format('job #%s %s at %s: %s%s. %s', j.id, j.recipe, left(j.sha, 7), j.state,
+           case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end, coalesce(j.summary, ''))
+    || E'\nLog: cb job log ' || j.id, 'runner');
+exception when others then null;
+end $$;
+
+create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare
+  a text := cb.set_actor(actor); p text := cb.read_project(project); rp jsonb; k text; spec jsonb; vals jsonb; ev jsonb;
+  new_id bigint; ahead int; lo int; hi int;
+begin
+  if p is null then raise exception 'project is required'; end if;
+  if not cb._is_dashboard() and not exists (select 1 from cb.sessions s where s.actor = a and s.project = p and s.last_seen > now() - interval '1 day') then
+    raise exception '% has no bound session on % in the last day: only a session of the project, or Ahmed, can queue a job', a, p;
+  end if;
+  sha := lower(trim(coalesce(sha, '')));
+  if sha !~ '^[0-9a-f]{7,40}$' then raise exception 'sha must be 7 to 40 hex characters'; end if;
+  params := coalesce(params, '{}'::jsonb);
+  if jsonb_typeof(params) is distinct from 'object' then raise exception 'params must be an object of lists'; end if;
+  select rr.params into rp from cb.runner_recipes rr where rr.project = p and rr.recipe = recipe order by rr.runner limit 1;
+  if not found then raise exception 'no recipe % for % on any runner: see cb jobs', recipe, p; end if;
+  for k in select jsonb_object_keys(params) loop
+    if not (rp ? k) then raise exception 'unknown parameter % for recipe %', k, recipe; end if;
+  end loop;
+  for k, spec in select * from jsonb_each(rp) loop
+    lo := coalesce((spec->>'min')::int, 0); hi := least(coalesce((spec->>'max')::int, 20), 20);
+    vals := coalesce(params->k, '[]'::jsonb);
+    if jsonb_typeof(vals) is distinct from 'array' then raise exception 'parameter % must be a list', k; end if;
+    if jsonb_array_length(vals) < lo then raise exception '% needs at least % value(s)', k, lo; end if;
+    if jsonb_array_length(vals) > hi then raise exception '% takes at most % values', k, hi; end if;
+    for ev in select jsonb_array_elements(vals) loop
+      if jsonb_typeof(ev) is distinct from 'string' or (ev #>> '{}') !~ '^[A-Za-z0-9@._/-]{1,200}$'
+         or (ev #>> '{}') ~ '^[-/]' or (ev #>> '{}') ~ '(^|/)\.\.(/|$)' then
+        raise exception 'bad value for %: % (text of letters, digits and @ . _ / - only, no leading - or /, no .. segment)', k, left(ev::text, 60);
+      end if;
+    end loop;
+  end loop;
+  insert into cb.jobs (project, recipe, params, sha, requester, task_id) values (p, recipe, params, sha, a, task_id)
+  returning cb.jobs.id into new_id;
+  select count(*)::int into ahead from cb.jobs j where j.state = 'queued' and j.id < new_id;
+  perform pg_notify('cb_jobs', new_id::text);
+  return jsonb_build_object('id', new_id, 'ahead', ahead);
+end $$;
+
+create function cb.job_get(id bigint) returns jsonb language sql stable as $$
+  select to_jsonb(j) from cb.jobs j where j.id = job_get.id
+$$;
+
+create function cb.jobs_list(project text default null) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project);
+begin
+  return jsonb_build_object(
+    'jobs', coalesce((select jsonb_agg(to_jsonb(j) order by j.id) from cb.jobs j
+                      where j.state in ('queued','running') and (p is null or j.project = p)), '[]'::jsonb),
+    'runners', coalesce((select jsonb_agg(jsonb_build_object('name', r.name, 'last_seen', r.last_seen, 'recipes',
+                  coalesce((select jsonb_agg(jsonb_build_object('project', rr.project, 'recipe', rr.recipe, 'params', rr.params, 'db', rr.db)
+                            order by rr.project, rr.recipe) from cb.runner_recipes rr where rr.runner = r.name), '[]'::jsonb))
+                  order by r.name) from cb.runners r), '[]'::jsonb));
+end $$;
+
+create function cb.job_cancel(id bigint, actor text default null) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); j cb.jobs;
+begin
+  select * into j from cb.jobs x where x.id = id for update;
+  if not found then raise exception 'no job #%', id; end if;
+  if not cb._is_dashboard() and j.requester <> a and cb._role(a) is distinct from 'lead' then
+    raise exception 'only the requester, the lead or Ahmed can cancel job #%', id;
+  end if;
+  if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;
+  update cb.jobs x set state = 'cancelled', finished_at = now() where x.id = id;
+  perform pg_notify('cb_jobs', id::text);
+end $$;
+
+create function cb.runner_hello(runner text, log_url text, recipes jsonb) returns int language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; n int := 0; r jsonb;
+begin
+  perform cb._runner_only();
+  if jsonb_typeof(coalesce(recipes, '[]'::jsonb)) is distinct from 'array' then raise exception 'recipes must be a list'; end if;
+  insert into cb.runners (name, log_url, started_at, last_seen) values (runner, log_url, now(), now())
+  on conflict (name) do update set log_url = excluded.log_url, started_at = now(), last_seen = now();
+  delete from cb.runner_recipes rr where rr.runner = runner_hello.runner;
+  for r in select jsonb_array_elements(coalesce(recipes, '[]'::jsonb)) loop
+    insert into cb.runner_recipes (runner, project, recipe, params, db)
+    values (runner, r->>'project', r->>'recipe', coalesce(r->'params', '{}'::jsonb), coalesce((r->>'db')::boolean, false));
+  end loop;
+  for j in update cb.jobs x set state = 'error', summary = 'error: runner restarted', finished_at = now()
+           where x.runner = runner_hello.runner and x.state = 'running' returning x.* loop
+    n := n + 1;
+    perform cb._job_tell(j);
+  end loop;
+  return n;
+end $$;
+
+create function cb.runner_beat(runner text) returns void language plpgsql as $$
+begin
+  perform cb._runner_only();
+  update cb.runners r set last_seen = now() where r.name = runner_beat.runner;
+end $$;
+
+create function cb.job_claim(runner text, allow_db boolean) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; jid bigint; d boolean;
+begin
+  perform cb._runner_only();
+  select x.id, rr.db into jid, d from cb.jobs x
+  join cb.runner_recipes rr on rr.runner = job_claim.runner and rr.project = x.project and rr.recipe = x.recipe
+  where x.state = 'queued' and (allow_db or not rr.db) order by x.id limit 1 for update of x skip locked;
+  if not found then return null; end if;
+  update cb.jobs x set state = 'running', runner = job_claim.runner, started_at = now() where x.id = jid returning x.* into j;
+  return to_jsonb(j) || jsonb_build_object('db', d);
+end $$;
+
+create function cb.job_finish(id bigint, runner text, state text, exit_code int, summary text) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; hit text;
+begin
+  perform cb._runner_only();
+  if state not in ('passed','failed','error') then raise exception 'state must be passed, failed or error'; end if;
+  if length(coalesce(summary, '')) > 1000 then raise exception 'summary is over 1000 characters'; end if;
+  hit := cb._sensitive(summary);
+  if hit is not null then raise exception 'the summary looks like %; the board keeps no such text', hit; end if;
+  update cb.jobs x set state = job_finish.state, exit_code = job_finish.exit_code, summary = job_finish.summary, finished_at = now()
+  where x.id = job_finish.id and x.state = 'running' and x.runner = job_finish.runner returning x.* into j;
+  if not found then return false; end if;
+  perform cb._job_tell(j);
+  return true;
+end $$;
