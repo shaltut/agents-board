@@ -13,7 +13,7 @@ function matches(rule: string, cmd: string): boolean {
   if (!m) return false;
   const pat = m[1]!;
   const re = (p: string) => new RegExp('^' + p.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
-  return re(pat).test(cmd) || (pat.endsWith(' *') && re(pat.slice(0, -2)).test(cmd));
+  return re(pat).test(cmd) || (pat.endsWith(' *') && pat.split('*').length === 2 && re(pat.slice(0, -2)).test(cmd));
 }
 const denied = (deny: string[], cmd: string) => deny.some((r) => matches(r, cmd));
 
@@ -33,6 +33,9 @@ test('every role denies push to main/master in every spelling, and force pushes'
     'git push origin master', 'git push origin HEAD:master', 'git push -f', 'git push -f origin fix/x',
     'git push origin fix/x -f', 'git push --force', 'git push origin fix/x --force', 'git push --force-with-lease',
     'git push origin fix/x --force-with-lease',
+    'git -C ../wt push origin main', 'git -C x push origin HEAD:main', 'git -c x=y push origin main',
+    'git push origin refs/heads/main', 'git push origin HEAD:refs/heads/main', 'git -C wt push --force origin x',
+    'git -C wt push origin +x', 'git -C wt push -f origin x',
   ];
   for (const r of ROLES) {
     const { deny } = load(r).permissions;
@@ -44,7 +47,9 @@ test('every role denies push to main/master in every spelling, and force pushes'
 test('a branch named fix/maintenance and an ordinary feature push match no deny rule', () => {
   for (const r of ROLES.filter((x) => !READ_ONLY.includes(x))) {
     const { deny } = load(r).permissions;
-    for (const c of ['git push origin fix/maintenance', 'git push -u origin feat/3599-kit', 'git push origin HEAD:feat/x']) {
+    for (const c of ['git push origin fix/maintenance', 'git push -u origin feat/3599-kit', 'git push origin HEAD:feat/x',
+      'git push origin feat/main-menu', 'git -C wt push origin fix/maintenance', 'git -C wt push -u origin feat/main-menu',
+      'git -C wt push origin feat/x', 'git commit -m "push to main"']) {
       assert.deepEqual(deny.filter((d: string) => matches(d, c)), [], `${r}: ${c}`);
     }
   }
