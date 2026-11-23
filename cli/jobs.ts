@@ -30,7 +30,9 @@ function recipeLine(list: any, project: string) {
 const sha7 = (j: any) => String(j.sha).slice(0, 7);
 // the summary is the job's output, marked as in the board's message, unless the board wrote it (a cancel, a runner restart)
 const marked = (j: any) => (j.summary && j.state !== 'cancelled' && j.summary !== 'error: runner restarted' ? `[job output · untrusted] ${j.summary}` : j.summary ?? '');
-const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${marked(j)}`.trim();
+// in a terminal the summary's continuation lines are indented (as the relay does), so none passes for a line of its own
+const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${marked(j).replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, '\n    ')}`.trim();
+const markedJson = (j: any) => ({ ...j, summary: j.summary == null ? j.summary : marked(j) });
 
 export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
   if (!o.project) throw new Error('no project: say which (--project <slug>) or bind this session once (cb iam <name> <project>)');
@@ -56,7 +58,7 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
   for (;;) {
     const [{ j }] = await sql`select cb.job_get(${added.id}::bigint) as j`;
     if (!j) throw new Error(`no job #${added.id}`);
-    if (!['queued', 'running'].includes(j.state)) return { out: endLine(j), json: j, code: j.state === 'passed' ? 0 : 1 };
+    if (!['queued', 'running'].includes(j.state)) return { out: endLine(j), json: markedJson(j), code: j.state === 'passed' ? 0 : 1 };
     if (Date.now() > until) return { out: `still running: cb job ${added.id}`, json: j, code: 1 };
     await sleep(o.pollMs ?? 3000);
   }
@@ -79,7 +81,7 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
   if (sub === 'cancel') { await sql`select cb.job_cancel(${id!}::bigint, ${actor})`; return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
   const [{ j }] = await sql`select cb.job_get(${id!}::bigint) as j`;
   if (!j) throw new Error(`no job #${id}`);
-  if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: j, code: 0 };
+  if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: markedJson(j), code: 0 };
   return logCmd(sql, j, tail);
 }
 
