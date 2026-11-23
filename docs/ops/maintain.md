@@ -240,8 +240,8 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 - starts sessions for waiting cards, like `cb squad up` (names, models, permission files), at most 3 a tick, 8 on
   the Mac in all; a name that failed to start waits 10 minutes;
 - closes a squad session idle 20 minutes that holds nothing (no card, question, job or open dashboard ask), that herdr
-  shows ready for input (`idle`, or `done` for a pane nobody looked at), when its role has no waiting work: it marks it closing, finds its pane, checks again (board and herdr), sends `/exit`,
-  then closes the pane (not gone in 60 s: the pane stays and the mark lapses in 5 minutes);
+  shows ready for input (`idle`, or `done` for a pane nobody looked at), when its role has no waiting work: it marks
+  it closing, finds its pane, checks again (board and herdr), sends `/exit`, then closes the pane (not gone in 60 s: the pane stays and the mark lapses in 5 minutes);
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
