@@ -1,0 +1,33 @@
+
+ RUN  v4.1.10 C:/r/demo-1
+
+ ❯ c.test.ts (3 tests | 1 failed | 1 skipped) 5ms
+     × breaks on purpose 3ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  c.test.ts > suite > breaks on purpose
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ c.test.ts:4:45
+      2| describe('suite', () => {
+      3|   test('adds', () => expect(1 + 1).toBe(2));
+      4|   test('breaks on purpose', () => expect(1).toBe(2));
+       |                                             ^
+      5|   test.skip('later', () => {});
+      6| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 1 skipped (3)
+   Start at  13:25:20
+   Duration  221ms (transform 33ms, setup 0ms, import 48ms, tests 5ms, environment 0ms)
+
