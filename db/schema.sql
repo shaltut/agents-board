@@ -441,6 +441,7 @@ begin
      where g.project = a;
     update cb.epics e set project = t where e.project = a; -- epics follow their steps
     update cb.goals g set project = t where g.project = a;
+    update cb.jobs j set project = t where j.project = a; -- runner jobs (#3600): a foreign key that does not cascade a delete
     update cb.project_aliases pa set slug = t where pa.slug = a;
     -- people on the merged project follow their work (#315 review); the FK cascade would drop them
     insert into cb.user_projects (user_name, project) select up.user_name, t from cb.user_projects up where up.project = a
@@ -4121,14 +4122,14 @@ begin
   if not cb._is_runner() then raise exception 'only the runner can do this'; end if;
 end $$;
 
--- "job #N recipe at sha7: state (exit n). summary" + log hint, to the requester. Best effort: an unknown requester
--- (session gone, no events) must not stop the job from ending.
+-- "job #N recipe at sha7: state (exit n). summary" + log hint (once it started: no log before), to the requester.
+-- Best effort: an unknown requester (session gone, no events) must not stop the job from ending.
 create function cb._job_tell(j cb.jobs) returns void language plpgsql as $$
 begin
   perform cb.tell(j.requester,
     format('job #%s %s at %s: %s%s. %s', j.id, j.recipe, left(j.sha, 7), j.state,
            case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end, coalesce(j.summary, ''))
-    || E'\nLog: cb job log ' || j.id, 'runner');
+    || case when j.started_at is not null then E'\nLog: cb job log ' || j.id else '' end, 'runner');
 exception when others then null;
 end $$;
 
@@ -4199,8 +4200,10 @@ begin
     raise exception 'only the requester, the lead or Ahmed can cancel job #%', id;
   end if;
   if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;
-  update cb.jobs x set state = 'cancelled', finished_at = now() where x.id = id;
+  update cb.jobs x set state = 'cancelled', summary = 'cancelled by ' || a, finished_at = now() where x.id = id returning x.* into j;
   perform pg_notify('cb_jobs', id::text);
+  -- a lead or Ahmed cancelled it: the requester may be waiting on its end. Last: cb.tell sets the actor to runner.
+  if j.requester is distinct from a then perform cb._job_tell(j); end if;
 end $$;
 
 create function cb.runner_hello(runner text, log_url text, recipes jsonb) returns int language plpgsql as $$

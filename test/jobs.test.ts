@@ -115,6 +115,26 @@ test('cancel: requester, lead or dashboard; queued or running only', async () =>
   assert.equal((await sql`select state from cb.jobs where id = ${b.id}`)[0].state, 'cancelled');
 });
 
+test('a cancel by someone else tells the requester; their own cancel does not', async () => {
+  const { sql, session, add } = await setup();
+  const told = async () => (await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`).map((e: any) => e.summary);
+  const a = await add('B1@mac');
+  await session`select cb.job_cancel(${a.id}, 'orch@pc')`;
+  const msgs = await told();
+  assert.equal(msgs.length, 1);
+  assert.match(msgs[0], new RegExp(`^job #${a.id} test at abcdef1: cancelled\\. cancelled by orch@pc$`)); // never started: no log to point at
+  const b = await add('B1@mac');
+  await session`select cb.job_cancel(${b.id}, 'B1@mac')`;
+  assert.equal((await told()).length, 1);
+});
+
+test('merging a project that ran a job moves the job', async () => {
+  const { sql, add } = await setup();
+  const { id } = await add('B1@mac');
+  await sql`select cb.project_alias('demo', 'demo2')`;
+  assert.equal((await sql`select project from cb.jobs where id = ${id}`)[0].project, 'demo2');
+});
+
 test('runner restart ends its running jobs and tells the requesters; queued jobs stay', async () => {
   const { sql, add, runner } = await setup();
   const a = await add('B1@mac'); const b = await add('B1@mac');
