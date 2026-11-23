@@ -25,9 +25,7 @@ test('role texts load from prompts/roles and survive freshDb', async () => {
   assert.equal(n, 8);
   const common = readFileSync('prompts/roles/_common.md', 'utf8').trim();
   const [{ t }] = await sql`select cb.role_text('builder') as t`;
-  assert.ok(t.startsWith(common));
-  assert.match(t, /\n\n/);
-  assert.ok(t.includes(readFileSync('prompts/roles/builder.md', 'utf8').trim()));
+  assert.equal(t, common + '\n\n' + readFileSync('prompts/roles/builder.md', 'utf8').trim());
 });
 
 test('loadRoleTexts updates and deletes', async () => {
@@ -62,22 +60,36 @@ test('every command a role file names exists', async () => {
   for (const f of readdirSync('prompts/roles')) {
     const text = readFileSync(join('prompts/roles', f), 'utf8');
     assert.ok(text.split('\n').length <= 60, `${f} is over 60 lines`);
-    for (const m of text.matchAll(/\bcb ([a-z]+)/g)) assert.ok(known.has(m[1]), `${f}: cb ${m[1]} is not a command`);
+    for (const m of text.matchAll(/\bcb ([a-z]+)(?: ([a-z]+))?/g)) {
+      assert.ok(known.has(m[1]), `${f}: cb ${m[1]} is not a command`);
+      // commands whose help lists subcommands: the second word must be one of them
+      const subs = ({ page: ['show', 'set'], huddle: ['open', 'say', 'add', 'show', 'close'], lock: ['take', 'release', 'queue'] } as Record<string, string[]>)[m[1]];
+      if (subs && m[2]) assert.ok(subs.includes(m[2]), `${f}: cb ${m[1]} ${m[2]} is not a subcommand`);
+    }
   }
 });
 
 test('cb role prints the text; cb iam ends with the role line', async () => {
-  await db();
+  const sql = await db();
   const r = cb(['role', 'reviewer']);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /never/i);
+  assert.equal(r.out, (await sql`select cb.role_text('reviewer') as t`)[0].t);
   const j = cb(['role', 'reviewer', '--json']);
   const p = JSON.parse(j.out);
   assert.equal(p.role, 'reviewer');
-  assert.ok(p.text.includes('reviewer') || p.text.length > 100);
-  const sql = await db();
+  assert.equal(p.text, r.out);
   await sql`select cb.ensure_project('demo')`;
   const i = cb(['iam', 'R9@mac', 'demo', '--role', 'reviewer'], { HERDR_PANE_ID: 'p9' });
   assert.equal(i.code, 0, i.err);
   assert.equal(i.out.split('\n').at(-1), 'Your role: cb role reviewer');
+});
+
+test('cb resume ends with the role line in a pipeline project', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`update cb.projects set pipeline = true where name = 'demo'`;
+  await sql`select cb.iam('mac', 'p8', 'B8@mac', 'demo', 'builder')`;
+  const r = cb(['resume'], { CB_ACTOR: 'B8@mac' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out.split('\n').at(-1), 'Your role: cb role builder');
 });
