@@ -23,6 +23,11 @@ test('ran is null without counts and 0 when nothing ran', () => {
   assert.equal(summarize(fx('node-test-fail.txt')).ran, 2);
 });
 
+test('node:test cancelled and todo counts are kept, and the cancelled tests named', () => {
+  const out = ['✖ hangs (3.2ms)', "  'test did not finish before its parent and was cancelled'", 'ℹ tests 15', 'ℹ pass 12', 'ℹ fail 0', 'ℹ cancelled 3', 'ℹ skipped 0', 'ℹ todo 1'].join('\n');
+  assert.equal(summarize(out).text, '12 passed, 0 failed, 3 cancelled, 0 skipped, 1 todo. Failing: hangs');
+});
+
 test('vitest output gives counts and the failing path', () => {
   assert.equal(summarize(fx('vitest-fail.txt')).text, '1 passed, 1 failed, 1 skipped. Failing: c.test.ts > suite > breaks on purpose');
 });

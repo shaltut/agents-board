@@ -7,10 +7,12 @@ const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 export const cut = (s: string, max = MAX) => (s.length > max ? s.slice(0, max - 1) + '…' : s);
 
-function shape(counts: { passed: number; failed: number; skipped: number }, names: string[]) {
+function shape(counts: { passed: number; failed: number; skipped: number; cancelled?: number; todo?: number }, names: string[]) {
   const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
-  let text = `${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped.`;
-  if (counts.failed > 0 || unique.length) {
+  // cancelled and todo only when there are some: node:test lists cancelled tests with the failing ones
+  const cancelled = counts.cancelled ? `${counts.cancelled} cancelled, ` : '';
+  let text = `${counts.passed} passed, ${counts.failed} failed, ${cancelled}${counts.skipped} skipped${counts.todo ? `, ${counts.todo} todo` : ''}.`;
+  if (counts.failed > 0 || counts.cancelled || unique.length) {
     const shown = unique.slice(0, MAX_NAMES).join('; ');
     const more = unique.length > MAX_NAMES ? `; and ${unique.length - MAX_NAMES} more` : '';
     text += ` Failing: ${shown}${more}`;
@@ -27,19 +29,19 @@ export function summarize(output: string): { text: string; ran: number | null } 
   if (vt !== undefined) {
     const n = (w: string) => Number(new RegExp(`(\\d+) ${w}\\b`).exec(vt)?.[1] ?? 0);
     const names = lines.flatMap((l) => /^\s*FAIL\s+(.+?)\s*$/.exec(l)?.[1] ?? []);
-    return shape({ passed: n('passed'), failed: n('failed'), skipped: n('skipped') }, names);
+    return shape({ passed: n('passed'), failed: n('failed'), skipped: n('skipped'), todo: n('todo') }, names);
   }
 
   const c: Record<string, number> = {};
   const names: string[] = [];
   for (const l of lines) {
-    const m = /^\s*(?:\S{1,4}\s+)?(pass|fail|skipped)\s+(\d+)\s*$/.exec(l);
+    const m = /^\s*(?:\S{1,4}\s+)?(pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/.exec(l);
     if (m) c[m[1]!] = Number(m[2]); // last occurrence wins
     const name = /^\s*✖ (.+?) \(\d+(?:\.\d+)?ms\)\s*$/.exec(l)?.[1] ?? /^\s*not ok \d+ - (.+?)(?:\s+#.*)?\s*$/.exec(l)?.[1];
     if (name) names.push(name);
   }
   if (c.pass !== undefined || c.fail !== undefined || c.skipped !== undefined) {
-    return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0 }, names);
+    return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0, cancelled: c.cancelled, todo: c.todo }, names);
   }
 
   // code-frame lines (a linted file's source: oxlint, prettier's `[error] 2 | code`, Babel's `> 12 | code`) stay off the
