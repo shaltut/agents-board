@@ -2,10 +2,14 @@
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
 
-type Machine = { herdr: string | null; repo: string; board: string };
-type Role = { count?: number; model: string; machine: string };
-export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; areas: string[]; supervise?: boolean };
-export type Launch = { name: string; role: string; area?: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string };
+// machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
+type Machine = { herdr: string | null; repo?: string; board: string };
+type Role = { count?: number | Record<string, number>; model: string; machine: string };
+type Repo = { home: boolean; paths: Record<string, string> };
+export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; repos?: Record<string, Repo>;
+  areas: (string | { name: string; repo: string })[]; supervise?: boolean };
+export type Want = { name: string; role: string; area?: string; repo: string };
+export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
 const ORDER = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
@@ -13,13 +17,29 @@ const MAC = 'macbook', MAC_CAP = 8;
 
 type Live = { actor: string; machine: string; project?: string | null };
 
-export function wantList(project: string, squad: Squad) {
-  const want: { name: string; role: string; area?: string }[] = [];
+/** A squad's repos, home first, then by name (as cb._repos_of). No repos: one repo, main, in each machine's repo folder. */
+export function reposOf(squad: Squad): Record<string, Repo> {
+  if (!squad.repos) return { main: { home: true, paths: Object.fromEntries(Object.entries(squad.machines).map(([k, m]) => [k, m.repo ?? ''])) } };
+  return Object.fromEntries(Object.entries(squad.repos).sort(([a, x], [b, y]) => Number(!!y.home) - Number(!!x.home) || (a < b ? -1 : a > b ? 1 : 0)));
+}
+export const homeRepo = (squad: Squad) => Object.entries(reposOf(squad)).find(([, r]) => r.home)?.[0] ?? 'main';
+
+// Names: the home repo keeps today's (demo-B1@m); another repo's builders and reviewers carry it (demo-dashboard-B1@m)
+export function wantList(project: string, squad: Squad): Want[] {
+  const want: Want[] = [], home = homeRepo(squad);
   for (const role of ORDER.filter((r) => squad.roles[r])) {
-    const m = squad.roles[role].machine;
-    if (role === 'lead') want.push({ name: `orch@${m}`, role });
-    else if (role === 'owner') for (const area of squad.areas) want.push({ name: `${project}-O-${area}@${m}`, role, area });
-    else for (let i = 1; i <= (squad.roles[role].count ?? 1); i++) want.push({ name: `${project}-${LETTER[role]}${i}@${m}`, role });
+    const m = squad.roles[role].machine, count = squad.roles[role].count;
+    if (role === 'lead') want.push({ name: `orch@${m}`, role, repo: home });
+    else if (role === 'owner') for (const a of squad.areas) {
+      const area = typeof a === 'string' ? a : a.name;
+      want.push({ name: `${project}-O-${area}@${m}`, role, area, repo: typeof a === 'string' ? home : a.repo });
+    }
+    else if (role === 'builder' || role === 'reviewer') {
+      const per = typeof count === 'object' ? count : { [home]: count ?? 1 };
+      for (const repo of Object.keys(reposOf(squad))) for (let i = 1; i <= (per[repo] ?? 0); i++)
+        want.push({ name: `${project}-${repo === home ? '' : `${repo}-`}${LETTER[role]}${i}@${m}`, role, repo });
+    }
+    else for (let i = 1; i <= (typeof count === 'number' ? count : 1); i++) want.push({ name: `${project}-${LETTER[role]}${i}@${m}`, role, repo: home });
   }
   return want;
 }
@@ -32,12 +52,15 @@ export function promptCommand(l: { herdr: string | null; name: string; prompt: s
   return `herdr${l.herdr ? ` --machine ${l.herdr}` : ''} agent prompt ${herdrName(l.name)} "${l.prompt}"`;
 }
 
-export function launchFor(project: string, squad: Squad, w: { name: string; role: string; area?: string }, first: 'next' | 'resume' = 'next'): Launch {
-  const machine = w.name.split('@')[1], mc = squad.machines[machine], role = squad.roles[w.role];
+export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next'): Launch {
+  const machine = w.name.split('@')[1], mc = squad.machines[machine], role = squad.roles[w.role], repos = reposOf(squad);
+  // with repos: the session names its repo, and the architect and qa (who read across repos) get every repo's folder
+  const across = squad.repos && (w.role === 'architect' || w.role === 'qa')
+    ? `. Repos: ${Object.entries(repos).filter(([, r]) => r.paths[machine]).map(([k, r]) => `${k} ${r.paths[machine]}`).join(', ')}` : '';
   return {
-    ...w, model: role.model, machine, herdr: mc.herdr, cwd: mc.repo,
+    ...w, model: role.model, machine, herdr: mc.herdr, cwd: repos[w.repo]?.paths[machine] ?? '',
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
-    prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}, then cb role ${w.role}, then cb ${first}`,
+    prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}${squad.repos ? ` --repo ${w.repo}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
   };
 }
 

@@ -39,7 +39,7 @@ test('waiting counts per role', async () => {
   await card(sql, { stage: null }); // unstaged
   const s = await state(sup);
   assert.equal(s.supervised, true);
-  assert.deepEqual(s.waiting, { builder: 1, reviewer: 1, qa: 1, investigator: 1, architect: 0, owner: { claims: 0 } });
+  assert.deepEqual(s.waiting, { builder: { main: 1 }, reviewer: { main: 1 }, qa: 1, investigator: 1, architect: 0, owner: { claims: 0 } }); // no repos: one repo, main
 });
 
 test('owner first, architect after 15 minutes', async () => {
@@ -73,6 +73,7 @@ test('sessions carry busy facts', async () => {
   assert.deepEqual(Object.keys(by).sort(), ['sv-B1@macbook', 'sv-B2@macbook', 'sv-B9@macbook']);
   const b1 = by['sv-B1@macbook'], b2 = by['sv-B2@macbook'];
   assert.deepEqual([b1.role, b1.live, b1.holds, b1.questions, b1.jobs, b1.closing, b1.machine, b1.pane], ['builder', true, 1, 1, 1, false, 'macbook', 'p1']);
+  assert.deepEqual([b1.repo, b2.repo], ['main', 'main']);
   assert.deepEqual([b2.live, b2.holds, b2.closing, b2.last_restore, b2.down_again_logged], [false, 0, true, null, false]);
   assert.ok(b2.last_event);
   assert.equal(new Date(b1.last_event).getTime(), new Date((await sql`select started_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].started_at).getTime()); // no events: the session's start
@@ -242,4 +243,46 @@ test('last_restore_failed: the latest restore did not start; a later restore tha
   assert.equal(await b1(), true);
   await sup`select cb.supervise_log('sv', 'restore', 'sv-B1@macbook', 'builder')`; // a restore that started notes its role
   assert.equal(await b1(), false);
+});
+
+test('waiting and sessions per repo', async () => {
+  const QHS = {
+    machines: { macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
+    repos: { api: { home: true, paths: { macbook: '/Users/me/Work/QHS/api' } }, dashboard: { paths: { macbook: '/Users/me/Work/QHS/dashboard' } } },
+    areas: [{ name: 'api', repo: 'api' }, { name: 'dashboard', repo: 'dashboard' }],
+    roles: { lead: { count: 1, machine: 'macbook' }, owner: { machine: 'macbook' },
+             builder: { count: { api: 1, dashboard: 1 }, machine: 'macbook' }, reviewer: { count: { api: 1, dashboard: 1 }, machine: 'macbook' } },
+    supervise: true,
+  };
+  const { sql, sup } = await setup(QHS);
+  await sql`update cb.sessions set repo = 'api' where actor = 'sv-B1@macbook'`; // sv-B2 bound before repos: the home repo
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('macbook','p3','sv-dashboard-B1@macbook','sv','builder','dashboard')`;
+  const repos = async (id: number, r: string[] | null) => sql`update cb.tasks set repos = ${r} where id = ${id}`;
+  const part = (id: number, repo: string, stage: string, assignee: string | null = null) =>
+    sql`insert into cb.task_parts (task_id, repo, stage, status, assignee) values (${id}, ${repo}, ${stage}, ${assignee ? 'in_progress' : 'next'}, ${assignee})`;
+  // two parts at build, the api part held: only the dashboard part waits
+  const two = await card(sql, { stage: 'build' });
+  await repos(two, ['api', 'dashboard']);
+  await part(two, 'api', 'build', 'sv-B1@macbook'); await part(two, 'dashboard', 'build');
+  let s = await state(sup);
+  assert.deepEqual(s.waiting.builder, { api: 0, dashboard: 1 });
+  // a one-repo dashboard card adds one to dashboard
+  await repos(await card(sql, { stage: 'build' }), ['dashboard']);
+  // no repos in a project of several: nobody's, counted nowhere
+  await card(sql, { stage: 'build' });
+  // a part already at review while its card is at build: neither a builder's nor a reviewer's yet
+  const ahead = await card(sql, { stage: 'build' });
+  await repos(ahead, ['api', 'dashboard']);
+  await part(ahead, 'api', 'review'); await part(ahead, 'dashboard', 'build', 'sv-dashboard-B1@macbook');
+  // a one-repo api card in review
+  await repos(await card(sql, { stage: 'review' }), ['api']);
+  // a design card tagged dashboard: its owner's
+  await card(sql, { stage: 'design', labels: ['dashboard'] });
+  s = await state(sup);
+  assert.deepEqual(s.waiting.builder, { api: 0, dashboard: 2 });
+  assert.deepEqual(s.waiting.reviewer, { api: 1, dashboard: 0 });
+  assert.deepEqual(s.waiting.owner, { api: 0, dashboard: 1 });
+  assert.equal(s.waiting.architect, 0);
+  const by = Object.fromEntries(s.sessions.map((x: any) => [x.actor, x.repo]));
+  assert.deepEqual(by, { 'sv-B1@macbook': 'api', 'sv-B2@macbook': 'api', 'sv-dashboard-B1@macbook': 'dashboard' });
 });
