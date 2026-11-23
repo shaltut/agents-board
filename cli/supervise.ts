@@ -111,7 +111,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
       const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
       if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); continue; }
       const r = startOne(l, run, tabs);
-      out.push(r.line);
+      out.push(what === 'restore' ? r.line.replace(/^started /, 'restored ') : r.line);
       if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
       // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
       // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)

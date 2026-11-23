@@ -117,9 +117,10 @@ test('a down session holding a card is restored with cb resume', async () => {
   await session(sql, 'sv-B2@macbook', 'builder', { live: false });
   await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
   const h = fakeHerdr();
-  await tick(deps(sup, h.run));
+  const out = await tick(deps(sup, h.run));
   assert.ok(h.calls.some((c) => c.args[1] === 'prompt' && c.args[2] === 'sv-b2-macbook' && c.args[3]!.endsWith('then cb resume')));
   assert.equal((await events(sql, 'restore')).length, 1);
+  assert.ok(out.some((l) => l.endsWith('restored sv-B2@macbook')), out.join('\n'));
 });
 
 test('close sequence: an idle 21-minute squad session is sent /exit and its pane closed', async () => {
