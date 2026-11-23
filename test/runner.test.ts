@@ -61,6 +61,8 @@ git('push', '-q', 'origin', 'main');
 const PR_ONLY = commit('pr'); git('push', '-q', 'origin', 'HEAD:refs/pull/1/head');
 const UNPUSHED = commit('never pushed');
 git('checkout', '-q', 'main');
+const TAG_ONLY = commit('tag only'); git('tag', 'only-a-tag'); git('push', '-q', 'origin', 'only-a-tag'); // before the first clone
+git('checkout', '-q', 'main');
 
 const PORT = await freePort();
 const node = (...a: string[]) => ['node', ...a];
@@ -72,6 +74,7 @@ const recipes = {
   big: { steps: [node('big.mjs')], timeout: 60 },
   nocmd: { steps: [['no-such-program-xyz']], timeout: 60 },
   cmdfile: { steps: [['tool.cmd']], timeout: 60 },
+  crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
@@ -155,6 +158,7 @@ test('the job env is clean', async () => {
 test('a sha nobody pushed, or only on a pull-request ref, is refused', async () => {
   assert.equal((await ended(await add('ok', UNPUSHED))).summary, 'error: push it first');
   assert.equal((await ended(await add('ok', PR_ONLY))).summary, 'error: push it first');
+  assert.equal((await ended(await add('ok', TAG_ONLY))).summary, 'error: push it first'); // heads only: no tags
   git('checkout', '-q', '-b', 'gone', 'main');
   const GONE = commit('gone', { 'gone.txt': 'x\n' });
   git('push', '-q', 'origin', 'gone');
@@ -188,6 +192,15 @@ test('a command that cannot start is an error and the runner goes on', async () 
   const ok = await add('ok');
   assert.equal((await ended(bad)).summary, 'error: could not start no-such-program-xyz');
   assert.equal((await ended(cmd)).summary, 'error: could not start tool.cmd');
+  assert.equal((await ended(ok)).state, 'passed');
+});
+
+test('a crash exit code too big for the board still ends the job', async () => {
+  const crash = await add('crash');
+  const ok = await add('ok');
+  const j = await ended(crash);
+  assert.equal(j.state, 'failed');
+  assert.notEqual(j.exit_code, 0);
   assert.equal((await ended(ok)).state, 'passed');
 });
 

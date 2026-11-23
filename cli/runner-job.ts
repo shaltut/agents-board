@@ -50,7 +50,7 @@ function run(argv: string[], o: { cwd: string; env: NodeJS.ProcessEnv; fd: numbe
     };
     child.stdout?.on('data', (b) => { r.out += b; });
     child.on('error', () => { r.startFailed = true; end(); }); // ENOENT: missing program
-    child.on('close', (code) => { r.code = code; end(); });
+    child.on('close', (code) => { r.code = code === null ? null : code | 0; end(); }); // | 0: a Windows crash code (0xC0000409) fits the board's int
     if (o.stop?.aborted) onStop();
   });
 }
@@ -68,7 +68,7 @@ export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; sl
   try {
     const d = await steps(j, o, fd, log);
     // mask can lengthen the text and the board refuses over 1000: cut last
-    return d && { state: d.state, exit_code: d.exit_code, summary: cut(mask(d.text)) };
+    return d && { state: d.state, exit_code: d.exit_code, summary: cut(mask(d.text.replaceAll('\0', ''))) }; // Postgres text refuses NUL
   } catch (e: any) {
     try { writeSync(fd, `runner: ${e?.message ?? e}\n`); } catch {}
     return { state: 'error', exit_code: null, summary: `error: runner fault: see cb job log ${j.id}` };
@@ -102,15 +102,16 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     rmSync(dir, { recursive: true, force: true });
     rmSync(lockState, { force: true });
     mkdirSync(p.base, { recursive: true });
-    // --no-local: a local-path origin would otherwise hand over every object it holds, not only what branches reach
-    const c = await run(['git', 'clone', '--no-checkout', '--no-local', p.git, dir], { cwd: p.base, env: genv, fd, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local <origin>' });
+    // --no-local: a local-path origin would otherwise hand over every object it holds, not only what branches reach;
+    // --no-tags: branches only, never a tag-only commit
+    const c = await run(['git', 'clone', '--no-checkout', '--no-local', '--no-tags', p.git, dir], { cwd: p.base, env: genv, fd, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local --no-tags <origin>' });
     if (stop.aborted) return null;
     if (c.code !== 0) {
       rmSync(dir, { recursive: true, force: true });
       return err('error: could not fetch from origin');
     }
   }
-  const f = await git(['fetch', '--prune', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
+  const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
   if (stop.aborted) return null;
   if (f.code !== 0) return err('error: could not fetch from origin');
   const rv = await git(['rev-parse', '--verify', '--quiet', `${j.sha}^{commit}`], true);
@@ -171,18 +172,31 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   return stop.aborted ? null : out;
 }
 
-/** job_finish. A summary the board refuses (`looks like`) is sent again as a pointer to the log; a board that cannot be
- *  reached is retried every 30 s until the finish lands or the job is no longer this runner's running job (false). */
+/** job_finish. A board that cannot be reached is retried every 30 s until the finish lands or the job is no longer this
+ *  runner's running job (false). A board that answers with a refusal gets one resend: the summary becomes a pointer to
+ *  the log (and the exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged
+ *  and given up, so the slot frees. */
 export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void): Promise<boolean> {
   const withheld = `summary withheld: see cb job log ${id}`;
-  let summary = r.summary;
+  let { exit_code, summary } = r;
   for (;;) {
     try {
-      return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${r.exit_code}, ${summary}) as ok`)[0].ok === true;
+      return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true;
     } catch (e: any) {
-      if (/looks like/.test(e?.message ?? '') && summary !== withheld) { summary = withheld; continue; }
-      say(`job #${id}: could not finish on the board (${e?.message ?? e}); retrying in 30 s`);
-      await new Promise((ok) => setTimeout(ok, 30_000));
+      if (e?.name !== 'PostgresError') {
+        say(`job #${id}: could not reach the board (${e?.message ?? e}); retrying in 30 s`);
+        await new Promise((ok) => setTimeout(ok, 30_000));
+        continue;
+      }
+      if (summary === withheld) {
+        say(`job #${id}: the board refused its end (${e.message}); giving up, it stays running until the next runner start`);
+        return false;
+      }
+      if (!/looks like/.test(e.message)) {
+        say(`job #${id}: the board refused its end (${e.message}); sending it again without the summary`);
+        exit_code = null;
+      }
+      summary = withheld;
     }
   }
 }
