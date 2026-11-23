@@ -132,7 +132,7 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.areas = [null]; }), /area null must be a slug/],
     [mod((s) => { s.areas = ['claims', 'claims']; }), /area claims is listed twice/],
     [mod((s) => { s.roles.builder.count = 7; }), /macbook would run 9 sessions/],
-    [mod((s) => { s.extra = 1; }), /unknown key: only machines, roles and areas/],
+    [mod((s) => { s.extra = 1; }), /unknown key: only machines, roles, areas and supervise/],
     [mod((s) => { s.roles.builder.extra = 1; }), /role builder has an unknown key/],
     [mod((s) => { s.machines.macbook.extra = 1; }), /machine macbook has an unknown key/],
     [mod((s) => { s.roles.owner.count = 2; }), /owner takes no count/],

@@ -94,7 +94,7 @@ create table if not exists cb.events (
 );
 create index if not exists events_actor_at on cb.events (actor, at desc);
 alter table cb.events drop constraint if exists events_kind_check;
-alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask'));
+alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor'));
 
 alter table cb.questions add column if not exists multi boolean not null default false;
 
@@ -1595,7 +1595,7 @@ begin
       union select t.assignee from cb.tasks t where t.assignee is not null and t.status not in ('done', 'cancelled') and (p is null or t.project = p)
     ) a
     left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
-    where a.actor is not null and a.actor not in ('ahmed', 'relay', 'unknown', 'board') and a.actor not in (select u.name from cb.users u)
+    where a.actor is not null and a.actor not in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner') and a.actor not in (select u.name from cb.users u)
   ) x), '[]');
 end $$;
 
@@ -3321,6 +3321,7 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
 drop function if exists cb._role_model cascade;
 drop function if exists cb.digest cascade;
@@ -3348,6 +3349,8 @@ alter table cb.sessions drop constraint if exists sessions_role_check;
 alter table cb.sessions add constraint sessions_role_check check (role is null or role in ('lead','architect','owner','builder','reviewer','qa','investigator'));
 alter table cb.sessions add column if not exists area text;
 alter table cb.sessions add column if not exists model text;
+-- the supervisor marks a session it is about to close: no card may land on it for 5 minutes (#3601)
+alter table cb.sessions add column if not exists closing_at timestamptz;
 
 alter table cb.questions add column if not exists approval_for bigint references cb.tasks(id) on delete set null;
 alter table cb.questions add column if not exists page_version int;
@@ -3649,8 +3652,13 @@ end $$;
 -- May session a take this card? Outside a pipeline project: always. Unstaged: research goes to investigators, the rest to
 -- roleless sessions and the lead. Staged: the role must match the stage; a hold (assignee = a, as stage_fail sets it)
 -- only skips the area and 15-minute checks of design, never the role.
+create function cb._closing(a text) returns boolean language sql stable as $$
+  select exists (select 1 from cb.sessions s where s.actor = a and s.closing_at > now() - interval '5 minutes')
+$$;
+
 create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
   select case
+    when cb._closing(a) then false
     when not cb._pipeline(t.project) then true
     when t.stage is null then
       case when t.type = 'research' then cb._role(a) = 'investigator' or t.assignee = a
@@ -3838,7 +3846,18 @@ begin
           from cb.tasks t
          where t.project = p and t.type = 'research' and t.status = 'next' and nullif(trim(t.assignee), '') is null
            and not exists (select 1 from cb.sessions s where s.project = p and s.role = 'investigator' and s.last_seen > now() - interval '10 minutes')
-      ) n having count(*) > 0)
+      ) n having count(*) > 0
+    union all
+    -- 12: what the supervisor did since the last digest, and the sessions it could not keep up (#3601)
+    select 12, false, null::bigint,
+           format('supervisor: started %s, closed %s, restored %s (cb sessions %s)',
+                  count(*) filter (where e.data ->> 'what' = 'start'), count(*) filter (where e.data ->> 'what' = 'close'),
+                  count(*) filter (where e.data ->> 'what' = 'restore'), p)
+      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since having count(*) > 0
+    union all
+    select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' else ' blocked' end
+                            || coalesce(': ' || (regexp_match(e.summary, '\((.*)\)$'))[1], '')
+      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked'))
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
     select x.grp, x.p0, x.id,
@@ -4017,8 +4036,11 @@ begin
      or jsonb_typeof(squad->'roles') is distinct from 'object' then
     raise exception 'squad needs machines and roles objects';
   end if;
-  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas')) then
-    raise exception 'squad has an unknown key: only machines, roles and areas';
+  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise')) then
+    raise exception 'squad has an unknown key: only machines, roles, areas and supervise';
+  end if;
+  if squad ? 'supervise' and jsonb_typeof(squad->'supervise') is distinct from 'boolean' then
+    raise exception 'supervise must be true or false';
   end if;
   areas := coalesce(squad->'areas', '[]'::jsonb);
   if jsonb_typeof(areas) is distinct from 'array' then raise exception 'areas must be a list'; end if;
@@ -4079,7 +4101,8 @@ begin
   if (roles ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
   if n_areas > 0 and not (roles ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
   if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
-  ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas);
+  ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
+        || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;
   update cb.projects pr set squad = ns where pr.slug = p;
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
@@ -4275,4 +4298,94 @@ begin
   if not found then return false; end if;
   perform cb._job_tell(j, true);
   return true;
+end $$;
+
+
+-- The supervisor (#3601): a PC daemon (application name 'cb-supervisor/<version>') that starts and closes squad sessions
+-- from these facts. Its functions refuse any other name (a deterrent like cb-runner, not auth).
+drop function if exists cb._is_supervisor cascade;
+drop function if exists cb._supervisor_only cascade;
+drop function if exists cb.supervise_state cascade;
+drop function if exists cb.supervise_mark cascade;
+drop function if exists cb.supervise_log cascade;
+
+create function cb._is_supervisor() returns boolean language sql stable as $$ select current_setting('application_name') like 'cb-supervisor%' $$;
+create function cb._supervisor_only() returns void language plpgsql stable as $$
+begin
+  if not cb._is_supervisor() then raise exception 'only the supervisor can do this'; end if;
+end $$;
+
+-- Everything the supervisor plans from, for one project. Waiting = cards nobody holds (design: the owner of the card's
+-- area first, the architect once no owner covers it or it has waited 15 minutes).
+create function cb.supervise_state(project text) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); sq jsonb; owners boolean; areas text[]; res jsonb;
+begin
+  select pr.squad into sq from cb.projects pr where pr.slug = p;
+  owners := coalesce(sq -> 'roles' ? 'owner', false);
+  areas := coalesce(array(select jsonb_array_elements_text(sq -> 'areas')), '{}');
+  with free as (
+    select t.* from cb.tasks t
+     where t.project = p and t.status = 'next' and nullif(trim(t.assignee), '') is null
+  ), design as (
+    select f.*, owners and f.labels && areas as covered from free f where f.stage = 'design'
+  )
+  select jsonb_build_object(
+    'project', p, 'squad', sq, 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true', false),
+    'waiting', jsonb_build_object(
+      'builder', (select count(*) from free f where f.stage = 'build'),
+      'reviewer', (select count(*) from free f where f.stage = 'review'),
+      'qa', (select count(*) from free f where f.stage = 'qa'),
+      'investigator', (select count(*) from free f where f.type = 'research'),
+      'architect', (select count(*) from design d where not d.covered or coalesce(d.stage_since, d.updated_at) < now() - interval '15 minutes'),
+      'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels))) from unnest(areas) ar), '{}')),
+    'sessions', coalesce((select jsonb_agg(jsonb_build_object(
+        'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'machine', s.machine, 'pane', s.pane,
+        'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
+        'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled')),
+        'questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open'),
+        'jobs', (select count(*) from cb.jobs j where j.requester = a.actor and j.state in ('queued', 'running')),
+        'last_event', (select max(e.at) from cb.events e where e.actor = a.actor),
+        'closing', cb._closing(a.actor),
+        'last_restore', r.at,
+        'down_again_logged', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
+                                        and e.data ->> 'session' = a.actor and e.at > coalesce(r.at, '-infinity'))
+      ) order by a.actor)
+      from (select s2.actor from cb.sessions s2 where s2.project = p
+            union select t.assignee from cb.tasks t where t.project = p and t.assignee is not null and t.status not in ('done', 'cancelled')) a
+      left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
+      left join lateral (select max(e.at) as at from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'restore' and e.data ->> 'session' = a.actor) r on true
+      where a.actor is not null and a.actor <> ''), '[]'))
+  into res;
+  return res;
+end $$;
+
+-- Mark a session closing (or clear it). A mark loses to a card the session holds: a claim that won the race
+-- clears the mark and the close is skipped. True when the mark stands.
+create function cb.supervise_mark(actor text, closing boolean) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+begin
+  perform cb._supervisor_only();
+  update cb.sessions s set closing_at = case when closing then now() end where s.actor = actor;
+  if closing and exists (select 1 from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled')) then
+    update cb.sessions s set closing_at = null where s.actor = actor;
+    return false;
+  end if;
+  return closing;
+end $$;
+
+-- One board event per start, close, restore and the like (project null for runner events). Names sessions and counts only.
+create function cb.supervise_log(project text, what text, session text, note text default null) returns bigint language plpgsql as $$
+#variable_conflict use_variable
+declare id bigint;
+begin
+  perform cb._supervisor_only();
+  if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again') then
+    raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again';
+  end if;
+  insert into cb.events (actor, project, kind, summary, data)
+  values ('supervisor', case when project is null then null else cb.read_project(project) end, 'supervisor',
+          what || ' ' || session || coalesce(' (' || note || ')', ''), jsonb_build_object('what', what, 'session', session))
+  returning events.id into id;
+  return id;
 end $$;

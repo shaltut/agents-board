@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 
 type Machine = { herdr: string | null; repo: string; board: string };
 type Role = { count?: number; model: string; machine: string };
-export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; areas: string[] };
+export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; areas: string[]; supervise?: boolean };
 export type Launch = { name: string; role: string; area?: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
