@@ -9,6 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge } from './bridge.ts';
+import { squadUp } from './squad-up.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
 
 const OPTIONS = {
@@ -22,7 +23,7 @@ const OPTIONS = {
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
-  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' },
+  kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -701,7 +702,8 @@ ${body}`, json: pg };
         : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine, json: r };
     }
     case 'squad': {
-      if ((args[0] !== 'show' && args[0] !== 'set') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->');
+      if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->  |  cb squad up <project> [--dry-run]');
+      if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], callFn); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
       if (args[0] === 'set') {
         if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
         const text = o.file === '-' ? await fromStdin('-', 'squad') : readFileSync(o.file, 'utf8');
