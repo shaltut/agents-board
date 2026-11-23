@@ -280,6 +280,25 @@ test('merge is the lead\'s, per repo', async () => {
   await sql`update cb.sessions set role = 'qa' where actor = 'qhs-dashboard-B1@mac'`;
   assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), []);
   assert.deepEqual(await claim(sql, 'qhs-Q1@mac'), [id]);
+  // nor passes it when the lead hands it the card
+  await sql`select cb.task_update(${id}::text, '{"assignee":"qhs-dashboard-B1@mac"}', 'orch@pc')`;
+  await assert.rejects(() => pass(sql, id, 'qhs-dashboard-B1@mac', 'checked'), /you built it: another qa session checks it/);
+});
+
+test('the digest names a parts card nobody can take only when a part is free and nobody live can take it', async () => {
+  const sql = await setup();
+  const nobody = async (id: number) => ((await sql`select cb.digest('qhs') as d`)[0].d as string[])
+    .some((l) => new RegExp(`#${id} \\(Building, no live session can take it\\)`).test(l));
+  // card at build, its api part ahead at review, its dashboard part in work: nothing to report
+  const busy = await approved(sql);
+  await claim(sql, 'qhs-B1@mac'); await claim(sql, 'qhs-dashboard-B1@mac');
+  await pass(sql, busy, 'qhs-B1@mac', 'built', { pr: API });
+  // a free dashboard part with no live dashboard builder: reported
+  const free = await approved(sql);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [free]);
+  await sql`update cb.sessions set last_seen = now() - interval '11 minutes' where actor = 'qhs-dashboard-B1@mac'`;
+  assert.equal(await nobody(busy), false);
+  assert.equal(await nobody(free), true);
 });
 
 test('a QA fail names the repo', async () => {

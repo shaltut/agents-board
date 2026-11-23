@@ -3700,7 +3700,9 @@ begin
   elsif t.stage = 'merge' then
     if nullif(lk ->> 'commit', '') is null and nullif(t.links ->> 'commit', '') is null then raise exception 'give the merge commit: --commit <sha>'; end if;
   elsif t.stage = 'qa' then
-    if a = t.crew ->> 'build' then raise exception 'you built it: another qa session checks it'; end if;
+    if a = t.crew ->> 'build' or exists (select 1 from cb.task_parts p where p.task_id = tid and p.crew ->> 'build' = a) then
+      raise exception 'you built it: another qa session checks it';
+    end if;
   end if;
   nxt := case t.stage when 'design' then 'approval' when 'build' then 'review' when 'review' then 'merge' when 'merge' then 'qa' else 'done' end;
   hold := case when nxt = 'done' then a end;
@@ -4021,6 +4023,9 @@ begin
         select t.id, t.priority = 'P0', format('#%s (%s, no live session can take it)', t.id, cb._stage_words(t.stage))
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null
+           -- a parts card (#3703) whose parts at its stage are all held is in work, not waiting
+           and not (exists (select 1 from cb.task_parts tp where tp.task_id = t.id and tp.stage = t.stage)
+                    and not exists (select 1 from cb.task_parts tp where tp.task_id = t.id and tp.stage = t.stage and tp.assignee is null))
            and not exists (select 1 from cb.sessions s
                             where s.project = p and s.last_seen > now() - interval '10 minutes'
                               and cb._claimable(jsonb_populate_record(null::cb.tasks, to_jsonb(t) || jsonb_build_object('stage_since', now() - interval '1 day')), s.actor))
