@@ -4518,6 +4518,21 @@ begin
     if nm is not null then raise exception 'repo % has builders but no reviewers: add a reviewer count for %', nm, nm; end if;
   end if;
   if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
+  -- herdr names are at most 32 characters (cli/squad-up.ts herdrName maps one character to one): each role's longest
+  -- session name must fit. Home repo <p>-B2@m, another repo <p>-<repo>-B2@m, owners <p>-O-<area>@m, the lead orch@m.
+  select sn into nm from (
+      select 'orch@' || (roles->'lead'->>'machine') as sn where roles ? 'lead'
+      union all
+      select p || '-O-' || coalesce(ae ->> 'name', ae #>> '{}') || '@' || (roles->'owner'->>'machine')
+        from jsonb_array_elements(areas) ae where roles ? 'owner'
+      union all
+      select p || '-' || case when rp is null or cn.key = hm then '' else cn.key || '-' end || rl.letter || cn.value || '@' || (roles->rl.role->>'machine')
+        from (values ('architect', 'A'), ('builder', 'B'), ('reviewer', 'R'), ('qa', 'Q'), ('investigator', 'I')) rl(role, letter)
+        cross join lateral jsonb_each_text(case when jsonb_typeof(roles->rl.role->'count') = 'object' then roles->rl.role->'count'
+                                                else jsonb_build_object('main', roles->rl.role->'count') end) cn
+       where roles ? rl.role) z
+   where length(sn) > 32 limit 1;
+  if nm is not null then raise exception 'session name % is over herdr''s 32 characters: use a shorter repo, area or machine key', nm; end if;
   ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
         || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
         || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;

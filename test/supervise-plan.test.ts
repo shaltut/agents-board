@@ -182,3 +182,15 @@ test('starts per repo', () => {
   assert.deepEqual(tick(qhs({ api: 0, dashboard: 1 }, both), ready).close, ['qhs-B1@macbook']);
   assert.deepEqual(tick(qhs({ api: 1, dashboard: 0 }, both), ready).close, ['qhs-dashboard-B1@macbook']);
 });
+
+test('3 starts per tick and the Mac cap hold across repo groups', () => {
+  const both = (o: Partial<TickInput>) => tick(qhs({ api: 2, dashboard: 1 }), o).start;
+  assert.deepEqual(names(both({ startsLeft: 3 })), ['qhs-B1@macbook', 'qhs-B2@macbook', 'qhs-dashboard-B1@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 2 })), ['qhs-B1@macbook', 'qhs-B2@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 3, macLive: 6 })), ['qhs-B1@macbook', 'qhs-B2@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 3, macLive: 7 })), ['qhs-B1@macbook']);
+  // reviewers of both repos share the same budget
+  const st = qhs({ api: 2, dashboard: 1 }); st.waiting.reviewer = { api: 1, dashboard: 1 };
+  assert.equal(tick(st, { startsLeft: 3 }).start.length, 3);
+  assert.equal(tick(st, { startsLeft: 5 }).start.length, 5);
+});

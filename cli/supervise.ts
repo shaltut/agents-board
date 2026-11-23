@@ -146,9 +146,12 @@ async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'di
   const lead = leadOf(state);
   if (!lead) { out.push(`${state.project}: no live lead to tell about ${l.name}`); return false; }
   const where = `herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}`;
+  // a prompt that lists repo folders (architect, qa in a project of several repos) carries absolute paths, which board
+  // text never does: the lead is pointed at the PC log, where startOne's line already printed the full command
+  const local = l.prompt.includes('. Repos: ');
   const text = why === 'dialog'
-    ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run: ${promptCommand(l)}`
-    : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it: ${promptCommand(l)}`;
+    ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run${local ? ' the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`
+    : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it${local ? ' with the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`;
   return tell(d, lead, text, out);
 }
 

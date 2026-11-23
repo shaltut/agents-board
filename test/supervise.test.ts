@@ -500,3 +500,27 @@ test('a name blocked again after its blocked agent is gone tells the lead again'
   assert.equal(h.calls.filter((c) => c.args[1] === 'start' && c.args[2] === 'sv-b1-macbook').length, 2, out.join('\n'));
   assert.equal((await tells(sql)).length, 2);
 });
+
+test('a launch whose prompt lists repo folders: the lead is told the command is in the PC log, the board keeps no path', async () => {
+  const { sql, sup } = await setup();
+  const RQ = {
+    machines: { macbook: { herdr: 'macbook', board: '/Users/me/board' } },
+    repos: { api: { home: true, paths: { macbook: '/Users/me/Work/rq/api' } }, web: { paths: { macbook: '/Users/me/Work/rq/web' } } },
+    areas: [], supervise: true,
+    roles: { lead: { count: 1, model: 'opus', machine: 'macbook' }, qa: { count: 1, model: 'sonnet', machine: 'macbook' },
+             builder: { count: { api: 1, web: 1 }, model: 'sonnet', machine: 'macbook' }, reviewer: { count: { api: 1, web: 1 }, model: 'opus', machine: 'macbook' } },
+  };
+  await sql`select cb.ensure_project('rq'), cb.project_pipeline('rq', true, 'ahmed')`;
+  await sql`select cb.squad_set('rq', ${sql.json(RQ)}, 'ahmed')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, last_seen) values ('macbook', 'pl', 'orch@macbook', 'rq', 'lead', now())`;
+  await card(sql, { project: 'rq', stage: 'qa' });
+  await card(sql, { project: 'rq', stage: 'build' }); // no repos named: nobody's, so no builder starts
+  const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready"}}' }) });
+  const out = await tick(deps(sup, h.run));
+  const t = await tells(sql);
+  assert.equal(t.length, 1, out.join('\n'));
+  assert.match(t[0].summary, /^supervisor: rq-Q1@macbook waits on a startup dialog in herdr pane p\d+ on macbook\. Answer it there, then run the prompt command the supervisor printed in the PC log\.$/);
+  assert.ok(!/\/Users\//.test(t[0].summary));
+  // the full command, repo folders included, is in the PC log
+  assert.ok(out.some((l) => l.includes('herdr --machine macbook agent prompt rq-q1-macbook "cb iam rq-Q1@macbook rq --role qa') && l.includes('Repos: api /Users/me/Work/rq/api, web /Users/me/Work/rq/web')), out.join('\n'));
+});

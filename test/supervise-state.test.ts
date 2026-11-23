@@ -286,3 +286,17 @@ test('waiting and sessions per repo', async () => {
   const by = Object.fromEntries(s.sessions.map((x: any) => [x.actor, x.repo]));
   assert.deepEqual(by, { 'sv-B1@macbook': 'api', 'sv-B2@macbook': 'api', 'sv-dashboard-B1@macbook': 'dashboard' });
 });
+
+test('a squad with one repo: a card with no repos named counts under it', async () => {
+  const ONE = {
+    machines: { macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
+    repos: { api: { paths: { macbook: '/Users/me/Work/QHS/api' } } },
+    roles: { builder: { count: { api: 2 }, machine: 'macbook' }, reviewer: { count: { api: 1 }, machine: 'macbook' } },
+    supervise: true,
+  };
+  const { sql, sup } = await setup(ONE);
+  await card(sql, { stage: 'build' }); await card(sql, { stage: 'review' });
+  const s = await state(sup);
+  assert.deepEqual([s.waiting.builder, s.waiting.reviewer], [{ api: 1 }, { api: 1 }]);
+  assert.ok(s.sessions.every((x: any) => x.repo === 'api'));
+});
