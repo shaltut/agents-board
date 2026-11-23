@@ -30,7 +30,7 @@ function recipeLine(list: any, project: string) {
 const sha7 = (j: any) => String(j.sha).slice(0, 7);
 const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${j.summary ?? ''}`.trim();
 
-export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; params: Record<string, string[]>; wait: boolean; actor: string; pollMs?: number }): Promise<Result> {
+export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
   if (!o.project) throw new Error('no project: say which (--project <slug>) or bind this session once (cb iam <name> <project>)');
   const known = async () => {
     const [{ l }] = await sql`select cb.jobs_list(${o.project}) as l`;
@@ -38,21 +38,23 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
   };
   if (!o.recipe) throw new Error(`usage: cb run <recipe> --sha <sha> [--<param> <value>...] [--wait]. Recipes: ${await known()}`);
   if (!o.sha) throw new Error('give the commit: --sha <sha> (git rev-parse HEAD; push it first)');
+  if (o.card !== undefined && !/^\d+$/.test(o.card)) throw new Error('--card needs a card number');
   let added: any;
   try {
-    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ? Number(o.card) : null}::bigint, ${o.actor}) as r`;
+    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ?? null}::bigint, ${o.actor}) as r`;
   } catch (e: any) {
     if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}. Recipes: ${await known()}`);
     throw e;
   }
   const queued = `job #${added.id} queued (${added.ahead} ahead)`;
   if (!o.wait) return { out: queued, json: added, code: 0 };
-  console.log(queued);
+  if (!o.json) console.log(queued);
   // cb.job_finish sends no pg_notify, so poll: LISTEN alone would miss the end
   const until = Date.now() + MAX_WAIT_MS;
   for (;;) {
     const [{ j }] = await sql`select cb.job_get(${added.id}::bigint) as j`;
-    if (j && !['queued', 'running'].includes(j.state)) return { out: endLine(j), json: j, code: j.state === 'passed' ? 0 : 1 };
+    if (!j) throw new Error(`no job #${added.id}`);
+    if (!['queued', 'running'].includes(j.state)) return { out: endLine(j), json: j, code: j.state === 'passed' ? 0 : 1 };
     if (Date.now() > until) return { out: `still running: cb job ${added.id}`, json: j, code: 1 };
     await sleep(o.pollMs ?? 3000);
   }
@@ -79,16 +81,35 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
   return logCmd(sql, j, tail);
 }
 
+const LOG_CAP = 1024 * 1024;
+const NOT_TAILSCALE = "the runner's log address on the board is not a Tailscale address: not fetching";
+
+/** The board row is writable by anyone with a database connection: fetch only a plain http://<tailscale ip>:<port>/ . */
+function logBase(raw: string): URL {
+  const u = URL.parse(raw);
+  // CB_LOG_URL_ALLOW_LOOPBACK=1 is test-only: it lets the tests' stand-in runner on 127.0.0.1 through
+  const ok = (h: string) => { const m = /^100\.(\d+)\.\d+\.\d+$/.exec(h); return (m && +m[1]! >= 64 && +m[1]! <= 127) || (process.env.CB_LOG_URL_ALLOW_LOOPBACK === '1' && h === '127.0.0.1'); };
+  if (!u || u.protocol !== 'http:' || u.pathname !== '/' || u.search || u.hash || u.username || u.password || !ok(u.hostname)) throw new Error(NOT_TAILSCALE);
+  return u;
+}
+
 async function logCmd(sql: any, j: any, tail?: string): Promise<Result> {
   if (!j.runner) throw new Error(`job #${j.id} has not started: no log yet`);
   if (tail !== undefined && !/^\d+$/.test(tail)) throw new Error('--tail takes a number of lines');
   const [r] = await sql`select log_url from cb.runners where name = ${j.runner}`;
   if (!r?.log_url) throw new Error(`the runner on ${j.runner} has no log address`);
-  let res: Response;
-  try { res = await fetch(`${r.log_url}/jobs/${j.id}/log${tail ? `?tail=${tail}` : ''}`, { signal: AbortSignal.timeout(10_000) }); }
-  catch { throw new Error(`the runner on ${j.runner} is not answering`); }
+  const url = new URL(`/jobs/${j.id}/log`, logBase(r.log_url));
+  if (tail) url.searchParams.set('tail', tail);
+  const dead = () => new Error(`the runner on ${j.runner} is not answering`);
+  let res: Response; let body: Buffer;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(10_000), redirect: 'error' });
+    body = Buffer.from(await res.arrayBuffer());
+  } catch { throw dead(); }
   if (res.status === 403) throw new Error('this machine may not read job logs: they stay on the PC and the MacBook');
   if (!res.ok) throw new Error(`the runner on ${j.runner} answered ${res.status}`);
-  const text = (await res.text()).replace(/\n+$/, '');
+  const cut = !tail && body.length > LOG_CAP;
+  const note = cut ? '… (log cut: showing the last 1 MB; use --tail)\n' : '';
+  const text = note + (cut ? body.subarray(body.length - LOG_CAP) : body).toString('utf8').replace(/\n+$/, '');
   return { out: text, json: { id: j.id, log: text }, code: 0 };
 }

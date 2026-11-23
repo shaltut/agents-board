@@ -723,7 +723,7 @@ ${body}`, json: pg };
         `${r}  ${r === 'owner' ? sq.areas.length : sq.roles[r].count} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
       return { out: [...lines, `areas: ${sq.areas.length ? sq.areas.join(', ') : 'none'}`].join('\n'), json: sq };
     }
-    case 'run': return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, actor });
+    case 'run': return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');

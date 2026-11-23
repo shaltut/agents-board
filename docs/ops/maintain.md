@@ -192,7 +192,7 @@ Set up, once, on the PC:
 
 1. Copy `docs/ops/runner.example.json` to `~/.claude-board/runner.json` (or point `CB_RUNNER_CONFIG` at it). Set
    `log.host` to the PC's Tailscale address and `log.port` to a free port (the example's are placeholders), list the
-   Tailscale addresses that may read logs in `log.peers` (the MacBook), and each project's `git` URL, `base` folder
+   Tailscale addresses that may read logs in `log.peers`: the PC's own address (`cb job log` on the PC connects to it) and the MacBook's, and each project's `git` URL, `base` folder
    and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
