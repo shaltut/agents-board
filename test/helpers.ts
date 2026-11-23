@@ -17,7 +17,7 @@ export async function freshDb() {
   }
   // tests seed as Ahmed too: they connect as his dashboard does (sessions can't act as ahmed)
   const sql = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'cb-web' } });
-  const tables = await sql`select tablename from pg_tables where schemaname = 'cb'`;
+  const tables = await sql`select tablename from pg_tables where schemaname = 'cb' and tablename <> 'role_texts'`; // role_texts is filled by setup, not by tests
   if (tables.length) await sql.unsafe(`truncate ${tables.map((t) => 'cb.' + t.tablename).join(', ')} restart identity cascade`);
   return sql;
 }

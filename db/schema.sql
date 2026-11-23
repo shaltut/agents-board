@@ -3958,3 +3958,25 @@ begin
    order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(actor) = any(t.labels), false) desc,
             case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit lim;
 end $$;
+
+-- ---------------------------------------------------------------- Squad kit (#3599)
+drop function if exists cb.role_text cascade;
+
+-- Role texts: filled from prompts/roles/*.md by db/roles.ts whenever setup runs; never truncated by tests.
+create table if not exists cb.role_texts (
+  role text primary key,
+  body text not null,
+  updated_at timestamptz not null default now()
+);
+
+-- What cb role prints: the rules every role follows, a blank line, then the role's own text.
+create function cb.role_text(role text) returns text language plpgsql stable as $$
+#variable_conflict use_variable
+declare t text;
+begin
+  select r.body into t from cb.role_texts r where r.role = role and r.role <> '_common';
+  if t is null then
+    raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', role;
+  end if;
+  return coalesce((select c.body || E'\n\n' from cb.role_texts c where c.role = '_common'), '') || t;
+end $$;

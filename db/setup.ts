@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { ensurePg, ownsPg } from './pg.ts';
 import { databaseUrl } from '../server/db.ts';
+import { loadRoleTexts } from './roles.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const isTest = process.argv.includes('--test');
@@ -22,6 +23,7 @@ await admin.end();
 
 const sql = postgres(url.toString(), { onnotice: () => {} });
 await sql.file(join(ROOT, 'db', 'schema.sql'));
+await loadRoleTexts(sql, join(ROOT, 'prompts', 'roles'));
 await sql.end();
 
 // A worktree's .git is a file: its bin/ is a dev copy and must not shadow the live cb on PATH (#373).

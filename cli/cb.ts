@@ -559,7 +559,7 @@ async function run(): Promise<unknown> {
       const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
       const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
       const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
-      return { out: `this pane (${pane}@${machine()}) is ${p}${b?.role ? ` as ${b.role}${b.area ? ` (area ${b.area})` : ''}` : ''}${b?.project ? `, working on ${b.project}` : ' (no project: add one, cb iam <name> <project>)'}${pack ? `\n\n${pack}` : ''}${goals ? `\n\n${goals}` : ''}` };
+      return { out: `this pane (${pane}@${machine()}) is ${p}${b?.role ? ` as ${b.role}${b.area ? ` (area ${b.area})` : ''}` : ''}${b?.project ? `, working on ${b.project}` : ' (no project: add one, cb iam <name> <project>)'}${pack ? `\n\n${pack}` : ''}${goals ? `\n\n${goals}` : ''}${b?.role ? `\n\nYour role: cb role ${b.role}` : ''}` };
     }
     case 'mem':
       return await mem();
@@ -696,8 +696,14 @@ ${body}`, json: pg };
     }
     case 'resume': {
       const r: any = await callFn('resume', { actor });
-      return { out: r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
-        : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`, json: r };
+      const roleLine = r.role ? `\n\nYour role: cb role ${r.role}` : '';
+      return { out: (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
+        : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine, json: r };
+    }
+    case 'role': {
+      need(1, 'role <role> [--json]   e.g. cb role builder');
+      const text = await callFn('role_text', { role: args[0] }) as string;
+      return { out: text, json: { role: args[0], text } };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');
