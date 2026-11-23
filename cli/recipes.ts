@@ -41,7 +41,7 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
     for (const el of argv as string[]) {
       const names = slotsOf(el);
       if (names.length > 1) fail(p, `"${el}" holds more than one slot`);
-      for (const n of names) if (!params[n]) fail(p, `unknown parameter {${n}}`);
+      for (const n of names) if (!Object.hasOwn(params, n)) fail(p, `unknown parameter {${n}}`);
     }
     return argv as string[];
   });
@@ -64,7 +64,7 @@ function loadRecipe(raw: unknown, path: string): Recipe {
   }
   const cwd = raw.cwd === undefined ? '.' : str(raw.cwd, `${path}.cwd`);
   for (const n of slotsOf(cwd)) {
-    if (!params[n]) fail(`${path}.cwd`, `unknown parameter {${n}}`);
+    if (!Object.hasOwn(params, n)) fail(`${path}.cwd`, `unknown parameter {${n}}`);
     if (params[n]!.max !== 1) fail(`${path}.cwd`, `{${n}} is a list parameter; cwd may use only max 1`);
   }
   const env = raw.env ?? {};
@@ -111,7 +111,7 @@ export function loadConfig(text: string): RunnerConfig {
 export function checkParams(recipe: Recipe, params: Record<string, string[]>): string | null {
   const bad = (n: string, why: string) => `error: bad parameter ${n}: ${why}`;
   for (const [n, spec] of Object.entries(recipe.params)) {
-    const vals = params[n] ?? [];
+    const vals = Object.hasOwn(params, n) ? params[n]! : [];
     if (!Array.isArray(vals) || vals.some((v) => typeof v !== 'string')) return bad(n, 'must be a list of strings');
     if (vals.length < spec.min) return bad(n, `needs at least ${spec.min}`);
     if (vals.length > spec.max) return bad(n, `at most ${spec.max}`);
@@ -121,7 +121,7 @@ export function checkParams(recipe: Recipe, params: Record<string, string[]>): s
       if (!ok) return bad(n, v);
     }
   }
-  for (const n of Object.keys(params)) if (!recipe.params[n]) return bad(n, 'unknown');
+  for (const n of Object.keys(params)) if (!Object.hasOwn(recipe.params, n)) return bad(n, 'unknown');
   return null;
 }
 
@@ -129,13 +129,13 @@ export function expand(argv: string[], params: Record<string, string[]>): string
   return argv.flatMap((el) => {
     const name = slotsOf(el)[0];
     if (name === undefined) return [el];
-    return (params[name] ?? []).map((v) => el.replace(`{${name}}`, () => v));
+    return (Object.hasOwn(params, name) ? params[name]! : []).map((v) => el.replace(`{${name}}`, () => v));
   });
 }
 
 export function jobCwd(slotDir: string, recipe: Recipe, params: Record<string, string[]>): string {
   const cwd = recipe.cwd.replace(SLOT, (_, n: string) => {
-    const v = params[n]?.[0];
+    const v = (Object.hasOwn(params, n) ? params[n]![0] : undefined);
     if (v === undefined) throw new Error(`cwd needs parameter ${n}`);
     return v;
   });
