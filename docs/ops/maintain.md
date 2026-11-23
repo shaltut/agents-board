@@ -29,10 +29,19 @@ Never `dc down -v`: `-v` deletes the database volume (and gh's login).
 A release is: the change merged to `main` (reviewed, the suite green on the PC or Mac), then:
 
 ```bash
-cd /opt/claude-board && git pull --ff-only
+cd /opt/claude-board && git fetch && git merge --ff-only origin/main
+git log --oneline -1                    # must show the sha you pushed
 cd deploy && dc up -d --build board     # builds, applies the schema, swaps the container (seconds of downtime)
 dc logs --tail 20 board                 # "claude_board ready", then the listen line
+dc ps                                   # board shows a fresh "Up <seconds>"
 ```
+
+vps2's checkout is on the `vps` branch, which tracks `origin/vps`, not `main`. A plain `git pull --ff-only` says
+"Already up to date", and `dc up -d --build board` then rebuilds the OLD code from cached layers. Merge `origin/main`
+as above, and check `git log --oneline -1` before the build.
+
+If vps2's public ssh port times out, use the Tailscale route:
+`ssh -o HostName=<tailscale ip> -o HostKeyAlias=<public ip> vps2`.
 
 Then the workers, right away, because their `cb` must match the schema:
 
@@ -40,7 +49,7 @@ Then the workers, right away, because their `cb` must match the schema:
 - **MacBook:** `~/Work/claude-board` is a copy, not a clone. From the PC (Git Bash, in the updated checkout):
 
   ```bash
-  tar czf /tmp/cb.tgz bin cli db prompts server hooks && sum=$(md5sum /tmp/cb.tgz | cut -d' ' -f1)
+  tar czf /tmp/cb.tgz bin cli db prompts server hooks kit && sum=$(md5sum /tmp/cb.tgz | cut -d' ' -f1)
   scp /tmp/cb.tgz macbook:Work/claude-board/cb.tgz
   ssh macbook "cd ~/Work/claude-board && [ \"\$(md5 -q cb.tgz)\" = $sum ] && tar xzf cb.tgz && rm cb.tgz && zsh -lc 'node cli/cb.ts sessions' | head -3"
   ```
@@ -57,6 +66,19 @@ is the window to keep short.
 
 **Rolling back** code: `git checkout <previous sha> && dc up -d --build board`. The schema is applied forward only:
 new columns and functions stay, which older code ignores. If an upgrade damaged data, restore the last backup (below).
+
+## Installing the dangerous-commands hook on a machine
+
+Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on the machine reads.
+
+1. Copy the file: `kit/hooks/block-dangerous.mjs` to `~/.claude/hooks/block-dangerous.mjs`.
+2. In `~/.claude/settings.json`, change the PreToolUse Bash hook command from
+   `bash ~/.claude/hooks/block-dangerous-commands.sh` to `node ~/.claude/hooks/block-dangerous.mjs`.
+3. Keep the old `.sh` file in place; it is the way back.
+4. Check it:
+   `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`.
+
+On the Mac, the same, copying from `kit/hooks/` in its board checkout (`~/Work/claude-board`, after the tar step above).
 
 ## Backups
 
