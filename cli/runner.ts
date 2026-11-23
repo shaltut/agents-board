@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig, published, type RunnerConfig } from './recipes.ts';
 import { logTail } from './summary.ts';
-import { finish, runJob } from './runner-job.ts';
+import { finish, reap, runJob } from './runner-job.ts';
 
 const say = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
 const CONFIG = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
@@ -24,18 +24,23 @@ try { cfg = loadConfig(readFileSync(CONFIG, 'utf8')); } catch (e: any) {
 }
 const NAME = cfg.name ?? machine();
 mkdirSync(LOGS, { recursive: true });
-mkdirSync(join(HOME, 'state'), { recursive: true });
+mkdirSync(join(HOME, 'state'), { recursive: true }); // slot install state and pid records
 
 // Log server: GET /jobs/<id>/log[?tail=n], for the peers in runner.json only. Nothing else.
 const server = http.createServer((req, res) => {
   const send = (code: number, body: string) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' }); res.end(body); };
+  try { serve(req, res, send); } catch { // a malformed target, or a log pruned mid-read: never the daemon's end
+    if (res.headersSent) res.destroy(); else send(404, 'not found\n');
+  }
+});
+function serve(req: http.IncomingMessage, res: http.ServerResponse, send: (code: number, body: string) => void) {
   const peer = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
   if (!cfg.log.peers.includes(peer)) return send(403, 'this machine may not read job logs\n');
-  const url = new URL(req.url ?? '/', 'http://runner');
-  const id = /^\/jobs\/(\d+)\/log$/.exec(url.pathname)?.[1];
-  const file = id === undefined ? '' : join(LOGS, `${id}.log`);
+  const url = URL.parse(req.url ?? '/', 'http://runner');
+  const id = url && /^\/jobs\/(\d+)\/log$/.exec(url.pathname)?.[1];
+  const file = url && id ? join(LOGS, `${id}.log`) : '';
   if (req.method !== 'GET' || !file || !existsSync(file)) return send(404, 'not found\n');
-  const tail = url.searchParams.get('tail');
+  const tail = url!.searchParams.get('tail');
   if (tail !== null) {
     const n = Number(tail);
     if (!Number.isInteger(n) || n < 0) return send(400, 'tail must be a whole number\n');
@@ -45,7 +50,7 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
   createReadStream(file).on('error', () => res.destroy()).pipe(res);
-});
+}
 await new Promise<void>((ok) => {
   server.once('error', (e: any) => {
     console.error(e?.code === 'EADDRINUSE' ? 'a runner is already running on this machine' : `log server: ${e?.message ?? e}`);
@@ -53,6 +58,13 @@ await new Promise<void>((ok) => {
   });
   server.listen(cfg.log.port, cfg.log.host, ok);
 });
+
+// Before any job: kill what a runner that died left running in the slots (git, installs, steps), so nothing races the
+// next job in the same slot. Stopped by a signal, this runner does the same for its own jobs on the way out.
+const STATE = join(HOME, 'state');
+const reaped = reap(STATE);
+if (reaped) say(`killed ${reaped} process(es) the last run left behind`);
+for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => { reap(STATE); process.exit(0); });
 
 const VERSION = createHash('sha1')
   .update([import.meta.filename, join(import.meta.dirname, 'runner-job.ts')].map((f) => readFileSync(f, 'utf8')).join('\0'))
@@ -62,9 +74,11 @@ const [hello] = await sql`select cb.runner_hello(${NAME}, ${`http://${cfg.log.ho
 if (hello!.n) say(`${hello!.n} job(s) left running by the last run ended as runner restarted`);
 
 const prune = () => {
-  for (const f of readdirSync(LOGS)) {
-    try { const p = join(LOGS, f); if (statSync(p).mtimeMs < Date.now() - KEEP_MS) rmSync(p); } catch {}
-  }
+  try {
+    for (const f of readdirSync(LOGS)) {
+      try { const p = join(LOGS, f); if (statSync(p).mtimeMs < Date.now() - KEEP_MS) rmSync(p); } catch {}
+    }
+  } catch (e: any) { say(`log cleanup failed: ${e?.message ?? e}`); }
 };
 prune();
 setInterval(prune, 86_400_000);

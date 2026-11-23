@@ -2,8 +2,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
@@ -27,6 +27,7 @@ after(async () => {
   for (const k of kids) killTree(k.pid);
   for (const p of pids) try { process.kill(p, 'SIGKILL'); } catch {}
   await Promise.all(clients.map((c) => c.end()));
+  rmSync(TMP, { recursive: true, force: true, maxRetries: 5 }); // the repos, slot clones, homes
 });
 
 // --- setup, once for the file (freshDb truncates the recipes a runner published: never after a runner starts)
@@ -139,6 +140,7 @@ test('a passing job ends passed with its log and a message', async () => {
   assert.equal(j.state, 'passed', j.summary);
   assert.equal(j.exit_code, 0);
   assert.match(logOf(id), /^ok$/m);
+  assert.equal(j.summary, 'ok'); // the log's `$ argv` lines never reach the board
   const msg = await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac' and summary like ${`job #${id} %`}`;
   assert.equal(msg.length, 1);
 });
@@ -278,6 +280,12 @@ test('the log server answers peers only', async () => {
   assert.equal((await r.text()).trim(), 'ok');
   assert.equal((await fetch(`http://127.0.0.1:${PORT}/jobs/${id}/x`)).status, 404);
   assert.equal((await fetch(`http://127.0.0.1:${PORT}/jobs/999999/log`)).status, 404);
+  // a malformed absolute-form target must not take the runner down
+  await new Promise<void>((ok) => {
+    const c = connect(PORT, '127.0.0.1', () => c.end('GET http://[ HTTP/1.1\r\nHost: x\r\n\r\n'));
+    c.on('data', () => {}); c.on('close', () => ok()); c.on('error', () => ok());
+  });
+  assert.equal((await fetch(`http://127.0.0.1:${PORT}/jobs/${id}/log?tail=1`)).status, 200);
 
   // another runner (own name, port, home; a recipe nobody queues) whose peers list is empty
   const port2 = await freePort();
@@ -298,18 +306,30 @@ test('a second runner refuses to start', async () => {
   assert.match(second.out, /a runner is already running on this machine/);
 });
 
-test('a restarted runner ends its running job and runs the queue', async () => {
+test('a restarted runner ends its running job, kills what it left running and runs the queue', async () => {
   const id = await add('slow');
-  await pidOf(id);
-  killTree(runner.child.pid);
+  const pid = await pidOf(id);
+  // the runner alone dies (no tree kill), as in a crash: its slow.mjs lives on in the slot
+  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
+  else runner.child.kill('SIGKILL');
   await runner.exited;
+  // POSIX: the detached slow.mjs outlives the runner. Windows kills a dead parent's job object with it, so plant a
+  // process that escaped (spawned detached) in the record instead, and a decoy whose pid runs another program.
+  if (!WIN) assert.ok(alive(pid), 'the orphan is still running before the restart');
+  const stray = () => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+  const planted = stray(), decoy = stray();
+  pids.push(planted.pid!, decoy.pid!);
+  writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${planted.pid} node.exe\n${decoy.pid} ${WIN ? 'other.exe' : 'node'}\n`);
   const ok = await add('ok');
   runner = startRunner();
   await up(runner);
+  await until('the planted process to go', () => !alive(planted.pid!), 10_000);
+  if (WIN) assert.ok(alive(decoy.pid!), 'a pid that runs another program is left alone');
   const j = await ended(id);
   assert.equal(j.state, 'error');
   assert.equal(j.summary, 'error: runner restarted');
   const msg = await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac' and summary like ${`job #${id} %`}`;
   assert.match(msg[0]?.summary ?? '', /runner restarted/);
-  assert.equal((await ended(ok)).state, 'passed');
+  await until('the orphan to go', () => !alive(pid), 10_000);
+  assert.equal((await ended(ok)).state, 'passed'); // in the slot the orphan held
 });
