@@ -399,7 +399,7 @@ test('a committed git.exe at the repo root is not the git the runner runs', { sk
   assert.doesNotMatch(logOf(a) + logOf(b), /Invalid argument/);
 });
 
-test('hooks and config a job plants in the slot clone never run', async () => {
+test('hooks, config and a config lock a job plants in the slot clone never run or stick', async () => {
   const hookMark = join(TMP, 'hook-ran').replaceAll('\\', '/'), filterMark = join(TMP, 'filter-ran').replaceAll('\\', '/');
   // a post-checkout hook, and a smudge filter set in .git/config for x.txt (.git/info/attributes)
   const plant = [
@@ -408,6 +408,7 @@ test('hooks and config a job plants in the slot clone never run', async () => {
     `writeFileSync('.git/hooks/post-checkout', '#!/bin/sh\\necho hit > "${hookMark}"\\n'); chmodSync('.git/hooks/post-checkout', 0o755);`,
     `appendFileSync('.git/config', '\\n[filter "x"]\\n\\tsmudge = echo hit > ${filterMark} && cat\\n');`,
     "writeFileSync('.git/info/attributes', 'x.txt filter=x\\n');",
+    "writeFileSync('.git/config.lock', '');", // would fail the next job's git config call
     "console.log('planted');",
   ].join('\n');
   git('checkout', '-q', '-b', 'plant', 'main');

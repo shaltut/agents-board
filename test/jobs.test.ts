@@ -90,6 +90,16 @@ test('finish sends the requester one message and ends the job once', async () =>
   assert.equal((await runner`select cb.job_finish(${id}, 'pc', 'passed', 0, 'x') as ok`)[0].ok, false);
 });
 
+test('a summary at the 1000-char cap still reaches the requester with its marker', async () => {
+  const { sql, add, runner } = await setup();
+  const { id } = await add('B1@mac');
+  await runner`select cb.job_claim('pc', false)`;
+  assert.equal((await runner`select cb.job_finish(${id}, 'pc', 'failed', 1, ${'x'.repeat(1000)}) as ok`)[0].ok, true);
+  const ev = await sql`select summary from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`;
+  assert.equal(ev.length, 1);
+  assert.ok(ev[0].summary.includes(`[job output · untrusted] ${'x'.repeat(1000)}`));
+});
+
 test('finish refuses a summary the board would flag or one over 1000 chars', async () => {
   const { sql, add, runner } = await setup();
   const { id } = await add('B1@mac');
@@ -121,6 +131,10 @@ test('cancel: the lead of another project cannot', async () => {
   const { id } = await add('B1@mac');
   await assert.rejects(session`select cb.job_cancel(${id}, 'orch2@pc')`, /only the requester/);
   assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'queued');
+  // an orch session bound to the job's project with no role set is its lead, as cb._role has it
+  await sql`insert into cb.sessions (machine, pane, actor, project) values ('pc','p6','orch@pc6','demo')`;
+  await session`select cb.job_cancel(${id}, 'orch@pc6')`;
+  assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'cancelled');
 });
 
 test('a cancel by someone else tells the requester; their own cancel does not', async () => {

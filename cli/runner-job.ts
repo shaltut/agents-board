@@ -246,6 +246,7 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     rmSync(join(gitDir, 'config'), { recursive: true, force: true }); // a planted link goes, not what it points at
     copyFileSync(saved, join(gitDir, 'config'));
     rmSync(join(gitDir, 'commondir'), { force: true }); // would point git at another config
+    rmSync(join(gitDir, 'config.lock'), { recursive: true, force: true }); // a planted lock would fail the URL set below
     if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
   io.reset();
