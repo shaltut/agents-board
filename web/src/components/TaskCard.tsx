@@ -1,6 +1,6 @@
 import { forwardRef } from 'react'
 import { GitCommitHorizontal, GitPullRequest, GitBranch } from 'lucide-react'
-import { useQuestions, type ListTask } from '@/lib/api'
+import { useQuestions, usePipeline, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { CardMenu } from './CardMenu'
@@ -13,6 +13,7 @@ type Props = { t: ListTask; showProject?: boolean; dragging?: boolean; overlay?:
 export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t, showProject, dragging, overlay, className, ...rest }, ref) {
   const l = t.links ?? {}
   const { data: open = [] } = useQuestions(undefined, 'open')
+  const pipeline = usePipeline(t.project)
   const holding = t.status === 'blocked' && t.blocked_on != null && open.some((q) => q.id === t.blocked_on && !q.assigned_to)
   const waits = t.status === 'done' || t.status === 'cancelled' ? [] : t.waits_on ?? []
   const edge = holding ? 'before:bg-lamp' : t.priority === 'P0' && t.status !== 'done' ? 'before:bg-st-blocked' : 'before:bg-transparent'
@@ -28,7 +29,7 @@ export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t,
         <PriorityPicker t={t} />
         {t.type === 'bug' && <TypeChip type={t.type} />}
         {showProject && <ProjectChip slug={t.project} />}
-        <StageChip stage={t.stage} />
+        <StageChip stage={pipeline ? t.stage : null} />
         <span className="ml-auto shrink-0 text-[11px] text-muted-foreground tabular-nums">{ago(t.updated_at)}</span>
       </div>
       <p className={cn('mt-1 text-sm leading-snug font-medium text-pretty', t.status === 'done' && 'text-muted-foreground')}>{t.title}</p>

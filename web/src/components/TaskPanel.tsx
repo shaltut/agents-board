@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { X } from 'lucide-react'
-import { onProject, rpc, useTask, useTasks, useUsers, type Status, type Task, type TaskRef } from '@/lib/api'
+import { onProject, rpc, usePipeline, useTask, useTasks, useUsers, type Status, type Task, type TaskRef } from '@/lib/api'
 import { ago, STATUS } from '@/lib/format'
 import { go } from '@/lib/route'
 import { cn } from '@/lib/utils'
@@ -49,13 +49,14 @@ function PanelBody({ data }: { data: NonNullable<ReturnType<typeof useTask>['dat
   const update = (fields: Record<string, unknown>, ok?: string) => call('task_update', { fields }, ok)
 
   const links = Object.entries(t.links ?? {})
+  const pipeline = usePipeline(t.project)
   const open = data.questions.filter((q) => q.status === 'open' && !q.assigned_to)
 
   return (
     <div className="flex flex-col">
       <SheetHeader className="gap-3 border-b p-5 pr-12">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <TaskId id={t.id} className="text-[14px] text-foreground" /><ProjectChip slug={t.project} /><StageChip stage={t.stage} />
+          <TaskId id={t.id} className="text-[14px] text-foreground" /><ProjectChip slug={t.project} /><StageChip stage={pipeline ? t.stage : null} />
           {t.epic_id != null && <EpicChip id={t.epic_id} />}
           <span>created by <ActorChip actor={t.created_by} /> {ago(t.created_at)}</span>
         </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { rpc, usePage, type Task } from '@/lib/api'
+import { rpc, usePage, usePipeline, type Task } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -10,16 +10,18 @@ import { Md } from './Md'
 /** A pipeline card's design page. Edit is Ahmed's: he corrects findings himself and the session re-reads the page.
  *  While the card waits for his approval the page is frozen: the refusal's words are shown as they are.
  *  ponytail: no diff view between the approved version and now; add one if Ahmed asks. */
-export function DesignPage({ t }: { t: Pick<Task, 'id' | 'stage' | 'type'> }) {
+export function DesignPage({ t }: { t: Pick<Task, 'id' | 'project' | 'stage' | 'type'> }) {
   const qc = useQueryClient()
   const { data: page, isLoading, isError } = usePage(t.id, true)
+  const pipeline = usePipeline(t.project)
   const [edit, setEdit] = useState(false)
   const [base, setBase] = useState<number | null>(null) // the version Edit started from, not the live one
   const [text, setText] = useState('')
   const [showApproved, setShowApproved] = useState(false)
   const [err, setErr] = useState('')
   useEffect(() => { if (!edit) setText(page?.body ?? '') }, [page?.body, edit])
-  if (isLoading || (!page && !t.stage && !isError)) return null
+  // the design page belongs to the pipeline; an investigation's page shows whenever one exists
+  if (isLoading || (t.type !== 'research' && !pipeline) || (!page && !t.stage && !isError)) return null
   const title = t.type === 'research' ? 'Investigation page' : 'Design page'
   const locked = t.stage === 'approval'
 

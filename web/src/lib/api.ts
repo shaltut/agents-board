@@ -103,6 +103,8 @@ const qs = (o: Record<string, string | undefined>) => {
 
 export const useUsers = () => useQuery({ queryKey: ['users'], queryFn: () => get<User[]>('/api/users') })
 export const useProjects = () => useQuery({ queryKey: ['projects'], queryFn: () => get<Project[]>('/api/projects') })
+/** Is the squad pipeline on for this project? A card's stage chip and design page show only then (a switched-off project looks as before). */
+export const usePipeline = (slug: string) => !!useProjects().data?.find((p) => p.slug === slug)?.pipeline
 /** A card from the list: no description (the server leaves it off; useTask has it). */
 export type ListTask = Omit<Task, 'body'>
 export const useTasks = (project?: string, status?: Status) =>
