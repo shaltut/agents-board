@@ -282,10 +282,30 @@ test('a staged card with no repo takes its repos once (digest group 13)', async 
   assert.deepEqual(await claim(sql, 'qhs-dashboard-R1@mac'), [rev]);
   // several at review, or on a held card: refused
   const rev2 = await add('review');
+  // at review the lead names one repo
+  assert.ok((await digest(sql)).includes(`#${rev2} has no repo: cb edit ${rev2} --repo <repo>`));
   await assert.rejects(() => edit(rev2, ['api', 'dashboard']), new RegExp(`#${rev2} is in review: give one repo, or send it back with cb fail ${rev2} --to design`));
+  // several repos and a holder in the same edit: refused, as on a held card
+  const both = await add();
+  await assert.rejects(() => sql`select cb.task_update(${both}::text, ${sql.json({ repos: ['api', 'dashboard'], assignee: 'qhs-B2@mac' })}, 'orch@pc')`,
+    new RegExp(`#${both} is held by qhs-B2@mac: give one repo, or free it first`));
+  // repos checked against the project the same edit moves it to
+  await sql`select cb.ensure_project('demo'), cb.project_pipeline('demo', true, 'ahmed')`;
+  const mv = await add();
+  await sql`select cb.task_update(${mv}::text, '{"project":"demo","repos":["main"]}', 'orch@pc')`;
+  assert.deepEqual({ ...(await sql`select project, repos from cb.tasks where id = ${mv}`)[0] }, { project: 'demo', repos: ['main'] });
   const held = await add();
   await sql`update cb.tasks set assignee = 'qhs-B2@mac', status = 'in_progress' where id = ${held}`;
   await assert.rejects(() => edit(held, ['api', 'dashboard']), new RegExp(`#${held} is held by qhs-B2@mac: give one repo, or free it first`));
   await edit(held, ['api']);
   assert.deepEqual((await sql`select repos from cb.tasks where id = ${held}`)[0].repos, ['api']);
+});
+
+test('a parts card is not handed to one session', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  const edit = (f: any) => sql`select cb.task_update(${id}::text, ${sql.json(f)}, 'orch@pc')`;
+  await assert.rejects(() => edit({ assignee: 'qhs-B1@mac' }), new RegExp(`#${id} is built one part per repo: parts are claimed by each repo's sessions`));
+  await edit({ assignee: null });
+  assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, null);
 });

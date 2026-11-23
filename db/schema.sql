@@ -699,7 +699,9 @@ begin
   if bad is not null then
     raise exception 'unknown field(s) %; allowed: title, body, priority, assignee, labels, links, project, rank, type, epic, epic_rank, repos', bad;
   end if;
-  select * into cur from cb.tasks t where t.id = tid;
+  -- the row lock first: a concurrent cb fail --to design or a second --repo edit cannot slip between these checks and
+  -- the update (#3703: repos and parts change together)
+  select * into cur from cb.tasks t where t.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
   rs := cur.repos;
   if fields ? 'repos' then
@@ -711,17 +713,25 @@ begin
          or exists (select 1 from cb.task_parts p where p.task_id = tid) then
         raise exception '#% is at %: repos lock once the design is passed; send it back with cb fail % --to design', tid, cb._stage_words(cur.stage), tid;
       end if;
-      opn := cardinality(coalesce(cb._check_repos(cur.project, cb._repo_list(fields -> 'repos')), '{}')) > 1;
+      opn := cardinality(coalesce(cb._check_repos(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end,
+                                                  cb._repo_list(fields -> 'repos')), '{}')) > 1;
       if opn and cur.stage = 'review' then
         raise exception '#% is in review: give one repo, or send it back with cb fail % --to design', tid, tid;
       end if;
-      if opn and nullif(trim(cur.assignee), '') is not null then
-        raise exception '#% is held by %: give one repo, or free it first', tid, cur.assignee;
+      -- the holder after this edit: one named in the same call counts
+      if opn and nullif(trim(case when fields ? 'assignee' then fields ->> 'assignee' else cur.assignee end), '') is not null then
+        raise exception '#% is held by %: give one repo, or free it first', tid,
+          case when fields ? 'assignee' then fields ->> 'assignee' else cur.assignee end;
       end if;
     end if;
     rs := cb._check_repos(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end, cb._repo_list(fields -> 'repos'));
   elsif fields ? 'project' and cb.resolve(fields ->> 'project') <> cur.project then
     rs := cb._check_repos(cb.resolve(fields ->> 'project'), cur.repos);  -- its repos must exist in the project it moves to
+  end if;
+  -- a parts card (#3703) is held by its parts at build and review, never as a card (clearing a holder is fine)
+  if nullif(trim(fields ->> 'assignee'), '') is not null and cur.stage in ('build', 'review') and cb._pipeline(cur.project)
+     and exists (select 1 from cb.task_parts p where p.task_id = tid) then
+    raise exception '#% is built one part per repo: parts are claimed by each repo''s sessions', tid;
   end if;
   ep := case when fields ? 'epic' then cb.norm_epic(fields ->> 'epic') else cur.epic_id end;
   -- an epic and its blockers stay in one project: moving the task alone would split them
@@ -4121,7 +4131,9 @@ begin
       from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed')
     union all
     -- 13: a staged card no builder or reviewer takes because it names no repo, in a project of several (#3703)
-    select 13, t.priority = 'P0', t.id, format('#%s has no repo: cb edit %s --repo <repo,repo>', t.id, t.id)
+    -- (several repos open parts only at build: at review the lead names one)
+    select 13, t.priority = 'P0', t.id,
+           format('#%s has no repo: cb edit %s --repo %s', t.id, t.id, case when t.stage = 'review' then '<repo>' else '<repo,repo>' end)
       from cb.tasks t
      where t.project = p and t.stage in ('build', 'review') and t.status not in ('done', 'cancelled')
        and cardinality(coalesce(t.repos, '{}')) = 0 and cb._multi_repo(p)
