@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push)",
+      "Bash(git push origin)",
+      "Bash(git push * main)",
+      "Bash(git push * main *)",
+      "Bash(git push *:main)",
+      "Bash(git push *:main *)",
+      "Bash(git push * master)",
+      "Bash(git push * master *)",
+      "Bash(git push *:master)",
+      "Bash(git push *:master *)",
+      "Bash(git push * +*)",
+      "Bash(git push -f*)",
+      "Bash(git push * -f*)",
+      "Bash(git push *--force*)",
+      "Bash(gh pr merge*)",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "Bash(git commit*)",
+      "Bash(git push*)"
+    ],
+    "allow": [
+      "Bash(cb *)"
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push)",
+      "Bash(git push origin)",
+      "Bash(git push * main)",
+      "Bash(git push * main *)",
+      "Bash(git push *:main)",
+      "Bash(git push *:main *)",
+      "Bash(git push * master)",
+      "Bash(git push * master *)",
+      "Bash(git push *:master)",
+      "Bash(git push *:master *)",
+      "Bash(git push * +*)",
+      "Bash(git push -f*)",
+      "Bash(git push * -f*)",
+      "Bash(git push *--force*)",
+      "Bash(gh pr merge*)"
+    ],
+    "allow": [
+      "Bash(cb *)"
+    ]
+  }
+}
