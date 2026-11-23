@@ -123,6 +123,7 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.ok(has(h.calls, 'pane', 'close', 'w1:p9'), out.join('\n'));
   assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   assert.equal((await events(sql, 'close')).length, 1);
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // the same name may start again
 });
 
 test('a claim between mark and re-check stops the close', async () => {

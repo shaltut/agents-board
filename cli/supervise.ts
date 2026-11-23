@@ -129,6 +129,7 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
     if (classifyAgentGet(run(m, ['agent', 'get', hn], 30_000)) !== 'absent') continue;
     const closed = run(m, ['pane', 'close', pane], 30_000).status === 0;
     await log(state.project, 'close', name, s.role);
+    await unmark(); // the agent is gone; a mark left on its old row would refuse work to the same name started again
     return closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`;
   }
   await unmark();
