@@ -253,7 +253,7 @@ It never:
 
 - starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
-  live session in the lead role; none live: the digest's blocked line) once, with the pane and the command to send
+  live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
 - frees a card held by a down session, or runs anything heavy itself.
 

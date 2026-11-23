@@ -113,7 +113,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
       const r = startOne(l, run, tabs);
       out.push(r.line);
       if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
-      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once.
+      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
       // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
       const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
       if (kind === 'start failed') {
@@ -138,9 +138,10 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
   }
 }
 
-// A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per name per run, with
-// the pane and the command to finish. False when no lead session is live or the tell failed: it is not retried (the
-// name now runs in herdr, so it is not launched again); the digest's blocked line is the fallback.
+// A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per block (again only
+// after that agent is gone and the name blocks anew), with the pane and the command to finish. False when no lead
+// session is live or the tell failed: it is not retried (the name now runs in herdr, so it is not launched again);
+// the digest's blocked line is the fallback.
 async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'dialog' | 'prompt', out: string[]) {
   const lead = leadOf(state);
   if (!lead) { out.push(`${state.project}: no live lead to tell about ${l.name}`); return false; }
