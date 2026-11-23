@@ -31,9 +31,16 @@ test('TAP output works too', () => {
   assert.equal(summarize('ok 1 - a\nnot ok 2 - b\n# pass 1\n# fail 1').text, '1 passed, 1 failed, 0 skipped. Failing: b');
 });
 
-test('other output gives the last 10 lines', () => {
+test('other output gives the last 3 lines', () => {
   const all = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
-  assert.equal(summarize(all.join('\n')).text, all.slice(20).join('\n'));
+  assert.equal(summarize(all.join('\n')).text, all.slice(27).join('\n'));
+});
+
+test('lint output drops code-frame lines, so no source reaches the board', () => {
+  const out = ['  x no-unused (a.ts:1)', '  301 │   expect(x)', '     ·  ───', '     ╰────', 'Found 3 warnings and 0 errors.'].join('\n');
+  const t = summarize(out).text;
+  assert.doesNotMatch(t, /[│·╰─]/);
+  assert.ok(t.endsWith('Found 3 warnings and 0 errors.'));
 });
 
 test('at most 5 failing names', () => {

@@ -84,6 +84,7 @@ const recipes = {
   wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
+  nulplant: { steps: [node('folder.mjs')], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
 const CFG = join(TMP, 'runner.json');
@@ -361,6 +362,21 @@ test('a restarted runner ends its running job, kills what it left running and ru
   assert.equal((await ended(ok)).state, 'passed'); // in the slot the orphan held
 });
 
+test('an over-long pid line does not switch reaping off', async () => {
+  const id = await add('wrapped');
+  const pid = await pidOf(id);
+  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
+  else runner.child.kill('SIGKILL');
+  await runner.exited;
+  await sleep(500);
+  const rec = readFileSync(join(HOME, 'state', 'slot-1.pids'), 'utf8');
+  writeFileSync(join(HOME, 'state', 'slot-1.pids'), `${'9'.repeat(20)} node\n${rec}`);
+  runner = startRunner();
+  await up(runner);
+  await until('the orphan to go', () => !alive(pid), 10_000);
+  await ended(id);
+});
+
 // Jobs run one at a time below, so each lands in slot 1, the first free one.
 test('a committed git.exe at the repo root is not the git the runner runs', { skip: !WIN && 'Windows exe search only' }, async () => {
   // whoami.exe refuses git's arguments, so a hijacked git call fails the job. Index only: a git.exe in WORK would
@@ -403,4 +419,14 @@ test('hooks and config a job plants in the slot clone never run', async () => {
   assert.equal(jq.state, 'passed', jq.summary);
   assert.equal(existsSync(hookMark), false, 'the planted hook ran');
   assert.equal(existsSync(filterMark), false, 'the planted filter ran');
+});
+
+test('a NUL folder a job plants in the slot does not break the next job', { skip: !WIN && 'Windows only' }, async () => {
+  const P = commit('nul', { 'folder.mjs': String.raw`import { mkdirSync, writeFileSync } from 'node:fs'; import { resolve } from 'node:path'; const d = '\\\\?\\' + resolve('NUL'); mkdirSync(d, { recursive: true }); writeFileSync(d + '\\x', '1'); console.log('planted');` });
+  git('push', '-q', 'origin', 'HEAD:refs/heads/folder');
+  git('checkout', '-q', 'main');
+  const jp = await ended(await add('nulplant', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const jq = await ended(await add('ok'));
+  assert.equal(jq.state, 'passed', jq.summary);
 });

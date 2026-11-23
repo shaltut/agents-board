@@ -5,7 +5,7 @@ import {
   closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { uptime } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
 
@@ -57,6 +57,9 @@ function commandLines(pids: string[]): Map<string, string> | null {
   return out;
 }
 
+/** POSIX: whether a command line is the recorded program, as the first word or, behind a shebang (`node /x/pnpm i`), the second. */
+export const rootMatches = (cmd: string, img: string) => cmd.split(' ').slice(0, 2).some((w) => basename(w) === img);
+
 /** Kills what a runner that died left running: every pid recorded in <stateDir>/*.pids, then forgets the records. A pid
  *  may have been reused since, so a record is acted on only when written since the last boot and while the pid still
  *  runs that root: on Windows, a launcher whose argv holds the slot's .nostart path (every root there is node.exe, as
@@ -70,7 +73,7 @@ export function reap(stateDir: string, say: (m: string) => void = () => {}): num
     const file = join(stateDir, f);
     try {
       if (statSync(file).mtimeMs >= boot) {
-        for (const m of readFileSync(file, 'utf8').matchAll(/^(\d+) (.+)$/gm)) recs.push({ pid: m[1]!, img: m[2]!.trim(), mark: file.replace(/\.pids$/, '.nostart').toLowerCase() });
+        for (const m of readFileSync(file, 'utf8').matchAll(/^(\d{1,10}) (.+)$/gm)) recs.push({ pid: m[1]!, img: m[2]!.trim(), mark: file.replace(/\.pids$/, '.nostart').toLowerCase() });
       }
     } catch {}
     try { rmSync(file, { force: true }); } catch {}
@@ -84,7 +87,7 @@ export function reap(stateDir: string, say: (m: string) => void = () => {}): num
   let n = 0;
   for (const r of recs) {
     const cmd = cmds.get(r.pid);
-    if (cmd === undefined || !(WIN ? cmd.toLowerCase().includes(r.mark) : basename(cmd.split(' ')[0]!) === r.img)) continue;
+    if (cmd === undefined || !(WIN ? cmd.toLowerCase().includes(r.mark) : rootMatches(cmd, r.img))) continue;
     try {
       if (WIN) execFileSync('taskkill', ['/pid', r.pid, '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
       else process.kill(-Number(r.pid), 'SIGKILL'); // its own process group (spawned detached)
@@ -212,7 +215,7 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   // credentials, but never the runner's CB_* or database URL) and no prompts.
   const dir = join(p.base, `${j.project}-${slot}`);
   const lockState = join(home, 'state', `${j.project}-${slot}.lock`);
-  const genv = jobEnv(process.env, cfg, { env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+  const genv = jobEnv(process.env, cfg, { env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_NO_REPLACE_OBJECTS: '1' } });
   // Job code owns the clone's worktree and .git between our git calls: no hook (lefthook's included) or fsmonitor runs,
   // and .git/config goes back to the copy saved at clone time (no planted filter, credential helper, sshCommand, url
   // rewrite, include) before each job's first git call and after each job.
@@ -239,6 +242,7 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     rmSync(join(gitDir, 'config'), { recursive: true, force: true }); // a planted link goes, not what it points at
     copyFileSync(saved, join(gitDir, 'config'));
     rmSync(join(gitDir, 'commondir'), { force: true }); // would point git at another config
+    if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
   io.reset();
   const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
@@ -307,10 +311,10 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 }
 
 /** job_finish. A board that cannot be reached, or answers with anything but a refusal (too many connections, a
- *  restart: any SQLSTATE but P0001), is retried every 30 s until the finish lands or the job is no longer this runner's
+ *  restart: a connection, serialization, resource, operator or transaction-state SQLSTATE: classes 08 40 53 57 25), is retried every 30 s until the finish lands or the job is no longer this runner's
  *  running job (false). A refusal (a `raise`, P0001) gets one resend: the summary becomes a pointer to the log (and the
  *  exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged and given up, so
- *  the slot frees. */
+ *  the slot frees. Any other board error (a missing function, no permission) is logged and given up the same way. */
 export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<boolean> {
   const withheld = `summary withheld: see cb job log ${id}`;
   let { exit_code, summary } = r;
@@ -318,6 +322,10 @@ export async function finish(sql: any, runner: string, id: number, r: Result, sa
     try {
       return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true;
     } catch (e: any) {
+      if (e?.name === 'PostgresError' && e.code !== 'P0001' && !/^(08|40|53|57|25)/.test(e.code ?? '')) {
+        say(`job #${id}: the board cannot take its end (${e.message}); giving up, it stays running until the next runner start`);
+        return false;
+      }
       if (e?.name !== 'PostgresError' || e.code !== 'P0001') {
         say(`job #${id}: the board did not take its end (${e?.message ?? e}); retrying in ${wait / 1000} s`);
         await new Promise((ok) => setTimeout(ok, wait));

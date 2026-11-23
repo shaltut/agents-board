@@ -18,7 +18,7 @@ function shape(counts: { passed: number; failed: number; skipped: number }, name
   return { text: cut(text), ran: counts.passed + counts.failed };
 }
 
-/** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 10 lines. */
+/** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 3 lines that are not code frames. */
 export function summarize(output: string): { text: string; ran: number | null } {
   // each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
   const lines = output.replace(ANSI, '').split(/\r?\n/).map((l) => l.slice(0, 2000));
@@ -42,7 +42,9 @@ export function summarize(output: string): { text: string; ran: number | null } 
     return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0 }, names);
   }
 
-  return { text: cut(lines.filter((l) => l.trim()).slice(-10).join('\n')), ran: null };
+  // code-frame lines (a linted file's source) stay off the board
+  const frame = /^\s*(?:\d+\s*[│|]|[·│╭╰─])/;
+  return { text: cut(lines.filter((l) => l.trim() && !frame.test(l)).slice(-3).join('\n')), ran: null };
 }
 
 const MASK = '[masked]';
