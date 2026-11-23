@@ -444,9 +444,10 @@ begin
     update cb.memories m set project = t where m.project = a; -- no unique key on a memory's project: nothing collides
     update cb.jobs j set project = t where j.project = a; -- runner jobs (#3600): a foreign key that does not cascade a delete
     -- the runners' recipes follow, so moved queued jobs are claimed (no foreign key); a recipe the runner already offers
-    -- the target keeps the target's row. runner.json must follow the merge too: a runner restart publishes its projects again
+    -- the target for the same repo keeps the target's row. runner.json must follow the merge too: a runner restart
+    -- publishes its projects again
     delete from cb.runner_recipes rr where rr.project = a
-      and exists (select 1 from cb.runner_recipes x where x.runner = rr.runner and x.project = t and x.recipe = rr.recipe);
+      and exists (select 1 from cb.runner_recipes x where x.runner = rr.runner and x.project = t and x.repo = rr.repo and x.recipe = rr.recipe);
     update cb.runner_recipes rr set project = t where rr.project = a;
     -- asks and bound sessions follow: their foreign keys set null on the delete below
     update cb.asks k set project = t where k.project = a;
@@ -4619,6 +4620,16 @@ create table if not exists cb.jobs (
   created_at timestamptz not null default now(), started_at timestamptz, finished_at timestamptz
 );
 create index if not exists jobs_open_idx on cb.jobs (state, id) where state in ('queued','running');
+-- several repos in one project (#3703): recipes and jobs belong to a repo; a one-repo project's is main
+alter table cb.runner_recipes add column if not exists repo text not null default 'main';
+alter table cb.jobs add column if not exists repo text not null default 'main';
+-- the key takes the repo (api and dashboard may both offer test). Existing rows are all main, so they stay unique.
+do $$ begin
+  if not exists (select 1 from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
+                 where c.conrelid = 'cb.runner_recipes'::regclass and c.contype = 'p' and a.attname = 'repo') then
+    alter table cb.runner_recipes drop constraint runner_recipes_pkey, add primary key (runner, project, repo, recipe);
+  end if;
+end $$;
 
 drop function if exists cb._is_runner cascade;
 drop function if exists cb._runner_only cascade;
@@ -4639,24 +4650,28 @@ begin
 end $$;
 
 -- "job #N recipe at sha7: state (exit n). summary" + log hint (once it started: no log before), to the requester.
+-- A repo other than main is named after the recipe: "job #N test (dashboard) at ..." (#3703).
 -- untrusted: the summary is the job's output (code from any origin branch), marked like GitHub lines; the head is not.
 -- Best effort: an unknown requester (session gone, no events) must not stop the job from ending.
 create function cb._job_tell(j cb.jobs, untrusted boolean default false) returns void language plpgsql as $$
 begin
   perform cb.tell(j.requester,
-    format('job #%s %s at %s: %s%s. %s%s', j.id, j.recipe, left(j.sha, 7), j.state,
+    format('job #%s %s%s at %s: %s%s. %s%s', j.id, j.recipe, case when j.repo <> 'main' then format(' (%s)', j.repo) else '' end, left(j.sha, 7), j.state,
            case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end,
            case when untrusted and coalesce(j.summary, '') <> '' then '[job output · untrusted] ' else '' end, coalesce(j.summary, ''))
     || case when j.started_at is not null then E'\nLog: cb job log ' || j.id else '' end, 'runner');
 exception when others then null;
 end $$;
 
-create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null)
+-- repo null: the repo of the actor's latest session on the project (cb._repo's rule), else the project's home repo.
+-- A repo no runner offers for the project is refused, naming the ones they have: no fallback to another repo (#3703).
+create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null,
+                           repo text default null)
 returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare
   a text := cb.set_actor(actor); p text := cb.read_project(project); rp jsonb; k text; spec jsonb; vals jsonb; ev jsonb;
-  new_id bigint; ahead int; lo int; hi int;
+  new_id bigint; ahead int; lo int; hi int; r text; has text[];
 begin
   if p is null then raise exception 'project is required'; end if;
   if not cb._is_dashboard() and not exists (select 1 from cb.sessions s where s.actor = a and s.project = p and s.last_seen > now() - interval '1 day') then
@@ -4666,8 +4681,15 @@ begin
   if sha !~ '^[0-9a-f]{7,40}$' then raise exception 'sha must be 7 to 40 hex characters'; end if;
   params := coalesce(params, '{}'::jsonb);
   if jsonb_typeof(params) is distinct from 'object' then raise exception 'params must be an object of lists'; end if;
-  select rr.params into rp from cb.runner_recipes rr where rr.project = p and rr.recipe = recipe order by rr.runner limit 1;
-  if not found then raise exception 'no recipe % for % on any runner: see cb jobs', recipe, p; end if;
+  r := coalesce(nullif(trim(repo), ''),
+                (select coalesce(s.repo, cb._home_repo(p)) from cb.sessions s where s.actor = a and s.project = p order by s.last_seen desc limit 1),
+                cb._home_repo(p));
+  has := array(select distinct rr.repo from cb.runner_recipes rr where rr.project = p order by rr.repo);
+  if cardinality(has) > 0 and r <> all(has) then raise exception 'the runner has no repo % for %: it has %', r, p, array_to_string(has, ', '); end if;
+  select rr.params into rp from cb.runner_recipes rr where rr.project = p and rr.repo = r and rr.recipe = recipe order by rr.runner limit 1;
+  if not found then
+    raise exception 'no recipe % for % on any runner: see cb jobs', recipe, p || case when r <> 'main' then format(' (%s)', r) else '' end;
+  end if;
   for k in select jsonb_object_keys(params) loop
     if not (rp ? k) then raise exception 'unknown parameter % for recipe %', k, recipe; end if;
   end loop;
@@ -4684,7 +4706,7 @@ begin
       end if;
     end loop;
   end loop;
-  insert into cb.jobs (project, recipe, params, sha, requester, task_id) values (p, recipe, params, sha, a, task_id)
+  insert into cb.jobs (project, repo, recipe, params, sha, requester, task_id) values (p, r, recipe, params, sha, a, task_id)
   returning cb.jobs.id into new_id;
   select count(*)::int into ahead from cb.jobs j where j.state = 'queued' and j.id < new_id;
   perform pg_notify('cb_jobs', new_id::text);
@@ -4703,8 +4725,8 @@ begin
     'jobs', coalesce((select jsonb_agg(to_jsonb(j) order by j.id) from cb.jobs j
                       where j.state in ('queued','running') and (p is null or j.project = p)), '[]'::jsonb),
     'runners', coalesce((select jsonb_agg(jsonb_build_object('name', r.name, 'last_seen', r.last_seen, 'recipes',
-                  coalesce((select jsonb_agg(jsonb_build_object('project', rr.project, 'recipe', rr.recipe, 'params', rr.params, 'db', rr.db)
-                            order by rr.project, rr.recipe) from cb.runner_recipes rr where rr.runner = r.name), '[]'::jsonb))
+                  coalesce((select jsonb_agg(jsonb_build_object('project', rr.project, 'repo', rr.repo, 'recipe', rr.recipe, 'params', rr.params, 'db', rr.db)
+                            order by rr.project, rr.repo, rr.recipe) from cb.runner_recipes rr where rr.runner = r.name), '[]'::jsonb))
                   order by r.name) from cb.runners r), '[]'::jsonb));
 end $$;
 
@@ -4738,8 +4760,8 @@ begin
   on conflict (name) do update set log_url = excluded.log_url, started_at = now(), last_seen = now();
   delete from cb.runner_recipes rr where rr.runner = runner_hello.runner;
   for r in select jsonb_array_elements(coalesce(recipes, '[]'::jsonb)) loop
-    insert into cb.runner_recipes (runner, project, recipe, params, db)
-    values (runner, r->>'project', r->>'recipe', coalesce(r->'params', '{}'::jsonb), coalesce((r->>'db')::boolean, false));
+    insert into cb.runner_recipes (runner, project, repo, recipe, params, db)
+    values (runner, r->>'project', coalesce(r->>'repo', 'main'), r->>'recipe', coalesce(r->'params', '{}'::jsonb), coalesce((r->>'db')::boolean, false));
   end loop;
   for j in update cb.jobs x set state = 'error', summary = 'error: runner restarted', finished_at = now()
            where x.runner = runner_hello.runner and x.state = 'running' returning x.* loop
@@ -4761,7 +4783,7 @@ declare j cb.jobs; jid bigint; d boolean;
 begin
   perform cb._runner_only();
   select x.id, rr.db into jid, d from cb.jobs x
-  join cb.runner_recipes rr on rr.runner = job_claim.runner and rr.project = x.project and rr.recipe = x.recipe
+  join cb.runner_recipes rr on rr.runner = job_claim.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
   where x.state = 'queued' and (allow_db or not rr.db) order by x.id limit 1 for update of x skip locked;
   if not found then return null; end if;
   update cb.jobs x set state = 'running', runner = job_claim.runner, started_at = now() where x.id = jid returning x.* into j;

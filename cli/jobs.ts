@@ -17,37 +17,46 @@ export function splitRunArgs(argv: string[], known: Set<string>): { rest: string
   return { rest, params };
 }
 
-/** "check (ws), test (app, files)": the recipes of one project, as the runners announced them. */
-function recipeLine(list: any, project: string) {
-  const seen = new Map<string, string>();
-  for (const r of list.runners) for (const x of r.recipes) if (x.project === project && !seen.has(x.recipe)) {
+/** repo → "check (ws), test (app, files)": the recipes of one project, per repo, as the runners announced them. */
+function recipeLines(list: any, project: string) {
+  const by = new Map<string, Map<string, string>>();
+  for (const r of list.runners) for (const x of r.recipes) if (x.project === project) {
+    const repo = x.repo ?? 'main';
+    const seen = by.get(repo) ?? new Map<string, string>();
+    by.set(repo, seen);
     const ps = Object.keys(x.params ?? {});
-    seen.set(x.recipe, ps.length ? `${x.recipe} (${ps.join(', ')})` : x.recipe);
+    if (!seen.has(x.recipe)) seen.set(x.recipe, ps.length ? `${x.recipe} (${ps.join(', ')})` : x.recipe);
   }
-  return seen.size ? [...seen.values()].join(', ') : '';
+  return new Map([...by].map(([repo, seen]) => [repo, [...seen.values()].join(', ')]));
 }
+// a one-repo project (main only) reads as before; with several repos each is named (#3703)
+const oneRepo = (m: Map<string, string>) => m.size === 1 && m.has('main');
+const repoTag = (j: any) => (j.repo && j.repo !== 'main' ? `/${j.repo}` : '');
 
 const sha7 = (j: any) => String(j.sha).slice(0, 7);
 // the summary is the job's output, marked as in the board's message, unless the board wrote it (a cancel, a runner restart)
 const marked = (j: any) => (j.summary && j.state !== 'cancelled' && j.summary !== 'error: runner restarted' ? `[job output · untrusted] ${j.summary}` : j.summary ?? '');
 // in a terminal the summary's continuation lines are indented (as the relay does), so none passes for a line of its own
-const endLine = (j: any) => `job #${j.id} ${j.recipe} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${marked(j).replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, '\n    ')}`.trim();
+const endLine = (j: any) => `job #${j.id} ${j.recipe}${j.repo && j.repo !== 'main' ? ` (${j.repo})` : ''} at ${sha7(j)}: ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''}. ${marked(j).replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, '\n    ')}`.trim();
 const markedJson = (j: any) => ({ ...j, summary: j.summary == null ? j.summary : marked(j) });
 
-export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
+export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; repo?: string; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
   if (!o.project) throw new Error('no project: say which (--project <slug>) or bind this session once (cb iam <name> <project>)');
   const known = async () => {
     const [{ l }] = await sql`select cb.jobs_list(${o.project}) as l`;
-    return recipeLine(l, o.project!) || 'none: no runner is connected';
+    const m = recipeLines(l, o.project!);
+    if (o.repo) return m.get(o.repo) || `none for ${o.repo}`;
+    if (!m.size) return 'none: no runner is connected';
+    return oneRepo(m) ? m.get('main')! : [...m].map(([repo, line]) => `${repo}: ${line}`).join('; ');
   };
   if (!o.recipe) throw new Error(`usage: cb run <recipe> --sha <sha> [--<param> <value>...] [--wait]. Recipes: ${await known()}`);
   if (!o.sha) throw new Error('give the commit: --sha <sha> (git rev-parse HEAD; push it first)');
   if (o.card !== undefined && !/^\d+$/.test(o.card)) throw new Error('--card needs a card number');
   let added: any;
   try {
-    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ?? null}::bigint, ${o.actor}) as r`;
+    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
   } catch (e: any) {
-    if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}. Recipes: ${await known()}`);
+    if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}${o.repo ? ` (${o.repo})` : ''}. Recipes: ${await known()}`);
     throw e;
   }
   const queued = `job #${added.id} queued (${added.ahead} ahead)`;
@@ -66,10 +75,14 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
 
 export async function jobsCmd(sql: any, project: string | null): Promise<Result> {
   const [{ l }] = await sql`select cb.jobs_list(${project}) as l`;
-  const lines = l.jobs.map((j: any) => `#${j.id} ${j.state} ${j.project} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}`);
+  const lines = l.jobs.map((j: any) => `#${j.id} ${j.state} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}`);
   if (!lines.length) lines.push('no job queued or running');
   const projects = project ? [project] : [...new Set<string>(l.runners.flatMap((r: any) => r.recipes.map((x: any) => x.project)))];
-  for (const p of projects) { const rl = recipeLine(l, p); if (rl) lines.push(project ? `recipes: ${rl}` : `recipes (${p}): ${rl}`); }
+  for (const p of projects) {
+    const m = recipeLines(l, p);
+    if (oneRepo(m)) lines.push(project ? `recipes: ${m.get('main')}` : `recipes (${p}): ${m.get('main')}`);
+    else for (const [repo, rl] of m) lines.push(`recipes (${project ? repo : `${p}/${repo}`}): ${rl}`);
+  }
   if (!l.runners.length) lines.push('no runner has connected: start cb runner on the PC');
   else lines.push(`runners: ${l.runners.map((r: any) => `${r.name} (seen ${new Date(r.last_seen).toISOString().slice(0, 19)}Z)`).join(', ')}`);
   return { out: lines.join('\n'), json: l, code: 0 };

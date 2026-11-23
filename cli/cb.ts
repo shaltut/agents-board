@@ -737,8 +737,7 @@ ${body}`, json: pg };
       return { out: [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`].join('\n'), json: sq };
     }
     case 'run':
-      if (o.repo !== undefined) throw new Error("--repo for cb run comes with the runner's repos (not yet)");
-      return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, json: !!o.json, actor });
+      return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');

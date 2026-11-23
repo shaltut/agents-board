@@ -3,7 +3,9 @@ import { resolve, sep } from 'node:path';
 
 export type Param = { pattern: string; min: number; max: number };
 export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env: Record<string, string>; timeout: number; db: boolean; params: Record<string, Param> };
-export type Project = { git: string; base: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
+export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
+// a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
+export type Project = { base: string; repos: Record<string, Repo> };
 export type RunnerConfig = { name?: string; slots: number; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
 
 const NAME = /^[a-z][a-z0-9-]*$/;
@@ -86,6 +88,20 @@ function loadRecipe(raw: unknown, path: string): Recipe {
   };
 }
 
+function loadRepo(p: Record<string, unknown>, pp: string): Repo {
+  if (!isObj(p.recipes)) fail(pp, 'needs a recipes object');
+  if (!Array.isArray(p.install) || !p.install.length || p.install.some((x) => typeof x !== 'string' || !x)) fail(`${pp}.install`, 'must be a non-empty list of strings');
+  const recipes: Record<string, Recipe> = {};
+  for (const [rn, r] of Object.entries(p.recipes)) {
+    if (!NAME.test(rn)) fail(`${pp}.recipes`, `name "${rn}" must match ${NAME}`);
+    recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`);
+  }
+  return {
+    git: str(p.git, `${pp}.git`), lockfile: str(p.lockfile, `${pp}.lockfile`),
+    install: p.install as string[], installTimeout: int(p.installTimeout, `${pp}.installTimeout`, 1, 7200), recipes,
+  };
+}
+
 export function loadConfig(text: string): RunnerConfig {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`runner.json: not valid JSON (${(e as Error).message})`); }
@@ -96,21 +112,32 @@ export function loadConfig(text: string): RunnerConfig {
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
   if (!isObj(raw.projects) || !Object.keys(raw.projects).length) fail('projects', 'must hold at least one project');
   const projects: Record<string, Project> = {};
+  const stems = new Map<string, string>();
   for (const [pn, p] of Object.entries(raw.projects)) {
     const pp = `projects.${pn}`;
     if (!NAME.test(pn)) fail('projects', `name "${pn}" must match ${NAME}`);
-    if (!isObj(p) || !isObj(p.recipes)) fail(pp, 'needs a recipes object');
-    only(p, pp, ['git', 'base', 'lockfile', 'install', 'installTimeout', 'recipes']);
-    if (!Array.isArray(p.install) || !p.install.length || p.install.some((x) => typeof x !== 'string' || !x)) fail(`${pp}.install`, 'must be a non-empty list of strings');
-    const recipes: Record<string, Recipe> = {};
-    for (const [rn, r] of Object.entries(p.recipes)) {
-      if (!NAME.test(rn)) fail(`${pp}.recipes`, `name "${rn}" must match ${NAME}`);
-      recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`);
+    if (!isObj(p)) fail(pp, 'must be an object');
+    const repos: Record<string, Repo> = {};
+    if (p.repos === undefined) {
+      only(p, pp, ['git', 'base', 'lockfile', 'install', 'installTimeout', 'recipes']);
+      repos.main = loadRepo(p, pp);
+    } else {
+      only(p, pp, ['base', 'repos']);
+      if (!isObj(p.repos) || !Object.keys(p.repos).length) fail(`${pp}.repos`, 'must hold at least one repo');
+      for (const [rn, r] of Object.entries(p.repos)) {
+        if (!NAME.test(rn)) fail(`${pp}.repos`, `name "${rn}" must match ${NAME}`);
+        if (!isObj(r)) fail(`${pp}.repos.${rn}`, 'must be an object');
+        only(r, `${pp}.repos.${rn}`, ['git', 'lockfile', 'install', 'installTimeout', 'recipes']);
+        repos[rn] = loadRepo(r, `${pp}.repos.${rn}`);
+      }
     }
-    projects[pn] = {
-      git: str(p.git, `${pp}.git`), base: str(p.base, `${pp}.base`), lockfile: str(p.lockfile, `${pp}.lockfile`),
-      install: p.install as string[], installTimeout: int(p.installTimeout, `${pp}.installTimeout`, 1, 7200), recipes,
-    };
+    projects[pn] = { base: str(p.base, `${pp}.base`), repos };
+    // slot clones and install records are named <project>-<slot> (main) or <project>-<repo>-<slot>: one name, one owner
+    for (const rn of Object.keys(repos)) {
+      const stem = rn === 'main' ? pn : `${pn}-${rn}`, who = rn === 'main' ? pn : `${pn} repo ${rn}`;
+      if (stems.has(stem)) fail('projects', `${who} and ${stems.get(stem)} would share the slot clones ${stem}-<slot>: rename one`);
+      stems.set(stem, who);
+    }
   }
   return {
     ...(raw.name === undefined ? {} : { name: str(raw.name, 'name') }),
@@ -172,9 +199,9 @@ export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<
 }
 
 export function published(cfg: RunnerConfig) {
-  return Object.entries(cfg.projects).flatMap(([project, p]) =>
-    Object.entries(p.recipes).map(([recipe, r]) => ({
-      project, recipe, db: r.db,
+  return Object.entries(cfg.projects).flatMap(([project, p]) => Object.entries(p.repos).flatMap(([repo, rp]) =>
+    Object.entries(rp.recipes).map(([recipe, r]) => ({
+      project, repo, recipe, db: r.db,
       params: Object.fromEntries(Object.entries(r.params).map(([n, s]) => [n, { min: s.min, max: s.max }])),
-    })));
+    }))));
 }
