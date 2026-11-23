@@ -124,10 +124,10 @@ test('restores use up startsLeft', () => {
   assert.equal(p.start.length, 1);
 });
 
-test('close only when herdr reports the agent idle', () => {
+test('close only when herdr reports the agent ready for input (idle, or done: unfocused panes stay done)', () => {
   const quiet = state({ sessions: [sess('sv-B1@macbook', 'builder', { last_event: ago(21) })] });
-  assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': 'idle' } }).close, ['sv-B1@macbook']);
-  for (const st of ['working', 'blocked', 'done', 'unknown']) assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': st } }).close, [], st);
+  for (const st of ['idle', 'done']) assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': st } }).close, ['sv-B1@macbook'], st);
+  for (const st of ['working', 'blocked', 'unknown']) assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': st } }).close, [], st);
   assert.deepEqual(tick(quiet).close, [], 'not in herdr: no close');
 });
 

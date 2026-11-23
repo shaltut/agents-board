@@ -12,6 +12,8 @@ export type State = { project: string; squad: Squad; supervised: boolean;
 export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[] };
 
+/** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
+export const READY = new Set(['idle', 'done']);
 const MIN = 60_000, CLOSE_AFTER = 20 * MIN, RETRY_AFTER = 10 * MIN, RESTORE_EVERY = 30 * MIN, MAC = 'macbook', MAC_CAP = 8;
 
 export function planTick(i: TickInput): TickPlan {
@@ -72,7 +74,7 @@ export function planTick(i: TickInput): TickPlan {
     if (g.waiting > 0) continue;
     for (const w of g.names) {
       const s = by.get(w.name);
-      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && i.herdrStatus[herdrName(w.name)] === 'idle'
+      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && READY.has(i.herdrStatus[herdrName(w.name)] ?? '')
         && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }

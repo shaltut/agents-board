@@ -350,6 +350,19 @@ test('the hold re-check runs after herdr finds the pane, right before /exit', as
   assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
 });
 
+test('herdr shows the agent working right before /exit: no /exit, the mark is cleared', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const run: Runner = (m, args) => args[1] === 'get' && h.live.has(args[2]!)
+    ? json({ result: { agent: { name: args[2], pane_id: 'w1:p9', agent_status: 'working' } } }) : h.run(m, args);
+  const out = await tick(deps(sup, run));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.ok(out.some((l) => /herdr shows it working/.test(l)), out.join('\n'));
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
+});
+
 test('a name herdr lists but cannot find is not tried again for 10 minutes', async () => {
   const { sql, sup } = await setup();
   await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 });

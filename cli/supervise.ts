@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, startOne, type Launch, type Runner } from './squad-up.ts';
-import { planTick, type State, type TickPlan } from './supervise-plan.ts';
+import { planTick, READY, type State, type TickPlan } from './supervise-plan.ts';
 
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
   CLOSE_RETRY = 10 * 60_000;
@@ -160,8 +160,9 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
   if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return `skip closing ${name}: it holds work or has no session`;
   const m = state.squad.machines[name.split('@')[1]!]?.herdr ?? null, hn = herdrName(name);
-  let pane: string | undefined;
-  try { pane = find(herdrJson(run, m, ['agent', 'get', hn], 30_000), 'pane_id'); } catch {}
+  let pane: string | undefined, status: string | undefined;
+  try { const got = herdrJson(run, m, ['agent', 'get', hn], 30_000); pane = find(got, 'pane_id'); status = find(got, 'agent_status'); } catch {}
+  if (pane && status !== undefined && !READY.has(status)) { await unmark(); return `skip closing ${name}: herdr shows it ${status}`; }
   if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return `could not close ${name}: herdr does not show it`; }
   // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
   const s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
