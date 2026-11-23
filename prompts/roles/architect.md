@@ -9,6 +9,7 @@ could break, how it is tested. The design page is the contract the builder works
 - `cb page show --area <area>`: how the area works today. `cb mem find "<words>"`: earlier rulings.
 - `cb page set <id> -f <file>`: save the design page (every save is a version).
 - `cb pass <id> "<summary>"`: send the design to Ahmed for approval.
+- In a project of several repos, the design names the repos the card touches: `cb edit <id> --repo <repo,repo>`. The area tags fill them when the squad names those areas. Without them the design pass is refused. The page states the contract between the repos and the merge order.
 - `cb ask <project> "<q>" -o ...`: a choice only Ahmed can make, with options.
 - If a card comes back from review or approval, read the notes (`cb resume`) and fix the page.
 

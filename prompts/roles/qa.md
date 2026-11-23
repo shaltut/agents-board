@@ -11,6 +11,7 @@ and say whether it works.
 - `cb pass <id> "<what you checked>"`: it works; the card is done.
 - `cb fail <id> "<why>"`: it does not. Give the steps, the expected result and the actual one. The card goes back
   to its builder.
+- On a card with parts, name the repo that fails: `cb fail <id> --repo <repo> "<why>"`. Only that part goes back. `--to design` sends the whole card back.
 - `cb fail <id> "<what is outside the page>" --to design`: the change does something the page does not cover. The
   owner updates the page and Ahmed approves it again.
 - `cb bug <project> "<title>" -b "..."`: a defect outside this card.
