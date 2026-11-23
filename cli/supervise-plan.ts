@@ -6,7 +6,8 @@ export type Session = { actor: string; role: string; area: string | null; machin
 export type State = { project: string; squad: Squad; supervised: boolean;
   waiting: { builder: number; reviewer: number; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   sessions: Session[] };
-export type TickInput = { state: State; herdrLive: Set<string>; herdrDown: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
+// launched: names this supervisor run started or restored that the board has not yet seen live
+export type TickInput = { state: State; herdrLive: Set<string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[] };
 
 const MIN = 60_000, CLOSE_AFTER = 20 * MIN, RETRY_AFTER = 10 * MIN, RESTORE_EVERY = 30 * MIN, MAC = 'macbook', MAC_CAP = 8;
@@ -51,9 +52,10 @@ export function planTick(i: TickInput): TickPlan {
   for (const g of groups.values()) {
     const mine = state.sessions.filter((s) => s.role === g.role && (g.area === undefined || s.area === g.area));
     const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.closing;
-    // a squad name herdr runs but the board does not see yet (still starting, or on a startup dialog) counts as
-    // started: live, and about to take work, so the next tick does not start another for the same card
-    const pending = g.names.filter((w) => herdrLive.has(herdrName(w.name)) && !by.get(w.name)?.live && !by.get(w.name)?.holds);
+    // a name this run launched that herdr runs but the board does not see yet (still starting, or on a startup
+    // dialog) counts as started: live, and about to take work, so the next tick does not start another for the same
+    // card. Only this run's launches: any other herdr-only name would cancel waiting work for as long as its pane lives.
+    const pending = g.names.filter((w) => i.launched.has(w.name) && herdrLive.has(herdrName(w.name)) && !by.get(w.name)?.live && !by.get(w.name)?.holds);
     const liveCount = mine.filter((s) => (s.live || herdrLive.has(herdrName(s.actor))) && !s.closing).length
       + pending.filter((w) => !mine.some((s) => s.actor === w.name)).length + g.names.filter((w) => restored.has(w.name)).length;
     let n = Math.min(g.waiting - mine.filter(idle).length - pending.length, g.names.length - liveCount);

@@ -11,13 +11,14 @@ import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, startOne, type Launch, type Runner } from './squad-up.ts';
 import { planTick, type State, type TickPlan } from './supervise-plan.ts';
 
-const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000;
+const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000;
 const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC: the runner tab's folder
 
-export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; runnerToldAt: number };
+// launched: names this run started or restored that the board has not yet seen live (planTick counts them as started)
+export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
-  probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>;
+  probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
 };
 const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
 
@@ -56,10 +57,17 @@ export async function tick(d: Deps): Promise<string[]> {
     if (macKeys.has(l.machine) || macKeys.has(String(l.actor).split('@')[1])) mac.add(herdrName(l.actor));
   }
   let macLive = Math.max(mac.size, macAgents), startsLeft = STARTS_PER_TICK;
+  // a launch stops counting as "started, not bound yet" once the board sees it live, or herdr no longer runs it
+  const liveOnBoard = new Set(states.flatMap((s) => s.sessions.filter((x) => x.live).map((x) => x.actor)));
+  if (!dryRun) {
+    for (const n of memory.launched) {
+      if (liveOnBoard.has(n) || (!herdrLive.has(herdrName(n)) && !herdrDown.has(n.split('@')[1]!))) memory.launched.delete(n);
+    }
+  }
 
   for (const state of states) {
     try {
-      const plan = planTick({ state, herdrLive, herdrDown, macLive, startsLeft, failedAt: memory.failedAt, now });
+      const plan = planTick({ state, herdrLive, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length;
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -68,7 +76,8 @@ export async function tick(d: Deps): Promise<string[]> {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
     }
   }
-  try { await runnerCheck(d, out, log); } catch (e) { out.push(`runner check failed: ${msg(e)}`); }
+  const leads = [...new Set(states.flatMap((s) => (s.squad.roles.lead ? [`orch@${s.squad.roles.lead.machine}`] : [])))];
+  try { await runnerCheck(d, out, log, leads); } catch (e) { out.push(`runner check failed: ${msg(e)}`); }
   return out;
 }
 
@@ -84,13 +93,16 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
       if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); continue; }
       const r = startOne(l, run, tabs);
       out.push(r.line);
-      if (r.blocked) {
-        await log(project, 'blocked', l.name, r.pane);
-        if (!memory.blockedTold.has(l.name)) { memory.blockedTold.add(l.name); await tellLead(d, state, l, r.pane!, out); }
+      if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
+      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once
+      const stuck = r.blocked ? 'dialog' : !r.ok && r.pane ? 'prompt' : null;
+      if (stuck) {
+        await log(project, 'blocked', l.name, stuck === 'dialog' ? r.pane : `prompt not sent, pane ${r.pane}`);
+        if (!memory.blockedTold.has(l.name) && await tellLead(d, state, l, r.pane!, stuck, out)) memory.blockedTold.add(l.name);
       } else if (r.ok) await log(project, what, l.name, l.role);
       else {
         memory.failedAt.set(l.name, now);
-        await log(project, 'failed', l.name, (r.line.startsWith('started') ? 'prompt not sent' : r.line.slice(r.line.indexOf(': ') + 2)).slice(0, 80));
+        await log(project, 'failed', l.name, r.line.slice(r.line.indexOf(': ') + 2).slice(0, 80));
       }
     }
   }
@@ -104,19 +116,27 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
   }
 }
 
-// A startup dialog is a person's: the lead is told once per name per run, with the pane and the command to finish.
-async function tellLead(d: Deps, state: State, l: Launch, pane: string, out: string[]) {
+// A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per name per run, with
+// the pane and the command to finish. False when there is no lead or the tell failed (then the next tick tries again).
+async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'dialog' | 'prompt', out: string[]) {
   const lead = state.squad.roles.lead;
-  if (!lead) return;
-  const text = `supervisor: ${l.name} waits on a startup dialog in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}. Answer it there, then run: ${promptCommand(l)}`;
-  try { await d.sql`select cb.tell(${`orch@${lead.machine}`}, ${text}, 'supervisor')`; } catch (e) { out.push(`could not tell orch@${lead.machine}: ${msg(e)}`); }
+  if (!lead) return false;
+  const where = `herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}`;
+  const text = why === 'dialog'
+    ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run: ${promptCommand(l)}`
+    : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it: ${promptCommand(l)}`;
+  return tell(d, `orch@${lead.machine}`, text, out);
+}
+
+async function tell(d: Deps, to: string, text: string, out: string[]) {
+  try { await d.sql`select cb.tell(${to}, ${text}, 'supervisor')`; return true; } catch (e) { out.push(`could not tell ${to}: ${msg(e)}`); return false; }
 }
 
 // Mark closing, re-check on a fresh statement, /exit, wait for herdr to drop the agent, close its pane.
 async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<string> {
-  const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
-  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return `skip closing ${name}: it holds work`;
+  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return `skip closing ${name}: it holds work or has no session`;
   const s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
   if (!s || s.holds || s.questions || s.jobs) { await unmark(); return `skip closing ${name}: it took work`; }
   const m = state.squad.machines[name.split('@')[1]!]?.herdr ?? null, hn = herdrName(name);
@@ -124,20 +144,20 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
   try { pane = find(herdrJson(run, m, ['agent', 'get', hn], 30_000), 'pane_id'); } catch {}
   if (!pane) { await unmark(); return `could not close ${name}: herdr does not show it`; }
   if (run(m, ['agent', 'prompt', hn, '/exit'], 30_000).status !== 0) { await unmark(); return `could not close ${name}: /exit was not sent`; }
-  for (let waited = 0; waited < CLOSE_WAIT; waited += POLL) {
+  for (const until = clock() + CLOSE_WAIT; clock() < until;) { // wall time: one agent get can take 30 s
     await sleep(POLL);
     if (classifyAgentGet(run(m, ['agent', 'get', hn], 30_000)) !== 'absent') continue;
     const closed = run(m, ['pane', 'close', pane], 30_000).status === 0;
-    await log(state.project, 'close', name, s.role);
-    await unmark(); // the agent is gone; a mark left on its old row would refuse work to the same name started again
+    await log(state.project, 'close', name, s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
     return closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`;
   }
   await unmark();
   return `could not close ${name}`;
 }
 
-// The PC runner: no beat for 3 minutes → start it in a herdr tab, unless its log port is still held (then report hourly).
-async function runnerCheck(d: Deps, out: string[], log: Log) {
+// The PC runner: no beat for 3 minutes → start it in a herdr tab, at most once per 10 minutes, unless its log port is
+// still held. A start that does not beat, or a held port, is told to every supervised project's lead, hourly.
+async function runnerCheck(d: Deps, out: string[], log: Log, leads: string[]) {
   if (!d.runnerConfig) return;
   let cfg;
   try { cfg = loadConfig(readFileSync(d.runnerConfig, 'utf8')); } catch (e) { out.push(`runner config: ${msg(e)}`); return; }
@@ -145,13 +165,27 @@ async function runnerCheck(d: Deps, out: string[], log: Log) {
   const { runners } = (await d.sql`select cb.jobs_list(null) as j`)[0].j;
   const beat = runners.find((r: any) => r.name === name)?.last_seen;
   if (beat && d.now - Date.parse(beat) < RUNNER_STALE) return;
+  const tellLeads = async (text: string) => {
+    if (d.dryRun || d.now - d.memory.runnerToldAt < HOUR) return false;
+    d.memory.runnerToldAt = d.now;
+    for (const to of leads) await tell(d, to, `supervisor: ${text}`, out);
+    return true;
+  };
+  const since = d.now - d.memory.runnerStartedAt;
+  if (since < RUNNER_RETRY) {
+    const text = `runner started ${Math.round(since / 60_000)} min ago and still not beating`;
+    out.push(text);
+    await tellLeads(`${text}: see the herdr tab runner on the PC`);
+    return;
+  }
   if (await d.probe(cfg.log.host, cfg.log.port)) {
-    if (d.now - d.memory.runnerToldAt < HOUR) return;
-    out.push(`runner ${name} is not beating but its port is held`);
-    if (!d.dryRun) { d.memory.runnerToldAt = d.now; await log(null, 'runner', name, 'not beating but its port is held'); }
+    const text = `runner ${name} is not beating but its port is held`;
+    if (d.dryRun) { out.push(text); return; }
+    if (await tellLeads(`${text}: an old runner may be stuck; restart it by hand`)) { out.push(text); await log(null, 'runner', name, 'not beating but its port is held'); }
     return;
   }
   if (d.dryRun) { out.push('would start the runner'); return; }
+  d.memory.runnerStartedAt = d.now;
   try {
     const pane = find(herdrJson(d.run, null, ['tab', 'create', '--cwd', BOARD, '--label', 'runner', '--no-focus']), 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
@@ -173,9 +207,10 @@ if (import.meta.main) {
   const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const sql = connect(undefined, { app: `cb-supervisor/${version}`, max: 2 });
-  const lock = await sql.reserve(); // the lock lives on this one connection; it goes when the connection does
-  // re-taken every tick: a lock held is re-entrant (true); a reconnect that lost it to another supervisor gives false
-  const locked = async () => (await lock`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0]!.ok === true;
+  // the lock lives on one reserved connection and goes with it. A dry run writes nothing, so it takes none (it may
+  // preview while a supervisor runs). Re-taken every tick: re-entrant (true); a reconnect that lost it gives false
+  const lock = dryRun ? null : await sql.reserve();
+  const locked = async () => !lock || (await lock`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0]!.ok === true;
   if (!(await locked())) { console.log('another supervisor is running'); process.exit(1); }
   const home = process.env.CB_SUPERVISOR_HOME || join(homedir(), '.claude-board', 'supervisor');
   const say = (line: string) => {
@@ -189,7 +224,7 @@ if (import.meta.main) {
     say(`supervisor up (cb-supervisor/${version})`);
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
-  const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), runnerToldAt: 0 };
+  const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0 };
   let code = 0;
   for (;;) {
     try {

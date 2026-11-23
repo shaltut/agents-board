@@ -20,7 +20,7 @@ const sess = (actor: string, role: string, o: Partial<Session> = {}): Session =>
   holds: 0, questions: 0, jobs: 0, last_event: ago(1), closing: false, last_restore: null, down_again_logged: false, ...o });
 const state = (o: { waiting?: Record<string, any>; sessions?: Session[]; supervised?: boolean } = {}): State => ({ project: 'sv', squad, supervised: o.supervised ?? true,
   waiting: { builder: 0, reviewer: 0, qa: 0, investigator: 0, architect: 0, owner: { claims: 0, kb: 0 }, ...o.waiting }, sessions: o.sessions ?? [] });
-const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, herdrLive: new Set(), herdrDown: new Set(), macLive: 0, startsLeft: 3, failedAt: new Map(), now: NOW, ...o });
+const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, herdrLive: new Set(), herdrDown: new Set(), launched: new Set(), macLive: 0, startsLeft: 3, failedAt: new Map(), now: NOW, ...o });
 const names = (l: { name: string }[]) => l.map((x) => x.name);
 
 test('not supervised: empty plan', () => {
@@ -57,12 +57,15 @@ test('3 starts per tick', () => {
   assert.equal(p.start.length, 3);
 });
 
-test('a squad name herdr runs but the board does not see yet counts as started', () => {
-  const live = new Set(['sv-b1-macbook']); // started last tick, not bound yet (or on a startup dialog)
-  assert.equal(tick(state({ waiting: { builder: 1 } }), { herdrLive: live }).start.length, 0);
-  assert.deepEqual(names(tick(state({ waiting: { builder: 2 } }), { herdrLive: live }).start), ['sv-B2@macbook']);
+test('a name this run launched and the board does not see yet counts as started; any other herdr name does not', () => {
+  const live = new Set(['sv-b1-macbook']); // in herdr, not live on the board
+  const launched = new Set(['sv-B1@macbook']); // this supervisor started it last tick (still binding, or on a dialog)
+  assert.equal(tick(state({ waiting: { builder: 1 } }), { herdrLive: live, launched }).start.length, 0);
+  assert.deepEqual(names(tick(state({ waiting: { builder: 2 } }), { herdrLive: live, launched }).start), ['sv-B2@macbook']);
   const old = sess('sv-B1@macbook', 'builder', { live: false }); // an old board row, not live
-  assert.equal(tick(state({ waiting: { builder: 1 }, sessions: [old] }), { herdrLive: live }).start.length, 0);
+  assert.equal(tick(state({ waiting: { builder: 1 }, sessions: [old] }), { herdrLive: live, launched }).start.length, 0);
+  // not launched by this run: it cancels no waiting work, and the next number starts
+  assert.deepEqual(names(tick(state({ waiting: { builder: 1 } }), { herdrLive: live }).start), ['sv-B2@macbook']);
 });
 
 test('a recently failed name is skipped, the next number is used', () => {

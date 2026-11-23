@@ -94,6 +94,15 @@ test('a closing session cannot claim', async () => {
   assert.equal(await claim(), 1);
 });
 
+test('a marked actor that binds again (a restart under the same name) can claim', async () => {
+  const { sql, sup } = await setup();
+  await card(sql, { stage: 'build' });
+  assert.equal((await sup`select cb.supervise_mark('sv-B1@macbook', true) as r`)[0].r, true);
+  await sql`select cb.iam('macbook', 'p9', 'sv-B1@macbook', 'sv', 'builder')`; // the restarted session's new pane
+  assert.equal((await sql`select count(*)::int as n from cb.sessions where actor = 'sv-B1@macbook' and closing_at is not null`)[0].n, 0);
+  assert.equal((await sql`select id from cb.task_claim('sv', 'sv-B1@macbook')`).length, 1);
+});
+
 test('a mark loses to a held card', async () => {
   const { sql, sup } = await setup();
   const id = await card(sql, { stage: 'build', assignee: 'sv-B1@macbook' });
@@ -170,6 +179,13 @@ test('digest: blocked line, and the totals line survives six down_again events',
   const at = d.findIndex((l: string) => l.startsWith('supervisor: started 0, closed 0, restored 0'));
   assert.ok(at > 0, JSON.stringify(d));
   assert.ok(d[at + 1].includes('down again') || d[at + 1].includes('blocked'), JSON.stringify(d));
+});
+
+test('digest: a failed start gets its own line', async () => {
+  const { sql, sup } = await setup();
+  await sup`select cb.supervise_log('sv', 'failed', 'sv-B1@macbook', 'model missing')`;
+  const d = (await sql`select cb.digest('sv', now() - interval '1 hour') as r`)[0].r;
+  assert.ok(d.includes('sv-B1@macbook failed to start: model missing'), JSON.stringify(d));
 });
 
 test('down_again_logged after a restore then a down_again', async () => {

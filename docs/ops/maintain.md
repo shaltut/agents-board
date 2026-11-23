@@ -241,13 +241,15 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 - closes a squad session idle 20 minutes that holds nothing (no card, question or job) when its role has no
   waiting work: it marks it closing, checks again, sends `/exit`, then closes the pane;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
-  for 3 minutes; if the runner's log port is still held, it reports that once an hour instead.
+  for 3 minutes, at most once per 10 minutes. A start that does not beat, or a log port still held by an old
+  runner, is told to each supervised project's lead once an hour.
 
 It never:
 
 - starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead once, with the
-  pane and the command to send the first prompt afterwards;
+  pane and the command to send the first prompt afterwards (the same when a session started but its first prompt
+  was not sent);
 - frees a card held by a down session, or runs anything heavy itself.
 
 ## Tests

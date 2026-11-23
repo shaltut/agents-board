@@ -1421,6 +1421,8 @@ begin
         role = case when excluded.actor = cb.sessions.actor then coalesce(excluded.role, cb.sessions.role) else excluded.role end,
         area = case when excluded.actor = cb.sessions.actor then coalesce(excluded.area, cb.sessions.area) else excluded.area end,
         model = case when excluded.actor = cb.sessions.actor then coalesce(excluded.model, cb.sessions.model) else excluded.model end;
+  -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
+  update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
   return trim(actor);
 end $$;
 
@@ -3855,9 +3857,9 @@ begin
                   count(*) filter (where e.data ->> 'what' = 'restore'), p)
       from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since having count(*) > 0
     union all
-    select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' else ' blocked' end
+    select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' when 'failed' then ' failed to start' else ' blocked' end
                             || coalesce(': ' || (e.data ->> 'note'), '')
-      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked'))
+      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed'))
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
     select x.grp, x.p0, x.id,
