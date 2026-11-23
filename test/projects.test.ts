@@ -163,6 +163,14 @@ test('projects: an alias merge moves the asks and bound sessions, not nulls them
   assert.equal((await sql`select project from cb.sessions where actor = 'B9@pc'`)[0].project, 'qhs');
 });
 
+test('projects: an alias merge moves the memories (their foreign key would refuse the delete)', async () => {
+  const { sql } = await setup();
+  await sql`select cb.task_add(project => 'acme', title => 'seed acme')`;
+  await sql`insert into cb.memories (project, kind, title, created_by) values ('acme', 'fact', 'merged memory', 'B9@pc')`;
+  await sql`select cb.project_alias('acme', 'qhs')`;
+  assert.equal((await sql`select project from cb.memories where title = 'merged memory'`)[0].project, 'qhs');
+});
+
 test('login: five wrong tries lock the name for two minutes; a success resets the count', async () => {
   const { sql } = await setup();
   loginFails.clear();

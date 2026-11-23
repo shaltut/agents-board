@@ -441,6 +441,7 @@ begin
      where g.project = a;
     update cb.epics e set project = t where e.project = a; -- epics follow their steps
     update cb.goals g set project = t where g.project = a;
+    update cb.memories m set project = t where m.project = a; -- no unique key on a memory's project: nothing collides
     update cb.jobs j set project = t where j.project = a; -- runner jobs (#3600): a foreign key that does not cascade a delete
     -- the runners' recipes follow, so moved queued jobs are claimed (no foreign key); a recipe the runner already offers
     -- the target keeps the target's row. runner.json must follow the merge too: a runner restart publishes its projects again
