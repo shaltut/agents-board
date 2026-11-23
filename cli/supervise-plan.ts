@@ -1,11 +1,12 @@
 // The supervisor's pure planner: from the board's facts and herdr's, decide this tick's restores, starts, closes and notes.
 import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad-up.ts';
 
-export type Session = { actor: string; role: string; area: string | null; machine: string | null; pane: string | null; live: boolean;
+export type Session = { actor: string; role: string; area: string | null; repo: string; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
   last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean };
 export type State = { project: string; squad: Squad; supervised: boolean;
-  waiting: { builder: number; reviewer: number; qa: number; investigator: number; architect: number; owner: Record<string, number> };
+  // builder and reviewer: per repo (#3703); owner: per area
+  waiting: { builder: Record<string, number>; reviewer: Record<string, number>; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   sessions: Session[] };
 // launched: names this supervisor run started or restored that the board has not yet seen live
 // herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only 'idle' may be closed
@@ -49,15 +50,18 @@ export function planTick(i: TickInput): TickPlan {
     take(w.name);
   }
 
-  // one want group per role (owners: one per area)
-  const groups = new Map<string, { role: string; area?: string; waiting: number; names: typeof wanted }>();
+  // one want group per role (owners: one per area; builders and reviewers: one per repo)
+  const perRepo = (role: string): role is 'builder' | 'reviewer' => role === 'builder' || role === 'reviewer';
+  const groups = new Map<string, { role: string; area?: string; repo: string; waiting: number; names: typeof wanted }>();
   for (const w of wanted) {
-    const key = w.role + (w.area ? `/${w.area}` : '');
-    const waiting = w.role === 'owner' ? state.waiting.owner[w.area!] ?? 0 : state.waiting[w.role as Exclude<keyof State['waiting'], 'owner'>] ?? 0;
-    (groups.get(key) ?? groups.set(key, { role: w.role, area: w.area, waiting, names: [] }).get(key)!).names.push(w);
+    const key = `${w.role}/${w.area ?? ''}/${w.repo}`;
+    const waiting = w.role === 'owner' ? state.waiting.owner[w.area!] ?? 0
+      : perRepo(w.role) ? state.waiting[w.role][w.repo] ?? 0
+      : state.waiting[w.role as 'qa' | 'investigator' | 'architect'] ?? 0;
+    (groups.get(key) ?? groups.set(key, { role: w.role, area: w.area, repo: w.repo, waiting, names: [] }).get(key)!).names.push(w);
   }
   for (const g of groups.values()) {
-    const mine = state.sessions.filter((s) => s.role === g.role && (g.area === undefined || s.area === g.area));
+    const mine = state.sessions.filter((s) => s.role === g.role && (g.area === undefined || s.area === g.area) && (!perRepo(g.role) || s.repo === g.repo));
     const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.asks && !s.closing;
     // a name this run launched that herdr runs but the board does not see yet (still starting, or on a startup
     // dialog) counts as started: live, and about to take work, so the next tick does not start another for the same

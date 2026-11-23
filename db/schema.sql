@@ -4531,6 +4531,22 @@ begin
     if nm is not null then raise exception 'repo % has builders but no reviewers: add a reviewer count for %', nm, nm; end if;
   end if;
   if mac > 8 then raise exception 'macbook would run % sessions; the cap is 8', mac; end if;
+  -- herdr names are at most 32 characters (cli/squad-up.ts herdrName maps one character to one): each role's longest
+  -- session name must fit. Home repo <p>-B2@m, another repo <p>-<repo>-B2@m (builders and reviewers only: project-wide
+  -- roles are always <p>-Q1@m), owners <p>-O-<area>@m, the lead orch@m.
+  select sn into nm from (
+      select 'orch@' || (roles->'lead'->>'machine') as sn where roles ? 'lead'
+      union all
+      select p || '-O-' || coalesce(ae ->> 'name', ae #>> '{}') || '@' || (roles->'owner'->>'machine')
+        from jsonb_array_elements(areas) ae where roles ? 'owner'
+      union all
+      select p || '-' || case when rp is null or cn.key = hm or rl.role not in ('builder', 'reviewer') then '' else cn.key || '-' end || rl.letter || cn.value || '@' || (roles->rl.role->>'machine')
+        from (values ('architect', 'A'), ('builder', 'B'), ('reviewer', 'R'), ('qa', 'Q'), ('investigator', 'I')) rl(role, letter)
+        cross join lateral jsonb_each_text(case when jsonb_typeof(roles->rl.role->'count') = 'object' then roles->rl.role->'count'
+                                                else jsonb_build_object('main', roles->rl.role->'count') end) cn
+       where roles ? rl.role) z
+   where length(sn) > 32 limit 1;
+  if nm is not null then raise exception 'session name % is over herdr''s 32 characters: use a shorter repo, area or machine key', nm; end if;
   ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
         || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
         || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;
@@ -4822,31 +4838,40 @@ begin
 end $$;
 
 -- Everything the supervisor plans from, for one project. Waiting = cards nobody holds (design: the owner of the card's
--- area first, the architect once no owner covers it or it has waited 15 minutes).
+-- area first, the architect once no owner covers it or it has waited 15 minutes); builders and reviewers per repo.
 create function cb.supervise_state(project text) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
-declare p text := cb.read_project(project); sq jsonb; owners boolean; areas text[]; res jsonb;
+declare p text := cb.read_project(project); rs text[] := cb._repos_of(p); sq jsonb; owners boolean; areas text[]; res jsonb;
 begin
   select pr.squad into sq from cb.projects pr where pr.slug = p;
   owners := coalesce(sq -> 'roles' ? 'owner', false);
-  areas := coalesce(array(select jsonb_array_elements_text(sq -> 'areas')), '{}');
+  -- an area is a name, or {name, repo} in a squad with repos
+  areas := coalesce(array(select coalesce(e ->> 'name', e #>> '{}') from jsonb_array_elements(sq -> 'areas') e), '{}');
   with free as (
     select t.* from cb.tasks t
      where t.project = p and t.status = 'next' and nullif(trim(t.assignee), '') is null
   ), design as (
     select f.*, owners and f.labels && areas as covered from free f where f.stage = 'design'
+  ), repo_work as (
+    -- build and review work per repo (#3703): a part counts under its repo when unheld at its card's stage; a card
+    -- without parts under its first repo (one repo: the home repo); no repos named in a project of several: nobody's
+    select pt.repo, f.stage from free f join cb.task_parts pt on pt.task_id = f.id
+     where f.stage in ('build', 'review') and pt.stage = f.stage and pt.status = 'next' and nullif(trim(pt.assignee), '') is null
+    union all
+    select case when cardinality(rs) > 1 then f.repos[1] else rs[1] end, f.stage from free f
+     where f.stage in ('build', 'review') and not exists (select 1 from cb.task_parts pt where pt.task_id = f.id)
   )
   select jsonb_build_object(
     'project', p, 'squad', sq, 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true', false),
     'waiting', jsonb_build_object(
-      'builder', (select count(*) from free f where f.stage = 'build'),
-      'reviewer', (select count(*) from free f where f.stage = 'review'),
+      'builder', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'build' and w.repo = r)) from unnest(rs) r),
+      'reviewer', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'review' and w.repo = r)) from unnest(rs) r),
       'qa', (select count(*) from free f where f.stage = 'qa'),
       'investigator', (select count(*) from free f where f.type = 'research'),
       'architect', (select count(*) from design d where not d.covered or coalesce(d.stage_since, d.updated_at) < now() - interval '15 minutes'),
       'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes')) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
-        'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'machine', s.machine, 'pane', s.pane,
+        'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))
                  + (select count(*) from cb._held_parts() h where h.assignee = a.actor),
