@@ -81,9 +81,11 @@ starts per tick across all projects. A name that fails to start is not tried aga
 
 ### 4. A down session that still holds cards
 
-Q2324 says no card is freed because its session is down, and Ahmed restores the session. **Open question for Ahmed
-(on the board):** should the supervisor do that restore by itself: start the same name again, with `cb resume` as its
-first prompt, at most once per 30 minutes per name? If not, the lead's digest keeps naming it as today.
+Q2324 says no card is freed because its session is down. **Decided by Ahmed (Q2381): the supervisor restores it.**
+A squad name of the project that is down (not live on the board, no herdr agent) and holds open cards is started
+again under the same name, with `cb resume` in its first prompt instead of `cb next`, at most once per 30 minutes per
+name. If it is down again within 30 minutes of a restore, the supervisor does not retry: the lead's digest names it
+for a person. Restores count toward the Mac cap and the 3 starts per tick, and go before new starts.
 
 ### 5. Startup dialogs are Ahmed's
 
