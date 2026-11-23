@@ -35,8 +35,9 @@ export function stripMessages(cmd) {
 }
 
 const PATTERNS = [
-  // flags -rf, -fr, -r -f, -f -r; the target is a bare / or ~ (also quoted), not ~/tmp/x
-  ['rm -rf /', String.raw`\brm[ \t]+(?:-[a-z]*r[a-z]*[ \t]+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*[ \t]+-[a-z]*r[a-z]*|-[a-z]*(?:rf|fr)[a-z]*)[ \t]+["']?(?:/\*?|~/?)(?=["'\s;&|)]|$)`],
+  // recursive rm (any flag order, -r/-R/--recursive, with or without -f; a non-TTY rm -r never prompts);
+  // the target is a bare / /* ~ ~/ ~/* ~/.* (also quoted), not ~/tmp/x
+  ['rm -rf /', String.raw`\brm[ \t]+(?:--?[a-z-]+[ \t]+)*(?:-[a-z]*r[a-z]*|--recursive)(?:[ \t]+--?[a-z-]+)*[ \t]+["']?(?:/\*?|~(?:/\.?\*)?/?)(?=["'\s;&|)]|$)`],
   ['mkfs.', String.raw`\bmkfs\.`],
   ['dd of=/dev/', String.raw`\bdd[ \t]+if=.*\bof=/dev/`],
   ['fork bomb', String.raw`:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`],
@@ -44,8 +45,9 @@ const PATTERNS = [
   ['mv to /dev/null', String.raw`\bmv[ \t][^;&|\n]*[ \t]/dev/null`], // one command segment: "git mv a b && x > /dev/null" is fine
   ['pipe to shell', String.raw`\b(?:wget|curl)[ \t].*\|[ \t]*(?:sudo[ \t]+)?(?:ba)?sh\b`],
   // a power-off word as a command or argument, not inside a file name (graceful-shutdown.ts, shutdown.test.ts)
-  ['shutdown', String.raw`(?<![\w.-])shutdown(?![\w./-])`],
-  ['reboot', String.raw`(?<![\w.-])reboot(?![\w./-])`],
+  // (a trailing dot is a file name unless it is .exe or .target: shutdown.exe, reboot.target)
+  ['shutdown', String.raw`(?<![\w.-])shutdown(?![\w/-])(?!\.(?!(?:exe|target)\b))`],
+  ['reboot', String.raw`(?<![\w.-])reboot(?![\w/-])(?!\.(?!(?:exe|target)\b))`],
   ['init 0/6', String.raw`\binit[ \t]+[06]\b`],
   ['format c:', String.raw`\bformat[ \t]+c:`],
   ['del c:', String.raw`\bdel[ \t]+/f[ \t]+/s[ \t]+/q[ \t]+c:`],

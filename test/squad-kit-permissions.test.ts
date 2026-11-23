@@ -106,8 +106,22 @@ test('a named-branch push stays allowed for the roles that may push', () => {
 test('read-only roles also deny commit with git options in front', () => {
   for (const r of READ_ONLY) {
     const { deny } = load(r).permissions;
-    assert.ok(deny.includes('Bash(git * commit*)'), r);
+    assert.ok(deny.includes('Bash(git -* commit*)'), r);
     assert.ok(denied(deny, 'git -C wt commit -m x') && denied(deny, 'git -c user.name=x commit -m y'), r);
+    assert.equal(denied(deny, 'git cat-file commit HEAD'), false, r);
+  }
+});
+
+test('push options that name no branch are denied, with twins; the git -* twins spare other subcommands', () => {
+  const bad = ['git push --no-verify', 'git push origin --no-verify', 'git push -u origin --no-verify', 'git push origin -u',
+    'git push --set-upstream origin', 'git push origin --set-upstream', 'git push -u upstream', 'git push -v', 'git push -q',
+    'git push --follow-tags', 'git push --atomic origin', 'git -C wt push --no-verify', 'git -C wt push origin main',
+    'git -C wt push origin -u', 'git -C wt push -v', 'git -c k=v push --atomic origin'];
+  const fine = ['git stash push -u', 'git log --grep push', 'git push -u origin feat/x'];
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const c of bad) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
+    for (const c of fine.filter((x) => !(READ_ONLY.includes(r) && x.startsWith('git push')))) assert.equal(denied(deny, c), false, `${r} must allow: ${c}`);
   }
 });
 

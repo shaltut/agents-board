@@ -91,6 +91,18 @@ const mustBlock = [
   'rm -r -f /',
   'rm -f -r /',
   'rm -rf "/"',
+  'rm -rf ~/*',
+  'rm -fr ~/*',
+  'rm -rf ~/.*',
+  'rm -r /',
+  'rm -R /*',
+  'rm --recursive ~',
+  'rm -r ~/',
+  'rm -r ~/*',
+  'rm -v -r /',
+  // a file extension that runs, or a unit that reboots
+  'shutdown.exe /r /t 0',
+  'systemctl start reboot.target',
 ];
 
 const mustPass = [
