@@ -183,6 +183,38 @@ a new volume and a restore, never just a new image tag.
 | GitHub watch silent | gh signed out, or its token expired or was revoked | `dc exec board gh auth status`; `dc exec board cb github` shows the last error; log in again |
 | The board or db restarted on its own at night | Watchtower, if the opt-out label was lost | `docker inspect -f '{{.Config.Labels}}' claude-board-board-1` shows `watchtower.enable:false` |
 
+## PC job runner
+
+Heavy checks (type checks, test suites, builds, DB tests) run on the PC, not on the Macs: sessions queue them with
+`cb run` and get the result as a message. One runner serves all projects.
+
+Set up, once, on the PC:
+
+1. Copy `docs/ops/runner.example.json` to `~/.claude-board/runner.json` (or point `CB_RUNNER_CONFIG` at it). Set
+   `log.host` to the PC's Tailscale address and `log.port` to a free port (the example's are placeholders), list the
+   Tailscale addresses that may read logs in `log.peers` (the MacBook), and each project's `git` URL, `base` folder
+   and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
+2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
+   (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
+3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
+
+What each result means:
+
+| Result | Meaning | Do |
+|---|---|---|
+| `error: push it first` | the commit is not on origin | push the branch, queue again |
+| `error: not on a branch of origin` | the commit is only on a tag, a PR ref or nowhere | push it on a branch |
+| `error: timed out after <N> min` | the recipe's timeout hit; the process tree was killed | read `cb job log <id>`; raise `timeout` only if the work is real |
+| `error: Docker is not running` | a DB recipe, no Docker on the PC | start Docker Desktop, queue again |
+| `error: runner restarted` | the runner stopped mid-job | queue again |
+| `error: could not start <cmd>` | the program is missing or is a `.cmd` file | fix `runner.json` or the PC's PATH |
+| `error: bad parameter <name>: <value>` | the runner's own check refused a value | fix the value; if it looks right, the recipe's pattern is too tight |
+| `error: could not fetch from origin` | no network, or no access to the repo | check git credentials on the PC |
+| `error: bad job row` | the job row is malformed | `cb job show <id>`; report it |
+| `error: runner fault: see cb job log <id>` | the runner itself failed | read the log, then the runner's pane |
+| `no tests ran: <summary>` | the command exited 0 but ran nothing | the file list or app is wrong |
+| `summary withheld: see cb job log <id>` | the output looked sensitive, so none of it went to the board | read the log from the PC or the MacBook |
+
 ## Tests
 
 Never on the VPS. The suite truncates whatever database it is given and expects the PC's layout (127.0.0.1:5434);

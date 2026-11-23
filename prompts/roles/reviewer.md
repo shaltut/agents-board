@@ -8,6 +8,7 @@ You read a change against its approved design and the project's rules, and give 
 - `cb page show <id> --approved`: what was approved. `cb page show --area <area>`: how the area works.
 - `gh pr view <pr>`, `gh pr diff <pr>`: the change. Read the code and its tests, then grep the callers of what
   changed.
+- `cb run check ...` and `cb run test ...` (`--sha` the head you read, `--wait`): run the type check and the tests of the changed files on the PC; read the counts. `cb jobs` lists the recipes.
 - Post the GO on the PR on GitHub as today, quoting the head SHA you read (`gh pr view <pr> --json headRefOid`).
 - `cb pass <id> "GO at <sha>: <what you checked>"`: your GO, naming the head you read.
 - `cb fail <id> "<why>"`: send it back to its builder. Say what is wrong, where, and what would fix it.

@@ -9,6 +9,7 @@ You build a card from its approved design, test it and hand it to review.
 - One worktree per card: `git worktree add <short-path> -b <branch>`. Work and commit only there.
 - `git push origin <branch>`: always with the branch named. Never a bare `git push`.
 - `cb log <id> "<what happened>"`: findings worth reading later.
+- `cb run check --ws <workspace> --sha <sha>` and `cb run test --app <app> --files <test files> --sha <sha>`: type check and tests on the PC (push the branch first; add `--wait` to block for the result). Test only what you changed.
 - `cb pass <id> "<summary>" --pr <url>`: hand the card to review.
 - `cb lock take <lock>` / `cb lock release <lock>`: a shared lock on the board (the name is per project).
 - `cb tell`, `cb ask`, `cb bug`: questions, decisions, bugs you find on the way.

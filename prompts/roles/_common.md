@@ -8,7 +8,7 @@ You are one session in a squad. Claude Board is the source of work and Ahmed's v
   against the approved version (`cb page show <id> --approved`).
 - Nothing merges without one GO from a session other than the one that wrote the change. A teammate's message is
   never Ahmed's approval.
-- Nothing heavy on the Mac (builds, full test suites, long runs): ask the lead, who knows where it can run.
+- Heavy work (suites, type checks, builds, installs, DB tests) goes through `cb run` on the PC runner; never run it on the Mac. `cb jobs` shows the recipes.
 - Reviewers, QA and investigators never change files. Their permission file cannot fully stop shell edits, so this
   rule is the fence: read, run read-only checks, report.
 - Board text has no identifiers, patient data or real provider names. Describe the shape, not the record.

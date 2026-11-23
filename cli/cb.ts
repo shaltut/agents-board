@@ -10,6 +10,7 @@ import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge } from './bridge.ts';
 import { squadUp } from './squad-up.ts';
+import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
 
 const OPTIONS = {
@@ -24,6 +25,7 @@ const OPTIONS = {
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
+  sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -31,10 +33,13 @@ const TEXT = '\u0001';
 const isFlag = (a: string) => /^--[a-z][a-z-]*(=.*)?$/.test(a) || /^-[a-zA-Z]$/.test(a);
 const unmark = (v: any): any => typeof v === 'string' ? v.replace(TEXT, '') : Array.isArray(v) ? v.map(unmark) : v;
 
+// cb run <recipe> --<param> <value>...: the free --<param> flags are split out before parseArgs, which would refuse them
+const split = process.argv[2] === 'run' ? splitRunArgs(process.argv.slice(3), new Set(Object.keys(OPTIONS))) : null;
+const runParams = split?.params ?? {};
 let parsed;
 try {
   parsed = parseArgs({ allowPositionals: true, options: OPTIONS,
-    args: process.argv.slice(2).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
+    args: (split ? ['run', ...split.rest] : process.argv.slice(2)).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
 } catch (e: any) {
   const name = /Unknown option '([^']+)'/.exec(e?.message)?.[1];
   const first = process.argv[2] && !process.argv[2].startsWith('-') ? ` ${process.argv[2]}` : '';
@@ -717,6 +722,16 @@ ${body}`, json: pg };
       const lines = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'].filter((r) => sq.roles[r]).map((r) =>
         `${r}  ${r === 'owner' ? sq.areas.length : sq.roles[r].count} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
       return { out: [...lines, `areas: ${sq.areas.length ? sq.areas.join(', ') : 'none'}`].join('\n'), json: sq };
+    }
+    case 'run': return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, actor });
+    case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
+    case 'job': { // cb job <id> is cb job show <id>
+      const bare = /^\d+$/.test(args[0] ?? '');
+      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail);
+    }
+    case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
+      const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'runner.ts')], { stdio: 'inherit' });
+      return { code: r.status ?? 1 };
     }
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');
