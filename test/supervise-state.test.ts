@@ -39,7 +39,7 @@ test('waiting counts per role', async () => {
   await card(sql, { stage: null }); // unstaged
   const s = await state(sup);
   assert.equal(s.supervised, true);
-  assert.deepEqual({ ...s.waiting, owner: undefined }, { builder: 1, reviewer: 1, qa: 1, investigator: 1, architect: 0, owner: undefined });
+  assert.deepEqual(s.waiting, { builder: 1, reviewer: 1, qa: 1, investigator: 1, architect: 0, owner: { claims: 0 } });
 });
 
 test('owner first, architect after 15 minutes', async () => {
@@ -51,7 +51,7 @@ test('owner first, architect after 15 minutes', async () => {
   await sql`update cb.tasks set stage_since = now() - interval '16 minutes' where id = ${id}`;
   s = await state(sup);
   assert.equal(s.waiting.architect, 1);
-  assert.equal(s.waiting.owner.claims, 1);
+  assert.equal(s.waiting.owner.claims, 0); // never demand for both roles at once
   await card(sql, { stage: 'design', labels: ['other'] }); // no squad area tag: architect at once
   assert.equal((await state(sup)).waiting.architect, 2);
 });
@@ -141,4 +141,42 @@ test('a runner event needs no project, and sessions_overview hides the superviso
   assert.ok(!rows.some((x: any) => x.actor === 'supervisor' || x.actor === 'runner'));
   const all = (await sql`select cb.sessions_overview() as r`)[0].r;
   assert.ok(!all.some((x: any) => x.actor === 'supervisor'));
+});
+
+test('supervise_mark is false for an actor with no session', async () => {
+  const { sup } = await setup();
+  assert.equal((await sup`select cb.supervise_mark('sv-B7@macbook', true) as r`)[0].r, false);
+});
+
+test('supervise_log refuses an empty session and a sensitive note, cuts long notes, keeps the note in data', async () => {
+  const { sql, sup } = await setup();
+  await assert.rejects(sup`select cb.supervise_log('sv', 'start', '')`, /session is required/);
+  await assert.rejects(sup`select cb.supervise_log('sv', 'start', null)`, /session is required/);
+  await assert.rejects(sup`select cb.supervise_log('sv', 'blocked', 'sv-B1@macbook', 'password: hunter2hunter2')`, /looks like|keeps no such text/);
+  await sup`select cb.supervise_log('sv', 'blocked', 'sv-B1@macbook', ${'x'.repeat(300)})`;
+  const [e] = await sql`select data from cb.events where kind = 'supervisor' order by id desc limit 1`;
+  assert.equal(e.data.note.length, 200);
+  assert.deepEqual(Object.keys(e.data).sort(), ['note', 'session', 'what']);
+});
+
+test('digest: blocked line, and the totals line survives six down_again events', async () => {
+  const { sql, sup } = await setup();
+  await sup`select cb.supervise_log('sv', 'blocked', 'sv-B1@macbook', 'startup dialog')`;
+  let d = (await sql`select cb.digest('sv', now() - interval '1 hour') as r`)[0].r;
+  assert.ok(d.includes('sv-B1@macbook blocked: startup dialog'), JSON.stringify(d));
+  for (let i = 1; i <= 6; i++) await sup`select cb.supervise_log('sv', 'down_again', ${'sv-B' + i + '@macbook'}, 'twice')`;
+  d = (await sql`select cb.digest('sv', now() - interval '1 hour') as r`)[0].r;
+  const at = d.findIndex((l: string) => l.startsWith('supervisor: started 0, closed 0, restored 0'));
+  assert.ok(at > 0, JSON.stringify(d));
+  assert.ok(d[at + 1].includes('down again') || d[at + 1].includes('blocked'), JSON.stringify(d));
+});
+
+test('down_again_logged after a restore then a down_again', async () => {
+  const { sup } = await setup();
+  await sup`select cb.supervise_log('sv', 'restore', 'sv-B1@macbook')`;
+  let b1 = (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook');
+  assert.deepEqual([!!b1.last_restore, b1.down_again_logged], [true, false]);
+  await sup`select cb.supervise_log('sv', 'down_again', 'sv-B1@macbook')`;
+  b1 = (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook');
+  assert.equal(b1.down_again_logged, true);
 });

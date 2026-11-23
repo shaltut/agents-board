@@ -3849,14 +3849,14 @@ begin
       ) n having count(*) > 0
     union all
     -- 12: what the supervisor did since the last digest, and the sessions it could not keep up (#3601)
-    select 12, false, null::bigint,
+    select 12, false, 0::bigint,
            format('supervisor: started %s, closed %s, restored %s (cb sessions %s)',
                   count(*) filter (where e.data ->> 'what' = 'start'), count(*) filter (where e.data ->> 'what' = 'close'),
                   count(*) filter (where e.data ->> 'what' = 'restore'), p)
       from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since having count(*) > 0
     union all
     select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' else ' blocked' end
-                            || coalesce(': ' || (regexp_match(e.summary, '\((.*)\)$'))[1], '')
+                            || coalesce(': ' || (e.data ->> 'note'), '')
       from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked'))
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
@@ -4338,7 +4338,7 @@ begin
       'qa', (select count(*) from free f where f.stage = 'qa'),
       'investigator', (select count(*) from free f where f.type = 'research'),
       'architect', (select count(*) from design d where not d.covered or coalesce(d.stage_since, d.updated_at) < now() - interval '15 minutes'),
-      'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels))) from unnest(areas) ar), '{}')),
+      'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes')) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'machine', s.machine, 'pane', s.pane,
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
@@ -4367,6 +4367,7 @@ create function cb.supervise_mark(actor text, closing boolean) returns boolean l
 begin
   perform cb._supervisor_only();
   update cb.sessions s set closing_at = case when closing then now() end where s.actor = actor;
+  if not found then return false; end if;
   if closing and exists (select 1 from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled')) then
     update cb.sessions s set closing_at = null where s.actor = actor;
     return false;
@@ -4377,15 +4378,19 @@ end $$;
 -- One board event per start, close, restore and the like (project null for runner events). Names sessions and counts only.
 create function cb.supervise_log(project text, what text, session text, note text default null) returns bigint language plpgsql as $$
 #variable_conflict use_variable
-declare id bigint;
+declare id bigint; hit text;
 begin
   perform cb._supervisor_only();
+  if nullif(trim(session), '') is null then raise exception 'session is required'; end if;
+  note := nullif(left(trim(note), 200), '');
+  hit := cb._sensitive(note);
+  if hit is not null then raise exception 'the note looks like %; the board keeps no such text', hit; end if;
   if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again') then
     raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again';
   end if;
   insert into cb.events (actor, project, kind, summary, data)
   values ('supervisor', case when project is null then null else cb.read_project(project) end, 'supervisor',
-          what || ' ' || session || coalesce(' (' || note || ')', ''), jsonb_build_object('what', what, 'session', session))
+          what || ' ' || session || coalesce(' (' || note || ')', ''), jsonb_build_object('what', what, 'session', session) || case when note is null then '{}'::jsonb else jsonb_build_object('note', note) end)
   returning events.id into id;
   return id;
 end $$;
