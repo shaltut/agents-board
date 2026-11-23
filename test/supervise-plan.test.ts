@@ -106,7 +106,7 @@ test('a holding name is not reused for a start even when its restore is held bac
 
 test('restores use up startsLeft', () => {
   const down = sess('sv-R1@macbook', 'reviewer', { live: false, holds: 1 });
-  const p = tick(state({ sessions: [down], waiting: { builder: 5 } }));
+  const p = tick(state({ sessions: [down], waiting: { builder: 5 } }), { startsLeft: 2 });
   assert.equal(p.restore.length, 1);
-  assert.equal(p.start.length, 2);
+  assert.equal(p.start.length, 1);
 });
