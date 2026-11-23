@@ -236,16 +236,23 @@ const probe = (host: string, port: number) => new Promise<boolean>((ok) => {
   s.once('error', () => ok(false));
 });
 
+// One supervisor anywhere: a session advisory lock on its own one-connection client that is never recycled. A dropped
+// connection (board restart, killed backend) takes the lock with it; postgres.js reconnects a pool connection on its
+// next query, so the next check takes the lock again there (a reserved connection it never reconnects: a query on it
+// throws from a timer and never settles). True: held; false: another supervisor took it; throws: board unreachable.
+export const lockClient = (app: string) => connect(undefined, { app, max: 1, lifetime: null });
+export const locked = async (lock: any) => (await lock`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0]!.ok === true;
+
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
   const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
-  const sql = connect(undefined, { app: `cb-supervisor/${version}`, max: 2 });
-  // the lock lives on one reserved connection and goes with it. A dry run writes nothing, so it takes none (it may
-  // preview while a supervisor runs). Re-taken every tick: re-entrant (true); a reconnect that lost it gives false
-  const lock = dryRun ? null : await sql.reserve();
-  const locked = async () => !lock || (await lock`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0]!.ok === true;
-  if (!(await locked())) { console.log('another supervisor is running'); process.exit(1); }
+  const app = `cb-supervisor/${version}`, sql = connect(undefined, { app, max: 1 });
+  // A dry run writes nothing, so it takes no lock (it may preview while a supervisor runs). Checked every tick, before
+  // anything acts: re-entrant (true); board unreachable: the tick fails and the next one tries again
+  const lock = dryRun ? null : lockClient(app);
+  const isLocked = async () => !lock || await locked(lock);
+  if (!(await isLocked())) { console.log('another supervisor is running'); process.exit(1); }
   const home = process.env.CB_SUPERVISOR_HOME || join(homedir(), '.claude-board', 'supervisor');
   const say = (line: string) => {
     const at = new Date().toISOString();
@@ -263,7 +270,7 @@ if (import.meta.main) {
   let code = 0;
   for (;;) {
     try {
-      if (!(await locked())) { say('another supervisor is running'); process.exit(1); }
+      if (!(await isLocked())) { say('another supervisor is running'); process.exit(1); }
       const now = ((await sql`select now() as t`)[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
       for (const line of await tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe })) say(line);
