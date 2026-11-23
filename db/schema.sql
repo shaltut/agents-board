@@ -1546,7 +1546,9 @@ begin
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')))
-                              and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')), '[]'),
+                              and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
+                              -- a part in work (#3703) is work in progress too
+                              and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
     -- Shared memory changes (#553), same audience as broadcasts: bound sessions on the entry's project, every bound
     -- session for a global one, only that machine's for a machine-scoped one. Live on add, Ahmed's confirm, a
     -- supersede (one line naming the replacement: its add is skipped), a retire with its why. Never a proposal, a
@@ -2244,7 +2246,9 @@ begin
         order by s.actor)
       from (select distinct s2.actor from cb.sessions s2 where (p is null or s2.project = p) and s2.last_seen > now() - interval '90 seconds') s
      where s.actor <> me and s.actor <> 'orch' and s.actor not like 'orch@%'
-       and not exists (select 1 from cb.tasks t where t.assignee = s.actor and t.status = 'in_progress')), '[]'),
+       and not exists (select 1 from cb.tasks t where t.assignee = s.actor and t.status = 'in_progress')
+       -- a part in work (#3703) is work in progress too
+       and not exists (select 1 from cb._held_parts() h where h.assignee = s.actor and h.status = 'in_progress')), '[]'),
     'next', cb._brief_tasks(p, null, 'next', 50),
     'huddles', coalesce((select jsonb_agg(jsonb_build_object('id', h.id, 'topic', h.topic, 'last_at', l.at) order by l.at)
       from cb.huddles h cross join lateral (select coalesce(max(e.at), h.opened_at) as at from cb.events e
@@ -3370,6 +3374,8 @@ drop function if exists cb._role_model cascade;
 drop function if exists cb.digest cascade;
 drop function if exists cb.digests_due cascade;
 drop function if exists cb._stage_words cascade;
+drop function if exists cb._held_parts cascade;
+drop function if exists cb._parts_words cascade;
 drop function if exists cb._finish_line cascade;
 drop function if exists cb._takes_it cascade;
 drop function if exists cb.next_step cascade;
@@ -3919,6 +3925,46 @@ begin
       n := n + 1;
     end if;
   end loop;
+  -- held parts (#3703): the same rules per part, its nudge time on the part. Quiet = no part change, no card event (nudges
+  -- excluded), no event by the holder anywhere, no fresh bind of its session.
+  for r in
+    select h.task_id as id, h.repo, h.assignee, h.status, h.stage, h.nudged_at, t.project, left(t.title, 80) as title, q.quiet_since
+      from cb._held_parts() h join cb.tasks t on t.id = h.task_id
+      cross join lateral (select greatest(h.since,
+                                          (select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')),
+                                          (select max(e.at) from cb.events e where e.actor = h.assignee),
+                                          (select max(s.started_at) from cb.sessions s where s.actor = h.assignee)) as quiet_since) q
+     where cb._pipeline(t.project) and q.quiet_since <= now() - interval '30 minutes'
+       and exists (select 1 from cb.sessions s where s.actor = h.assignee and s.last_seen > now() - interval '10 minutes')
+       and not exists (select 1 from cb.questions qq where qq.task_id = t.id and qq.status = 'open')
+  loop
+    mins := floor(extract(epoch from now() - r.quiet_since) / 60);
+    idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
+    perform 1 from cb.tasks t where t.id = r.id for update;  -- part rows change only under the card's row lock
+    if mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since and r.nudged_at <= now() - interval '60 minutes')) then
+      why := case when r.status = 'next' then format('held for %s with no activity', idle)
+                  else format('no update for %s and the nudge went unanswered', idle) end;
+      update cb.task_parts p set assignee = null, status = 'next', nudged_at = null
+       where p.task_id = r.id and p.repo = r.repo and p.assignee = r.assignee and p.status = r.status;  -- claimed or passed since: leave it
+      get diagnostics moved = row_count;
+      continue when moved = 0;
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'note', format('freed from %s: %s (part %s)', r.assignee, why, r.repo),
+              jsonb_build_object('stall', true, 'repo', r.repo));
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message', format('#%s part %s went back to the queue: %s', r.id, r.repo, why),
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo));
+      n := n + 2;
+    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since) then
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', r.project, r.id, 'message',
+              format('#%s "%s" (part %s) has had no update for %s at %s. Say where it stands (cb log %s "...") or it goes back to the queue in an hour.',
+                     r.id, r.title, r.repo, idle, cb._stage_words(r.stage), r.id),
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo));
+      update cb.task_parts p set nudged_at = now() where p.task_id = r.id and p.repo = r.repo;
+      n := n + 1;
+    end if;
+  end loop;
   return n;
 end $$;
 
@@ -3961,6 +4007,14 @@ begin
     -- 4: reviewed, waiting for the lead to merge
     select 4, t.priority = 'P0', t.id, format('#%s reviewed: merge it, then cb pass %s "<what merged>" --commit <sha>', t.id, t.id)
       from cb.tasks t where t.project = p and t.stage = 'merge' and t.status not in ('done', 'cancelled')
+       and not exists (select 1 from cb.task_parts tp where tp.task_id = t.id)
+    union all
+    -- 4, a parts card (#3703): a line per part still to merge
+    select 4, t.priority = 'P0', t.id,
+           format('#%s reviewed: merge %s%s, then cb pass %s "<what merged>" --repo %s --commit <sha>', t.id, tp.repo,
+                  coalesce(' (PR #' || substring(tp.pr from '/pull/([0-9]+)') || ')', ''), t.id, tp.repo)
+      from cb.tasks t join cb.task_parts tp on tp.task_id = t.id and tp.stage = 'merge'
+     where t.project = p and t.stage = 'merge' and t.status not in ('done', 'cancelled')
     union all
     -- 5: answers nobody collected: the lead asked, or the asker's relay has been gone for 10 minutes
     select 5, false, q.id, format('Q%s answered for %s (%s): cb pending', q.id, q.asked_by,
@@ -3989,15 +4043,20 @@ begin
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
     union all
-    -- 9: a holder that is down keeps its cards (Q2324); a name with no session row is a re-bound pane
-    select 9, bool_or(t.priority = 'P0'), min(t.id),
-           format('%s is down and holds %s: restore it, or cb edit %s --assignee <session>', t.assignee,
-                  string_agg('#' || t.id, ', ' order by t.id), min(t.id))
-      from cb.tasks t
-     where t.project = p and t.status in ('in_progress', 'next', 'blocked') and nullif(trim(t.assignee), '') is not null
-       and not exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
-       and (t.assignee like '%@%' or exists (select 1 from cb.sessions s where s.actor = t.assignee))
-     group by t.assignee
+    -- 9: a holder that is down keeps its cards and parts (Q2324); a name with no session row is a re-bound pane. cb edit
+    -- hands over a card, not a part: a holder of parts only is restored
+    select 9, bool_or(x.p0), min(x.id),
+           format('%s is down and holds %s: restore it', x.holder, string_agg(x.what, ', ' order by x.id, x.what))
+           || coalesce(', or cb edit ' || min(x.id) filter (where x.repo is null) || ' --assignee <session>', '')
+      from (select t.id, t.priority = 'P0' as p0, t.assignee as holder, null::text as repo, '#' || t.id as what
+              from cb.tasks t
+             where t.project = p and t.status in ('in_progress', 'next', 'blocked') and nullif(trim(t.assignee), '') is not null
+            union all
+            select t.id, t.priority = 'P0', h.assignee, h.repo, format('#%s (part %s)', t.id, h.repo)
+              from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p) x
+     where not exists (select 1 from cb.sessions s where s.actor = x.holder and s.last_seen > now() - interval '10 minutes')
+       and (x.holder like '%@%' or exists (select 1 from cb.sessions s where s.actor = x.holder))
+     group by x.holder
     union all
     -- 10: a live session on the wrong model for its role
     select 10, false, null::bigint, format('%s is a %s on %s; the role runs %s: restart it with --model %s',
@@ -4045,7 +4104,14 @@ begin
     union all
     select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' when 'failed' then ' failed to start' else ' blocked' end
                             || coalesce(': ' || (e.data ->> 'note'), '')
-      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed'))
+      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed')
+    union all
+    -- 13: a staged card no builder or reviewer takes because it names no repo, in a project of several (#3703)
+    select 13, t.priority = 'P0', t.id, format('#%s has no repo: cb edit %s --repo <repo,repo>', t.id, t.id)
+      from cb.tasks t
+     where t.project = p and t.stage in ('build', 'review') and t.status not in ('done', 'cancelled')
+       and cardinality(coalesce(t.repos, '{}')) = 0 and cb._multi_repo(p)
+       and not exists (select 1 from cb.task_parts tp where tp.task_id = t.id))
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
     select x.grp, x.p0, x.id,
@@ -4101,22 +4167,50 @@ create function cb._stage_words(stage text) returns text language sql immutable 
     when 'qa' then 'Checking on dev against the design' else $1 end end
 $$;
 
+-- A part hold (#3703) counts exactly like a card's: the part has a holder and is not merged, its card is open and staged.
+create function cb._held_parts() returns setof cb.task_parts language sql stable as $$
+  select p.* from cb.task_parts p join cb.tasks t on t.id = p.task_id
+   where nullif(trim(p.assignee), '') is not null and p.stage <> 'merged' and t.status not in ('done', 'cancelled') and t.stage is not null
+$$;
+
+-- A parts card in plain words (#3703): its stage, then each part in the design's repo order, e.g.
+-- "build: api done (PR #12), dashboard building (qhs-dashboard-B1@mac)". null: no parts, or the card is not past approval
+-- (parts sent back to design wait for re-approval).
+create function cb._parts_words(tid bigint) returns text language sql stable as $$
+  select t.stage || ': ' || string_agg(p.repo || ' ' || case
+      when p.stage = 'merged' then 'merged'
+      when array_position('{build,review,merge}'::text[], p.stage) > array_position('{build,review,merge,qa}'::text[], t.stage)
+        then 'done' || coalesce(' (PR #' || substring(p.pr from '/pull/([0-9]+)') || ')', '')
+      else case p.stage when 'build' then case when h.held then 'building' else 'waits for a builder' end
+                        when 'review' then case when h.held then 'in review' else 'waits for a reviewer' end
+                        else 'waits for the lead to merge' end
+           || case when h.held then ' (' || p.assignee || ')' else '' end
+    end, ', ' order by array_position(t.repos, p.repo), p.repo)
+    from cb.tasks t join cb.task_parts p on p.task_id = t.id
+   cross join lateral (select nullif(trim(p.assignee), '') is not null as held) h
+   where t.id = tid and t.stage in ('build', 'review', 'merge', 'qa')
+   group by t.id, t.stage
+$$;
+
 -- The command that finishes this card's stage for whoever holds it.
 create function cb._finish_line(t cb.tasks) returns text language sql stable as $$
   select case when not cb._pipeline(t.project) then format('cb done %s "<summary>"', t.id) else case t.stage
     when 'design' then format('cb page set %s -f page.md, then cb pass %s "<summary>"', t.id, t.id)
     when 'build' then format('cb pass %s "<summary>" --pr <url>', t.id)
     when 'review' then format('cb pass %s "<verdict>" or cb fail %s "<what is wrong>"', t.id, t.id)
-    when 'merge' then format('merge it, then cb pass %s "<what merged>" --commit <sha>', t.id)
+    when 'merge' then case when exists (select 1 from cb.task_parts p where p.task_id = t.id)
+      then format('merge each repo''s PR in the design''s order, then cb pass %s "<what merged>" --repo <repo> --commit <sha>', t.id)
+      else format('merge it, then cb pass %s "<what merged>" --commit <sha>', t.id) end
     when 'qa' then format('cb pass %s "<checked on dev>" or cb fail %s "<what fails>"', t.id, t.id)
     when 'approval' then format('waiting for Ahmed (Q%s)',
       (select max(q.id) from cb.questions q where q.approval_for = t.id and q.status in ('open', 'answered')))
     else format('cb done %s "<summary>"', t.id) end end
 $$;
 
--- Who takes the card now: its holder by name, else the role the stage needs.
+-- Who takes the card now: its holder by name, a parts card's parts in words (#3703), else the role the stage needs.
 create function cb._takes_it(t cb.tasks) returns text language sql stable as $$
-  select coalesce(nullif(trim(t.assignee), ''), case (case when cb._pipeline(t.project) then t.stage end) when 'design' then 'an owner or architect' when 'approval' then 'Ahmed'
+  select coalesce(nullif(trim(t.assignee), ''),
+    case when cb._pipeline(t.project) and t.stage in ('build', 'review', 'merge') then cb._parts_words(t.id) end, case (case when cb._pipeline(t.project) then t.stage end) when 'design' then 'an owner or architect' when 'approval' then 'Ahmed'
     when 'build' then 'a builder' when 'review' then 'a reviewer' when 'merge' then 'the lead' when 'qa' then 'QA'
     else 'the lead or a session without a role' end)
 $$;
@@ -4158,6 +4252,10 @@ begin
         'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then t.stage end,
         'stage_words', cb._stage_words(case when cb._pipeline(t.project) then t.stage end), 'status', t.status,
         'finish', cb._finish_line(t), 'page', cb._page_for(t, a),
+        -- a parts card (#3703): the part this actor holds, and every part in words
+        'part', (select jsonb_build_object('repo', h.repo, 'stage', h.stage, 'pr', h.pr) from cb._held_parts() h
+                  where h.task_id = t.id and h.assignee = a order by h.repo limit 1),
+        'parts', cb._parts_words(t.id),
         'notes', coalesce((select jsonb_agg(jsonb_build_object('at', n.at, 'actor', n.actor, 'summary', n.summary) order by n.id desc)
                              from (select e.id, e.at, e.actor, e.summary from cb.events e
                                     where e.task_id = t.id and (e.kind in ('note', 'done') or e.data ? 'stage') and e.summary <> ''
@@ -4165,7 +4263,8 @@ begin
         'questions', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'body', q.body, 'status', q.status) order by q.id)
                                  from cb.questions q where q.task_id = t.id and q.status in ('open', 'answered')), '[]'))
       order by t.updated_at desc)
-      from cb.tasks t where t.assignee = a and t.status not in ('done', 'cancelled')), '[]'));
+      from cb.tasks t where (t.assignee = a or t.id in (select h.task_id from cb._held_parts() h where h.assignee = a))
+                         and t.status not in ('done', 'cancelled')), '[]'));
 end $$;
 
 -- The queue this actor can claim, in claim order: cb.task_claim takes its first row, cb start previews the first few (lim null = all).
@@ -4698,7 +4797,8 @@ begin
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'machine', s.machine, 'pane', s.pane,
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
-        'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled')),
+        'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))
+                 + (select count(*) from cb._held_parts() h where h.assignee = a.actor),
         'questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open'),
         'jobs', (select count(*) from cb.jobs j where j.requester = a.actor and j.state in ('queued', 'running')),
         'asks', (select count(*) from cb.asks k where k.to_actor = a.actor and k.status = 'open'),
@@ -4715,7 +4815,8 @@ begin
                                             and e.data ->> 'session' = a.actor and e.at > coalesce(s.started_at, '-infinity'))
       ) order by a.actor)
       from (select s2.actor from cb.sessions s2 where s2.project = p
-            union select t.assignee from cb.tasks t where t.project = p and t.assignee is not null and t.status not in ('done', 'cancelled')) a
+            union select t.assignee from cb.tasks t where t.project = p and t.assignee is not null and t.status not in ('done', 'cancelled')
+            union select h.assignee from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p) a
       left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
       left join lateral (select e.at, e.data ->> 'note' = 'start failed' as failed from cb.events e
                           where e.actor = 'supervisor' and e.data ->> 'what' = 'restore' and e.data ->> 'session' = a.actor
@@ -4733,7 +4834,8 @@ begin
   perform cb._supervisor_only();
   update cb.sessions s set closing_at = case when closing then now() end where s.actor = actor;
   if not found then return false; end if;
-  if closing and exists (select 1 from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled')) then
+  if closing and (exists (select 1 from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled'))
+                  or exists (select 1 from cb._held_parts() h where h.assignee = actor)) then
     update cb.sessions s set closing_at = null where s.actor = actor;
     return false;
   end if;

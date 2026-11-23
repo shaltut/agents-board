@@ -189,7 +189,8 @@ function printBrief(b: any) {
 /** A staged card's block for cb resume and cb next: the words, the finish line, the page it is built from, notes, questions. */
 function cardBlock(c: any, head = true): string {
   const ind = (s: string) => s.split('\n').map((l) => `    ${l}`).join('\n');
-  return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`, `  finish with: ${c.finish}`,
+  return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`,
+    c.part && `  your part: ${c.part.repo}`, c.parts && `  parts: ${c.parts}`, `  finish with: ${c.finish}`,
     c.page && `  page (v${c.page.version}${c.page.approved ? ', approved' : ''}):\n${ind(c.page.body)}`,
     c.notes.length && `  notes:\n${c.notes.map((n: any) => `    ${new Date(n.at).toISOString().slice(0, 16).replace('T', ' ')} ${n.actor}: ${flat(n.summary)}`).join('\n')}`,
     c.questions.length && `  questions:\n${c.questions.map((q: any) => `    Q${q.id}${q.status === 'answered' ? ' answered:' : ''} ${flat(q.body)}`).join('\n')}`,
@@ -197,7 +198,10 @@ function cardBlock(c: any, head = true): string {
 }
 
 /** cb pass, fail and stage: where the card went and who takes it (cb.next_step), as a line and as json. */
-const stepOut = (s: any) => ({ out: s.takes_it ? `#${s.id} → ${s.stage_words}; ${s.takes_it} takes it. You: cb next` : `#${s.id} → ${s.stage_words}. You: cb next`, json: s });
+const stepOut = (s: any) => ({ out: !s.takes_it ? `#${s.id} → ${s.stage_words}. You: cb next`
+  // a parts card (#3703): takes_it is its parts in words ("build: api done (PR #12), ...")
+  : s.takes_it.startsWith(`${s.stage}: `) ? `#${s.id} → ${s.stage_words}; ${s.takes_it}. You: cb next`
+  : `#${s.id} → ${s.stage_words}; ${s.takes_it} takes it. You: cb next`, json: s });
 
 /** Projects are namespaces: a session bound to one project never changes another project's tasks. */
 
