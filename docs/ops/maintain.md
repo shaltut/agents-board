@@ -66,6 +66,7 @@ is the window to keep short.
 
 **Rolling back** code: `git checkout <previous sha> && dc up -d --build board`. The schema is applied forward only:
 new columns and functions stay, which older code ignores. If an upgrade damaged data, restore the last backup (below).
+On vps2 the checkout is now detached from `vps`: the next release must first run `git checkout vps`, before its merge.
 
 ## Installing the dangerous-commands hook on a machine
 
