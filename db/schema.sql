@@ -1688,6 +1688,7 @@ begin
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
      where t.status not in ('done', 'cancelled')
        and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
+       and not exists (select 1 from cb.questions q where q.task_id = t.id and q.status = 'open')  -- waiting on a person is not silence (Q2357)
   loop
     continue when r.last_at > now() - interval '1 hour';
     mins := floor(extract(epoch from now() - r.last_at) / 60);
@@ -3681,6 +3682,7 @@ begin
        and t.status in ('in_progress', 'next') and cb._pipeline(t.project)
        and q.quiet_since <= now() - interval '30 minutes'
        and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
+       and not exists (select 1 from cb.questions qq where qq.task_id = t.id and qq.status = 'open')  -- waiting on a person (Q2357)
   loop
     mins := floor(extract(epoch from now() - r.quiet_since) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';

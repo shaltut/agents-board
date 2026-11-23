@@ -195,3 +195,58 @@ test('cb squad set / show', async () => {
     assert.deepEqual(JSON.parse(cb(['squad', 'show', 'demo', '--json']).out), SQUAD);
   } finally { rmSync(dir, { recursive: true }); }
 });
+
+// Q2357: a card that waits on a person's answer is not chased for silence
+async function waitingCard(sql: any) {
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
+  await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Fix the thing', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+  await sql`select cb.task_ping_set('1', true, 'ahmed')`;
+  const age = (mins: number) => sql`update cb.tasks set updated_at = now() - ${mins + ' minutes'}::interval where id = 1`
+    .then(() => sql`update cb.events set at = now() - ${mins + ' minutes'}::interval where task_id = 1 and not (data ? 'nudge')`);
+  const pings = async () => (await sql`select cb.pings_due() as n`)[0].n;
+  return { age, pings };
+}
+
+test('pings_due: an open question holds the pings; answering restarts the clock (Q2357)', async () => {
+  const sql = await db();
+  const { age, pings } = await waitingCard(sql);
+  const [{ q }] = await sql`select cb.ask(project => 'demo', body => 'Which way?', task_id => '1', actor => 'W1@pc') as q`;
+  await age(120);
+  assert.equal(await pings(), 0, 'waiting on a person is not silence');
+  await sql`select cb.answer(${String(q)}, 'This way', 'ahmed')`;
+  assert.equal(await pings(), 0, 'the answer is an update: the clock restarted');
+  await age(120);
+  assert.equal(await pings(), 2, 'two hours after the answer it is chased again');
+});
+
+test('pings_due: a withdrawn, dormant, answered or sent-back question does not hold the pings (Q2357)', async () => {
+  for (const status of ['withdrawn', 'dormant', 'answered', 'sent_back']) {
+    const sql = await db();
+    const { age, pings } = await waitingCard(sql);
+    await sql`select cb.ask(project => 'demo', body => 'Which way?', task_id => '1', actor => 'W1@pc')`;
+    await sql`update cb.questions set status = ${status}, answer = 'x' where task_id = 1`;
+    await age(120);
+    assert.equal(await pings(), 2, status);
+  }
+});
+
+test('stage_stalls_due: no nudge to the holder of a card waiting on a person (Q2357)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p2','B1@mac','demo','builder'), ('pc','p4','orch@pc','demo',null)`;
+  await sql`select cb.task_add(project => 'demo', title => 'Fix the thing', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`;
+  await sql`update cb.tasks set status = 'in_progress', assignee = 'B1@mac' where id = 1`;
+  const [{ q }] = await sql`select cb.ask(project => 'demo', body => 'Which way?', task_id => '1', actor => 'B1@mac') as q`;
+  const m = '40 minutes';
+  await sql`update cb.tasks set updated_at = now() - ${m}::interval where id = 1`;
+  await sql`update cb.sessions set started_at = now() - ${m}::interval where actor = 'B1@mac'`;
+  await sql`update cb.events set at = now() - ${m}::interval where (task_id = 1 or actor = 'B1@mac') and not (data ? 'nudge')`;
+  const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
+  assert.equal(await due(), 0, 'open question: no nudge');
+  await sql`update cb.questions set status = 'dormant' where id = ${q}`;
+  await sql`update cb.events set at = now() - ${m}::interval where task_id = 1 and not (data ? 'nudge')`; // the flip wrote an event
+  assert.equal(await due(), 1, 'a dormant question does not hold it');
+});
