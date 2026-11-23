@@ -233,3 +233,13 @@ test('down_again_since_bind: set by a down_again, cleared when the name binds ag
   await sql`select cb.iam('macbook', 'p1', 'sv-B1@macbook', 'sv', 'builder')`; // bound again by hand
   assert.equal(await b1(), false);
 });
+
+test('last_restore_failed: the latest restore did not start; a later restore that started clears it', async () => {
+  const { sup } = await setup();
+  const b1 = async () => (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook').last_restore_failed;
+  assert.equal(await b1(), false);
+  await sup`select cb.supervise_log('sv', 'restore', 'sv-B1@macbook', 'start failed')`;
+  assert.equal(await b1(), true);
+  await sup`select cb.supervise_log('sv', 'restore', 'sv-B1@macbook', 'builder')`; // a restore that started notes its role
+  assert.equal(await b1(), false);
+});

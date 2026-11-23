@@ -235,8 +235,9 @@ A project is supervised only when its pipeline is on and its squad file says `"s
 The squad `count` per role is then the most the supervisor keeps up. Every 60 s it:
 
 - restores a squad session that is down but holds open cards, under the same name with `cb resume` (at most once
-  per 30 minutes per name, failed or not; down again within 30 minutes: a `down_again` event, and no automatic
-  restore until the name binds again: restore it by hand);
+  per 30 minutes per name; a restore that failed to start is tried again after 10 minutes; down again within 30
+  minutes of a restore that started: a `down_again` event, and no automatic restore until the name binds again:
+  restore it by hand);
 - starts sessions for waiting cards, like `cb squad up` (names, models, permission files), at most 3 a tick, 8 on
   the Mac in all; a name that failed to start waits 10 minutes;
 - closes a squad session idle 20 minutes that holds nothing (no card, question, job or open dashboard ask), that herdr

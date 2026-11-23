@@ -379,16 +379,26 @@ test('a name herdr lists but cannot find is not tried again for 10 minutes', asy
   assert.equal(gets, 2);
 });
 
-test('a restore that fails still writes a restore event, so the 30-minute limit holds', async () => {
+test('a restore that fails writes a restore event, is not down again next tick, and is tried again after 10 minutes', async () => {
   const { sql, sup } = await setup();
   await session(sql, 'sv-B2@macbook', 'builder', { live: false });
   await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
   const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: 'model missing' }) });
-  await tick(deps(sup, h.run));
+  const d = deps(sup, h.run);
+  await tick(d);
   const r = await events(sql, 'restore');
   assert.equal(r.length, 1);
   assert.equal(r[0].data.note, 'start failed');
   assert.equal((await events(sql, 'failed')).length, 1);
+  const starts = () => h.calls.filter((c) => c.args[1] === 'start' && c.args[2] === 'sv-b2-macbook').length;
+  h.live.clear(); // the failed start left nothing running
+  const out = await tick({ ...d, now: d.now + 60_000 });
+  assert.equal((await events(sql, 'down_again')).length, 0, out.join('\n'));
+  assert.equal(starts(), 1);
+  h.live.clear();
+  await tick({ ...d, now: d.now + 11 * 60_000 });
+  assert.equal(starts(), 2);
+  assert.equal((await events(sql, 'down_again')).length, 0);
 });
 
 test('one bad project does not stop the others', async () => {

@@ -4352,6 +4352,8 @@ begin
         'last_event', greatest((select max(e.at) from cb.events e where e.actor = a.actor), s.started_at),
         'closing', cb._closing(a.actor),
         'last_restore', r.at,
+        -- the latest restore did not start (its note is 'start failed'): retried, never read as down again
+        'last_restore_failed', coalesce(r.failed, false),
         'down_again_logged', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
                                         and e.data ->> 'session' = a.actor and e.at > coalesce(r.at, '-infinity')),
         -- a down_again since the name last bound: no automatic restore until it binds again (no crash loop)
@@ -4361,7 +4363,9 @@ begin
       from (select s2.actor from cb.sessions s2 where s2.project = p
             union select t.assignee from cb.tasks t where t.project = p and t.assignee is not null and t.status not in ('done', 'cancelled')) a
       left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
-      left join lateral (select max(e.at) as at from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'restore' and e.data ->> 'session' = a.actor) r on true
+      left join lateral (select e.at, e.data ->> 'note' = 'start failed' as failed from cb.events e
+                          where e.actor = 'supervisor' and e.data ->> 'what' = 'restore' and e.data ->> 'session' = a.actor
+                          order by e.at desc, e.id desc limit 1) r on true
       where a.actor is not null and a.actor <> ''), '[]'))
   into res;
   return res;

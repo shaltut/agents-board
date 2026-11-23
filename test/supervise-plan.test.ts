@@ -17,7 +17,7 @@ const squad = {
   areas: ['claims', 'kb'], supervise: true,
 };
 const sess = (actor: string, role: string, o: Partial<Session> = {}): Session => ({ actor, role, area: null, machine: 'macbook', pane: 'p', live: true,
-  holds: 0, questions: 0, jobs: 0, asks: 0, last_event: ago(1), closing: false, last_restore: null, down_again_logged: false, down_again_since_bind: false, ...o });
+  holds: 0, questions: 0, jobs: 0, asks: 0, last_event: ago(1), closing: false, last_restore: null, last_restore_failed: false, down_again_logged: false, down_again_since_bind: false, ...o });
 const state = (o: { waiting?: Record<string, any>; sessions?: Session[]; supervised?: boolean } = {}): State => ({ project: 'sv', squad, supervised: o.supervised ?? true,
   waiting: { builder: 0, reviewer: 0, qa: 0, investigator: 0, architect: 0, owner: { claims: 0, kb: 0 }, ...o.waiting }, sessions: o.sessions ?? [] });
 const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, herdrLive: new Set(), herdrStatus: {}, herdrDown: new Set(), launched: new Set(), macLive: 0, startsLeft: 3, failedAt: new Map(), now: NOW, ...o });
@@ -141,4 +141,13 @@ test('down again since it last bound: never restored again until it binds', () =
   const p = tick(state({ sessions: [down] }));
   assert.deepEqual([p.restore, p.notes], [[], []]);
   assert.equal(tick(state({ sessions: [{ ...down, down_again_since_bind: false }] })).restore.length, 1);
+});
+
+test('a restore that did not start is tried again after 10 minutes and is never down again', () => {
+  const down = sess('sv-B1@macbook', 'builder', { live: false, holds: 1, last_restore_failed: true });
+  const soon = tick(state({ sessions: [{ ...down, last_restore: ago(5) }] }));
+  assert.deepEqual([soon.restore, soon.notes], [[], []]);
+  assert.deepEqual(names(tick(state({ sessions: [{ ...down, last_restore: ago(11) }] })).restore), ['sv-B1@macbook']);
+  // this run's own memory of the failure holds it back too
+  assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(11) }] }), { failedAt: new Map([['sv-B1@macbook', NOW - 5 * 60_000]]) }).restore.length, 0);
 });

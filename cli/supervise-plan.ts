@@ -3,7 +3,7 @@ import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad
 
 export type Session = { actor: string; role: string; area: string | null; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
-  down_again_logged: boolean; down_again_since_bind: boolean };
+  last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean };
 export type State = { project: string; squad: Squad; supervised: boolean;
   waiting: { builder: number; reviewer: number; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   sessions: Session[] };
@@ -37,7 +37,9 @@ export function planTick(i: TickInput): TickPlan {
     const s = by.get(w.name);
     if (!s || !s.holds || isLive(w.name) || herdrDown.has(machineOf(w.name))) continue;
     if (s.down_again_since_bind) continue; // down again after a restore: a person restores it; no loop until it binds again
-    if (s.last_restore && now - Date.parse(s.last_restore) < RESTORE_EVERY) {
+    const since = s.last_restore ? now - Date.parse(s.last_restore) : Infinity;
+    if (s.last_restore_failed) { if (since < RETRY_AFTER) continue; } // it never started: tried again after 10 minutes
+    else if (since < RESTORE_EVERY) {
       if (!s.down_again_logged) plan.notes.push({ what: 'down_again', session: w.name });
       continue;
     }
