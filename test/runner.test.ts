@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { runJob } from '../cli/runner-job.ts';
+import { loadConfig } from '../cli/recipes.ts';
 
 const WIN = process.platform === 'win32';
 const NAME = 'pc-test';
@@ -430,4 +432,32 @@ test('a NUL folder a job plants in the slot does not break the next job', { skip
   assert.equal(jp.state, 'passed', jp.summary);
   const jq = await ended(await add('ok'));
   assert.equal(jq.state, 'passed', jq.summary);
+});
+
+// runJob in this process, with its own home and slot folders: no board, no daemon
+const DHOME = join(TMP, 'dhome');
+const direct = (name: string, gitUrl: string, id: number, sha = MAIN, lockfile = 'lock.txt') => {
+  const cfg = loadConfig(JSON.stringify({ slots: 1, log: { host: '127.0.0.1', port: 1, peers: [] },
+    projects: { [name]: { ...project(gitUrl, { ok: recipes.ok }), base: join(TMP, 'direct'), lockfile } } }));
+  return runJob({ id, project: name, recipe: 'ok', sha, params: {} }, { cfg, home: DHOME, slot: 1, stop: new AbortController().signal });
+};
+const dlog = (id: number) => readFileSync(join(DHOME, 'logs', `${id}.log`), 'utf8');
+
+test('a fresh slot installs even when the lockfile cannot be read at the sha', async () => {
+  const r = await direct('nolock', ORIGIN, 900001, MAIN, 'no-such.lock');
+  assert.equal(r?.state, 'passed', r?.summary);
+  assert.match(dlog(900001), /^installed$/m);
+});
+
+test('a changed git URL in runner.json reaches an existing slot clone', async () => {
+  const a = await direct('moved', ORIGIN, 900002);
+  assert.equal(a?.state, 'passed', a?.summary);
+  const ORIGIN2 = join(TMP, 'origin2.git');
+  execFileSync('git', ['clone', '-q', '--bare', ORIGIN, ORIGIN2], { env: gitEnv });
+  git('checkout', '-q', '-b', 'moved', 'main');
+  const M = commit('only on the new origin');
+  git('push', '-q', ORIGIN2, 'moved');
+  git('checkout', '-q', 'main');
+  const b = await direct('moved', ORIGIN2, 900003, M);
+  assert.equal(b?.state, 'passed', b?.summary);
 });

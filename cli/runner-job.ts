@@ -249,6 +249,11 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
   io.reset();
+  // runner.json's git URL wins over the one saved at clone time (a moved origin reaches existing slot clones)
+  const u = await run([...G, 'config', 'remote.origin.url', p.git], { cwd: dir, env: genv, io, ms: GIT_MS, stop, show: 'git config remote.origin.url <origin>' });
+  if (stop.aborted) return null;
+  if (u.code !== 0) throw new Error(`git config exited ${u.code}`);
+  copyFileSync(join(gitDir, 'config'), saved);
   const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
   if (stop.aborted) return null;
   if (f.code !== 0) return err('error: could not fetch from origin');
@@ -265,12 +270,13 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     if (r.code !== 0) throw new Error(`git ${args[0]} exited ${r.code}`);
   }
 
-  // 3. install when the lockfile's blob differs from this slot's last install (a lockfile missing at the sha reads as '')
+  // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
+  // always when the blob cannot be read (a lockfile missing at the sha, a wrong lockfile path)
   const env = jobEnv(process.env, cfg, recipe);
   const lb = await git(['rev-parse', `${full}:${p.lockfile}`], true);
   const blob = lb.code === 0 ? lb.out.trim() : '';
   if (stop.aborted) return null;
-  if (blob !== (existsSync(lockState) ? readFileSync(lockState, 'utf8') : '')) {
+  if (!blob || !existsSync(lockState) || blob !== readFileSync(lockState, 'utf8')) {
     rmSync(lockState, { force: true }); // a half-done install must not count as the old one
     const from = fstatSync(io.fd).size;
     const r = await run(p.install, { cwd: dir, env, io, ms: p.installTimeout * 1000, stop });
@@ -316,19 +322,19 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 
 /** job_finish. A board that cannot be reached, or answers with anything but a refusal (too many connections, a
  *  restart: a connection, serialization, resource, operator or transaction-state SQLSTATE: classes 08 40 53 57 25), is retried every 30 s until the finish lands or the job is no longer this runner's
- *  running job (false). A refusal (a `raise`, P0001) gets one resend: the summary becomes a pointer to the log (and the
- *  exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged and given up, so
+ *  running job ('gone': it ended on the board, e.g. cancelled just before). A refusal (a `raise`, P0001) gets one resend: the summary becomes a pointer to the log (and the
+ *  exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged and given up ('gave-up'), so
  *  the slot frees. Any other board error (a missing function, no permission) is logged and given up the same way. */
-export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<boolean> {
+export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<'done' | 'gone' | 'gave-up'> {
   const withheld = `summary withheld: see cb job log ${id}`;
   let { exit_code, summary } = r;
   for (;;) {
     try {
-      return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true;
+      return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true ? 'done' : 'gone';
     } catch (e: any) {
       if (e?.name === 'PostgresError' && e.code !== 'P0001' && !/^(08|40|53|57|25)/.test(e.code ?? '')) {
         say(`job #${id}: the board cannot take its end (${e.message}); giving up, it stays running until the next runner start`);
-        return false;
+        return 'gave-up';
       }
       if (e?.name !== 'PostgresError' || e.code !== 'P0001') {
         say(`job #${id}: the board did not take its end (${e?.message ?? e}); retrying in ${wait / 1000} s`);
@@ -337,7 +343,7 @@ export async function finish(sql: any, runner: string, id: number, r: Result, sa
       }
       if (summary === withheld) {
         say(`job #${id}: the board refused its end (${e.message}); giving up, it stays running until the next runner start`);
-        return false;
+        return 'gave-up';
       }
       if (!/looks like/.test(e.message)) {
         say(`job #${id}: the board refused its end (${e.message}); sending it again without the summary`);

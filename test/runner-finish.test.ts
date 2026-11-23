@@ -19,14 +19,14 @@ const R: Result = { state: 'failed', exit_code: 3, summary: '1 passed, 1 failed.
 
 test('a looks-like refusal is resent once with the summary withheld, the exit code kept', async () => {
   const { sql, calls } = fakeSql([pgError('P0001', 'the summary looks like an email; the board keeps no such text'), true]);
-  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), true);
+  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), 'done');
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1], [7, 'pc', 'failed', 3, 'summary withheld: see cb job log 7']);
 });
 
 test('a board that is busy or restarting is retried, not a refusal: summary and exit code kept', async () => {
   const { sql, calls } = fakeSql([pgError('53300', 'sorry, too many clients already'), pgError('57P01', 'terminating connection due to administrator command'), true]);
-  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), true);
+  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), 'done');
   assert.equal(calls.length, 3);
   for (const c of calls) assert.deepEqual(c, [7, 'pc', 'failed', 3, R.summary]);
 });
@@ -34,14 +34,22 @@ test('a board that is busy or restarting is retried, not a refusal: summary and 
 test('an error the board will keep giving (function missing, no permission) is given up on, not retried forever', async () => {
   const { sql, calls } = fakeSql([pgError('42883', 'function cb.job_finish does not exist'), true]);
   const said: string[] = [];
-  assert.equal(await finish(sql, 'pc', 7, R, (m) => said.push(m), 0), false);
+  assert.equal(await finish(sql, 'pc', 7, R, (m) => said.push(m), 0), 'gave-up');
   assert.equal(calls.length, 1);
   assert.equal(said.length, 1);
 });
 
+test('a job that already ended on the board (cancelled just before) is gone, not given up', async () => {
+  const { sql, calls } = fakeSql([false]);
+  const said: string[] = [];
+  assert.equal(await finish(sql, 'pc', 7, R, (m) => said.push(m), 0), 'gone');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(said, []);
+});
+
 test('a network error is retried', async () => {
   const { sql, calls } = fakeSql([Object.assign(new Error('read ECONNRESET'), { name: 'Error' }), true]);
-  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), true);
+  assert.equal(await finish(sql, 'pc', 7, R, () => {}, 0), 'done');
   assert.equal(calls.length, 2);
 });
 
