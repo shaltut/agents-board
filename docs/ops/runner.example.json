@@ -1,0 +1,107 @@
+{
+  "slots": 2,
+  "log": { "host": "100.64.0.1", "port": 7600, "peers": ["100.64.0.2"] },
+  "passEnv": [],
+  "projects": {
+    "ihop": {
+      "git": "https://github.com/TachyHealth/iHop-Platform.git",
+      "base": "C:/r",
+      "lockfile": "pnpm-lock.yaml",
+      "install": ["pnpm", "install", "--frozen-lockfile"],
+      "installTimeout": 1200,
+      "recipes": {
+        "install": { "steps": [["pnpm", "install", "--frozen-lockfile"]], "timeout": 1200 },
+        "check": {
+          "params": { "ws": { "pattern": "^@ihop/[a-z0-9-]+$", "min": 1, "max": 6 } },
+          "steps": [["pnpm", "--filter={ws}", "check"]],
+          "env": { "NODE_OPTIONS": "--max-old-space-size=4096" },
+          "timeout": 1200
+        },
+        "test": {
+          "params": {
+            "app": { "pattern": "^(claims-api|preauth)$" },
+            "files": { "pattern": "^tests/(?![A-Za-z0-9._/-]*\\.integration\\.test\\.ts$)[A-Za-z0-9._/-]+\\.test\\.ts$", "min": 1, "max": 20 }
+          },
+          "cwd": "apps/{app}",
+          "steps": [["node", "--conditions=development", "--env-file-if-exists=.env.test", "--import", "tsx", "--test", "--test-force-exit", "--test-concurrency=1", "{files}"]],
+          "env": { "NODE_OPTIONS": "--max-old-space-size=4096" },
+          "timeout": 1800
+        },
+        "itest": {
+          "params": { "files": { "pattern": "^tests/[A-Za-z0-9._/-]+\\.integration\\.test\\.ts$", "min": 1, "max": 20 } },
+          "cwd": "apps/claims-api",
+          "steps": [
+            ["node", "../../scripts/test-stack/claims-integration.mjs", "up", "--env-out", ".env.integration"],
+            ["node", "--conditions=development", "--env-file-if-exists=.env.test", "--env-file=.env.integration", "--import", "tsx", "--test", "--test-force-exit", "--test-concurrency=1", "{files}"]
+          ],
+          "finally": [["node", "../../scripts/test-stack/claims-integration.mjs", "down"]],
+          "env": {
+            "NODE_OPTIONS": "--max-old-space-size=4096",
+            "INTEGRATION_TESTS": "1",
+            "DB_SSL_DISABLE": "true",
+            "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "TEST_STACK_PROJECT": "cb-runner-it",
+            "TEST_STACK_PG_PORT": "55432",
+            "TEST_STACK_REDIS_PORT": "56379",
+            "TEST_STACK_S3_PORT": "59000"
+          },
+          "timeout": 2400,
+          "db": true
+        },
+        "kbtest": {
+          "params": { "files": { "pattern": "^(server|client|tests)/[A-Za-z0-9._/-]+\\.db\\.test\\.ts$", "min": 1, "max": 20 } },
+          "cwd": "apps/knowledge-base",
+          "steps": [
+            ["node", "../../scripts/test-stack/claims-integration.mjs", "up", "--env-out", ".env.integration"],
+            ["node", "--env-file=.env.integration", "node_modules/vitest/vitest.mjs", "run", "{files}"]
+          ],
+          "finally": [["node", "../../scripts/test-stack/claims-integration.mjs", "down"]],
+          "env": {
+            "INTEGRATION_TESTS": "1",
+            "DB_SSL_DISABLE": "true",
+            "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "TEST_STACK_PROJECT": "cb-runner-it",
+            "TEST_STACK_PG_PORT": "55432",
+            "TEST_STACK_REDIS_PORT": "56379",
+            "TEST_STACK_S3_PORT": "59000"
+          },
+          "timeout": 2400,
+          "db": true
+        },
+        "vitest": {
+          "params": {
+            "ws": { "pattern": "^@ihop/[a-z0-9-]+$" },
+            "files": { "pattern": "^[A-Za-z0-9._/-]+\\.test\\.tsx?$", "min": 1, "max": 20 }
+          },
+          "steps": [["pnpm", "--filter={ws}", "exec", "vitest", "run", "{files}"]],
+          "timeout": 1800
+        },
+        "lint": {
+          "params": { "files": { "pattern": "^[A-Za-z0-9._/-]+\\.(ts|tsx|mts|mjs|js|json|md|css|yml|yaml)$", "min": 1, "max": 20 } },
+          "steps": [["pnpm", "exec", "oxlint", "{files}"], ["pnpm", "exec", "prettier", "--check", "{files}"]],
+          "timeout": 600
+        },
+        "build": {
+          "params": { "ws": { "pattern": "^@ihop/[a-z0-9-]+$", "min": 1, "max": 6 } },
+          "steps": [["pnpm", "exec", "turbo", "build", "--filter={ws}"]],
+          "env": { "NODE_OPTIONS": "--max-old-space-size=4096" },
+          "timeout": 1800
+        },
+        "guards": {
+          "steps": [
+            ["node", "scripts/image-digest-guard.mjs"],
+            ["node", "scripts/log-discipline-guard.mjs"],
+            ["node", "scripts/telemetry-names-guard.mjs"],
+            ["node", "scripts/metric-registry-guard.mjs"],
+            ["node", "scripts/secrets-scan.mjs"],
+            ["node", "scripts/input-validation-audit.mjs"],
+            ["node", "scripts/suppression-audit.mjs"],
+            ["node", "scripts/llm-client-boundary.mjs"],
+            ["node", "scripts/check-auth-error-envelope.mjs"]
+          ],
+          "timeout": 900
+        }
+      }
+    }
+  }
+}
