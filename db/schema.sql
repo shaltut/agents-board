@@ -4352,9 +4352,11 @@ $$;
 create function cb._home_repo(p text) returns text language sql stable as $$ select (cb._repos_of(p))[1] $$;
 create function cb._multi_repo(p text) returns boolean language sql stable as $$ select cardinality(cb._repos_of(p)) > 1 $$;
 
--- The repo an actor works in: its latest session's, else that session's project's home repo, else main.
+-- The repo an actor works in: its latest session's, else that session's project's home repo, else main. A stored repo
+-- the project no longer has (it gained or changed repos after the bind) counts as the home repo.
 create function cb._repo(a text) returns text language sql stable as $$
-  select coalesce((select coalesce(s.repo, cb._home_repo(s.project)) from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'main')
+  select coalesce((select case when s.repo = any(cb._repos_of(s.project)) then s.repo else cb._home_repo(s.project) end
+                     from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'main')
 $$;
 
 -- Repo names checked against the project's repos; duplicates dropped, given order kept. null or empty: null (not named).

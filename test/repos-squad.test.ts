@@ -138,6 +138,16 @@ test('_repo defaults to the home repo', async () => {
   assert.equal((await sql`select cb._repo('nobody@nowhere') as r`)[0].r, 'main');
 });
 
+test('_repo: a stored repo the project no longer has counts as the home repo', async () => {
+  const sql = await setup();
+  // bound with --repo main while demo was one repo; demo then gains repos
+  await sql`select cb.iam('mac', 'p8', 'demo-B1@mac', 'demo', role => 'builder', repo => 'main')`;
+  await sql`select cb.squad_set('demo', ${sql.json(QHS)}, 'ahmed')`;
+  assert.equal((await sql`select cb._repo('demo-B1@mac') as r`)[0].r, 'api');
+  const s = (await sql`select cb.supervise_state('demo') as r`)[0].r.sessions.find((x: any) => x.actor === 'demo-B1@mac');
+  assert.equal(s.repo, 'api');
+});
+
 test('card repos', async () => {
   const sql = await setup();
   const [{ id }] = await sql`select cb.task_add(project => 'qhs', title => 'x', repos => '["dashboard","api"]', actor => 'orch@pc') as id`;
