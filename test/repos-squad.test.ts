@@ -3,6 +3,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { callFn } from '../server/rpc.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -101,6 +102,11 @@ test('squad_set refuses each invalid repos squad with the field named', async ()
     [mod((s) => { s.repos.bot = { paths: { macbook: '/Users/me/Work/QHS/bot' } }; s.roles.builder.count.bot = 1; }), /repo bot has builders but no reviewers/],
     [mod((s) => { s.roles.builder.count.api = 5; }), /macbook would run 9 sessions; the cap is 8/],
     [mod((s) => { s.repos.Web = { paths: { macbook: '/Users/me/Work/QHS/web' } }; }), /repo Web must be a slug/],
+    [mod((s) => { s.repos = null; s.machines.macbook.repo = '/Users/me/Work/QHS/api'; }), /repos must be an object/],
+    [mod((s) => { s.repos.api.paths.nowhere = '/x'; }), /repo api path on nowhere: nowhere is not in machines/],
+    // vps runs one role only, so the refusal is that role's: an owner needs its areas' repos, a project-wide role the home repo
+    [mod((s) => { s.machines.vps = { herdr: 'vps2', board: '/b' }; s.repos.api.paths.vps = '/w/api'; s.roles.owner.machine = 'vps'; }), /repo dashboard has no path on vps/],
+    [mod((s) => { s.machines.vps = { herdr: 'vps2', board: '/b' }; s.repos.dashboard.paths.vps = '/w/dashboard'; s.roles.investigator = { count: 1, machine: 'vps' }; }), /repo api has no path on vps/],
   ];
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('qhs', ${sql.json(s)}, 'ahmed')`, re);
 });
@@ -141,10 +147,19 @@ test('card repos', async () => {
   assert.deepEqual(await repos(sql, id), ['api']);
   await assert.rejects(() => sql`select cb.task_update(${id}, '{"repos":["web"]}', 'orch@pc')`, /repo web is not a repo of qhs/);
   await assert.rejects(() => sql`select cb.task_update(${id}, '{"repos":"api"}', 'orch@pc')`, /repos is a list of repo names/);
+  // moving a card to another project re-checks its repos there, unless the same edit names valid ones
+  const [{ id: mv }] = await sql`select cb.task_add(project => 'qhs', title => 'mv', repos => '["dashboard"]', actor => 'orch@pc') as id`;
+  await assert.rejects(() => sql`select cb.task_update(${mv}, '{"project":"demo"}', 'orch@pc')`, /repo dashboard is not a repo of demo: main/);
+  await assert.rejects(() => sql`select cb.task_update(${mv}, '{"project":"demo","repos":["api"]}', 'orch@pc')`, /repo api is not a repo of demo: main/);
+  await sql`select cb.task_update(${mv}, '{"project":"demo","repos":[]}', 'orch@pc')`;
+  assert.deepEqual([(await sql`select project from cb.tasks where id = ${mv}`)[0].project, await repos(sql, mv)], ['demo', null]);
+  const [{ id: mv2 }] = await sql`select cb.task_add(project => 'qhs', title => 'mv2', repos => '["api"]', actor => 'orch@pc') as id`;
+  await sql`select cb.task_update(${mv2}, '{"project":"demo","repos":["main"]}', 'orch@pc')`;
+  assert.deepEqual(await repos(sql, mv2), ['main']);
   for (const st of ['approval', 'build', 'review', 'merge', 'qa']) {
     await sql`update cb.tasks set stage = ${st} where id = ${id}`;
     await assert.rejects(() => sql`select cb.task_update(${id}, '{"repos":["dashboard"]}', 'orch@pc')`,
-      /#\d+ is at .*: repos lock at build; send it back with cb fail \d+ --to design/);
+      /#\d+ is at .*: repos lock once the design is passed; send it back with cb fail \d+ --to design/);
   }
   assert.deepEqual(await repos(sql, id), ['api']);
 });
@@ -181,11 +196,15 @@ test('stage build needs a repo in a multi-repo project', async () => {
   const sql = await setup();
   const bug = await add(sql, 'qhs', { type: 'bug' });
   await assert.rejects(() => sql`select cb.stage_set(${bug}, 'build', 'small', 'orch@pc')`, /give the repos: cb stage \d+ build --repo <repo> --why/);
-  await assert.rejects(() => sql`select cb.stage_set(${bug}, 'build', 'small', 'orch@pc', repos => '{web}')`, /repo web is not a repo of qhs/);
-  assert.equal((await sql`select cb.stage_set(${bug}, 'build', 'small', 'orch@pc', repos => '{dashboard}') as r`)[0].r, 'build');
+  await assert.rejects(() => sql`select cb.stage_set(${bug}, 'build', 'small', 'orch@pc', repos => '["web"]')`, /repo web is not a repo of qhs/);
+  assert.equal((await sql`select cb.stage_set(${bug}, 'build', 'small', 'orch@pc', repos => '["dashboard"]') as r`)[0].r, 'build');
   assert.deepEqual(await repos(sql, bug), ['dashboard']);
+  // the web and the CLI call it through rpc, which sends arrays as jsonb
+  const viaRpc = await add(sql, 'qhs', { type: 'bug' });
+  assert.equal(await callFn('stage_set', { id: String(viaRpc), stage: 'build', why: 'small', actor: 'orch@pc', repos: ['dashboard', 'api'] }, sql), 'build');
+  assert.deepEqual(await repos(sql, viaRpc), ['dashboard', 'api']);
   const ops = await add(sql, 'qhs', { type: 'bug' });
-  await assert.rejects(() => sql`select cb.stage_set(${ops}, 'none', 'ops', 'orch@pc', repos => '{api}')`, /repos go with build/);
+  await assert.rejects(() => sql`select cb.stage_set(${ops}, 'none', 'ops', 'orch@pc', repos => '["api"]')`, /repos go with build/);
   // cb add --stage build refuses before creating the card
   const before = (await sql`select count(*)::int n from cb.tasks`)[0].n;
   await assert.rejects(() => sql`select cb.task_add(project => 'qhs', title => 'x', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`,
@@ -210,11 +229,19 @@ test('CLI: squad show, edit --repo, add --repo, stage --repo', async () => {
   assert.deepEqual(await repos(sql, id), ['api', 'dashboard']);
   assert.equal(cb(['edit', String(id), '--repo', '']).code, 0);
   assert.equal(await repos(sql, id), null);
-  const a = cb(['add', 'qhs', 'x', '--repo', 'api']);
+  // empty names (a trailing or doubled comma) are dropped
+  const e2 = cb(['edit', String(id), '--repo', 'api,,dashboard']);
+  assert.equal(e2.code, 0, e2.err);
+  assert.deepEqual(await repos(sql, id), ['api', 'dashboard']);
+  const a = cb(['add', 'qhs', 'x', '--repo', 'api,']);
   assert.equal(a.code, 0, a.err);
   assert.deepEqual(await repos(sql, Number(a.out.replace('#', ''))), ['api']);
+  const i = cb(['iam', 'qhs-api-B2@pc', 'qhs', '--role', 'builder', '--repo', 'api'], { HERDR_PANE_ID: 'p9' });
+  assert.equal(i.code, 0, i.err);
+  assert.equal((await sql`select repo from cb.sessions where machine = 'pc' and pane = 'p9'`)[0].repo, 'api');
+  assert.match(cb(['help', 'bug']).out, /^cb bug .*\[--stage build --why "<why>"\] \[--repo <repo,repo>\]/);
   const bug = await add(sql, 'qhs', { type: 'bug' });
-  const s = cb(['stage', String(bug), 'build', '--repo', 'dashboard', '--why', 'small']);
+  const s = cb(['stage', String(bug), 'build', '--repo', 'dashboard,', '--why', 'small']);
   assert.equal(s.code, 0, s.err);
   assert.deepEqual(await repos(sql, bug), ['dashboard']);
   const b = cb(['bug', 'qhs', 'y', '-b', 'broke', '--stage', 'build', '--why', 'small', '--repo', 'api']);

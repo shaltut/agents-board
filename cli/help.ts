@@ -101,7 +101,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     unblock: { use: 'cb unblock <task> --by <task>', topic: 'work',
       does: 'Remove a blocker that no longer applies. With nothing else holding it, the task goes to Next.',
       eg: 'cb unblock 13 --by 12' },
-    bug: { use: 'cb bug <project> "<title>" -b "<what happened, how to reproduce, expected vs actual>" [-p P1] [-l tag]', topic: 'work',
+    bug: { use: 'cb bug <project> "<title>" -b "<what happened, how to reproduce, expected vs actual>" [-p P1] [-l tag] [--stage build --why "<why>"] [--repo <repo,repo>]', topic: 'work',
       does: 'File a bug you found outside your task; it goes to Next and the project\'s orchestrator is told and assigns it. Then keep working on your task. A problem with the board itself (cb, relay, web board): project claude-board.',
       eg: 'cb bug ihop "Hijri dates before 1400 parse as Gregorian" -b "claim 8812: 1399-02-01 read as 1399 CE; expected 1979-01-01"',
       more: '-b is required. The project must exist: a typo errors with the known projects instead of creating one.' },

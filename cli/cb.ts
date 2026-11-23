@@ -93,6 +93,9 @@ function need(n: number, usage: string) {
   if (args.length < n) throw new Error(`usage: cb ${usage}. Details: cb help ${cmd}`);
 }
 
+/** --repo a,b as a list; empty names (a trailing or doubled comma) dropped. */
+const repoList = (v: string) => v.split(',').map((x) => x.trim()).filter(Boolean);
+
 function links(): Record<string, string> {
   const l: Record<string, string> = {};
   for (const kv of o.link ?? []) { const i = kv.indexOf('='); if (i > 0) l[kv.slice(0, i)] = kv.slice(i + 1); }
@@ -576,17 +579,17 @@ async function run(): Promise<unknown> {
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
-        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: o.repo.split(',') } : {}) });
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       return { out: `#${id}`, json: id };
     }
     case 'bug': {
-      need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual"');
+      need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual" [--stage build --why "<why>"] [--repo <repo,repo>]');
       if (!o.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb bug <project> "<title>" -b "<what happened>" --stage build --why "<why>"');
       await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
-        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: o.repo.split(',') } : {}) });
+        ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
@@ -598,8 +601,7 @@ async function run(): Promise<unknown> {
     case 'stage': {
       need(2, 'stage <id> build|none --why "<why>" [--repo <repo,repo>]   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
       await guard(args[0]);
-      // stage_set takes text[]: callFn sends a JS array as jsonb, so the list goes as an array literal
-      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor, ...(o.repo ? { repos: `{${o.repo}}` } : {}) });
+      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor, ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'pass': {
@@ -649,7 +651,7 @@ async function run(): Promise<unknown> {
       const fields: Record<string, unknown> = {};
       for (const k of ['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic'] as const) if (o[k] !== undefined) fields[k] = o[k];
       if (o.labels) fields.labels = o.labels.split(',');
-      if (o.repo !== undefined) fields.repos = o.repo ? o.repo.split(',') : null;
+      if (o.repo !== undefined) fields.repos = repoList(o.repo);
       const l = links(); if (Object.keys(l).length) fields.links = l;
       await callFn('task_update', { id: args[0], fields, actor });
       return { out: `#${args[0].replace('#', '')} updated` };
@@ -730,7 +732,9 @@ ${body}`, json: pg };
         .map(([k, v]: any) => v.home ? `${k} (home)` : k).join(', ')}`] : [];
       return { out: [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`].join('\n'), json: sq };
     }
-    case 'run': return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, json: !!o.json, actor });
+    case 'run':
+      if (o.repo !== undefined) throw new Error("--repo for cb run comes with the runner's repos (not yet)");
+      return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');

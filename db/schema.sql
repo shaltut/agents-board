@@ -699,12 +699,15 @@ begin
   end if;
   select * into cur from cb.tasks t where t.id = tid;
   if not found then raise exception 'task #% not found', tid; end if;
+  rs := cur.repos;
   if fields ? 'repos' then
     -- repos lock from approval on: Ahmed approved a design for these repos, and builders may already work in them
     if cur.stage in ('approval', 'build', 'review', 'merge', 'qa') and cb._pipeline(cur.project) then
-      raise exception '#% is at %: repos lock at build; send it back with cb fail % --to design', tid, cur.stage, tid;
+      raise exception '#% is at %: repos lock once the design is passed; send it back with cb fail % --to design', tid, cb._stage_words(cur.stage), tid;
     end if;
     rs := cb._check_repos(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end, cb._repo_list(fields -> 'repos'));
+  elsif fields ? 'project' and cb.resolve(fields ->> 'project') <> cur.project then
+    rs := cb._check_repos(cb.resolve(fields ->> 'project'), cur.repos);  -- its repos must exist in the project it moves to
   end if;
   ep := case when fields ? 'epic' then cb.norm_epic(fields ->> 'epic') else cur.epic_id end;
   -- an epic and its blockers stay in one project: moving the task alone would split them
@@ -733,7 +736,7 @@ begin
     links    = case when fields ? 'links' then t.links || (fields -> 'links') else t.links end,
     project  = case when fields ? 'project' then cb.ensure_project(fields ->> 'project') else t.project end,
     rank     = case when fields ? 'rank' then (fields ->> 'rank')::double precision else t.rank end,
-    repos    = case when fields ? 'repos' then rs else t.repos end
+    repos    = rs
   where t.id = tid;
   perform set_config('cb.note', '', true);
 end $$;
@@ -3506,7 +3509,7 @@ end $$;
 
 -- The lead restages an unclaimed card. build: small found work (a bug or chore) skips design (Q2315); none: work with
 -- no code (ops, a data check) leaves the pipeline and is worked the old way (Q2323).
-create function cb.stage_set(id text, stage text, why text, actor text default null, repos text[] default null) returns text language plpgsql as $$
+create function cb.stage_set(id text, stage text, why text, actor text default null, repos jsonb default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(trim(coalesce(stage, '')));
         rs text[];
@@ -3525,9 +3528,9 @@ begin
     if t.stage is distinct from 'design' then raise exception '#% is not at design: only a card at design can skip to build', tid; end if;
     if t.type not in ('bug', 'chore') then raise exception '#% is a %: only a bug or chore can skip design', tid, t.type; end if;
     -- a card never defaults to a repo (#3703): in a project of several, the lead names them
-    rs := coalesce(cb._check_repos(t.project, repos), t.repos);
+    rs := coalesce(cb._check_repos(t.project, cb._repo_list(repos)), t.repos);
     if rs is null and cb._multi_repo(t.project) then raise exception 'give the repos: cb stage % build --repo <repo> --why "<why>"', tid; end if;
-  elsif repos is not null then
+  elsif cardinality(coalesce(cb._repo_list(repos), '{}')) > 0 then
     raise exception 'repos go with build: cb stage % build --repo <repo> --why "<why>"', tid;
   end if;
   perform set_config('cb.stage_ok', 'on', true);
@@ -4125,6 +4128,10 @@ begin
   end if;
   if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise','repos')) then
     raise exception 'squad has an unknown key: only machines, roles, areas and supervise (and repos, for a project of several repos)';
+  end if;
+  -- "repos": null is a mistake, not "no repos": refused here, before a machine's repo is judged against it
+  if squad ? 'repos' and jsonb_typeof(squad->'repos') is distinct from 'object' then
+    raise exception 'repos must be an object of repos: {"<name>": {"home": true, "paths": {"<machine>": "<absolute path>"}}}';
   end if;
   if squad ? 'supervise' and jsonb_typeof(squad->'supervise') is distinct from 'boolean' then
     raise exception 'supervise must be true or false';

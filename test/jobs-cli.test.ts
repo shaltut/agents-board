@@ -50,6 +50,14 @@ test('cb run queues and prints the job', async () => {
   assert.equal(r.out, 'job #1 queued (0 ahead)');
 });
 
+test('cb run --repo refuses until the runner knows repos (#3703)', async () => {
+  const { sql } = await setup();
+  const r = cb(['run', 'test', '--sha', 'abc1234', '--files', 'a.test.ts', '--project', 'demo', '--repo', 'api']);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /--repo for cb run comes with the runner's repos \(not yet\)/);
+  assert.equal((await sql`select count(*)::int n from cb.jobs`)[0].n, 0);
+});
+
 test('cb run refuses flag- and path-shaped values by name', async () => {
   await setup();
   for (const bad of ['-r', '../x']) {
