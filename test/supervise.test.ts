@@ -485,3 +485,17 @@ test('a throw between the mark and /exit clears the mark', async () => {
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
   assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
 });
+
+test('a name blocked again after its blocked agent is gone tells the lead again', async () => {
+  const { sql, sup } = await setup();
+  await card(sql);
+  await session(sql, 'orch@macbook', 'lead');
+  const h = fakeHerdr({ start: () => ({ status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready"}}' }) });
+  const d = deps(sup, h.run);
+  await tick(d);
+  assert.ok(d.memory.blockedTold.has('sv-B1@macbook'));
+  h.live.clear(); // a person closed the blocked pane
+  const out = await tick({ ...d, now: d.now + 60_000 });
+  assert.equal(h.calls.filter((c) => c.args[1] === 'start' && c.args[2] === 'sv-b1-macbook').length, 2, out.join('\n'));
+  assert.equal((await tells(sql)).length, 2);
+});

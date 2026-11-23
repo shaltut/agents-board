@@ -73,11 +73,12 @@ export async function tick(d: Deps): Promise<string[]> {
     if (macKeys.has(l.machine) || macKeys.has(String(l.actor).split('@')[1])) mac.add(herdrName(l.actor));
   }
   let macLive = Math.max(mac.size, macAgents), startsLeft = STARTS_PER_TICK;
-  // a launch stops counting as "started, not bound yet" once the board sees it live, or herdr no longer runs it
+  // a launch stops counting as "started, not bound yet" once the board sees it live, or herdr no longer runs it; a
+  // later block of the same name tells the lead again
   const liveOnBoard = new Set(states.flatMap((s) => s.sessions.filter((x) => x.live).map((x) => x.actor)));
   if (!dryRun) {
     for (const n of memory.launched) {
-      if (liveOnBoard.has(n) || (!herdrLive.has(herdrName(n)) && !herdrDown.has(n.split('@')[1]!))) memory.launched.delete(n);
+      if (liveOnBoard.has(n) || (!herdrLive.has(herdrName(n)) && !herdrDown.has(n.split('@')[1]!))) { memory.launched.delete(n); memory.blockedTold.delete(n); }
     }
   }
 
