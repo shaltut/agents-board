@@ -657,6 +657,10 @@ begin
   if coalesce(trim(title), '') = '' then raise exception 'title is required'; end if;
   if sg is not null and not piped then raise exception 'stage is only for projects with the pipeline on'; end if;
   if sg is not null and sg <> 'build' then raise exception 'a new card starts at design; the lead can send small work to build: stage => build'; end if;
+  -- said here, not by stage_set: its hint would name a card id that the refusal rolls back
+  if sg = 'build' and cardinality(coalesce(cb._repo_list(repos), '{}')) = 0 and cb._multi_repo(p) then
+    raise exception 'give the repos: --stage build --repo <repo> --why "<why>"';
+  end if;
   -- work added through an alias ("tawuniya") keeps that stream's tags
   l := l || array(select g from cb.project_aliases pa, unnest(pa.tags) g where pa.alias = cb.slug(project) and g <> all(l));
   insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since, repos)
@@ -3586,14 +3590,14 @@ begin
     select g.version, g.body into v, pgbody from cb.pages g where g.task_id = tid;
     if v is null then raise exception 'write the design page first: cb page set % -f <file>', tid; end if;
     -- several repos (#3703): the card names its repos before approval; unnamed, they come from its area tags, in squad order
-    if t.repos is null and cb._multi_repo(t.project) then
+    if t.repos is null then
       select array_agg(z.rname order by z.ix) into rs
         from (select e.el ->> 'repo' as rname, min(e.ix) as ix
                 from cb.projects pr, jsonb_array_elements(pr.squad -> 'areas') with ordinality e(el, ix)
                where pr.slug = t.project and jsonb_typeof(e.el) = 'object' and e.el ->> 'name' = any(t.labels)
                group by 1) z;
-      if rs is null then raise exception 'name the repos first: cb edit % --repo <repo,repo>', tid; end if;
-      update cb.tasks x set repos = rs where x.id = tid;
+      if rs is null and cb._multi_repo(t.project) then raise exception 'name the repos first: cb edit % --repo <repo,repo>', tid; end if;
+      if rs is not null then update cb.tasks x set repos = rs where x.id = tid; end if;
     end if;
     extra := jsonb_build_object('crew', jsonb_build_object('design', a));
   elsif t.stage = 'build' then
