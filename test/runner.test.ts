@@ -87,6 +87,7 @@ const recipes = {
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
+  junkref: { steps: [node('junk.mjs')], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
 const CFG = join(TMP, 'runner.json');
@@ -442,6 +443,19 @@ test('a NUL folder a job plants in the slot does not break the next job', { skip
   assert.equal(jp.state, 'passed', jp.summary);
   const jq = await ended(await add('ok'));
   assert.equal(jq.state, 'passed', jq.summary);
+});
+
+test('a non-ref file a job leaves under .git/refs starts the slot over, not a failed fetch', async () => {
+  git('checkout', '-q', '-b', 'junk', 'main');
+  const P = commit('junk', { 'junk.mjs': "import { writeFileSync } from 'node:fs'; writeFileSync('.git/refs/junk', 'not a ref'); console.log('planted');" });
+  git('push', '-q', 'origin', 'junk');
+  git('checkout', '-q', 'main');
+  const jp = await ended(await add('junkref', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const id = await add('ok');
+  const jq = await ended(id);
+  assert.equal(jq.state, 'passed', jq.summary);
+  assert.match(logOf(id), /git clone/); // the fetch failed, the slot was cloned again
 });
 
 // runJob in this process, with its own home and slot folders: no board, no daemon

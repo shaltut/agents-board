@@ -237,21 +237,6 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   const git = (args: string[], capture = false) => run([...G, ...args], { cwd: dir, env: genv, io, ms: GIT_MS, stop, capture });
   const saved = join(home, 'state', `${j.project}-${slot}.gitconfig`);
   const gitDir = join(dir, '.git');
-  if (!lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() || !existsSync(saved)) { // missing, or a link: start over
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(lockState, { force: true });
-    rmSync(saved, { force: true });
-    mkdirSync(p.base, { recursive: true });
-    // --no-local: a local-path origin would otherwise hand over every object it holds, not only what branches reach;
-    // --no-tags: branches only, never a tag-only commit
-    const c = await run([...G, 'clone', '--no-checkout', '--no-local', '--no-tags', p.git, dir], { cwd: p.base, env: genv, io, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local --no-tags <origin>' });
-    if (stop.aborted) return null;
-    if (c.code !== 0) {
-      rmSync(dir, { recursive: true, force: true });
-      return err('error: could not fetch from origin');
-    }
-    copyFileSync(join(gitDir, 'config'), saved);
-  }
   io.reset = () => {
     // a .git a job swapped for a link is left alone (the next job starts the slot over): nothing outside the clone goes
     if (lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory()) {
@@ -262,15 +247,36 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     }
     if (WIN) rmSync('\\\\?\\' + resolve(dir, 'NUL'), { recursive: true, force: true }); // core.hooksPath=NUL is relative: a job's NUL folder would break every git call
   };
-  io.reset();
-  // runner.json's git URL wins over the one saved at clone time (a moved origin reaches existing slot clones)
-  const u = await run([...G, 'config', 'remote.origin.url', p.git], { cwd: dir, env: genv, io, ms: GIT_MS, stop, show: 'git config remote.origin.url <origin>' });
-  if (stop.aborted) return null;
-  if (u.code !== 0) throw new Error(`git config exited ${u.code}`);
-  copyFileSync(join(gitDir, 'config'), saved);
-  const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
-  if (stop.aborted) return null;
-  if (f.code !== 0) return err('error: could not fetch from origin');
+  // A fetch that fails in an existing clone (a job may have left garbage under .git, e.g. a non-ref file in refs) starts
+  // the slot over once: a fresh clone, then the fetch again. rmSync removes links, never what they point at.
+  for (let again = false; ; again = true) {
+    if (again || !lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() || !existsSync(saved)) { // missing, or a link: start over
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(lockState, { force: true });
+      rmSync(saved, { force: true });
+      mkdirSync(p.base, { recursive: true });
+      // --no-local: a local-path origin would otherwise hand over every object it holds, not only what branches reach;
+      // --no-tags: branches only, never a tag-only commit
+      const c = await run([...G, 'clone', '--no-checkout', '--no-local', '--no-tags', p.git, dir], { cwd: p.base, env: genv, io, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local --no-tags <origin>' });
+      if (stop.aborted) return null;
+      if (c.code !== 0) {
+        rmSync(dir, { recursive: true, force: true });
+        return err('error: could not fetch from origin');
+      }
+      copyFileSync(join(gitDir, 'config'), saved);
+      again = true; // a fresh clone gets no second start-over
+    }
+    io.reset();
+    // runner.json's git URL wins over the one saved at clone time (a moved origin reaches existing slot clones)
+    const u = await run([...G, 'config', 'remote.origin.url', p.git], { cwd: dir, env: genv, io, ms: GIT_MS, stop, show: 'git config remote.origin.url <origin>' });
+    if (stop.aborted) return null;
+    if (u.code !== 0) throw new Error(`git config exited ${u.code}`);
+    copyFileSync(join(gitDir, 'config'), saved);
+    const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
+    if (stop.aborted) return null;
+    if (f.code === 0) break;
+    if (again) return err('error: could not fetch from origin');
+  }
   const rv = await git(['rev-parse', '--verify', '--quiet', `${j.sha}^{commit}`], true);
   if (stop.aborted) return null;
   if (rv.code !== 0) return err('error: push it first');
