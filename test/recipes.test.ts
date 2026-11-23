@@ -37,6 +37,22 @@ test('loadConfig names the bad field', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], finally: [['b', '{zz}']] })), /finally\[0\].*zz/);
 });
 
+test('loadConfig refuses a misspelled key, an empty install and an optional cwd parameter', () => {
+  const base = JSON.parse(cfgWith({ steps: [['a']] }));
+  const withRecipe = (r: object) => { const c = structuredClone(base); Object.assign(c.projects.p.recipes.r, r); return JSON.stringify(c); };
+  assert.throws(() => loadConfig(withRecipe({ finaly: [['b']] })), { message: 'projects.p.recipes.r: unknown key "finaly"' });
+  assert.throws(() => loadConfig(withRecipe({ dbb: true })), /projects\.p\.recipes\.r: unknown key "dbb"/);
+  assert.throws(() => loadConfig(withRecipe({ params: { x: { pattern: '.', mx: 2 } } })), /projects\.p\.recipes\.r\.params\.x: unknown key "mx"/);
+  assert.throws(() => loadConfig(JSON.stringify({ ...base, slot: 2 })), /runner\.json: unknown key "slot"/);
+  assert.throws(() => loadConfig(JSON.stringify({ ...base, log: { ...base.log, peer: [] } })), /log: unknown key "peer"/);
+  const proj = (p: object) => { const c = structuredClone(base); Object.assign(c.projects.p, p); return JSON.stringify(c); };
+  assert.throws(() => loadConfig(proj({ lockFile: 'x' })), /projects\.p: unknown key "lockFile"/);
+  assert.throws(() => loadConfig(proj({ install: [] })), /projects\.p\.install: must be a non-empty list/);
+  assert.throws(() => loadConfig(withRecipe({ cwd: '{x}', params: { x: { pattern: '.', min: 0 } } })), /cwd.*min 1/);
+  assert.ok(loadConfig(withRecipe({ cwd: '{x}', params: { x: { pattern: '.' } } })));
+  assert.ok(example());
+});
+
 test('checkParams refuses flag- and path-shaped values and the pattern', () => {
   const test_ = example().projects.ihop!.recipes.test!;
   const bad = (files: string[]) => checkParams(test_, { app: ['claims-api'], files });
@@ -66,7 +82,8 @@ test('jobEnv starts empty', () => {
   const cfg = example();
   const recipe = { ...cfg.projects.ihop!.recipes.guards!, env: { A: '1' } };
   const from = { PATH: 'p', CB_DATABASE_URL: 'x', DATABASE_URL: 'y', SECRET: 's', TEMP: 't' };
-  assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', A: '1' });
+  // NoDefaultCurrentDirectoryInExePath: Windows must not run a program from the cwd (a committed git.exe) before PATH
+  assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', A: '1' });
   assert.equal(jobEnv({ ...from, SECRET: 's' }, { ...cfg, passEnv: ['SECRET', 'ABSENT'] }, recipe).SECRET, 's');
 });
 

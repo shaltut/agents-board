@@ -18,6 +18,10 @@ const slotsOf = (s: string) => [...s.matchAll(SLOT)].map((m) => m[1]!);
 function fail(path: string, why: string): never {
   throw new Error(`${path}: ${why}`);
 }
+// a misspelled key (`finaly`, `dbb`) would silently change what runs: refuse it
+function only(o: Record<string, unknown>, path: string, allowed: string[]) {
+  for (const k of Object.keys(o)) if (!allowed.includes(k)) fail(path, `unknown key "${k}"`);
+}
 function str(v: unknown, path: string): string {
   if (typeof v !== 'string' || !v) fail(path, 'must be a non-empty string');
   return v;
@@ -49,12 +53,14 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
 
 function loadRecipe(raw: unknown, path: string): Recipe {
   if (!isObj(raw)) fail(path, 'must be an object');
+  only(raw, path, ['params', 'cwd', 'steps', 'finally', 'env', 'timeout', 'db']);
   const params: Record<string, Param> = {};
   if (raw.params !== undefined && !isObj(raw.params)) fail(`${path}.params`, 'must be an object');
   for (const [n, pr] of Object.entries(raw.params ?? {})) {
     const pp = `${path}.params.${n}`;
     if (!NAME.test(n)) fail(`${path}.params`, `name "${n}" must match ${NAME}`);
     if (!isObj(pr)) fail(pp, 'must be an object');
+    only(pr, pp, ['pattern', 'min', 'max']);
     const pattern = str(pr.pattern, `${pp}.pattern`);
     try { new RegExp(pattern); } catch { fail(`${pp}.pattern`, 'does not compile'); }
     const min = int(pr.min, `${pp}.min`, 0, MAX_VALUES, 1);
@@ -66,6 +72,7 @@ function loadRecipe(raw: unknown, path: string): Recipe {
   for (const n of slotsOf(cwd)) {
     if (!Object.hasOwn(params, n)) fail(`${path}.cwd`, `unknown parameter {${n}}`);
     if (params[n]!.max !== 1) fail(`${path}.cwd`, `{${n}} is a list parameter; cwd may use only max 1`);
+    if (params[n]!.min < 1) fail(`${path}.cwd`, `{${n}} may be left out; cwd may use only min 1`);
   }
   const env = raw.env ?? {};
   if (!isObj(env) || Object.values(env).some((x) => typeof x !== 'string')) fail(`${path}.env`, 'must be an object of strings');
@@ -83,7 +90,9 @@ export function loadConfig(text: string): RunnerConfig {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`runner.json: not valid JSON (${(e as Error).message})`); }
   if (!isObj(raw)) fail('runner.json', 'must be an object');
+  only(raw, 'runner.json', ['name', 'slots', 'log', 'passEnv', 'projects']);
   if (!isObj(raw.log)) fail('log', 'is required: { host, port, peers }');
+  only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
   if (!isObj(raw.projects) || !Object.keys(raw.projects).length) fail('projects', 'must hold at least one project');
   const projects: Record<string, Project> = {};
@@ -91,6 +100,8 @@ export function loadConfig(text: string): RunnerConfig {
     const pp = `projects.${pn}`;
     if (!NAME.test(pn)) fail('projects', `name "${pn}" must match ${NAME}`);
     if (!isObj(p) || !isObj(p.recipes)) fail(pp, 'needs a recipes object');
+    only(p, pp, ['git', 'base', 'lockfile', 'install', 'installTimeout', 'recipes']);
+    if (!Array.isArray(p.install) || !p.install.length || p.install.some((x) => typeof x !== 'string' || !x)) fail(`${pp}.install`, 'must be a non-empty list of strings');
     const recipes: Record<string, Recipe> = {};
     for (const [rn, r] of Object.entries(p.recipes)) {
       if (!NAME.test(rn)) fail(`${pp}.recipes`, `name "${rn}" must match ${NAME}`);
@@ -98,7 +109,7 @@ export function loadConfig(text: string): RunnerConfig {
     }
     projects[pn] = {
       git: str(p.git, `${pp}.git`), base: str(p.base, `${pp}.base`), lockfile: str(p.lockfile, `${pp}.lockfile`),
-      install: strList(p.install, `${pp}.install`), installTimeout: int(p.installTimeout, `${pp}.installTimeout`, 1, 7200), recipes,
+      install: p.install as string[], installTimeout: int(p.installTimeout, `${pp}.installTimeout`, 1, 7200), recipes,
     };
   }
   return {
@@ -145,7 +156,9 @@ export function jobCwd(slotDir: string, recipe: Recipe, params: Record<string, s
   return out;
 }
 
-export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Recipe): Record<string, string> {
+/** A job's env, built from nothing. The runner's own git and docker calls use it too, with `recipe.env` holding their
+ *  extras: they never get the runner's whole env (its CB_* and database URL). */
+export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<Recipe, 'env'>): Record<string, string> {
   // Windows env names are case-insensitive (Path vs PATH): match that way, emit the listed spelling
   const lower = new Map(Object.entries(from).map(([k, v]) => [k.toUpperCase(), v]));
   const out: Record<string, string> = {};
@@ -153,7 +166,9 @@ export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Recip
     const v = lower.get(n.toUpperCase());
     if (v !== undefined) out[n] = v;
   }
-  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', ...recipe.env };
+  // NoDefaultCurrentDirectoryInExePath: on Windows the process that looks a program up (the launcher, or a job's own
+  // child) must not take a committed git.exe / docker.exe from its cwd before PATH. Inert elsewhere.
+  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', ...recipe.env };
 }
 
 export function published(cfg: RunnerConfig) {

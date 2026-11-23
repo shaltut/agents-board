@@ -23,6 +23,8 @@ try { cfg = loadConfig(readFileSync(CONFIG, 'utf8')); } catch (e: any) {
   process.exit(1);
 }
 const NAME = cfg.name ?? machine();
+// Windows: a program started by name is never taken from the cwd (a slot clone's committed git.exe) before PATH
+process.env.NoDefaultCurrentDirectoryInExePath = '1';
 mkdirSync(LOGS, { recursive: true });
 mkdirSync(join(HOME, 'state'), { recursive: true }); // slot install state and pid records
 
@@ -62,12 +64,13 @@ await new Promise<void>((ok) => {
 // Before any job: kill what a runner that died left running in the slots (git, installs, steps), so nothing races the
 // next job in the same slot. Stopped by a signal, this runner does the same for its own jobs on the way out.
 const STATE = join(HOME, 'state');
-const reaped = reap(STATE);
+const reaped = reap(STATE, say);
 if (reaped) say(`killed ${reaped} process(es) the last run left behind`);
-for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => { reap(STATE); process.exit(0); });
+for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => { reap(STATE, say); process.exit(0); });
 
+// the version covers all of the runner's own code
 const VERSION = createHash('sha1')
-  .update([import.meta.filename, join(import.meta.dirname, 'runner-job.ts')].map((f) => readFileSync(f, 'utf8')).join('\0'))
+  .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
   .digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-runner/${VERSION}`, max: 4 });
 const [hello] = await sql`select cb.runner_hello(${NAME}, ${`http://${cfg.log.host}:${cfg.log.port}`}, ${sql.json(published(cfg) as any)}) as n`;

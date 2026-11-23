@@ -2,8 +2,9 @@
 // the recipe's steps and finally steps, and build the board summary. The daemon (cli/runner.ts) claims and finishes.
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
-  closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
+  closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
+import { uptime } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
@@ -16,8 +17,8 @@ export type JobRow = { id: number; project: unknown; recipe: unknown; sha: unkno
 export type Result = { state: 'passed' | 'failed' | 'error'; exit_code: number | null; summary: string };
 type Ran = { code: number | null; out: string; timedOut: boolean; startFailed: boolean; stopped: boolean };
 // a job's log fd, its slot's pid record (<home>/state/slot-<n>.pids: the commands running now, pid → program) and the
-// `$ argv` lines written to its log
-type Io = { fd: number; pids: string; nostart: string; live: Map<number, string>; headers: Set<string> };
+// `$ argv` lines written to its log; reset puts the slot clone's .git/config back
+type Io = { fd: number; pids: string; nostart: string; live: Map<number, string>; headers: Set<string>; reset?: () => void };
 
 // The record holds only live roots: rewritten on every spawn and exit, gone when none runs (one job per slot).
 function record(io: Io) {
@@ -36,31 +37,59 @@ export function treeKill(pid: number | undefined) {
 
 const image = (cmd: string) => { const b = basename(cmd); return WIN && !extname(b) ? `${b}.exe` : b; };
 
-/** Kills what a runner that died left running: every pid recorded in <stateDir>/*.pids, then forgets the records.
- *  On Windows only while that pid still runs the recorded program, so a reused pid is left alone. Synchronous. */
-export function reap(stateDir: string): number {
-  let n = 0;
+// pid → command line, for the pids still running; null when they cannot be read. Windows: one CIM query
+// ((Get-Process).CommandLine comes back empty on the PC). POSIX: /proc, else ps.
+function commandLines(pids: string[]): Map<string, string> | null {
+  const out = new Map<string, string>();
+  try {
+    if (WIN) {
+      const q = `Get-CimInstance Win32_Process -Filter "${pids.map((p) => `ProcessId=${p}`).join(' OR ')}" -ErrorAction Stop | ForEach-Object { "$($_.ProcessId)\`t$($_.CommandLine)" }`;
+      const text = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', q], { windowsHide: true, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const m of text.matchAll(/^(\d+)\t(.*)$/gm)) out.set(m[1]!, m[2]!.trim());
+    } else {
+      for (const p of pids) {
+        try { out.set(p, readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0').join(' ').trim()); } catch {
+          try { out.set(p, execFileSync('ps', ['-o', 'args=', '-p', p], { encoding: 'utf8', timeout: 10_000 }).trim()); } catch {}
+        }
+      }
+    }
+  } catch { return null; }
+  return out;
+}
+
+/** Kills what a runner that died left running: every pid recorded in <stateDir>/*.pids, then forgets the records. A pid
+ *  may have been reused since, so a record is acted on only when written since the last boot and while the pid still
+ *  runs that root: on Windows, a launcher whose argv holds the slot's .nostart path (every root there is node.exe, as
+ *  are agent sessions and relays); on POSIX, the recorded program. Synchronous. */
+export function reap(stateDir: string, say: (m: string) => void = () => {}): number {
+  const boot = Date.now() - uptime() * 1000;
+  const recs: { pid: string; img: string; mark: string }[] = [];
   let files: string[] = [];
   try { files = readdirSync(stateDir).filter((f) => f.endsWith('.pids')); } catch {}
   for (const f of files) {
     const file = join(stateDir, f);
-    let text = '';
-    try { text = readFileSync(file, 'utf8'); } catch {}
-    for (const line of text.split('\n')) {
-      const m = /^(\d+) (.+)$/.exec(line.trim());
-      if (!m) continue;
-      try {
-        if (WIN) {
-          const row = execFileSync('tasklist', ['/FI', `PID eq ${m[1]}`, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 10_000 });
-          if (row.split(',')[0]!.replaceAll('"', '').trim().toLowerCase() !== m[2]!.toLowerCase()) continue;
-          execFileSync('taskkill', ['/pid', m[1]!, '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
-        } else {
-          process.kill(-Number(m[1]), 'SIGKILL'); // its own process group (spawned detached)
-        }
-        n++;
-      } catch {}
-    }
+    try {
+      if (statSync(file).mtimeMs >= boot) {
+        for (const m of readFileSync(file, 'utf8').matchAll(/^(\d+) (.+)$/gm)) recs.push({ pid: m[1]!, img: m[2]!.trim(), mark: file.replace(/\.pids$/, '.nostart').toLowerCase() });
+      }
+    } catch {}
     try { rmSync(file, { force: true }); } catch {}
+  }
+  if (!recs.length) return 0;
+  const cmds = commandLines(recs.map((r) => r.pid));
+  if (!cmds) {
+    say(`could not read the command lines of ${recs.length} recorded process(es); left them running`);
+    return 0;
+  }
+  let n = 0;
+  for (const r of recs) {
+    const cmd = cmds.get(r.pid);
+    if (cmd === undefined || !(WIN ? cmd.toLowerCase().includes(r.mark) : basename(cmd.split(' ')[0]!) === r.img)) continue;
+    try {
+      if (WIN) execFileSync('taskkill', ['/pid', r.pid, '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+      else process.kill(-Number(r.pid), 'SIGKILL'); // its own process group (spawned detached)
+      n++;
+    } catch {}
   }
   return n;
 }
@@ -155,6 +184,7 @@ export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; sl
   } finally {
     if (io.fd >= 0) try { closeSync(io.fd); } catch {}
     try { rmSync(io.pids, { force: true }); } catch {}
+    try { io.reset?.(); } catch {}
   }
 }
 
@@ -178,24 +208,39 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   };
   const summary = (from: number) => summarize(tail(from)).text;
 
-  // 2. the slot clone at the sha. Git runs with the runner's own env (its credentials); recipe commands never do.
+  // 2. the slot clone at the sha. Git and docker run with the job's base env (the user's profile, so git's
+  // credentials, but never the runner's CB_* or database URL) and no prompts.
   const dir = join(p.base, `${j.project}-${slot}`);
   const lockState = join(home, 'state', `${j.project}-${slot}.lock`);
-  const genv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  const git = (args: string[], capture = false) => run(['git', ...args], { cwd: dir, env: genv, io, ms: GIT_MS, stop, capture });
-  if (!existsSync(join(dir, '.git'))) {
+  const genv = jobEnv(process.env, cfg, { env: { GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+  // Job code owns the clone's worktree and .git between our git calls: no hook (lefthook's included) or fsmonitor runs,
+  // and .git/config goes back to the copy saved at clone time (no planted filter, credential helper, sshCommand, url
+  // rewrite, include) before each job's first git call and after each job.
+  const G = ['git', '-c', `core.hooksPath=${WIN ? 'NUL' : '/dev/null'}`, '-c', 'core.fsmonitor=false'];
+  const git = (args: string[], capture = false) => run([...G, ...args], { cwd: dir, env: genv, io, ms: GIT_MS, stop, capture });
+  const saved = join(home, 'state', `${j.project}-${slot}.gitconfig`);
+  const gitDir = join(dir, '.git');
+  if (!lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() || !existsSync(saved)) { // missing, or a link: start over
     rmSync(dir, { recursive: true, force: true });
     rmSync(lockState, { force: true });
+    rmSync(saved, { force: true });
     mkdirSync(p.base, { recursive: true });
     // --no-local: a local-path origin would otherwise hand over every object it holds, not only what branches reach;
     // --no-tags: branches only, never a tag-only commit
-    const c = await run(['git', 'clone', '--no-checkout', '--no-local', '--no-tags', p.git, dir], { cwd: p.base, env: genv, io, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local --no-tags <origin>' });
+    const c = await run([...G, 'clone', '--no-checkout', '--no-local', '--no-tags', p.git, dir], { cwd: p.base, env: genv, io, ms: GIT_MS, stop, show: 'git clone --no-checkout --no-local --no-tags <origin>' });
     if (stop.aborted) return null;
     if (c.code !== 0) {
       rmSync(dir, { recursive: true, force: true });
       return err('error: could not fetch from origin');
     }
+    copyFileSync(join(gitDir, 'config'), saved);
   }
+  io.reset = () => {
+    rmSync(join(gitDir, 'config'), { recursive: true, force: true }); // a planted link goes, not what it points at
+    copyFileSync(saved, join(gitDir, 'config'));
+    rmSync(join(gitDir, 'commondir'), { force: true }); // would point git at another config
+  };
+  io.reset();
   const f = await git(['fetch', '--prune', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*']);
   if (stop.aborted) return null;
   if (f.code !== 0) return err('error: could not fetch from origin');
@@ -261,20 +306,21 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   return stop.aborted ? null : out;
 }
 
-/** job_finish. A board that cannot be reached is retried every 30 s until the finish lands or the job is no longer this
- *  runner's running job (false). A board that answers with a refusal gets one resend: the summary becomes a pointer to
- *  the log (and the exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged
- *  and given up, so the slot frees. */
-export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void): Promise<boolean> {
+/** job_finish. A board that cannot be reached, or answers with anything but a refusal (too many connections, a
+ *  restart: any SQLSTATE but P0001), is retried every 30 s until the finish lands or the job is no longer this runner's
+ *  running job (false). A refusal (a `raise`, P0001) gets one resend: the summary becomes a pointer to the log (and the
+ *  exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged and given up, so
+ *  the slot frees. */
+export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<boolean> {
   const withheld = `summary withheld: see cb job log ${id}`;
   let { exit_code, summary } = r;
   for (;;) {
     try {
       return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true;
     } catch (e: any) {
-      if (e?.name !== 'PostgresError') {
-        say(`job #${id}: could not reach the board (${e?.message ?? e}); retrying in 30 s`);
-        await new Promise((ok) => setTimeout(ok, 30_000));
+      if (e?.name !== 'PostgresError' || e.code !== 'P0001') {
+        say(`job #${id}: the board did not take its end (${e?.message ?? e}); retrying in ${wait / 1000} s`);
+        await new Promise((ok) => setTimeout(ok, wait));
         continue;
       }
       if (summary === withheld) {

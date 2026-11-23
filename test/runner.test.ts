@@ -2,7 +2,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +83,7 @@ const recipes = {
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
   wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
+  plant: { steps: [node('plant.mjs')], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
 const CFG = join(TMP, 'runner.json');
@@ -94,7 +95,8 @@ writeFileSync(CFG, JSON.stringify({
 type Runner = { child: ChildProcess; out: string; exited: Promise<number | null> };
 function startRunner(config = CFG, home = HOME): Runner {
   const child = spawn(process.execPath, ['cli/runner.ts'], {
-    env: { ...process.env, CB_RUNNER_CONFIG: config, CB_RUNNER_HOME: home, CB_DATABASE_URL: TEST_URL, RUNNER_MARKER: '1' },
+    // without NoDefaultCurrentDirectoryInExePath, as in a plain terminal (an agent's shell may set it): the runner sets it
+    env: { ...process.env, NoDefaultCurrentDirectoryInExePath: undefined, CB_RUNNER_CONFIG: config, CB_RUNNER_HOME: home, CB_DATABASE_URL: TEST_URL, RUNNER_MARKER: '1' },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   kids.push(child);
@@ -335,14 +337,21 @@ test('a restarted runner ends its running job, kills what it left running and ru
   await runner.exited;
   await sleep(500);
   assert.ok(alive(pid), 'the orphan is still running before the restart');
-  // a decoy record whose pid now runs another program: a reused pid is left alone (Windows checks the program)
+  // a decoy record whose pid was reused by another node.exe (an agent session, a relay): on Windows every recorded root
+  // is node.exe (the launcher), so only the launcher's own mark (its slot's .nostart path) in the command line counts
   const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
   pids.push(decoy.pid!);
-  writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'other.exe' : 'node'}\n`);
+  writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'node.exe' : 'node'}\n`);
+  // a record from before the last boot is never acted on, even when its pid carries the mark
+  const stale = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', '--', join(HOME, 'state', 'slot-3.nostart')], { detached: true, stdio: 'ignore', windowsHide: true });
+  pids.push(stale.pid!);
+  writeFileSync(join(HOME, 'state', 'slot-3.pids'), `${stale.pid} ${WIN ? 'node.exe' : 'node'}\n`);
+  utimesSync(join(HOME, 'state', 'slot-3.pids'), new Date('2000-01-01'), new Date('2000-01-01'));
   const ok = await add('ok');
   runner = startRunner();
   await up(runner);
-  if (WIN) assert.ok(alive(decoy.pid!), 'a pid that runs another program is left alone');
+  if (WIN) assert.ok(alive(decoy.pid!), 'a reused pid running another node.exe is left alone');
+  assert.ok(alive(stale.pid!), 'a record older than the boot is left alone');
   const j = await ended(id);
   assert.equal(j.state, 'error');
   assert.equal(j.summary, 'error: runner restarted');
@@ -350,4 +359,48 @@ test('a restarted runner ends its running job, kills what it left running and ru
   assert.match(msg[0]?.summary ?? '', /runner restarted/);
   await until('the orphan to go', () => !alive(pid), 10_000);
   assert.equal((await ended(ok)).state, 'passed'); // in the slot the orphan held
+});
+
+// Jobs run one at a time below, so each lands in slot 1, the first free one.
+test('a committed git.exe at the repo root is not the git the runner runs', { skip: !WIN && 'Windows exe search only' }, async () => {
+  // whoami.exe refuses git's arguments, so a hijacked git call fails the job. Index only: a git.exe in WORK would
+  // hijack this test's own git calls.
+  const blob = git('hash-object', '-w', 'C:/Windows/System32/whoami.exe');
+  git('checkout', '-q', '-b', 'exe', 'main');
+  git('update-index', '--add', '--cacheinfo', `100755,${blob},git.exe`);
+  git('commit', '-q', '-m', 'git.exe at the root');
+  const EXE = git('rev-parse', 'HEAD');
+  git('push', '-q', 'origin', 'exe');
+  git('checkout', '-q', 'main');
+  const a = await add('ok', EXE); // clean and the lockfile rev-parse run with git.exe in the cwd
+  const ja = await ended(a);
+  assert.equal(ja.state, 'passed', ja.summary);
+  const b = await add('ok'); // the next job's fetch too
+  const jb = await ended(b);
+  assert.equal(jb.state, 'passed', jb.summary);
+  assert.doesNotMatch(logOf(a) + logOf(b), /Invalid argument/);
+});
+
+test('hooks and config a job plants in the slot clone never run', async () => {
+  const hookMark = join(TMP, 'hook-ran').replaceAll('\\', '/'), filterMark = join(TMP, 'filter-ran').replaceAll('\\', '/');
+  // a post-checkout hook, and a smudge filter set in .git/config for x.txt (.git/info/attributes)
+  const plant = [
+    "import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from 'node:fs';",
+    "mkdirSync('.git/hooks', { recursive: true }); mkdirSync('.git/info', { recursive: true });",
+    `writeFileSync('.git/hooks/post-checkout', '#!/bin/sh\\necho hit > "${hookMark}"\\n'); chmodSync('.git/hooks/post-checkout', 0o755);`,
+    `appendFileSync('.git/config', '\\n[filter "x"]\\n\\tsmudge = echo hit > ${filterMark} && cat\\n');`,
+    "writeFileSync('.git/info/attributes', 'x.txt filter=x\\n');",
+    "console.log('planted');",
+  ].join('\n');
+  git('checkout', '-q', '-b', 'plant', 'main');
+  const P = commit('plant', { 'plant.mjs': plant, 'x.txt': 'a\n' });
+  const Q = commit('next', { 'x.txt': 'b\n' }); // checking it out rewrites x.txt: the filter would run
+  git('push', '-q', 'origin', 'plant');
+  git('checkout', '-q', 'main');
+  const jp = await ended(await add('plant', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const jq = await ended(await add('ok', Q));
+  assert.equal(jq.state, 'passed', jq.summary);
+  assert.equal(existsSync(hookMark), false, 'the planted hook ran');
+  assert.equal(existsSync(filterMark), false, 'the planted filter ran');
 });
