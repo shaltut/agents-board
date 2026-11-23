@@ -87,11 +87,12 @@ test('resume lists a card by its part', async () => {
   assert.deepEqual(r.cards.map((c: any) => c.id), [id]);
   assert.deepEqual(r.cards[0].part, { repo: 'dashboard', stage: 'build', pr: null });
   assert.equal(r.cards[0].parts, line);
+  assert.equal(r.cards[0].status, 'in_progress', 'the part status, not the card status (Next)');
   assert.equal((await sql`select cb.next_step(${String(id)}) as s`)[0].s.takes_it, line);
   assert.deepEqual((await resume(sql, 'qhs-B1@mac')).cards, []);
   const out = cb(['resume'], D);
   assert.equal(out.code, 0, out.err);
-  assert.ok(out.out.includes('  your part: dashboard') && out.out.includes(`  parts: ${line}`), out.out);
+  assert.ok(out.out.includes(`#${id} [in_progress] c`) && out.out.includes('  your part: dashboard') && out.out.includes(`  parts: ${line}`), out.out);
   // a part ahead of the card is done, with its PR
   await claim(sql, 'qhs-B1@mac');
   const p = cb(['pass', String(id), 'built', '--pr', API], 'qhs-B1@mac');
@@ -229,4 +230,62 @@ test('the digest shows parts', async () => {
   d = await digest(sql);
   assert.ok(d.includes(`#${bare} has no repo: cb edit ${bare} --repo <repo,repo>`), d.join('\n'));
   assert.ok(d.includes(`${D} is down and holds #${held} (part dashboard): restore it`), d.join('\n'));
+});
+
+test('freeing one part leaves its sibling on its own clock', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, 'qhs-B1@mac'); await claim(sql, D);
+  const age = async (mins: number) => {
+    const i = `${mins} minutes`;
+    await sql`update cb.task_parts set since = now() - ${i}::interval where task_id = ${id}`;
+    await sql`update cb.sessions set started_at = now() - ${i}::interval`;
+    await sql`update cb.events set at = now() - ${i}::interval where (task_id = ${id} or actor in ('qhs-B1@mac', ${D})) and not (data ? 'nudge')`;
+  };
+  const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
+  const holders = async () => (await sql`select assignee from cb.task_parts where task_id = ${id} order by repo`).map((r: any) => r.assignee);
+  await age(31);
+  assert.equal(await due(), 2, 'both holders nudged');
+  await age(91);
+  await sql`update cb.task_parts set nudged_at = now() - case repo when 'dashboard' then interval '61 minutes' else interval '10 minutes' end where task_id = ${id}`;
+  assert.equal(await due(), 2, 'dashboard freed: a note and a message');
+  assert.deepEqual(await holders(), ['qhs-B1@mac', null]);
+  // the free note on the card is not activity for the api part: its own nudge hour runs out and it is freed too
+  await sql`update cb.task_parts set nudged_at = now() - interval '61 minutes' where task_id = ${id} and repo = 'api'`;
+  assert.equal(await due(), 2);
+  assert.deepEqual(await holders(), [null, null]);
+});
+
+test('a staged card with no repo takes its repos once (digest group 13)', async () => {
+  const sql = await setup();
+  const add = async (stage = 'build') => {
+    const id = Number((await sql`select cb.task_add(project => 'qhs', title => 'b', type => 'bug', actor => 'orch@pc') as id`)[0].id);
+    await sql`select cb._stage_move(${id}, ${stage}, null, 'x')`;
+    return id;
+  };
+  const edit = (id: number, repos: string[]) => sql`select cb.task_update(${id}::text, ${sql.json({ repos })}, 'orch@pc')`;
+  const bare = await add();
+  assert.ok((await digest(sql)).includes(`#${bare} has no repo: cb edit ${bare} --repo <repo,repo>`));
+  const e = cb(['edit', String(bare), '--repo', 'api,dashboard'], 'orch@pc');
+  assert.equal(e.code, 0, e.err);
+  assert.deepEqual((await sql`select repo, stage, status, assignee from cb.task_parts where task_id = ${bare} order by repo`)
+    .map((r: any) => [r.repo, r.stage, r.status, r.assignee]), [['api', 'build', 'next', null], ['dashboard', 'build', 'next', null]]);
+  assert.ok(!(await digest(sql)).some((l) => l.startsWith(`#${bare} has no repo`)));
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [bare]);
+  assert.deepEqual(await claim(sql, D), [bare]);
+  // once: named, the repos lock as any card's do
+  await assert.rejects(() => edit(bare, ['api']), /repos lock once the design is passed/);
+  // one repo at review: no parts, the repo's reviewer takes it
+  const rev = await add('review');
+  await edit(rev, ['dashboard']);
+  assert.equal((await sql`select count(*)::int n from cb.task_parts where task_id = ${rev}`)[0].n, 0);
+  assert.deepEqual(await claim(sql, 'qhs-dashboard-R1@mac'), [rev]);
+  // several at review, or on a held card: refused
+  const rev2 = await add('review');
+  await assert.rejects(() => edit(rev2, ['api', 'dashboard']), new RegExp(`#${rev2} is in review: give one repo, or send it back with cb fail ${rev2} --to design`));
+  const held = await add();
+  await sql`update cb.tasks set assignee = 'qhs-B2@mac', status = 'in_progress' where id = ${held}`;
+  await assert.rejects(() => edit(held, ['api', 'dashboard']), new RegExp(`#${held} is held by qhs-B2@mac: give one repo, or free it first`));
+  await edit(held, ['api']);
+  assert.deepEqual((await sql`select repos from cb.tasks where id = ${held}`)[0].repos, ['api']);
 });

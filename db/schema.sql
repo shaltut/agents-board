@@ -691,7 +691,7 @@ end $$;
 create function cb.task_update(id text, fields jsonb, actor text default null)
 returns void language plpgsql as $$
 #variable_conflict use_variable
-declare tid bigint := cb.norm_id(id); bad text; cur cb.tasks; ep bigint; rs text[];
+declare tid bigint := cb.norm_id(id); bad text; cur cb.tasks; ep bigint; rs text[]; opn boolean := false;
 begin
   perform cb.set_actor(actor);
   select string_agg(k, ', ') into bad from jsonb_object_keys(coalesce(fields, '{}')) k
@@ -703,9 +703,21 @@ begin
   if not found then raise exception 'task #% not found', tid; end if;
   rs := cur.repos;
   if fields ? 'repos' then
-    -- repos lock from approval on: Ahmed approved a design for these repos, and builders may already work in them
+    -- repos lock from approval on: Ahmed approved a design for these repos, and builders may already work in them.
+    -- Except once (#3703, digest group 13): a card at build or review that names no repo and has no parts (staged before
+    -- its project had several repos) takes them; several only at build and unheld, which opens its parts.
     if cur.stage in ('approval', 'build', 'review', 'merge', 'qa') and cb._pipeline(cur.project) then
-      raise exception '#% is at %: repos lock once the design is passed; send it back with cb fail % --to design', tid, cb._stage_words(cur.stage), tid;
+      if cur.stage not in ('build', 'review') or cardinality(coalesce(cur.repos, '{}')) > 0
+         or exists (select 1 from cb.task_parts p where p.task_id = tid) then
+        raise exception '#% is at %: repos lock once the design is passed; send it back with cb fail % --to design', tid, cb._stage_words(cur.stage), tid;
+      end if;
+      opn := cardinality(coalesce(cb._check_repos(cur.project, cb._repo_list(fields -> 'repos')), '{}')) > 1;
+      if opn and cur.stage = 'review' then
+        raise exception '#% is in review: give one repo, or send it back with cb fail % --to design', tid, tid;
+      end if;
+      if opn and nullif(trim(cur.assignee), '') is not null then
+        raise exception '#% is held by %: give one repo, or free it first', tid, cur.assignee;
+      end if;
     end if;
     rs := cb._check_repos(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end, cb._repo_list(fields -> 'repos'));
   elsif fields ? 'project' and cb.resolve(fields ->> 'project') <> cur.project then
@@ -741,6 +753,7 @@ begin
     repos    = rs
   where t.id = tid;
   perform set_config('cb.note', '', true);
+  if opn then perform cb._parts_open(tid); end if;
 end $$;
 
 create function cb.task_done(id text, summary text, links jsonb default '{}', actor text default null)
@@ -3931,7 +3944,8 @@ begin
     select h.task_id as id, h.repo, h.assignee, h.status, h.stage, h.nudged_at, t.project, left(t.title, 80) as title, q.quiet_since
       from cb._held_parts() h join cb.tasks t on t.id = h.task_id
       cross join lateral (select greatest(h.since,
-                                          (select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')),
+                                          -- a sibling part's free note (stall) is not this part's activity
+                                          (select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge' or e.data ? 'stall')),
                                           (select max(e.at) from cb.events e where e.actor = h.assignee),
                                           (select max(s.started_at) from cb.sessions s where s.actor = h.assignee)) as quiet_since) q
      where t.status in ('in_progress', 'next') and cb._pipeline(t.project) and q.quiet_since <= now() - interval '30 minutes'
@@ -4250,7 +4264,7 @@ begin
   return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'project', s.project,
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
         'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then (w.v).stage end,
-        'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', t.status,
+        'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', (w.v).status,
         'finish', cb._finish_line(w.v), 'page', cb._page_for(t, a),
         -- a parts card (#3703): the part this actor holds, and every part in words
         'part', case when hp.repo is not null then jsonb_build_object('repo', hp.repo, 'stage', hp.stage, 'pr', hp.pr) end,
@@ -4263,9 +4277,10 @@ begin
                                  from cb.questions q where q.task_id = t.id and q.status in ('open', 'answered')), '[]'))
       order by t.updated_at desc)
       from cb.tasks t
-      left join lateral (select h.repo, h.stage, h.pr from cb._held_parts() h where h.task_id = t.id and h.assignee = a order by h.repo limit 1) hp on true
-      -- the card at the stage of the part this actor holds: a reviewer's part may be ahead of the card (a NO-GO pulled it back)
-      cross join lateral (select jsonb_populate_record(t, jsonb_build_object('stage', coalesce(hp.stage, t.stage))) as v) w
+      left join lateral (select h.repo, h.stage, h.status, h.pr from cb._held_parts() h where h.task_id = t.id and h.assignee = a order by h.repo limit 1) hp on true
+      -- the card at the stage and status of the part this actor holds: a reviewer's part may be ahead of the card (a NO-GO
+      -- pulled it back), and the card itself stays in Next
+      cross join lateral (select jsonb_populate_record(t, jsonb_build_object('stage', coalesce(hp.stage, t.stage), 'status', coalesce(hp.status, t.status))) as v) w
      where (t.assignee = a or hp.repo is not null) and t.status not in ('done', 'cancelled')), '[]'));
 end $$;
 
