@@ -605,15 +605,15 @@ async function run(): Promise<unknown> {
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'pass': {
-      need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
+      need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>] [--repo <repo>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
       await guard(args[0]);
-      await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
+      await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'fail': {
-      need(2, 'fail <id> "<why>" [--to design]   e.g. cb fail 42 "the error path is missing"');
+      need(2, 'fail <id> "<why>" [--to design] [--repo <repo>]   e.g. cb fail 42 "the error path is missing"');
       await guard(args[0]);
-      await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor });
+      await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'move':

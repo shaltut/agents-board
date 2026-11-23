@@ -781,16 +781,29 @@ $$;
 create function cb.task_claim(project text default null, actor text default null)
 returns setof cb.tasks language plpgsql as $$
 #variable_conflict use_variable
-declare a text := cb.set_actor(actor); p text := cb.read_project(project); tid bigint;
+declare a text := cb.set_actor(actor); p text := cb.read_project(project); tid bigint; st text; rp text;
 begin
   -- the order and the claim rules are cb.task_queue's (cb start previews it); the outer filters are re-checked on a row
   -- another claim changed while we waited, so they stay here
-  select t.id into tid from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
-   where t.status = 'next' and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
+  select t.id, t.stage into tid, st from cb.task_queue(p, a, null) with ordinality as q join cb.tasks t on t.id = q.id
+   where (t.status = 'next' or (t.status = 'in_progress' and t.stage in ('build', 'review')  -- a parts card: see cb.task_queue
+                                and cb._pipeline(t.project) and exists (select 1 from cb.task_parts tp where tp.task_id = t.id)))
+     and (t.assignee is null or t.assignee = a)  -- never take a task queued for someone else
      and cb._claimable(t, a)  -- re-checked on the locked row: a restage meanwhile must not hand it to the wrong role
    order by q.ordinality limit 1
    for update of t skip locked;
   if tid is null then return; end if;
+  -- a card with parts (#3703): claim the actor's repo part, never the card. The where is the real guard: a part claimed
+  -- by a claim that committed while this one waited is not taken again (nothing this once).
+  if st in ('build', 'review') and exists (select 1 from cb.task_parts tp where tp.task_id = tid) then
+    update cb.task_parts tp set status = 'in_progress', assignee = a, since = now(), nudged_at = null
+     where tp.task_id = tid and tp.repo = cb._repo(a) and tp.stage = st and tp.status = 'next' and (tp.assignee is null or tp.assignee = a)
+    returning tp.repo into rp;
+    if rp is null then return; end if;
+    perform cb._parts_sync(tid, format('claimed by %s (part %s)', a, rp), jsonb_build_object('repo', rp));
+    return query select t.* from cb.tasks t where t.id = tid;
+    return;
+  end if;
   perform set_config('cb.note', 'claimed by ' || a, true);
   return query update cb.tasks t set status = 'in_progress', assignee = a where t.id = tid returning t.*;
   perform set_config('cb.note', '', true);
@@ -3349,6 +3362,7 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb._repo_fits cascade;
 drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
 drop function if exists cb._role_model cascade;
@@ -3412,6 +3426,20 @@ create table if not exists cb.page_versions (
 create table if not exists cb.stage_nudges (
   task_id   bigint primary key references cb.tasks(id) on delete cascade,
   nudged_at timestamptz not null
+);
+-- a card of several repos: one part per repo through build, review and merge (#3703; rules at cb._parts_sync)
+create table if not exists cb.task_parts (
+  task_id   bigint references cb.tasks(id) on delete cascade,
+  repo      text not null,
+  stage     text not null check (stage in ('build', 'review', 'merge', 'merged')),
+  status    text not null default 'next' check (status in ('next', 'in_progress')),
+  assignee  text,
+  crew      jsonb not null default '{}',  -- build, review: who built and reviewed this part
+  pr        text,
+  commit    text,
+  since     timestamptz not null default now(),
+  nudged_at timestamptz,
+  primary key (task_id, repo)
 );
 
 create function cb._pipeline(p text) returns boolean language sql stable as $$
@@ -3541,6 +3569,7 @@ begin
   values (a, t.project, tid, 'note',
           case when s = 'build' then 'small work, skipped design: ' || trim(why) else 'taken out of the pipeline: ' || trim(why) end,
           case when s = 'build' then '{"small": true}'::jsonb else '{"unstaged": true}'::jsonb end);
+  if s = 'build' then perform cb._parts_open(tid); end if;
   return case when s = 'build' then 'build' end;
 end $$;
 
@@ -3568,10 +3597,13 @@ begin
 end $$;
 
 -- The holder hands a card to the next stage. approval is never passed by a session: Ahmed's answer moves it.
-create function cb.stage_pass(id text, summary text, links jsonb default '{}', actor text default null) returns text language plpgsql as $$
+-- A card with parts (#3703) passes one part: build and review the part the actor holds, merge the part repo names.
+create function cb.stage_pass(id text, summary text, links jsonb default '{}', actor text default null, repo text default null)
+returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); r text := cb._role(a);
         lk jsonb := coalesce(links, '{}'); nxt text; hold text; extra jsonb := '{}'; v int; qid bigint; pgbody text; rs text[];
+        pt cb.task_parts%rowtype; rp text := nullif(trim(repo), '');
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
@@ -3580,6 +3612,50 @@ begin
   if t.stage = 'approval' then
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
     raise exception 'waiting for Ahmed''s answer on Q%', qid;
+  end if;
+  if t.stage in ('build', 'review', 'merge') and exists (select 1 from cb.task_parts p where p.task_id = tid) then
+    if t.stage = 'merge' then
+      if r is distinct from 'lead' then raise exception 'merging is the lead''s'; end if;
+      if rp is null then
+        raise exception 'give the repo: --repo <repo> (parts: %)',
+          (select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) from cb.task_parts p where p.task_id = tid);
+      end if;
+      select * into pt from cb.task_parts p where p.task_id = tid and p.repo = rp and p.stage = 'merge';
+      if not found then raise exception 'part % of #% is not waiting to merge', rp, tid; end if;
+    else
+      -- the part's own stage, not the card's: a NO-GO on another part may have pulled the card back to build
+      select * into pt from cb.task_parts p
+       where p.task_id = tid and p.assignee = a and p.stage in ('build', 'review') and (rp is null or p.repo = rp) order by p.repo limit 1;
+      if not found then raise exception 'you hold no part of #%: claim it first (cb next)', tid; end if;
+      if pt.stage = 'build' and r is distinct from 'builder' then raise exception 'build is passed by a builder session'; end if;
+      if pt.stage = 'review' and r is distinct from 'reviewer' then raise exception 'review is passed by a reviewer session'; end if;
+    end if;
+    if coalesce(trim(summary), '') = '' then raise exception 'summary is required: say in one line what you did'; end if;
+    if pt.stage = 'build' then
+      if nullif(lk ->> 'pr', '') is null and pt.pr is null then raise exception 'give the pull request: --pr <url>'; end if;
+      if nullif(lk ->> 'pr', '') !~ '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+/?$' then
+        raise exception 'give the full pull request URL: https://github.com/<owner>/<repo>/pull/<n>';
+      end if;
+    elsif pt.stage = 'review' then
+      if a = pt.crew ->> 'build' then raise exception 'you built it: another reviewer passes review'; end if;
+      if a = t.crew ->> 'design' then raise exception 'you designed it: another reviewer passes review'; end if;
+    elsif nullif(lk ->> 'commit', '') is null and pt.commit is null then
+      raise exception 'give the merge commit: --commit <sha>';
+    end if;
+    update cb.task_parts p set stage = case pt.stage when 'build' then 'review' when 'review' then 'merge' else 'merged' end,
+           status = 'next', assignee = null, since = now(), nudged_at = null,
+           pr = coalesce(nullif(lk ->> 'pr', ''), p.pr), commit = coalesce(nullif(lk ->> 'commit', ''), p.commit),
+           crew = p.crew || case pt.stage when 'build' then jsonb_build_object('build', a) when 'review' then jsonb_build_object('review', a)
+                                          else '{}'::jsonb end
+     where p.task_id = tid and p.repo = pt.repo;
+    -- each part's PR and commit under its repo; the bare pr and commit are the first repo's (the design's merge order)
+    lk := (lk - 'pr' - 'commit') || jsonb_strip_nulls(jsonb_build_object(
+            'pr:' || pt.repo, nullif(lk ->> 'pr', ''), 'commit:' || pt.repo, nullif(lk ->> 'commit', ''),
+            'pr', case when pt.repo = t.repos[1] then nullif(lk ->> 'pr', '') end,
+            'commit', case when pt.repo = t.repos[1] then nullif(lk ->> 'commit', '') end));
+    perform cb._parts_sync(tid, pt.repo || ': ' || trim(summary), jsonb_build_object('links', lk, 'repo', pt.repo));
+    select x.stage into nxt from cb.tasks x where x.id = tid;
+    return nxt;
   end if;
   if t.stage = 'design' and (r is null or r not in ('owner', 'architect')) then raise exception 'design is passed by an owner or architect session'; end if;
   if t.stage = 'build' and r is distinct from 'builder' then raise exception 'build is passed by a builder session'; end if;
@@ -3630,18 +3706,34 @@ begin
 end $$;
 
 -- A reviewer or qa session sends the card back (to its builder, or to design); the designer takes a card back from approval.
-create function cb.stage_fail(id text, why text, to_stage text default null, actor text default null) returns text language plpgsql as $$
+-- A card with parts (#3703): a reviewer's NO-GO sends back only its part; qa names the repo that fails; --to design
+-- sends the whole card back and its parts wait, unheld, for re-approval.
+create function cb.stage_fail(id text, why text, to_stage text default null, actor text default null, repo text default null)
+returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(nullif(trim(to_stage), '')); nxt text; qid bigint;
+        pt cb.task_parts%rowtype; rp text := nullif(trim(repo), ''); parts text;
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
   if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
-  if t.stage in ('review', 'qa') then
+  select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) into parts from cb.task_parts p where p.task_id = tid;
+  if parts is not null and t.stage in ('build', 'review', 'merge') then
+    -- the reviewer's part, at its own stage (the card may be back at build already)
+    select * into pt from cb.task_parts p
+     where p.task_id = tid and p.assignee = a and p.stage = 'review' and (rp is null or p.repo = rp) order by p.repo limit 1;
+    if not found then raise exception 'you hold no part of #%: claim it first (cb next)', tid; end if;
+    nxt := coalesce(s, 'build');
+  elsif t.stage in ('review', 'qa') then
     if t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
     nxt := coalesce(s, 'build');
+    if parts is not null and nxt = 'build' then
+      if rp is null then raise exception 'name the repo that fails: cb fail % --repo <repo> "<why>" (parts: %)', tid, parts; end if;
+      select * into pt from cb.task_parts p where p.task_id = tid and p.repo = rp;
+      if not found then raise exception '% is not a part of #%: %', rp, tid, parts; end if;
+    end if;
   elsif t.stage = 'approval' and a = t.crew ->> 'design' then
     nxt := 'design';
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
@@ -3651,7 +3743,15 @@ begin
   else
     raise exception 'cb fail is for the holder of a card in review or qa, or the designer taking a card back from approval';
   end if;
+  if pt.repo is not null and nxt = 'build' then
+    update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', since = now(), nudged_at = null
+     where p.task_id = tid and p.repo = pt.repo;
+    perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
+    return 'build';
+  end if;
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
+  -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder
+  if nxt = 'design' then update cb.task_parts p set assignee = null, status = 'next' where p.task_id = tid; end if;
   return nxt;
 end $$;
 
@@ -3684,9 +3784,13 @@ begin
   if t.stage = 'approval' and t.status not in ('done', 'cancelled') and cb._pipeline(t.project) and qid = latest then
     picked := cb._picked(q.options, q.answer, false);
     if 'Approve' = any (picked) then
-      -- a first approval leaves the card unassigned; one after a send back to design returns it to its builder
-      perform cb._stage_move(t.id, 'build', t.crew ->> 'build', 'design approved');
+      -- a first approval leaves the card unassigned; one after a send back to design returns it to its builder. A card of
+      -- several repos (or one that has parts) is held by its parts instead: unassigned, each part back with its builder.
+      perform cb._stage_move(t.id, 'build',
+        case when cardinality(coalesce(t.repos, '{}')) > 1 or exists (select 1 from cb.task_parts p where p.task_id = t.id) then null
+             else t.crew ->> 'build' end, 'design approved');
       update cb.tasks x set approved_version = q.page_version where x.id = t.id;
+      perform cb._parts_open(t.id);
     else  -- Changes needed, or any typed answer: never approve on an ambiguous one, never leave the card waiting
       perform cb._stage_move(t.id, 'design', t.crew ->> 'design', q.answer);
     end if;
@@ -3705,6 +3809,20 @@ create function cb._closing(a text) returns boolean language sql stable as $$
   select exists (select 1 from cb.sessions s where s.actor = a and s.closing_at > now() - interval '5 minutes')
 $$;
 
+-- The repo half of a build or review claim (#3703). A card with parts: a free part of a's repo at the card's stage (at
+-- review, not one a built or the card a designed). No parts in a project of several repos: the card's first repo is a's
+-- (no repos named: nobody's). One repo: any. plpgsql: cb._repo and cb.task_parts are created further down.
+create function cb._repo_fits(t cb.tasks, a text) returns boolean language plpgsql stable as $$
+begin
+  if exists (select 1 from cb.task_parts p where p.task_id = t.id) then
+    return exists (select 1 from cb.task_parts p
+                    where p.task_id = t.id and p.stage = t.stage and p.status = 'next' and (p.assignee is null or p.assignee = a)
+                      and p.repo = cb._repo(a)
+                      and (t.stage <> 'review' or (a is distinct from p.crew ->> 'build' and a is distinct from t.crew ->> 'design')));
+  end if;
+  return not cb._multi_repo(t.project) or coalesce(t.repos[1] = cb._repo(a), false);
+end $$;
+
 create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
   select case
     when cb._closing(a) then false
@@ -3719,8 +3837,9 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
               or (cb._area(a) is null and (t.stage_since < now() - interval '15 minutes'
                   or not exists (select 1 from cb.sessions s where s.role = 'owner' and s.project = t.project and s.area = any(t.labels)
                                     and s.last_seen > now() - interval '10 minutes')))))
-      when 'build' then cb._role(a) = 'builder'
+      when 'build' then cb._role(a) = 'builder' and cb._repo_fits(t, a)
       when 'review' then cb._role(a) = 'reviewer' and a is distinct from t.crew ->> 'build' and a is distinct from t.crew ->> 'design'
+                         and cb._repo_fits(t, a)
       when 'merge' then cb._role(a) = 'lead'
       when 'qa' then cb._role(a) = 'qa' and a is distinct from t.crew ->> 'build'
       else false end, false)
@@ -4030,11 +4149,14 @@ begin
 end $$;
 
 -- The queue this actor can claim, in claim order: cb.task_claim takes its first row, cb start previews the first few (lim null = all).
+-- A card with parts is in_progress while one part is worked; its other parts are still free (cb._repo_fits says which).
 create function cb.task_queue(project text, actor text, lim int default 3) returns setof cb.tasks language plpgsql stable as $$
 #variable_conflict use_variable
 begin
   return query select t.* from cb.tasks t
-   where t.status = 'next' and (project is null or t.project = cb.read_project(project)) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
+   where (t.status = 'next' or (t.status = 'in_progress' and t.stage in ('build', 'review')
+                                and cb._pipeline(t.project) and exists (select 1 from cb.task_parts tp where tp.task_id = t.id)))
+     and (project is null or t.project = cb.read_project(project)) and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
    order by t.priority <> 'P0', coalesce(cb._pipeline(t.project) and cb._area(actor) = any(t.labels), false) desc,
             case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id limit lim;
 end $$;
@@ -4270,6 +4392,60 @@ begin
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
   return ns;
+end $$;
+
+-- Build parts (#3703): a card of several repos is built, reviewed and merged one part per repo. The card's stage is its
+-- least advanced part's; while it is at build or review the parts are held, never the card. Merge passes per part (the
+-- lead, by --repo); qa stays card-level. A card has parts once it entered build with more than one repo, and keeps
+-- them through a send back to design (re-approval reopens them). Part rows change only under the card's row lock.
+-- (cb.task_parts is created in the pipeline section: stage_pass and stage_fail declare its rowtype)
+drop function if exists cb._parts_open cascade;
+drop function if exists cb._parts_sync cascade;
+
+-- The card's stage := its least advanced part's (all merged: qa, unassigned). At build or review the card is unheld,
+-- in_progress while a part at its stage is. note and data (links merged into the card) go on the card's history either
+-- way, so a part's pass is recorded even when the card stays.
+create function cb._parts_sync(tid bigint, note text default null, data jsonb default '{}') returns void language plpgsql as $$
+#variable_conflict use_variable
+declare cur text; lo int; nxt text; busy boolean;
+begin
+  select t.stage into cur from cb.tasks t where t.id = tid for update;
+  select min(array_position('{build,review,merge,merged}'::text[], p.stage)) into lo from cb.task_parts p where p.task_id = tid;
+  if lo is null then return; end if;
+  nxt := ('{build,review,merge,qa}'::text[])[lo];
+  if nxt is distinct from cur then
+    perform cb._stage_move(tid, nxt, null, note, data);
+    note := null; data := '{}';
+  end if;
+  busy := exists (select 1 from cb.task_parts p where p.task_id = tid and p.stage = nxt and p.status = 'in_progress');
+  perform set_config('cb.stage_ok', 'on', true);
+  perform set_config('cb.note', coalesce(note, ''), true);
+  perform set_config('cb.data', coalesce(data, '{}')::text, true);
+  update cb.tasks t set status = case when nxt in ('build', 'review') then case when busy then 'in_progress' else 'next' end else t.status end,
+         assignee = case when nxt in ('build', 'review') then null else t.assignee end,
+         links = t.links || coalesce(data -> 'links', '{}')
+   where t.id = tid;
+  perform set_config('cb.stage_ok', '', true);
+  perform set_config('cb.note', '', true);
+  perform set_config('cb.data', '', true);
+end $$;
+
+-- On entering build: one part per repo at build. A part kept from before goes back to its builder (status next) with its
+-- PR; a part whose repo left the list is dropped with a note for the lead to close its PR. One repo and no parts: nothing.
+create function cb._parts_open(tid bigint) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare t cb.tasks%rowtype; r record;
+begin
+  select * into t from cb.tasks x where x.id = tid for update;
+  if cardinality(coalesce(t.repos, '{}')) <= 1 and not exists (select 1 from cb.task_parts p where p.task_id = tid) then return; end if;
+  for r in delete from cb.task_parts p where p.task_id = tid and not (p.repo = any(coalesce(t.repos, '{}'))) returning p.repo, p.pr loop
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    values (coalesce(nullif(current_setting('cb.actor', true), ''), 'board'), t.project, tid, 'note',
+            'part ' || r.repo || ' dropped' || coalesce(': close its PR ' || r.pr, ''), '{"digest": true}');
+  end loop;
+  insert into cb.task_parts as p (task_id, repo, stage) select tid, x, 'build' from unnest(t.repos) x
+  on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', since = now(), nudged_at = null;
+  perform cb._parts_sync(tid);
 end $$;
 
 
