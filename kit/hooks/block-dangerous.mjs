@@ -69,7 +69,8 @@ export function check(command) {
 
 // Kill by process name (#3809): a name stops every process that has it, other sessions' too. On 24 Nov one session's
 // Get-Process node | Stop-Process killed the PC's job runner, its supervisor and every session's relay, twice.
-const KILL_BY_NAME = `kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). A lookup by name (Get-Process node, pgrep, ps | grep, Win32_Process) and a stop in one command count too. Stop only yours, by PID: note it when you start the process (Start-Process -PassThru, or $! in bash), or list them with their command lines in one command (Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine, or pgrep -fl node) and pick yours, then stop it in the next: Stop-Process -Id <pid> (Git Bash: taskkill //PID <pid>; Mac: kill <pid>). Or by the port it listens on: Get-NetTCPConnection -LocalPort <port> -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess }, or kill $(lsof -t -iTCP:<port> -sTCP:LISTEN); a port Docker publishes belongs to Docker: stop the container instead`;
+// (pwsh 7.6 preview on the PC cannot load CIM, so its list and port commands run in Windows PowerShell or netstat)
+const KILL_BY_NAME = `kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). A lookup by name (Get-Process node, pgrep, ps | grep, Win32_Process) feeding a stop counts too. Stop only yours, by PID: note it when you start the process (Start-Process -PassThru, or $! in bash), or list them with their command lines and pick yours (Windows PowerShell: Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine; from pwsh wrap it in powershell -NoProfile { ... }; Mac: pgrep -fl node), then stop it in the next command: Stop-Process -Id <pid> (Git Bash: taskkill //PID <pid>; Mac: kill <pid>). Or by the port it listens on: netstat -ano | findstr :<port> (the PID ends the LISTENING line), or on the Mac kill $(lsof -t -iTCP:<port> -sTCP:LISTEN); a port Docker publishes belongs to Docker: stop the container instead`;
 // a command word as a name: no quotes, no path, lower case, no .exe (C:\Windows\System32\taskkill.exe is taskkill)
 // (a leading ! too: herdr agent prompt w1 "!pkill node" runs pkill in that session)
 const cmdName = (raw) => raw.replace(/["']/g, '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '').replace(/^!/, '');
@@ -95,6 +96,7 @@ function literalPids(args) {
   for (let k = 0; k < args.length; k++) {
     const x = args[k];
     if (/^-id:\d+(?:,\d*)*$/i.test(x)) pids++;
+    else if (x === '@') continue; // -Id @(1234,5678)
     else if (VALUE_OPT.test(x)) k++;
     else if (/^(?:-|\/\/?[a-z])/i.test(x)) continue; // a switch: -Force, -9, /F
     else if (/^\d+(?:,\d*)*$/.test(x)) pids++;
@@ -112,10 +114,16 @@ function literalPids(args) {
 // stripped already (check).
 function killByName(text) {
   const joined = text.replace(/`\r?\n/g, ' ').replace(/\\\r?\n/g, ' ').replace(/`/g, ' $ ');
-  return scanKills(joined, { lookup: false }, false);
+  return scanKills(joined, { lookup: false, stop: false }, false);
 }
 
-// seen.lookup: a by-name lookup came earlier in the command; inArgs: this text is inside a stop's arguments
+// a single-clause ProcessId filter names one process: -Filter "ProcessId=1234", where processid=1234 (not "... OR ProcessId=1")
+const oneProcess = (w) => w.some((x) => /^\s*processid\s*=\s*\S+\s*$/i.test(x));
+const RUNS_NEXT = new Set(['c', 'k', '-c', '-command']); // cmd /c "taskkill" ..., bash -c, pwsh -Command: the next word runs
+const TERMINATE_AFTER = new Set(['-methodname', '-name', 'call', '=', 'methodname']); // Invoke-CimMethod -Name Terminate, splats
+
+// seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; inArgs: this text is inside a
+// stop's arguments
 function scanKills(text, seen, inArgs) {
   for (const seg of text.match(SEGMENT) ?? []) {
     const raw = seg.match(WORD) ?? [];
@@ -125,8 +133,11 @@ function scanKills(text, seen, inArgs) {
     for (let i = 0; i < w.length; i++) {
       const args = inArgs || i <= argsEnd;
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args)) return true;
-      if (/^["']/.test(raw[i])) continue; // a quoted word is an argument, not a command: Select-String "kill"
       const n = name[i], prev = name[i - 1];
+      // CIM/WMI Terminate, quoted or not: Invoke-CimMethod -MethodName "Terminate", -Name Terminate, @{ MethodName = 'Terminate' }
+      if (n === 'terminate' && TERMINATE_AFTER.has(prev)) { if (seen.lookup) return true; seen.stop = true; continue; }
+      // a quoted word is an argument (Select-String "kill"), unless it is the command: & 'taskkill' /IM node.exe
+      if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !RUNS_NEXT.has(prev)) continue;
       if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate|foreach)$/.test(n) && !n.includes('getprocessesbyname')) continue;
       if (NOT_RUN.has(prev) || (prev === '-v' && name[i - 2] === 'command')) continue; // which pkill, command -v pkill
       let rest = w.slice(i + 1, i + 1 + ARGS);
@@ -141,24 +152,26 @@ function scanKills(text, seen, inArgs) {
       if (n === 'killall' || (n === 'pkill' && !narrow(rest))) return true;
       // kill -9 -1, kill -- -1: every process you own (kill -1 1234 is SIGHUP to 1234)
       if (n === 'kill' && rest.some((x, k) => k > 0 && x === '-1' && !/^-[sn]$/.test(rest[k - 1]))) return true;
-      const byId = rest.some((x) => /^(?:-id|-p|--pid|-q)(?::|=|$)/i.test(x) || (n === 'ps' && /^-[a-z]*p\d*$/i.test(x))); // ps -fp $PID
+      const byId = rest.some((x) => /^(?:-id|-p|--pid|-q)(?::|=|$)/i.test(x) || (n === 'ps' && /^-[a-zA-Z]*p\d*$/.test(x))); // ps -fp $PID
       const lookup = ((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
         || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist'
-        || (n === 'win32_process' && !w.some((x) => /processid\s*=/i.test(x))) // -Filter "ProcessId=1234" is one process
-        || (n === 'wmic' && /^process$/i.test(rest[0] ?? '') && !w.some((x) => /processid\s*=/i.test(x)))
+        || (n === 'win32_process' && !oneProcess(w)) || (n === 'wmic' && /^process$/i.test(rest[0] ?? '') && !oneProcess(w))
         || (n === 'lsof' && rest.some((x) => /^-c/.test(x))) // lsof -c node
         || n.includes('getprocessesbyname');
-      if (lookup) { if (args) return true; seen.lookup = true; }
+      // inside a stop's arguments, or fed to an earlier stop's input: xargs kill < <(pgrep node), done < <(pgrep node)
+      if (lookup) { if (args || (seen.stop && w.slice(0, i).includes('<'))) return true; seen.lookup = true; }
       const stop = ((n === 'stop-process' || n === 'spps' || n === 'taskkill' || n === 'remove-ciminstance'
         || (n === 'kill' && !OTHER_TOOL.has(prev))) && !literalPids(rest))
-        || (n === 'terminate' && (prev === '-methodname' || prev === 'call')) || /\.(?:kill|terminate)$/.test(n)
+        || /\.(?:kill|terminate)$/.test(n)
         || (/\.foreach$/.test(n) && /^(?:kill|terminate)$/i.test(w[i + 1] ?? '')) // (Get-Process node).ForEach('Kill')
         || (n === 'wmic' && rest.some((x) => /^delete$/i.test(x)))
         // a pid file or parent the shell fills in: pkill -F <(pgrep node); its arguments run to the segment's end
         || (n === 'pkill' && w.slice(i + 1, i + 1 + ARGS).some((x) => x === '<' || (x.includes('$') && x !== '$$')));
       if (stop) {
         if (seen.lookup) return true;
-        argsEnd = Math.max(argsEnd, n === 'pkill' ? w.length : i + rest.length);
+        seen.stop = true;
+        // to the window's end, past a redirection: kill 2>/dev/null $(pgrep node)
+        argsEnd = Math.max(argsEnd, n === 'pkill' ? w.length : Math.min(w.length - 1, i + ARGS));
       }
     }
   }
