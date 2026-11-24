@@ -16,7 +16,23 @@ const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer:
 const ORDER = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
 const MAC = 'macbook', MAC_CAP = 8;
 
-type Live = { actor: string; machine: string; project?: string | null };
+type Live = { actor: string; machine: string; project?: string | null; role?: string | null };
+
+// A session's role as cb._role reads it: unset, an orch name is the lead
+const roleOf = (l: Live) => l.role ?? (l.actor === 'orch' || l.actor.startsWith('orch@') ? 'lead' : null);
+
+/** The squad's wanted sessions with the lead settled against who is live (#3746). A project's lead is the session live in
+ *  it with the lead role, whatever its name: then no lead is wanted, unless it goes by one of the squad's lead names (kept,
+ *  so it is skipped as live). orch@<m> live in another project leads that one: this project's is <project>-orch@<m>. */
+function wantNow(project: string, squad: Squad, live: Live[]): Want[] {
+  return wantList(project, squad).flatMap((w) => {
+    if (w.role !== 'lead') return [w];
+    const here = live.filter((x) => x.project === project), alt = { ...w, name: `${project}-${w.name}` };
+    for (const c of [w, alt]) if (here.some((x) => x.actor === c.name)) return [c];
+    if (here.some((x) => roleOf(x) === 'lead')) return [];
+    return [live.some((x) => x.actor === w.name && x.project && x.project !== project) ? alt : w];
+  });
+}
 
 /** A squad's repos, home first, then by name (as cb._repos_of). No repos: one repo, main, in each machine's repo folder. */
 export function reposOf(squad: Squad): Record<string, Repo> {
@@ -74,10 +90,10 @@ export function planSquad(project: string, squad: Squad, live: Live[], herdrAgen
   let mac = Math.max(new Set([...live.filter((l) => isMac(l.machine)).map((l) => l.actor),
     ...Object.entries(herdrAgents).filter(([k]) => isMac(k)).flatMap(([, v]) => v)]).size, macAgents);
   const out = { start: [] as Launch[], skip: [] as string[], refused: [] as string[], heldBy: {} as Record<string, string>, herdrOnly: [] as Launch[] };
-  for (const w of wantList(project, squad)) {
+  for (const w of wantNow(project, squad, live)) {
     const machine = w.name.split('@')[1];
     const l = launchFor(project, squad, w);
-    const onBoard = live.find((x) => x.actor === w.name || (w.role === 'lead' && x.actor === 'orch'));
+    const onBoard = live.find((x) => x.actor === w.name);
     if (onBoard) {
       out.skip.push(w.name);
       if (w.role === 'lead' && onBoard.project && onBoard.project !== project) out.heldBy[w.name] = onBoard.project;
@@ -174,7 +190,8 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
   const rows = await callFn('sessions_overview', { project: null }) as any[];
-  const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string, project: (r.project ?? null) as string | null }));
+  const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string,
+    project: (r.project ?? null) as string | null, role: (r.role ?? null) as string | null }));
   const lines: string[] = [];
   let macAgents = 0, macDown = false;
   const macKey = Object.keys(squad.machines).find((k) => squad.machines[k].herdr === MAC);
@@ -186,8 +203,8 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const herdrAgents: Record<string, string[]> = {};
   const unknown = new Set<string>();
   const onBoard = new Set(live.map((l) => l.actor));
-  for (const w of wantList(project, squad)) {
-    if (onBoard.has(w.name) || (w.role === 'lead' && onBoard.has('orch'))) continue;
+  for (const w of wantNow(project, squad, live)) {
+    if (onBoard.has(w.name)) continue;
     const machine = w.name.split('@')[1];
     if (isMac(machine) && macDown) { unknown.add(w.name); continue; }
     if (!validHerdrName(herdrName(w.name))) continue; // fails at launch with a clear line

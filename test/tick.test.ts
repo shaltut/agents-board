@@ -86,6 +86,7 @@ test('tick: stuck work (silent holder, long block, review with no reviewer, some
   await sql`select cb.task_add(project => 'demo', title => 'W4 job', status => 'in_progress', assignee => 'W4@m', actor => 'orch@test')`;
   await sql`select cb.log('demo', 'I am on it', '7', '{}', 'W3@m')`;
   await sql`select cb.task_add(project => 'demo', title => 'PO questions for Omar', status => 'review', assignee => 'orch@test', actor => 'orch@test')`;
+  await sql`select cb.iam('test', 'p0', 'orch@test', 'demo')`; // the lead is a session bound to the project (#3746)
   await ago(sql, sql`actor in ('W7@m', 'W9@m')`, '2 hours');
   const r = cb(['tick', 'demo']);
   assert.match(r.out, /STUCK/);
@@ -436,3 +437,18 @@ test('tick: hostile titles, actors and PR links print as inert commands in bash 
     assert.match(run.stdout, /\$\(touch PWN4\)/, sh); // arrives as text
   }
 });
+
+// #3746: a card in review held by its project's lead (a lead-role session, whatever its name) waits on a person
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]] as [string, string | null, string, boolean][]) {
+  test(`tick: a card in review held by ${who} (role ${role ?? 'unset'}) bound to ${bound} is ${leads ? 'not ' : ''}unreviewed in p`, async () => {
+    const sql = await db();
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound})`;
+    await sql`select cb.task_add(project => 'p', title => 'PO questions', status => 'review', assignee => ${who})`;
+    for (const proj of ['p', null]) { // the all-projects tick too
+      const [{ t }] = await sql`select cb.tick(${proj}) as t`;
+      assert.deepEqual(t.unreviewed.map((x: any) => x.id), leads ? [] : [1], `tick(${proj})`);
+    }
+  });
+}

@@ -104,3 +104,13 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   const own = cb(['bug', 'ihop', 'orch found one', '-b', 'z'], { CB_ACTOR: 'orch@shaltoot' });
   assert.equal(own.out, '#8 bug filed in ihop; you triage it: cb edit 8 --assignee <worker>');
 });
+
+test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('qhs')`;
+  await sql`select cb.iam('pc', 'w2:p2', 'QO@shaltoot', 'qhs', 'lead')`;
+  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'qhs')`;
+  const r = cb(['bug', 'qhs', 'login blank', '-b', 'Open /login.\nExpected a form, got blank.'], { CB_ACTOR: 'W7@macbook' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '#1 bug filed in qhs; told QO@shaltoot');
+});

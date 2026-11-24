@@ -97,3 +97,21 @@ test('pings_due: a worker whose session is gone is not pinged, its orchestrator 
   assert.equal(m.to_, 'orch@pc');
   assert.match(m.summary, /its session has not checked in for 10 minutes/);
 });
+
+// #3746: the lead's copy goes to the project's lead-role session, whatever its name; bound elsewhere, it leads elsewhere
+for (const [who, role, bound, leads] of [['QO@pc', 'lead', 'p', true], ['QO@pc', 'lead', 'q', false], ['orch@pc', null, 'p', true]] as [string, string | null, string, boolean][]) {
+  test(`pings_due: ${who} (role ${role ?? 'unset'}) bound to ${bound} ${leads ? 'gets' : 'does not get'} the lead's copy for a card in p`, async () => {
+    const sql = await freshDb(); clients.push(sql);
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('pc', 'p1', 'W1@pc', 'p')`;
+    await sql`select cb.iam('pc', 'p2', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('pc', 'p2', ${who}, ${bound})`;
+    await sql`select cb.task_add(project => 'p', title => 'Stuck', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+    await sql`update cb.tasks set updated_at = now() - interval '3 hours' where id = 1`;
+    await sql`update cb.events set at = now() - interval '3 hours' where task_id = 1`;
+    await sql`select cb.task_ping_set('1', true, 'ahmed')`;
+    await sql`select cb.pings_due()`;
+    const to = (await sql`select data ->> 'to' as to_ from cb.events where data ? 'nudge' order by id`).map((x: any) => x.to_);
+    assert.deepEqual(to.sort(), leads ? ['W1@pc', who].sort() : ['W1@pc']);
+  });
+}

@@ -574,3 +574,28 @@ test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nob
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
   }
 });
+
+// #3746: a project's lead is its lead-role session, whatever its name (an orch@ session with no role still is); the
+// same session bound to another project leads that one, not this. [actor, role, bound to, leads p]
+const LEADS: [string, string | null, string, boolean][] = [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]];
+for (const [who, role, bound, leads] of LEADS) {
+  test(`lead by role: ${who} (role ${role ?? 'unset'}) bound to ${bound} ${leads ? 'triages p, gets its answer copies, talks in any p huddle' : 'gets none of p\'s'}`, async () => {
+    const sql = await db();
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('m', 'w1:p1', 'W1@m', 'p')`;
+    await sql`select cb.iam('m', 'w1:p2', 'W2@m', 'p')`;
+    await sql`select cb.iam('m', 'w1:p9', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'w1:p9', ${who}, ${bound})`; // the same name re-binding keeps its role
+    const [{ t }] = await sql`select cb.triagers('p') as t`;
+    assert.deepEqual(t, leads ? [who] : ['W1@m', 'W2@m']);
+    // Ahmed answers a worker's question in p: its lead gets a copy
+    await sql`select cb.ask(project => 'p', body => 'Which one?', reply_to => ${sql.json({ machine: 'm', pane: 'w1:p1' })}, actor => 'W1@m')`;
+    await sql`select cb.answer('1', 'The first')`;
+    const [{ i }] = await sql`select cb.inbox('m', 'w1:p9', 0) as i`;
+    assert.deepEqual(i.answer_copies.map((c: any) => c.id), leads ? [1] : []);
+    // a huddle in p it is not a member of
+    const [{ h }] = await sql`select cb.huddle_open('rollout', ${sql.json(['W2@m'])}, null, 'W1@m') as h`;
+    const say = sql`select cb.huddle_say(${String(h)}, 'ship Monday', ${who})`;
+    if (leads) await say; else await assert.rejects(say, new RegExp(`${who} is not in huddle`));
+  });
+}

@@ -55,10 +55,11 @@ test('the Mac cap also counts the agents herdr lists on the Mac (quiet or unname
   assert.equal(p.refused.length, 3);
 });
 
-test('a live session named exactly orch is the lead, on any machine', () => {
-  const p = planSquad('demo', squad, [{ actor: 'orch', machine: 'shaltoot' }], {});
-  assert.ok(p.skip.includes('orch@shaltoot'));
-  assert.ok(!names(p).includes('orch@shaltoot'));
+test('a live session named exactly orch leads its own project, on any machine; another project\'s is not this one\'s lead', () => {
+  const p = planSquad('demo', squad, [{ actor: 'orch', machine: 'shaltoot', project: 'demo' }], {});
+  assert.ok(!p.start.some((l) => l.role === 'lead'), names(p).join());
+  const q = planSquad('demo', squad, [{ actor: 'orch', machine: 'shaltoot', project: 'other' }], {});
+  assert.ok(names(q).includes('orch@shaltoot'), names(q).join());
 });
 
 test('agent get: exit 0 live, agent_not_found absent, anything else unknown', () => {
@@ -77,10 +78,52 @@ test('the Mac cap counts by the herdr label, whatever the machine key', () => {
   assert.equal(p.refused.length, 2);
 });
 
-test('a second project cannot take the lead name another project holds', () => {
-  const p = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other' }], {});
-  assert.deepEqual(p.heldBy, { 'orch@shaltoot': 'other' });
+// #3746: a project's lead is the session live in it with the lead role, whatever its name
+test('orch@<machine> leading another project: this project\'s lead starts as <project>-orch@<machine>', () => {
+  const p = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' }], {});
+  assert.deepEqual(p.heldBy, {});
+  assert.deepEqual(p.skip, []);
   assert.ok(!names(p).includes('orch@shaltoot'));
+  const lead = p.start.find((l) => l.role === 'lead')!;
+  assert.deepEqual({ ...lead }, { name: 'demo-orch@shaltoot', role: 'lead', repo: 'main', model: 'opus', machine: 'shaltoot', herdr: null,
+    cwd: '/Users/me/Work/demo', settings: 'C:/b/kit/permissions/lead.json',
+    prompt: 'cb iam demo-orch@shaltoot demo --role lead --model opus, then cb role lead, then cb next' });
+  // the next run: the alternate lead is live in demo, skipped as live like any squad name
+  const again = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' },
+    { actor: 'demo-orch@shaltoot', machine: 'shaltoot', project: 'demo', role: 'lead' }], {});
+  assert.deepEqual(again.skip, ['demo-orch@shaltoot']);
+  assert.ok(!again.start.some((l) => l.role === 'lead'));
+});
+
+test('a lead-role session live in the project, whatever its name, is its lead: no lead started, none skipped', () => {
+  const live = [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' }, { actor: 'QO@shaltoot', machine: 'shaltoot', project: 'demo', role: 'lead' }];
+  const p = planSquad('demo', squad, live, {});
+  assert.ok(!p.start.some((l) => l.role === 'lead'), names(p).join());
+  assert.deepEqual(p.skip, []);
+  assert.deepEqual(p.heldBy, {});
+  // the same session bound to another project leads that one, not this
+  const q = planSquad('demo', squad, [{ actor: 'QO@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' }], {});
+  assert.ok(names(q).includes('orch@shaltoot'), names(q).join());
+});
+
+test('orch@<machine> live in this project is skipped as today, nothing renamed; live with no project too', () => {
+  for (const role of [null, 'lead']) { // sessions_overview gives role null outside a pipeline project
+    const p = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'demo', role }], {});
+    assert.deepEqual(p.skip, ['orch@shaltoot']);
+    assert.ok(!p.start.some((l) => l.role === 'lead'), names(p).join());
+    assert.deepEqual(p.heldBy, {});
+  }
+  const u = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: null }], {});
+  assert.deepEqual(u.skip, ['orch@shaltoot']);
+  assert.ok(!u.start.some((l) => l.role === 'lead'));
+});
+
+test('the alternate lead name live in a third project is held by it, not started', () => {
+  const p = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other' },
+    { actor: 'demo-orch@shaltoot', machine: 'shaltoot', project: 'third', role: 'builder' }], {});
+  assert.deepEqual(p.skip, ['demo-orch@shaltoot']);
+  assert.deepEqual(p.heldBy, { 'demo-orch@shaltoot': 'third' });
+  assert.ok(!p.start.some((l) => l.role === 'lead'));
 });
 
 // ---- squadUp with a fake herdr: nothing real is started ----
@@ -93,7 +136,7 @@ function fake(handler: (c: Call) => any) {
   return { calls, run };
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
-const rows = (list: [string, string, boolean][]) => list.map(([actor, project, live]) => ({ actor, project, live, machine: actor.split('@')[1] }));
+const rows = (list: [string, string, boolean, string?][]) => list.map(([actor, project, live, role]) => ({ actor, project, live, machine: actor.split('@')[1], role: role ?? null }));
 const callFn = (r: any[]) => async (fn: string) => (fn === 'squad_get' ? squad : r);
 const paneOut = (id: string) => ({ status: 0, stdout: JSON.stringify({ result: { pane_id: id } }), stderr: '' });
 
@@ -140,10 +183,31 @@ test('squad up: a launch that fails closes only the pane this run made for it', 
   assert.equal(closes[0]!.args[2], 'p4'); // the fourth pane made this run is B2's: no earlier pane is closed
 });
 
-test('squad up: the lead name held by another project is reported, not started', async () => {
+test('squad up: orch@<machine> leading another project: the lead starts as <project>-orch@<machine>, asked of herdr by that name', async () => {
   const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
-  const out = await squadUp('demo', true, callFn(rows([['orch@shaltoot', 'other', true]])), f.run);
-  assert.match(out, /skip orch@shaltoot: lead name held by project other/);
+  const out = await squadUp('demo', true, callFn(rows([['orch@shaltoot', 'other', true, 'lead']])), f.run);
+  assert.match(out, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
+  assert.doesNotMatch(out, /held by|orch@shaltoot: live/);
+  assert.ok(has(f.calls, 'agent', 'get', 'demo-orch-shaltoot'));
+  assert.ok(!has(f.calls, 'agent', 'get', 'orch-shaltoot'));
+});
+
+test('squad up: the alternate lead already running in herdr (quiet on the board) is not started a second time', async () => {
+  const f = fake((c) => {
+    if (c.args[1] === 'get') return c.args[2] === 'demo-orch-shaltoot' ? OK : GONE;
+    if (c.args[0] === 'tab' || c.args[0] === 'pane') return paneOut('p1');
+  });
+  const out = await squadUp('demo', false, callFn(rows([['orch@shaltoot', 'other', true, 'lead'], ['demo-orch@shaltoot', 'demo', false]])), f.run);
+  assert.match(out, /skip demo-orch@shaltoot: running in herdr but not on the board \(not bound\?\)\n  herdr agent prompt demo-orch-shaltoot "cb iam demo-orch@shaltoot demo --role lead/);
+  assert.ok(!f.calls.some((c) => c.args[1] === 'start' && /orch/.test(c.args[2]!)), out);
+});
+
+test('squad up: a lead-role session live in the project is its lead: herdr is not asked about a lead, none started', async () => {
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
+  const out = await squadUp('demo', true, callFn(rows([['QO@shaltoot', 'demo', true, 'lead']])), f.run);
+  assert.doesNotMatch(out, /orch/);
+  assert.ok(!f.calls.some((c) => c.args[1] === 'get' && /orch/.test(c.args[2]!)));
+  assert.match(out, /start demo-B1@macbook/);
 });
 
 test('herdrName: lowercase slug of the board name', () => {
@@ -259,6 +323,14 @@ test('no repos: names, folders and prompts exactly as before', () => {
   assert.ok(ls.every((x) => x.repo === 'main'));
   assert.deepEqual(ls.map(({ repo, ...x }) => x), IHOP_LAUNCH);
   assert.deepEqual(w.map((x) => launchFor('ihop', IHOP, x, 'resume').prompt), IHOP_RESUME);
+});
+
+test('the ihop squad with orch@shaltoot live in ihop: the lead is skipped, nothing renamed (#3746)', () => {
+  const p = planSquad('ihop', IHOP, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'ihop', role: 'lead' }], {});
+  assert.deepEqual(p.skip, ['orch@shaltoot']);
+  assert.deepEqual(p.heldBy, {});
+  assert.deepEqual(names(p), IHOP_WANT.slice(1).map((w) => w.name));
+  assert.deepEqual(p.refused, []);
 });
 
 // ---- a machine's herdr workspace (#3719): new tabs open in the squad's workspace, not the focused one ----

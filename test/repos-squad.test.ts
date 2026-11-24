@@ -336,6 +336,11 @@ test('squad_set refuses a session name over herdr\'s 32 characters', async () =>
   await assert.rejects(set(from((s) => { s.machines[far] = s.machines.shaltoot; delete s.machines.shaltoot;
     for (const r of Object.values<any>(s.repos)) { r.paths[far] = r.paths.shaltoot; delete r.paths.shaltoot; }
     s.roles.lead.machine = far; s.roles.owner.machine = 'macbook'; })), msg(`orch@${far}`));
+  // the lead starts as <project>-orch@<machine> when orch@<machine> leads another project (#3746): that name must fit too
+  const mid = 'lead-machine-15'; // orch@lead-machine-15 is 20, claude-board-orch@lead-machine-15 is 33
+  await assert.rejects(set(from((s) => { s.machines[mid] = s.machines.shaltoot; delete s.machines.shaltoot;
+    for (const r of Object.values<any>(s.repos)) { r.paths[mid] = r.paths.shaltoot; delete r.paths.shaltoot; }
+    s.roles.lead.machine = mid; s.roles.owner.machine = 'macbook'; })), msg(`claude-board-orch@${mid}`));
   // no repos: <project>-<letter><count>@<machine>
   const flat = { machines: { macbook: { herdr: 'macbook', repo: '/r', board: '/b' } }, roles: { builder: { count: 1, machine: 'macbook' } } };
   await sql`select cb.ensure_project('a-long-project-name-here')`;
