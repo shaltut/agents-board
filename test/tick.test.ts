@@ -453,13 +453,15 @@ for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', '
   });
 }
 
-// #3746: misheld leaves out the card's project lead by role, whatever its name; a lead bound elsewhere, orch@ included, is a worker here
-for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true], ['orch@m', null, 'q', false]] as [string, string | null, string, boolean][]) {
+// #3746 (C6): misheld catches a worker writing on another worker's card, so it leaves out ANY lead (cb._role), whatever
+// its name and whichever project it is bound to; a worker bound here is still misheld
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', true], ['orch@m', null, 'p', true],
+  ['orch@m', null, 'q', true], ['W3@m', null, 'p', false]] as [string, string | null, string, boolean][]) {
   test(`tick: a note by ${who} (role ${role ?? 'unset'}) bound to ${bound} on W4's card in p is ${leads ? 'not ' : ''}misheld`, async () => {
     const sql = await db();
     await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
     await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
-    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound}, ${role})`;
     await sql`select cb.task_add(project => 'p', title => 'job', status => 'in_progress', assignee => 'W4@m', actor => 'W4@m')`;
     await sql`select cb.log('p', 'looked at it', '1', '{}', ${who})`;
     const [{ t }] = await sql`select cb.tick('p') as t`;

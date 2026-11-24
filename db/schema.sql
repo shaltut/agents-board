@@ -2297,13 +2297,13 @@ begin
        -- review. t.project, not p: p is null on the all-projects tick
        and coalesce(t.assignee, '') <> 'ahmed' and not cb._is_lead(t.assignee, t.project)
        and coalesce(t.assignee, '') not in (select u.name from cb.users u)), '[]'),
-    -- in progress, but the last one to move it or write on it is another worker (not Ahmed, the relay or the card's
-    -- project lead, #3746)
+    -- in progress, but the last one to move it or write on it is another worker (not Ahmed, the relay or a lead: any
+    -- session whose role is lead, whichever project it leads, #3746)
     'misheld', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'by', l.actor) order by t.id)
       from cb.tasks t cross join lateral (select e.actor from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note', 'done')
                                            order by e.id desc limit 1) l
      where t.status = 'in_progress' and (p is null or t.project = p) and t.assignee is not null and l.actor <> t.assignee
-       and l.actor not in ('ahmed', 'relay', 'unknown') and not cb._is_lead(l.actor, t.project)
+       and l.actor not in ('ahmed', 'relay', 'unknown') and cb._role(l.actor) is distinct from 'lead'
        and l.actor not in (select u.name from cb.users u)), '[]'),
     -- live sessions (relay within 90s) holding nothing in progress; tags = what they worked on this week
     'idle', coalesce((select jsonb_agg(jsonb_build_object('actor', s.actor, 'tags',
