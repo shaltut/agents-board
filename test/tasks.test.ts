@@ -245,6 +245,16 @@ test('a cleared assignee is null: the card is handed out again', async () => {
   assert.equal(Number(c.id), 1, 'the cleared card is handed out');
   await sql`select cb.task_update('1', ${sql.json({ assignee: ' W3 ' })}, 'ahmed')`;
   assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'W3', 'a name is kept, trimmed');
+  // the dashboard's card menu clears with a JSON null
+  await sql`select cb.task_update('1', ${sql.json({ assignee: null })}, 'ahmed')`;
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, null, 'a JSON null clears it');
+  // cb add --assignee none (or '') registers an unassigned card, the same rule as cb edit
+  for (const none of ['none', '', ' None ']) {
+    const id = Number((await sql`select cb.task_add(project => 'demo', title => 'U', status => 'next', assignee => ${none}) as id`)[0].id);
+    assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, null, `cb add --assignee ${JSON.stringify(none)} is unassigned`);
+  }
+  const id = Number((await sql`select cb.task_add(project => 'demo', title => 'V', status => 'next', assignee => ' W4 ') as id`)[0].id);
+  assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, 'W4', 'cb add trims a name');
 });
 
 test('#3762 repro: a pipeline card whose holder was cleared with --assignee none can be restaged', async () => {
