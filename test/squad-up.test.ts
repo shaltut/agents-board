@@ -126,6 +126,35 @@ test('the alternate lead name live in a third project is held by it, not started
   assert.ok(!p.start.some((l) => l.role === 'lead'));
 });
 
+// a quiet lead: a lead-role session of this project seen in the last day (cb.triagers' window), not live now
+const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+const orchElsewhere = { actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' };
+const quietQO = (min: number, project = 'demo', role: string | null = 'lead') => ({ actor: 'QO@shaltoot', project, role, last_seen: ago(min) });
+
+test('a quiet lead seen in the last day: no other lead is started beside it; seen 2 days ago, the lead starts as before', () => {
+  for (const live of [[orchElsewhere], []]) { // neither <project>-orch@<m> nor orch@<m>
+    const p = planSquad('demo', squad, live, {}, 0, [quietQO(10)]);
+    assert.ok(!p.start.some((l) => l.role === 'lead'), names(p).join());
+    assert.deepEqual(p.skip, []);
+    assert.deepEqual(p.quietLead, { actor: 'QO@shaltoot', mins: 10 });
+  }
+  const old = planSquad('demo', squad, [orchElsewhere], {}, 0, [quietQO(2 * 24 * 60)]);
+  assert.equal(old.start.find((l) => l.role === 'lead')?.name, 'demo-orch@shaltoot');
+  assert.equal(old.quietLead, null);
+  // quiet in another project, or not a lead: not this project's lead
+  for (const q of [quietQO(10, 'other'), quietQO(10, 'demo', 'builder')])
+    assert.ok(names(planSquad('demo', squad, [], {}, 0, [q])).includes('orch@shaltoot'));
+});
+
+test('orch@<machine> leading this project but not live is restarted under its own name, as today; the alternate too', () => {
+  const p = planSquad('demo', squad, [], {}, 0, [{ actor: 'orch@shaltoot', project: 'demo', role: null, last_seen: ago(10) }]);
+  assert.ok(names(p).includes('orch@shaltoot'), names(p).join());
+  assert.equal(p.quietLead, null);
+  const a = planSquad('demo', squad, [orchElsewhere], {}, 0, [{ actor: 'demo-orch@shaltoot', project: 'demo', role: 'lead', last_seen: ago(10) }]);
+  assert.ok(names(a).includes('demo-orch@shaltoot'), names(a).join());
+  assert.equal(a.quietLead, null);
+});
+
 // ---- squadUp with a fake herdr: nothing real is started ----
 const OK = { status: 0, stdout: '{}', stderr: '' };
 const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
@@ -200,6 +229,19 @@ test('squad up: the alternate lead already running in herdr (quiet on the board)
   const out = await squadUp('demo', false, callFn(rows([['orch@shaltoot', 'other', true, 'lead'], ['demo-orch@shaltoot', 'demo', false]])), f.run);
   assert.match(out, /skip demo-orch@shaltoot: running in herdr but not on the board \(not bound\?\)\n  herdr agent prompt demo-orch-shaltoot "cb iam demo-orch@shaltoot demo --role lead/);
   assert.ok(!f.calls.some((c) => c.args[1] === 'start' && /orch/.test(c.args[2]!)), out);
+});
+
+test('squad up: a quiet lead: no lead started, one line names it and how to fix it; seen 2 days ago, the lead starts', async () => {
+  const quietRow = (min: number) => ({ actor: 'QO@shaltoot', project: 'demo', live: false, machine: 'shaltoot', role: 'lead', last_seen: ago(min) });
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
+  const out = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(10)]), f.run);
+  assert.match(out, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it, or cb iam <name> demo --role lead$/m);
+  assert.doesNotMatch(out, /start \S*orch/);
+  assert.ok(!f.calls.some((c) => c.args[1] === 'get' && /orch/.test(c.args[2]!)));
+  assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
+  const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
+  assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
+  assert.doesNotMatch(old, /skip lead/);
 });
 
 test('squad up: a lead-role session live in the project is its lead: herdr is not asked about a lead, none started', async () => {

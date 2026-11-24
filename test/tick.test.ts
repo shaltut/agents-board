@@ -452,3 +452,25 @@ for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', '
     }
   });
 }
+
+// #3746: misheld leaves out the card's project lead by role, whatever its name; a lead bound elsewhere is a worker here
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]] as [string, string | null, string, boolean][]) {
+  test(`tick: a note by ${who} (role ${role ?? 'unset'}) bound to ${bound} on W4's card in p is ${leads ? 'not ' : ''}misheld`, async () => {
+    const sql = await db();
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound})`;
+    await sql`select cb.task_add(project => 'p', title => 'job', status => 'in_progress', assignee => 'W4@m', actor => 'W4@m')`;
+    await sql`select cb.log('p', 'looked at it', '1', '{}', ${who})`;
+    const [{ t }] = await sql`select cb.tick('p') as t`;
+    assert.deepEqual(t.misheld.map((x: any) => x.id), leads ? [] : [1]);
+  });
+}
+
+test('tick: idle leaves out the project\'s lead by role, whatever its name (#3746)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('p')`;
+  await sql`select cb.iam('m', 'p1', 'W1@m', 'p'), cb.iam('m', 'p2', 'QO@m', 'p', 'lead'), cb.iam('m', 'p3', 'orch@m', 'p')`;
+  const [{ t }] = await sql`select cb.tick('p', 'ahmed') as t`;
+  assert.deepEqual(t.idle.map((x: any) => x.actor), ['W1@m']);
+});

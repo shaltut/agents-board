@@ -2297,12 +2297,13 @@ begin
        -- review. t.project, not p: p is null on the all-projects tick
        and coalesce(t.assignee, '') <> 'ahmed' and not cb._is_lead(t.assignee, t.project)
        and coalesce(t.assignee, '') not in (select u.name from cb.users u)), '[]'),
-    -- in progress, but the last one to move it or write on it is another worker (not Ahmed, the relay or an orchestrator)
+    -- in progress, but the last one to move it or write on it is another worker (not Ahmed, the relay or the card's
+    -- project lead, #3746)
     'misheld', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'by', l.actor) order by t.id)
       from cb.tasks t cross join lateral (select e.actor from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note', 'done')
                                            order by e.id desc limit 1) l
      where t.status = 'in_progress' and (p is null or t.project = p) and t.assignee is not null and l.actor <> t.assignee
-       and l.actor not in ('ahmed', 'relay', 'unknown', 'orch') and l.actor not like 'orch@%'
+       and l.actor not in ('ahmed', 'relay', 'unknown') and not cb._is_lead(l.actor, t.project)
        and l.actor not in (select u.name from cb.users u)), '[]'),
     -- live sessions (relay within 90s) holding nothing in progress; tags = what they worked on this week
     'idle', coalesce((select jsonb_agg(jsonb_build_object('actor', s.actor, 'tags',
@@ -2311,8 +2312,11 @@ begin
           'can', (select coalesce(jsonb_agg(t.id order by t.id), '[]') from cb.tasks t
                    where t.status = 'next' and t.assignee is null and (p is null or t.project = p) and cb._claimable(t, s.actor)))
         order by s.actor)
-      from (select distinct s2.actor from cb.sessions s2 where (p is null or s2.project = p) and s2.last_seen > now() - interval '90 seconds') s
-     where s.actor <> me and s.actor <> 'orch' and s.actor not like 'orch@%'
+      -- one row per actor (its latest live session), with the project it is bound to
+      from (select distinct on (s2.actor) s2.actor, s2.project from cb.sessions s2
+             where (p is null or s2.project = p) and s2.last_seen > now() - interval '90 seconds' order by s2.actor, s2.last_seen desc) s
+     -- a lead of its own project is never offered work (#3746)
+     where s.actor <> me and not cb._is_lead(s.actor, s.project)
        and not exists (select 1 from cb.tasks t where t.assignee = s.actor and t.status = 'in_progress')
        -- a part in work (#3703) is work in progress too
        and not exists (select 1 from cb._held_parts() h where h.assignee = s.actor and h.status = 'in_progress')), '[]'),
@@ -2501,7 +2505,8 @@ end $$;
 
 -- A blocker finished (done or cancelled): every task it held with nothing else holding it goes to Next. The moved
 -- event ("unblocked: #12 is done") reaches the assignee through the relay's events channel; a task with no assignee
--- is a message to the project's orchestrators (orch@*, seen in the last day). Named after tasks_history on purpose:
+-- is a message to the project's leads (sessions bound to it with the lead role, as cb.triagers; seen in the last day).
+-- Named after tasks_history on purpose:
 -- after-row triggers run in name order, so the blocker's own event is written before this changes cb.note.
 create function cb.tasks_unblock() returns trigger language plpgsql as $$
 declare note text := current_setting('cb.note', true); data text := current_setting('cb.data', true);
@@ -2527,7 +2532,8 @@ begin
          jsonb_build_object('to', s.actor, 'task', f.id)
     from freed f
     join (select distinct s2.actor, s2.project from cb.sessions s2
-           where (s2.actor like 'orch@%' or s2.actor = 'orch') and s2.last_seen > now() - interval '1 day') s on s.project = f.project
+           where coalesce(s2.role, case when s2.actor = 'orch' or s2.actor like 'orch@%' then 'lead' end) = 'lead'
+             and s2.last_seen > now() - interval '1 day') s on s.project = f.project
    where f.assignee is null and not cb._pipeline(f.project);  -- a pipeline lead hears of it in the digest
   perform set_config('cb.note', coalesce(note, ''), true);
   perform set_config('cb.data', coalesce(data, ''), true);
