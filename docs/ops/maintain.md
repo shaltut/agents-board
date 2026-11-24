@@ -291,6 +291,9 @@ and the dangerous-commands hook blocks a `git push` whose destination is on it: 
 `x:development`, `HEAD:refs/heads/development`, `+x:development`, `--delete origin development`. Plain `git push` and
 `git push origin` stay denied by the role permission files. Card #3746.
 
+- The block says what to do instead: push your own branch and open a PR; the lead merges it.
+- While the list is set, a push whose remote or branch the shell fills in (`$B`, `$(git branch --show-current)`,
+  backticks) is blocked too, since the hook cannot see the branch: name it literally.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
   by `cb squad up` or the supervisor).
 - The fence is the hook installed on each machine: after a release that changed it, copy it there (Upgrade, above).

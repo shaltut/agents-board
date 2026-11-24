@@ -73,14 +73,29 @@ const PUSH_OPT_ARG = new Set(['-o', '--push-option', '--repo', '--receive-pack',
 const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const globRe = (e) => new RegExp(`^${e.split('*').map(literal).join('.*')}$`);
 
+// Shell-ish splitting, quote-aware: a quoted run (with \" inside "...") never ends a command or a word.
+// Segments end at ; & | newline outside quotes; words end at whitespace and ( ) { } outside quotes.
+const SEGMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[^;&|\n"'\\])+`, 'g');
+const WORD = new RegExp(String.raw`(?:${QUOTED}|\\.|[^\s(){}"'\\])+`, 'g');
+// one layer of quoting off, as the shell does: "..." (\" \\ \$ \` inside unescaped), '...' as is, \x outside quotes
+const unquote = (w) => w.replace(new RegExp(String.raw`"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)`, 'g'),
+  (_all, dq, sq, esc) => (dq !== undefined ? dq.replace(/\\(["\\$`])/g, '$1') : sq ?? esc));
+
 // The protected branch a git push in cmd writes to, or null. Message text is ignored (stripMessages); a git ... push
 // anywhere in a segment counts, like the patterns above, so it fails closed (echo git push origin development blocks).
+// A branch the shell fills in ($B, $(...), backticks) cannot be checked: that word is returned, so it blocks too.
 export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
-  for (const seg of stripMessages(String(cmd ?? '')).split(/[;&|\n]/)) {
-    // words as the shell hands them on: quotes and escapes gone ("devel"opment is development), ( ) { } ` break words
-    const w = seg.split(/[\s(){}`]+/).map((x) => x.replace(/["'\\]/g, '')).filter(Boolean);
+  // a line continuation joins its lines; a backtick substitution counts as $ (and its inner command stays a command)
+  const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`/g, ' $ ');
+  for (const seg of text.match(SEGMENT) ?? []) {
+    const raw = seg.match(WORD) ?? [];
+    const w = raw.map(unquote);
+    // a quoted command (bash -c "...", ssh host '...') is read as a command too, one layer of quotes off
+    for (let i = 0; i < w.length; i++) {
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i])) { const inner = protectedPush(w[i], list); if (inner) return inner; }
+    }
     for (let i = 0; i < w.length; i++) {
       if (!/(?:^|\/)git(?:\.exe)?$/.test(w[i])) continue;
       let j = i + 1;
@@ -92,9 +107,12 @@ export function protectedPush(cmd, list) {
         const x = w[j];
         if (/^\d*[<>]/.test(x)) { if (/^\d*[<>]+$/.test(x)) j++; continue; } // a redirection, and its file when apart
         if (x === '--delete' || /^-\w*d\w*$/.test(x)) del = true;
-        else if (x.startsWith('-')) { if (PUSH_OPT_ARG.has(x)) j++; }
+        else if (x.startsWith('-')) { if (PUSH_OPT_ARG.has(x)) j++; } // -o <value>; --push-option=<value> is one word
         else words.push(x);
       }
+      // the shell fills in a $ word: the branch is unknown here. The remote too: an unquoted $R can split into two words
+      const filled = words.find((x) => x.includes('$'));
+      if (filled) return filled;
       // the first word is the remote; each refspec's destination: dst of src:dst (:dst too), a bare src itself, and
       // under --delete the word as given; without a leading + or refs/heads/
       for (const r of words.slice(1)) {
@@ -116,7 +134,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     // only adds a block: a command already blocked keeps its reason
     const list = (process.env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const branch = reason || !list.length ? null : protectedPush(command, list);
-    if (branch) reason = `git push to protected branch ${branch}`;
+    if (branch) reason = branch.includes('$')
+      ? `git push to a branch the shell fills in (${branch}) while branches are protected: name the branch literally, e.g. git push -u origin feat/my-card`
+      : `git push to protected branch ${branch}: push your own branch and open a PR; the lead merges it`;
   } catch {} // bad or empty stdin: allow, never block everything
   process.stdout.write(JSON.stringify(reason ? { decision: 'block', reason: `Blocked dangerous command: ${reason}` } : {}));
 }

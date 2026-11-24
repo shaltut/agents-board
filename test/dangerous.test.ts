@@ -178,6 +178,26 @@ const pushBlocked: [string, string][] = [
   ['git push origin feat/x\ngit push origin staging', 'staging'],
   // matched anywhere in a segment, like the other patterns (grep -n reboot blocks too): it fails closed
   ['echo git push origin development > notes.txt', 'development'],
+  // fix round 1: a quoted option value with spaces is one word, and a quoted ; does not end the command
+  ['git -C "/tmp/my dir" push origin development', 'development'],
+  ['git -c "core.sshCommand=ssh -i k" push origin development', 'development'],
+  ['git -c http.extraheader="AUTHORIZATION: bearer $T" push origin development', 'development'],
+  ["git -c credential.helper='!f() { echo x; }; f' push origin development", 'development'],
+  // a command inside quotes is read as a command, one layer of quoting off at a time
+  ['bash -c "git -C \\"/tmp/my dir\\" push origin staging"', 'staging'],
+  ["ssh host 'cd x && git push origin staging'", 'staging'],
+  ['git push origin \\\n  development', 'development'],
+];
+// fix round 1: a branch the shell fills in cannot be checked: blocked while the list is set (the word comes back)
+const pushExpanded = [
+  'git push -u origin $(git branch --show-current)',
+  'git push -u origin "$(git rev-parse --abbrev-ref HEAD)"',
+  'B=development; git push origin $B',
+  'git push origin `git branch --show-current`',
+  'git push origin HEAD:${B}',
+  'git push origin feat/x:"$B"',
+  // an unquoted $R may split into a remote and a branch
+  'git push $R feat/x',
 ];
 const pushPassed = [
   'git push origin feature/development-fix',
@@ -194,8 +214,17 @@ const pushPassed = [
   'git push origin feat/x 2>&1 | tee development',
   'git push',
   'git push origin',
+  // fix round 1: a push option's value is not a refspec, quoted or joined with =
+  'git push origin feat/x -o "merge_request.title=Fix staging bug"',
+  'git push origin feat/x --push-option "title=Fix staging bug"',
+  'git push origin feat/x --push-option="title=Fix staging bug"',
+  // quoted option values with spaces, or a $ in one, are not branches
+  'git -C "/tmp/my dir" push origin feat/x',
+  'git -c http.extraheader="AUTHORIZATION: bearer $T" push -u origin feat/x',
+  'git push origin feat/x > "$LOG"',
 ];
 for (const [c, branch] of pushBlocked) test(`protectedPush blocks ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), branch));
+for (const c of pushExpanded) test(`protectedPush blocks the shell-filled ${JSON.stringify(c)}`, () => assert.match(protectedPush(c, LIST) ?? '', /\$/));
 for (const c of pushPassed) test(`protectedPush passes ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), null));
 test('protectedPush: an empty list blocks nothing', () => assert.equal(protectedPush('git push origin development', []), null));
 test('protectedPush: a glob is anchored, * spans /, and the entry\'s other characters are literal', () => {
@@ -213,9 +242,19 @@ test('as a hook: CB_PROTECTED_BRANCHES set blocks a push to a listed branch with
   const hook = (command: string, e = env) => JSON.parse(run(JSON.stringify({ tool_input: { command } }), e).stdout);
   const blocked = run(JSON.stringify({ tool_input: { command: 'cd x && git push origin releases/2026-11-12' } }), env);
   assert.equal(blocked.status, 0);
-  assert.deepEqual(JSON.parse(blocked.stdout), { decision: 'block', reason: 'Blocked dangerous command: git push to protected branch releases/2026-11-12' });
-  assert.equal(hook('git push origin staging').reason, 'Blocked dangerous command: git push to protected branch staging');
+  // the reason says what to do next (fix round 1)
+  assert.deepEqual(JSON.parse(blocked.stdout), { decision: 'block',
+    reason: 'Blocked dangerous command: git push to protected branch releases/2026-11-12: push your own branch and open a PR; the lead merges it' });
+  assert.equal(hook('git push origin staging').reason,
+    'Blocked dangerous command: git push to protected branch staging: push your own branch and open a PR; the lead merges it');
+  // a branch the shell fills in: blocked, and told to name the branch
+  for (const c of ['git push -u origin $(git branch --show-current)', 'B=development; git push origin $B']) {
+    const r = hook(c);
+    assert.equal(r.decision, 'block', c);
+    assert.match(r.reason, /^Blocked dangerous command: git push to a branch the shell fills in \(.*\$.*\) while branches are protected: name the branch literally/, c);
+  }
   assert.deepEqual(hook('git push origin feat/x'), {});
+  assert.deepEqual(hook('git push -u origin feat/x'), {});
   assert.deepEqual(hook('cb tell X "git push origin development"'), {});
   // a command another pattern already blocks keeps that reason
   assert.equal(hook('git push --force origin main', { CB_PROTECTED_BRANCHES: 'main' }).reason, 'Blocked dangerous command: git push --force main');
