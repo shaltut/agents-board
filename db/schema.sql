@@ -503,12 +503,12 @@ begin
       ac := current_setting('cb.actor', true);
       if not (cb._is_dashboard() or (cb._role(ac) = 'lead' and nullif(trim(coalesce(current_setting('cb.note', true), '')), '') is not null)) then
         raise exception '#% is at %: % (only Ahmed, or the lead with a note, closes it outside the pipeline)', old.id, old.stage,
-          case when old.stage = 'approval' then cb._finish_line(old) else 'finish it with ' || cb._finish_line(old) end;
+          case when old.stage = 'approval' then cb._finish_line(old) else 'finish it with ' || cb._finish_line(old, ac) end;
       end if;
     end if;
     -- review is the status of a card waiting at approval; any other staged card parked there would fall out of every list
     if new.status = 'review' and new.status is distinct from old.status and new.stage is distinct from 'approval' then
-      raise exception '#% is at %: finish it with %', old.id, cb._stage_words(old.stage), cb._finish_line(old);
+      raise exception '#% is at %: finish it with %', old.id, cb._stage_words(old.stage), cb._finish_line(old, current_setting('cb.actor', true));
     end if;
     if new.project is distinct from old.project and not cb._is_dashboard() then
       raise exception '#% is at %: a staged card stays in its project (Ahmed can move it from the board)', old.id, old.stage;
@@ -770,7 +770,14 @@ begin
     repos    = rs
   where t.id = tid;
   perform set_config('cb.note', '', true);
-  if opn then perform cb._parts_open(tid); end if;
+  if opn then
+    perform cb._parts_open(tid);
+    -- the card stays at build, so no stage change pushes the new parts: a note per part, by repo (cb.inbox next_work)
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    select coalesce(nullif(current_setting('cb.actor', true), ''), 'unknown'), t.project, tid, 'note',
+           format('part %s opened at build', p.repo), jsonb_build_object('repo', p.repo)
+      from cb.task_parts p join cb.tasks t on t.id = p.task_id where p.task_id = tid order by p.repo;
+  end if;
 end $$;
 
 create function cb.task_done(id text, summary text, links jsonb default '{}', actor text default null)
@@ -1500,7 +1507,7 @@ end $$;
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
 create function cb.inbox(machine text, pane text, after_event bigint default 0) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
-declare m text := lower(trim(machine)); me text; proj text; seen bigint;
+declare m text := lower(trim(machine)); me text; proj text; seen bigint; myrepo text;
 begin
   -- a new session (relay before cb iam) starts from now; until it joins a project it hears no broadcasts
   insert into cb.sessions (machine, pane, actor, broadcast_seen)
@@ -1509,6 +1516,7 @@ begin
           coalesce((select max(e.id) from cb.events e), 0))
   on conflict on constraint sessions_pkey do update set last_seen = now()
   returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen into me, proj, seen;
+  myrepo := cb._repo(me);  -- once, not per event row (next_work)
   return jsonb_build_object(
     'actor', me,
     'project', proj, -- with actor: the binding the relay hands to cb (#3256)
@@ -1578,8 +1586,8 @@ begin
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')
                                                  -- a parts card (#3703) stays in Next while its parts move: its stage
                                                  -- changes, and changes to a part of my repo (sent back, freed), count
-                                                 or (e.kind in ('updated', 'note') and (e.data ? 'stage' or e.data ->> 'repo' = cb._repo(me))
-                                                     and exists (select 1 from cb.task_parts p where p.task_id = t.id))))
+                                                 or (e.kind in ('updated', 'note') and exists (select 1 from cb.task_parts p where p.task_id = t.id)
+                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))
                               and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
                               -- a part in work (#3703) is work in progress too
                               and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
@@ -4243,9 +4251,14 @@ create function cb._parts_words(tid bigint) returns text language sql stable as 
    group by t.id, t.stage
 $$;
 
--- The command that finishes this card's stage for whoever holds it.
-create function cb._finish_line(t cb.tasks) returns text language sql stable as $$
-  select case when not cb._pipeline(t.project) then format('cb done %s "<summary>"', t.id) else case t.stage
+-- The command that finishes this card's stage for whoever holds it. a holding a part (#3703): its part's stage, not the
+-- card's (a NO-GO on another part may have pulled the card back to build), with --repo.
+create function cb._finish_line(t cb.tasks, a text default null) returns text language sql stable as $$
+  select coalesce((select case h.stage
+      when 'build' then format('cb pass %s "<summary>" --pr <url> --repo %s', t.id, h.repo)
+      when 'review' then format('cb pass %s "<verdict>" --repo %s or cb fail %s "<what is wrong>" --repo %s', t.id, h.repo, t.id, h.repo) end
+    from cb._held_parts() h where h.task_id = t.id and h.assignee = a and cb._pipeline(t.project) order by h.repo limit 1),
+  case when not cb._pipeline(t.project) then format('cb done %s "<summary>"', t.id) else case t.stage
     when 'design' then format('cb page set %s -f page.md, then cb pass %s "<summary>"', t.id, t.id)
     when 'build' then format('cb pass %s "<summary>" --pr <url>', t.id)
     when 'review' then format('cb pass %s "<verdict>" or cb fail %s "<what is wrong>"', t.id, t.id)
@@ -4255,7 +4268,7 @@ create function cb._finish_line(t cb.tasks) returns text language sql stable as 
     when 'qa' then format('cb pass %s "<checked on dev>" or cb fail %s "<what fails>"', t.id, t.id)
     when 'approval' then format('waiting for Ahmed (Q%s)',
       (select max(q.id) from cb.questions q where q.approval_for = t.id and q.status in ('open', 'answered')))
-    else format('cb done %s "<summary>"', t.id) end end
+    else format('cb done %s "<summary>"', t.id) end end)
 $$;
 
 -- Who takes the card now: its holder by name, a parts card's parts in words (#3703), else the role the stage needs.
@@ -4302,7 +4315,7 @@ begin
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
         'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then (w.v).stage end,
         'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', (w.v).status,
-        'finish', cb._finish_line(w.v), 'page', cb._page_for(t, a),
+        'finish', cb._finish_line(w.v, a), 'page', cb._page_for(t, a),
         -- a parts card (#3703): the part this actor holds, and every part in words
         'part', case when hp.repo is not null then jsonb_build_object('repo', hp.repo, 'stage', hp.stage, 'pr', hp.pr) end,
         'parts', cb._parts_words(t.id),
@@ -4376,11 +4389,14 @@ $$;
 create function cb._home_repo(p text) returns text language sql stable as $$ select (cb._repos_of(p))[1] $$;
 create function cb._multi_repo(p text) returns boolean language sql stable as $$ select cardinality(cb._repos_of(p)) > 1 $$;
 
--- The repo an actor works in: its latest session's, else that session's project's home repo, else main. A stored repo
--- the project no longer has (it gained or changed repos after the bind) counts as the home repo.
-create function cb._repo(a text) returns text language sql stable as $$
-  select coalesce((select case when s.repo = any(cb._repos_of(s.project)) then s.repo else cb._home_repo(s.project) end
-                     from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'main')
+-- The repo an actor works in (in project p when given): its latest session's, else that session's project's home repo;
+-- no session: p's home repo (main). A stored main the project no longer has (it gained repos after the bind) counts
+-- as the home repo; any other stale repo stays as it is: it claims nothing, and the supervisor shows it under that repo.
+create function cb._repo(a text, p text default null) returns text language sql stable as $$
+  select coalesce((select case when s.repo = any(cb._repos_of(s.project)) or coalesce(s.repo, 'main') <> 'main' then s.repo
+                               else cb._home_repo(s.project) end
+                     from cb.sessions s where s.actor = a and (p is null or s.project = p) order by s.last_seen desc limit 1),
+                  cb._home_repo(p))
 $$;
 
 -- Repo names checked against the project's repos; duplicates dropped, given order kept. null or empty: null (not named).
@@ -4413,6 +4429,7 @@ declare
   areas jsonb; roles jsonb := '{}'; ns jsonb;
   -- repos (#3703): rp as given, rs as saved (home on every repo), hm the home repo, area_repos the areas' repos
   rp jsonb := squad->'repos'; rs jsonb := '{}'; x record; hm text; nm text; need text[]; area_repos text[] := '{}';
+  busy text;  -- the open cards that hold a repo the new squad drops
 begin
   if not cb._is_dashboard() and cb._role(a) is distinct from 'lead' then raise exception 'only Ahmed or the lead sets the squad'; end if;
   if p is null then raise exception 'project is required'; end if;
@@ -4573,7 +4590,20 @@ begin
        where roles ? rl.role) z
    where length(sn) > 32 limit 1;
   if nm is not null then raise exception 'session name % is over herdr''s 32 characters: use a shorter repo, area or machine key', nm; end if;
-  ns := jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
+  -- a repo open work names stays (dropped or renamed, its cards and parts could never be claimed); flat is the one repo
+  -- main. Adding repos is free.
+  need := case when rp is null then '{main}' else array(select jsonb_object_keys(rs)) end;
+  select z.r, string_agg('#' || z.id, ', ' order by z.id) filter (where z.n <= 5) into nm, busy
+    from (select w.r, w.id, row_number() over (partition by w.r order by w.id) as n
+            from (select u.r, t.id from cb.tasks t cross join lateral unnest(t.repos) u(r)
+                   where t.project = p and t.status not in ('done', 'cancelled')
+                  union
+                  select tp.repo, t.id from cb.task_parts tp join cb.tasks t on t.id = tp.task_id
+                   where t.project = p and t.status not in ('done', 'cancelled')) w
+           where w.r <> all(need)) z
+   group by z.r order by z.r limit 1;
+  if nm is not null then raise exception 'repo % still has open work (%): finish or move those cards first', nm, busy; end if;
+  ns :=jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
         || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
         || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;
   update cb.projects pr set squad = ns where pr.slug = p;
@@ -4625,11 +4655,25 @@ declare t cb.tasks%rowtype; r record;
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if cardinality(coalesce(t.repos, '{}')) <= 1 and not exists (select 1 from cb.task_parts p where p.task_id = tid) then return; end if;
-  for r in delete from cb.task_parts p where p.task_id = tid and not (p.repo = any(coalesce(t.repos, '{}'))) returning p.repo, p.pr loop
+  -- a holder losing its part is told (never the session acting): its card was never its own, so nothing else reaches it.
+  -- No session path leaves a holder here today (--to design frees every part); a dashboard edit could.
+  for r in delete from cb.task_parts p where p.task_id = tid and not (p.repo = any(coalesce(t.repos, '{}'))) returning p.repo, p.pr, p.assignee loop
     insert into cb.events (actor, project, task_id, kind, summary, data)
     values (coalesce(nullif(current_setting('cb.actor', true), ''), 'board'), t.project, tid, 'note',
             'part ' || r.repo || ' dropped' || coalesce(': close its PR ' || r.pr, ''), '{"digest": true}');
+    if nullif(trim(r.assignee), '') is not null and r.assignee is distinct from current_setting('cb.actor', true) then
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', t.project, tid, 'message', format('#%s part %s was dropped: you no longer hold it', tid, r.repo),
+              jsonb_build_object('to', r.assignee, 'repo', r.repo));
+    end if;
   end loop;
+  insert into cb.events (actor, project, task_id, kind, summary, data)
+  select 'board', t.project, tid, 'message', format('#%s part %s went back to build: you no longer hold it', tid, p.repo),
+         jsonb_build_object('to', p.assignee, 'repo', p.repo)
+    from cb.task_parts p
+   where p.task_id = tid and nullif(trim(p.assignee), '') is not null and p.assignee is distinct from p.crew ->> 'build'
+     and p.assignee is distinct from current_setting('cb.actor', true)
+   order by p.repo;
   -- a kept part's builder is told (the card stays in Next and unheld: nothing else reaches it); a new part has no holder
   for r in insert into cb.task_parts as p (task_id, repo, stage) select tid, x, 'build' from unnest(t.repos) x
            on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null,
@@ -4713,7 +4757,7 @@ begin
 exception when others then null;
 end $$;
 
--- repo null: the repo of the actor's latest session on the project (cb._repo's rule), else the project's home repo.
+-- repo null: cb._repo of the actor in this project (its latest session there, else the project's home repo).
 -- A repo no runner offers for the project is refused, naming the ones they have: no fallback to another repo (#3703).
 create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null,
                            repo text default null)
@@ -4731,9 +4775,7 @@ begin
   if sha !~ '^[0-9a-f]{7,40}$' then raise exception 'sha must be 7 to 40 hex characters'; end if;
   params := coalesce(params, '{}'::jsonb);
   if jsonb_typeof(params) is distinct from 'object' then raise exception 'params must be an object of lists'; end if;
-  r := coalesce(nullif(trim(repo), ''),
-                (select coalesce(s.repo, cb._home_repo(p)) from cb.sessions s where s.actor = a and s.project = p order by s.last_seen desc limit 1),
-                cb._home_repo(p));
+  r := coalesce(nullif(trim(repo), ''), cb._repo(a, p));
   has := array(select distinct rr.repo from cb.runner_recipes rr where rr.project = p order by rr.repo);
   if cardinality(has) > 0 and r <> all(has) then raise exception 'the runner has no repo % for %: it has %', r, p, array_to_string(has, ', '); end if;
   select rr.params into rp from cb.runner_recipes rr where rr.project = p and rr.repo = r and rr.recipe = recipe order by rr.runner limit 1;

@@ -404,6 +404,74 @@ test('--to design and a cancel message every part holder; re-approval messages e
   assert.equal((await msgs(sql, 'p4'))[1], `#${id} is cancelled: your part dashboard is closed`);
 });
 
+test('a NO-GO while the card is already at build pushes the builder by its repo', async () => {
+  const sql = await setup();
+  const id = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await fail(sql, id, 'qhs-dashboard-R1@mac', 'the chart is wrong');
+  assert.equal((await card(sql, id)).stage, 'build');
+  const e0 = await top(sql);
+  await fail(sql, id, 'qhs-R1@mac', 'the error path is missing');
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and id > ${e0} and data ? 'stage'`)[0].n, 0,
+    'the card stays at build: only the repo key carries it');
+  assert.deepEqual((await inbox(sql, 'p3', e0)).next_work.map((w: any) => Number(w.id)), [id]);
+  assert.deepEqual((await inbox(sql, 'p4', e0)).next_work, [], 'not the dashboard builder: nothing changed in its repo');
+  assert.deepEqual((await inbox(sql, 'p5', e0)).next_work, [], 'another api builder: the part is B1\'s');
+});
+
+test('a builder bound with a stale main claims the home repo\'s part', async () => {
+  const sql = await setup();
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p9','qhs-B3@mac','qhs','builder','main')`;
+  const id = await approved(sql);
+  assert.deepEqual(await claim(sql, 'qhs-B3@mac'), [id]);
+  assert.deepEqual((await parts(sql, id)).map((p: any) => [p.repo, p.status, p.assignee]),
+    [['api', 'in_progress', 'qhs-B3@mac'], ['dashboard', 'next', null]]);
+});
+
+test('a QA fail by repo reaches its builder while it is busy elsewhere', async () => {
+  const sql = await setup();
+  const id = await atMerge(sql);
+  await pass(sql, id, 'orch@pc', 'merged', { commit: 'abc1234' }, 'api');
+  await pass(sql, id, 'orch@pc', 'merged', { commit: 'def5678' }, 'dashboard');
+  assert.deepEqual(await claim(sql, 'qhs-Q1@mac'), [id]);
+  const other = await approved(sql, ['api']);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [other]);
+  const e0 = await top(sql);
+  const r = cb(['fail', String(id), 'the total is wrong', '--repo', 'api'], 'qhs-Q1@mac');
+  assert.equal(r.code, 0, r.err);
+  const i = await inbox(sql, 'p3', e0);
+  assert.deepEqual(i.messages.map((m: any) => m.summary), [`#${id} part api is back with you at build: the total is wrong`]);
+  assert.deepEqual(i.next_work, [], 'busy: the message is how it hears');
+});
+
+test('a part opened by a repos edit at build is pushed to its repo\'s builders', async () => {
+  const sql = await setup();
+  const id = Number((await sql`select cb.task_add(project => 'qhs', title => 'b', type => 'bug', actor => 'orch@pc') as id`)[0].id);
+  await sql`select cb._stage_move(${id}, 'build', null, 'x')`;
+  const e0 = await top(sql);
+  await sql`select cb.task_update(${id}::text, '{"repos":["api","dashboard"]}', 'orch@pc')`;
+  assert.deepEqual((await inbox(sql, 'p3', e0)).next_work.map((w: any) => Number(w.id)), [id]);
+  assert.deepEqual((await inbox(sql, 'p4', e0)).next_work.map((w: any) => Number(w.id)), [id]);
+  assert.deepEqual((await inbox(sql, 'p6', e0)).next_work, [], 'a reviewer has nothing to take yet');
+});
+
+// No session path leaves a holder on a part at re-approval today (--to design clears them): set directly, as a
+// dashboard edit or a later path could leave one
+test('re-approval tells a part\'s old holder when its part is dropped or goes back to its builder', async () => {
+  const sql = await setup();
+  const id = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac');
+  await fail(sql, id, 'qhs-R1@mac', 'the contract is wrong', 'design');
+  await sql`select cb.task_update(${id}::text, '{"repos":["api"]}', 'qhs-O1@pc')`;
+  await sql`update cb.task_parts set assignee = 'qhs-B2@mac', status = 'in_progress' where task_id = ${id} and repo = 'api'`;
+  await sql`update cb.task_parts set assignee = 'qhs-dashboard-R1@mac' where task_id = ${id} and repo = 'dashboard'`;
+  await pass(sql, id, 'qhs-O1@pc', 'redesigned');
+  await approve(sql, id);
+  assert.deepEqual(await msgs(sql, 'p5'), [`#${id} part api went back to build: you no longer hold it`]);
+  assert.deepEqual(await msgs(sql, 'p7'), [`#${id} part dashboard was dropped: you no longer hold it`]);
+  assert.deepEqual(await msgs(sql, 'p3'), [`#${id} part api is back with you at build`]);
+});
+
 test('one-repo card: its events and inbox are unchanged (pin)', async () => {
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo'), cb.project_pipeline('demo', true, 'ahmed')`;

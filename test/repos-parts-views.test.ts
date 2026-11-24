@@ -134,9 +134,19 @@ test('a reviewer whose part is ahead of the card resumes at its part\'s stage', 
   await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
   await sql`select cb.stage_fail(${id}::text, 'wrong', null, 'qhs-dashboard-R1@mac')`;
   const [c] = (await resume(sql, 'qhs-R1@mac')).cards;
-  assert.deepEqual([c.id, c.stage, c.stage_words, c.finish], [id, 'review', 'In review', `cb pass ${id} "<verdict>" or cb fail ${id} "<what is wrong>"`]);
+  assert.deepEqual([c.id, c.stage, c.stage_words, c.finish],
+    [id, 'review', 'In review', `cb pass ${id} "<verdict>" --repo api or cb fail ${id} "<what is wrong>" --repo api`]);
   assert.deepEqual(c.part, { repo: 'api', stage: 'review', pr: API });
   assert.equal(c.parts, 'build: api done (PR #12), dashboard building (qhs-dashboard-B1@mac)');
+  // the builder the NO-GO gave its part back to: its build line, with its repo
+  assert.equal((await resume(sql, D)).cards[0].finish, `cb pass ${id} "<summary>" --pr <url> --repo dashboard`);
+  // closing the card by hand is refused with the holder's own part line, not the card's (build)
+  const done = cb(['done', String(id), 'looks fine'], 'qhs-R1@mac');
+  assert.notEqual(done.code, 0);
+  assert.ok(done.err.includes(`finish it with cb pass ${id} "<verdict>" --repo api or cb fail ${id} "<what is wrong>" --repo api (`), done.err);
+  // a session holding no part: the card's line, as before
+  const q = cb(['done', String(id), 'looks fine'], 'qhs-Q1@mac');
+  assert.ok(q.err.includes(`finish it with cb pass ${id} "<summary>" --pr <url> (only Ahmed`), q.err);
 });
 
 test('part holders count as holding', async () => {

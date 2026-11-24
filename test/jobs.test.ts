@@ -275,6 +275,15 @@ test('jobs per repo', async () => {
   assert.deepEqual(l.runners.find((r: any) => r.name === 'pc').recipes.filter((x: any) => x.project === 'qhs').map((x: any) => x.repo), ['api', 'dashboard']);
 });
 
+test('a job with no repo goes to the session\'s repo by cb._repo\'s rule: a stale main is the home repo', async () => {
+  const { sql, addRepo } = await setupRepos();
+  // qhs gained repos after this builder bound with --repo main
+  await sql`update cb.projects set squad = '{"repos": {"api": {"home": true, "paths": {}}, "dashboard": {"home": false, "paths": {}}}}' where slug = 'qhs'`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p10','qhs-B1@mac','qhs','builder','main')`;
+  const j = await addRepo(null, 'qhs-B1@mac');
+  assert.equal((await sql`select repo from cb.jobs where id = ${j.id}`)[0].repo, 'api');
+});
+
 test('merging a project moves its recipes per repo, so a moved queued repo job is claimed', async () => {
   const { sql, runner, addRepo } = await setupRepos();
   // the target already offers test, for another repo: the moved dashboard row must stay

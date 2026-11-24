@@ -148,6 +148,64 @@ test('_repo: a stored repo the project no longer has counts as the home repo', a
   assert.equal(s.repo, 'api');
 });
 
+test('_repo: a stale repo other than main stays as it is and claims nothing', async () => {
+  const sql = await setup();
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p9','qhs-dashboard-B1@mac','qhs','builder','dashboard')`;
+  // dashboard is renamed web (no open work names it)
+  await sql`select cb.squad_set('qhs', ${sql.json(mod((s) => {
+    s.repos.web = s.repos.dashboard; delete s.repos.dashboard;
+    s.areas = [{ name: 'api', repo: 'api' }, { name: 'web', repo: 'web' }];
+    s.roles.builder.count = { api: 2, web: 1 }; s.roles.reviewer.count = { api: 1, web: 1 };
+  }))}, 'ahmed')`;
+  assert.equal((await sql`select cb._repo('qhs-dashboard-B1@mac') as r`)[0].r, 'dashboard');
+  const s = (await sql`select cb.supervise_state('qhs') as r`)[0].r.sessions.find((x: any) => x.actor === 'qhs-dashboard-B1@mac');
+  assert.equal(s.repo, 'dashboard');
+  // an api card at build is not the renamed session's
+  const id = Number((await sql`select cb.task_add(project => 'qhs', title => 'b', type => 'bug', repos => '["api"]', stage => 'build', why => 'small', actor => 'orch@pc') as id`)[0].id);
+  assert.deepEqual([...await sql`select id from cb.task_claim('qhs', 'qhs-dashboard-B1@mac')`], []);
+  assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, null);
+});
+
+test('squad_set refuses to drop or rename a repo that open work names', async () => {
+  const sql = await setup();
+  const noDash = mod((s) => {
+    delete s.repos.dashboard; s.areas = [{ name: 'api', repo: 'api' }];
+    s.roles.builder.count = { api: 2 }; s.roles.reviewer.count = { api: 1 };
+  });
+  const renamed = mod((s) => {
+    s.repos.web = s.repos.dashboard; delete s.repos.dashboard;
+    s.areas = [{ name: 'api', repo: 'api' }, { name: 'web', repo: 'web' }];
+    s.roles.builder.count = { api: 2, web: 1 }; s.roles.reviewer.count = { api: 1, web: 1 };
+  });
+  const flat = { machines: { shaltoot: { herdr: null, repo: 'F:/Work/QHS/api', board: 'F:/Work/claude-board' } },
+    roles: { lead: { count: 1, machine: 'shaltoot' } } };
+  const set = (sq: any) => sql`select cb.squad_set('qhs', ${sql.json(sq)}, 'ahmed')`;
+  const ids: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    ids.push(Number((await sql`select cb.task_add(project => 'qhs', title => 'c', repos => '["dashboard"]', actor => 'orch@pc') as id`)[0].id));
+  }
+  const five = ids.slice(0, 5).map((i) => '#' + i).join(', ');
+  const refused = new RegExp(`repo dashboard still has open work \\(${five}\\): finish or move those cards first$`);
+  await assert.rejects(() => set(noDash), refused);
+  await assert.rejects(() => set(renamed), refused);
+  // back to flat is the one repo main
+  await assert.rejects(() => set(flat), refused);
+  // adding a repo stays free
+  await set(mod((s) => { s.repos.docs = { paths: s.repos.api.paths }; }));
+  for (const i of ids) await sql`update cb.tasks set status = 'cancelled' where id = ${i}`;
+  // a part of an open card counts too (here the card itself names api only)
+  const p = Number((await sql`select cb.task_add(project => 'qhs', title => 'c', repos => '["api"]', actor => 'orch@pc') as id`)[0].id);
+  await sql`insert into cb.task_parts (task_id, repo, stage) values (${p}, 'dashboard', 'build')`;
+  await assert.rejects(() => set(noDash), new RegExp(`repo dashboard still has open work \\(#${p}\\)`));
+  await sql`delete from cb.task_parts where task_id = ${p}`;
+  await set(renamed);
+  // flat while an open card names api: refused; closed, it goes
+  await assert.rejects(() => set(flat), new RegExp(`repo api still has open work \\(#${p}\\)`));
+  await sql`update cb.tasks set status = 'cancelled' where id = ${p}`;
+  await set(flat);
+  assert.deepEqual((await sql`select cb._repos_of('qhs') as r`)[0].r, ['main']);
+});
+
 test('card repos', async () => {
   const sql = await setup();
   const [{ id }] = await sql`select cb.task_add(project => 'qhs', title => 'x', repos => '["dashboard","api"]', actor => 'orch@pc') as id`;
