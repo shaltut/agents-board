@@ -278,6 +278,7 @@ drop function if exists cb.lock_take cascade;
 drop function if exists cb.lock_release cascade;
 drop function if exists cb.lock_queue cascade;
 drop function if exists cb.norm_epic cascade;
+drop function if exists cb._norm_assignee cascade;
 drop function if exists cb.epic_create cascade;
 drop function if exists cb.epic_update cascade;
 drop function if exists cb.epic_close cascade;
@@ -678,7 +679,7 @@ begin
   insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since, repos)
   values (p, trim(title), coalesce(body, ''), st, cb.norm_priority(priority),
           l, coalesce(links, '{}'),
-          coalesce(assignee, case when st = 'in_progress' then a end), a, ty, cb.norm_epic(epic),
+          coalesce(cb._norm_assignee(assignee), case when st = 'in_progress' then a end), a, ty, cb.norm_epic(epic),
           case when staged then 'design' end, case when staged then now() end, cb._check_repos(p, cb._repo_list(repos)))
   returning cb.tasks.id into new_id;
   -- stage => build is the lead's restage, with the same checks (and the note) as cb.stage_set; it reads the repos just stored
@@ -708,6 +709,10 @@ begin
    where k not in ('title','body','priority','assignee','labels','links','project','rank','type','epic','epic_rank','repos');
   if bad is not null then
     raise exception 'unknown field(s) %; allowed: title, body, priority, assignee, labels, links, project, rank, type, epic, epic_rank, repos', bad;
+  end if;
+  -- a cleared holder is null, never a string (#3762): cb edit --assignee none or '' (the dashboard sends a JSON null)
+  if fields ? 'assignee' then
+    fields := jsonb_set(fields, '{assignee}', coalesce(to_jsonb(cb._norm_assignee(fields ->> 'assignee')), 'null'::jsonb));
   end if;
   -- the row lock first: a concurrent cb fail --to design or a second --repo edit cannot slip between these checks and
   -- the update (#3703: repos and parts change together)
@@ -2335,6 +2340,12 @@ end $$;
 -- ---------------------------------------------------------------- epics and blockers (#341)
 
 -- "E3", "e3", "#3" or "3" → 3; null, '' or "none" → null (out of its epic). An unknown epic is an error.
+-- a card's holder as stored: '', blanks and 'none' (any case) mean nobody, i.e. null; a name is trimmed (#3762). The rest
+-- of the board tests "assignee is null" for unassigned (cb next, claims, cb stage)
+create function cb._norm_assignee(x text) returns text language sql immutable as $$
+  select case when lower(coalesce(trim(x), '')) in ('', 'none') then null else trim(x) end
+$$;
+
 create function cb.norm_epic(epic text) returns bigint language plpgsql stable as $$
 #variable_conflict use_variable
 declare v text := lower(trim(coalesce(epic, '')));
