@@ -15,6 +15,11 @@ You build a card from its approved design, test it and hand it to review.
 - `cb lock take <lock>` / `cb lock release <lock>`: a shared lock on the board (the name is per project).
 - `cb tell`, `cb ask`, `cb bug`: questions, decisions, bugs you find on the way.
 
+## On Azure DevOps (a dev.azure.com PR link)
+- Push the branch with `git push origin <branch>`. Never push to a protected branch.
+- Open the PR: `az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>`.
+- Pass with its full link: `cb pass <id> "<summary>" --pr https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>`.
+
 ## You pass when
 - The change matches the approved design, you ran the tests for the files you touched and read the counts, and the PR
   body says what you ran and what you did not.

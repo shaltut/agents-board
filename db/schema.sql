@@ -3732,8 +3732,10 @@ begin
     if coalesce(trim(summary), '') = '' then raise exception 'summary is required: say in one line what you did'; end if;
     if pt.stage = 'build' then
       if nullif(lk ->> 'pr', '') is null and pt.pr is null then raise exception 'give the pull request: --pr <url>'; end if;
-      if nullif(lk ->> 'pr', '') !~ '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+/?$' then
-        raise exception 'give the full pull request URL: https://github.com/<owner>/<repo>/pull/<n>';
+      -- a GitHub or an Azure DevOps PR (#3746); a null link (the part already has its PR) falls through
+      if nullif(lk ->> 'pr', '') !~ '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+/?$'
+         and nullif(lk ->> 'pr', '') !~ '^https://dev\.azure\.com/[^/]+/[^/]+/_git/[^/]+/pullrequest/[0-9]+/?$' then
+        raise exception 'give the full pull request URL: https://github.com/<owner>/<repo>/pull/<n> or https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>';
       end if;
     elsif pt.stage = 'review' then
       if a = pt.crew ->> 'build' then raise exception 'you built it: another reviewer passes review'; end if;

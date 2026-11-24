@@ -408,6 +408,21 @@ test('q quotes for bash and PowerShell: safe words bare, the rest single-quoted 
   assert.equal(q('$(id)'), "'$(id)'");
 });
 
+test('prRef: an Azure DevOps link is never looked up on GitHub, even with GITHUB_REPO_<PROJECT> set (#3746)', async () => {
+  const { prRef } = await import('../cli/tick.ts');
+  const had = process.env.GITHUB_REPO_QHS;
+  process.env.GITHUB_REPO_QHS = 'o/r';
+  try {
+    assert.equal(prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    // GitHub links resolve as before: a full URL, and a bare number through GITHUB_REPO_QHS
+    assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'qhs'), { repo: 'acme/app', n: '9' });
+    assert.deepEqual(prRef('#15', 'qhs'), { repo: 'o/r', n: '15' });
+  } finally {
+    if (had === undefined) delete process.env.GITHUB_REPO_QHS; else process.env.GITHUB_REPO_QHS = had;
+  }
+});
+
 test('tick: hostile titles, actors and PR links print as inert commands in bash and PowerShell', async () => {
   const sql = await db();
   const evil = "x’; touch PWN1; ’ $(touch PWN2) `touch PWN3` it's";

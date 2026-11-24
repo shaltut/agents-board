@@ -229,6 +229,21 @@ test('the card leaves build when every part has its PR', async () => {
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and summary = 'dashboard: built' and data ? 'stage'`)[0].n, 1);
 });
 
+test('a part passes build with an Azure DevOps pull request link; a link without its number or repo is refused (#3746)', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, 'qhs-B1@mac');
+  const ADO = 'https://dev.azure.com/org/proj/_git/api/pullrequest/12';
+  const both = /give the full pull request URL: https:\/\/github\.com\/<owner>\/<repo>\/pull\/<n> or https:\/\/dev\.azure\.com\/<org>\/<project>\/_git\/<repo>\/pullrequest\/<n>/;
+  await assert.rejects(() => pass(sql, id, 'qhs-B1@mac', 'built', { pr: 'https://dev.azure.com/org/proj/_git/api/pullrequests' }), both);
+  await assert.rejects(() => pass(sql, id, 'qhs-B1@mac', 'built', { pr: 'https://dev.azure.com/org/proj/pullrequest/12' }), both);
+  // only the dev.azure.com form: the old visualstudio.com host is refused
+  await assert.rejects(() => pass(sql, id, 'qhs-B1@mac', 'built', { pr: 'https://org.visualstudio.com/proj/_git/api/pullrequest/12' }), both);
+  assert.equal((await pass(sql, id, 'qhs-B1@mac', 'built', { pr: ADO }))[0].r, 'build');
+  assert.deepEqual((await parts(sql, id)).map((p: any) => [p.repo, p.stage, p.pr]), [['api', 'review', ADO], ['dashboard', 'build', null]]);
+  assert.equal((await card(sql, id)).links['pr:api'], ADO);
+});
+
 test('review is per part', async () => {
   const sql = await setup();
   const id = await atReview(sql);

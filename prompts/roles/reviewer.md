@@ -15,6 +15,14 @@ You read a change against its approved design and the project's rules, and give 
 - `cb fail <id> "<why>"`: send it back to its builder. Say what is wrong, where, and what would fix it.
   `cb fail <id> "<why>" --to design`: the design is what is wrong.
 
+## On Azure DevOps (a dev.azure.com PR link)
+- `az repos pr show --id <n>`: the PR. Its head is `lastMergeSourceCommit.commitId`.
+- The code: `git fetch origin +refs/pull/<n>/merge:refs/remotes/pr/<n>` (works without the az login).
+- Your GO goes on the board in the `cb pass` summary with the head SHA, and the same line on the PR: write
+  `{"comments":[{"content":"GO at <sha>"}],"status":"closed"}` to a go.json outside the repo, then run
+  `az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 --url "https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<n>/threads?api-version=7.1" --body @go.json`.
+- If az says to log in: say so on the card with `cb log <id> "<what az said>"`. The board GO stands.
+
 ## You pass when
 - The change does what the approved design says, the rules of the area still hold, the tests pin the new behaviour
   and you found nothing that breaks a caller.

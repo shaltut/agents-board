@@ -33,6 +33,11 @@ Ahmed is often away: you never wait on him.
 - There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid`. If they differ,
   do not merge: `cb tell <reviewer> "re-read the new head <sha> and post a fresh GO"`.
 
+## On Azure DevOps (a dev.azure.com PR link)
+- Compare the GO's SHA with `az repos pr show --id <n>` (`lastMergeSourceCommit.commitId`). If they differ, do not merge: ask for a fresh GO as above.
+- Merge with `az repos pr update --id <n> --status completed`, then `cb pass <id> "<what merged>" --repo <repo> --commit <merge sha>` as today.
+- `cb tick` shows no state for Azure DevOps PRs.
+
 ## Silent holders
 - A card has sat with a quiet holder: ask it with `cb tell`, then reassign it.
 

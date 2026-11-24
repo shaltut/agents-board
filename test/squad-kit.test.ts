@@ -296,4 +296,9 @@ test('role texts name the repo rules', () => {
   has('lead', 'cb stage <id> build --repo');
   has('owner', 'cb edit <id> --repo');
   has('architect', 'cb edit <id> --repo');
+  // #3746: an Azure DevOps PR has its own block in each role that handles PRs
+  for (const r of ['builder', 'reviewer', 'lead']) has(r, '## On Azure DevOps (a dev.azure.com PR link)');
+  has('builder', 'az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>');
+  has('reviewer', 'az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798');
+  has('lead', 'az repos pr update --id <n> --status completed');
 });
