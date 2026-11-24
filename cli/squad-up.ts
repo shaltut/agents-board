@@ -116,10 +116,14 @@ export function herdrJson(run: Runner, m: string | null, args: string[], timeout
   try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
 }
 
+// A pane herdr just made refuses agent start (agent_pane_busy) until its shell prompt is up: about 10 s of retries.
+const BUSY_TRIES = 6, BUSY_WAIT_MS = 2000;
+const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
 /** Start one session: a pane (a new tab, or a split of a tab in `tabs`, two panes per tab), the agent, its first
  *  prompt. ok: the agent is up (blocked: up but waiting on a startup dialog; the pane is kept). A launch that did not
  *  come up has its own pane closed, never any other. "started, prompt not sent" is ok: false with its pane. */
-export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: string; panes: number }>): { line: string; pane?: string; blocked?: boolean; ok: boolean } {
+export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: string; panes: number }>, pause: (ms: number) => void = sleep): { line: string; pane?: string; blocked?: boolean; ok: boolean } {
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
   let pane: string | undefined, started = false;
@@ -138,7 +142,16 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (!pane) throw new Error('herdr returned no pane id');
     let blocked = false;
     try {
-      herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+      for (let i = 1; ; i++) {
+        try {
+          herdr(l.herdr, ['agent', 'start', herdrName(l.name), '--kind', 'claude', '--pane', pane, '--timeout', '120000', '--', '--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', l.settings]);
+          break;
+        } catch (e) {
+          // agent_pane_busy: the new pane's shell is not up yet (a split made a moment ago, a slow shell profile)
+          if (i >= BUSY_TRIES || !/agent_pane_busy/.test((e as Error).message)) throw e;
+          pause(BUSY_WAIT_MS);
+        }
+      }
     } catch (e) {
       // agent_not_ready: Claude Code waits on a startup dialog (folder trust, bypass warning). The agent exists: keep the pane.
       if (!/agent_not_ready/.test((e as Error).message)) throw e;

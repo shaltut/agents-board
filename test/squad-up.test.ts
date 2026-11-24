@@ -336,3 +336,45 @@ test('startOne: a workspace list herdr did not answer with makes no workspace', 
   assert.match(r.line, /herdr workspace list gave no workspaces/);
   assert.ok(!f.calls.some((c) => c.args[0] === 'workspace' && c.args[1] === 'create'));
 });
+
+// #3747: a pane herdr just made may not have its shell up yet; agent start then says agent_pane_busy
+const BUSY = { status: 1, stderr: '{"error":{"code":"agent_pane_busy","message":"target pane is not an available shell"}}' };
+
+test('startOne: a split whose shell is not up yet (agent_pane_busy) is retried, and the session starts in it', () => {
+  let starts = 0;
+  const waits: number[] = [];
+  const f = fake((c) => {
+    if (c.args[0] === 'pane' && c.args[1] === 'split') return paneOut('w4:p2');
+    if (c.args[1] === 'start') return ++starts < 3 ? BUSY : OK;
+  });
+  const r = startOne(wsLaunch('demo-B2@macbook'), f.run, { macbook: { pane: 'w4:p1', panes: 1 } }, (ms) => waits.push(ms));
+  assert.ok(r.ok, r.line);
+  assert.equal(starts, 3);
+  assert.equal(waits.length, 2);
+  assert.ok(waits.every((ms) => ms > 0));
+  assert.ok(!has(f.calls, 'pane', 'close'));
+  assert.ok(f.calls.some((c) => c.args[1] === 'prompt'));
+});
+
+test('startOne: a pane still busy after the retries is closed and the launch fails with herdr\'s reason', () => {
+  let starts = 0;
+  const f = fake((c) => {
+    if (c.args[0] === 'pane' && c.args[1] === 'split') return paneOut('w4:p2');
+    if (c.args[1] === 'start') { starts++; return BUSY; }
+  });
+  const r = startOne(wsLaunch('demo-B2@macbook'), f.run, { macbook: { pane: 'w4:p1', panes: 1 } }, () => {});
+  assert.ok(!r.ok);
+  assert.ok(starts > 1 && starts <= 10, `tried ${starts} times`);
+  assert.match(r.line, /agent_pane_busy/);
+  assert.deepEqual(f.calls.filter((c) => c.args[1] === 'close').map((c) => c.args[2]), ['w4:p2']);
+});
+
+test('startOne: any other start error is not retried', () => {
+  let starts = 0;
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('p1');
+    if (c.args[1] === 'start') { starts++; return { status: 1, stderr: '{"error":{"code":"model_missing"}}' }; }
+  });
+  assert.ok(!startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => { throw new Error('no wait expected'); }).ok);
+  assert.equal(starts, 1);
+});
