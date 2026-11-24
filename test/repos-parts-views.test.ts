@@ -214,7 +214,12 @@ test('a quiet part holder is nudged, then freed', async () => {
   assert.equal(await due(), 0, 'one nudge only');
   await age(91);
   await sql`update cb.task_parts set nudged_at = now() - interval '61 minutes' where task_id = ${id} and repo = 'dashboard'`;
+  // an idle dashboard builder is pushed the freed part (the card itself never moves)
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('mac','p9','qhs-dashboard-B2@mac','qhs','builder','dashboard')`;
+  const e0 = Number((await sql`select max(id) as m from cb.events`)[0].m);
   assert.equal(await due(), 2, 'a note to the holder and the release');
+  assert.deepEqual((await sql`select cb.inbox('mac', 'p9', ${e0}) as i`)[0].i.next_work.map((w: any) => Number(w.id)), [id]);
+  assert.deepEqual((await sql`select cb.inbox('mac', 'p3', ${e0}) as i`)[0].i.next_work, [], 'an api builder is not');
   const [p] = await sql`select status, assignee, nudged_at from cb.task_parts where task_id = ${id} and repo = 'dashboard'`;
   assert.deepEqual([p.status, p.assignee, p.nudged_at], ['next', null, null]);
   const note = `freed from ${D}: no update for 1h 31m and the nudge went unanswered (part dashboard)`;
