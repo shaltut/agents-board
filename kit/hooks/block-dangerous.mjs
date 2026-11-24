@@ -83,7 +83,8 @@ const unquote = (w) => w.replace(new RegExp(String.raw`"((?:\\.|[^"\\])*)"|'([^'
 
 // The protected branch a git push in cmd writes to, or null. Message text is ignored (stripMessages); a git ... push
 // anywhere in a segment counts, like the patterns above, so it fails closed (echo git push origin development blocks).
-// A branch the shell fills in ($B, $(...), backticks) cannot be checked: that word is returned, so it blocks too.
+// A branch the shell fills in ($B, $(...), backticks) cannot be checked: that word is returned, so it blocks too. So is
+// a wildcard destination (refs/heads/*, develop*): it can write a protected branch.
 export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
@@ -114,10 +115,12 @@ export function protectedPush(cmd, list) {
       const filled = words.find((x) => x.includes('$'));
       if (filled) return filled;
       // the first word is the remote; each refspec's destination: dst of src:dst (:dst too), a bare src itself, and
-      // under --delete the word as given; without a leading + or refs/heads/
+      // under --delete the word as given; without a leading + or refs/heads/ (or heads/, which git reads the same)
       for (const r of words.slice(1)) {
         const s = r.replace(/^\+/, '');
-        const dst = (del || !s.includes(':') ? s : s.slice(s.lastIndexOf(':') + 1)).replace(/^refs\/heads\//, '');
+        const to = del || !s.includes(':') ? s : s.slice(s.lastIndexOf(':') + 1);
+        if (to.includes('*')) return to; // a wildcard refspec writes every branch it matches: protected ones too (C11)
+        const dst = to.replace(/^(?:refs\/)?heads\//, '');
         if (hit(dst)) return dst;
       }
     }
@@ -136,7 +139,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     const branch = reason || !list.length ? null : protectedPush(command, list);
     if (branch) reason = branch.includes('$')
       ? `git push to a branch the shell fills in (${branch}) while branches are protected: name the branch literally, e.g. git push -u origin feat/my-card`
-      : `git push to protected branch ${branch}: push your own branch and open a PR; the lead merges it`;
+      : branch.includes('*')
+        ? `git push to a wildcard destination (${branch}) while branches are protected: push one branch by name, e.g. git push -u origin feat/my-card`
+        : `git push to protected branch ${branch}: push your own branch and open a PR; the lead merges it`;
   } catch {} // bad or empty stdin: allow, never block everything
   process.stdout.write(JSON.stringify(reason ? { decision: 'block', reason: `Blocked dangerous command: ${reason}` } : {}));
 }

@@ -63,7 +63,7 @@ Then the workers, right away, because their `cb` must match the schema:
 - **The dangerous-commands hook**, when the release changed `kit/hooks/block-dangerous.mjs`: each machine runs its
   own installed copy, not the checkout's. With Ahmed's yes, copy `kit/hooks/block-dangerous.mjs` to
   `~/.claude/hooks/block-dangerous.mjs` on the PC and on the Mac (from `~/Work/claude-board`, after the tar step), then
-  run the two checks in [Installing the dangerous-commands hook](#installing-the-dangerous-commands-hook-on-a-machine).
+  run the three checks in [Installing the dangerous-commands hook](#installing-the-dangerous-commands-hook-on-a-machine).
 
 If the schema change drops or renames a function the old CLI calls, a worker's `cb` fails until it is updated: that
 is the window to keep short.
@@ -83,7 +83,11 @@ Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on
 4. Check it:
    `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`, and
    `echo '{"tool_input":{"command":"git reset --hard"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints the block JSON
-   (`{"decision":"block","reason":"Blocked dangerous command: git reset --hard"}`).
+   (`{"decision":"block","reason":"Blocked dangerous command: git reset --hard"}`), and, the protected-branch fence,
+   `echo '{"tool_input":{"command":"git push origin development"}}' | CB_PROTECTED_BRANCHES=development node ~/.claude/hooks/block-dangerous.mjs`
+   prints the block JSON
+   (`{"decision":"block","reason":"Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it"}`).
+   An old copy prints `{}` there: the fence is missing.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
    treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
    command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
@@ -285,17 +289,32 @@ Card #3719.
 
 A squad may list the branches its sessions must never push to: `"protected": ["development", "staging",
 "releases/*", "athena-production"]` (branch names, or globs where `*` is any run of characters, `/` included; at most
-30, each 1 to 100 characters of letters, digits and `. _ / * -`, not starting with `-`). `cb squad up` and the
-supervisor then create each new session's pane with `CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`),
-and the dangerous-commands hook blocks a `git push` whose destination is on it: `git push origin development`,
-`x:development`, `HEAD:refs/heads/development`, `+x:development`, `--delete origin development`. Plain `git push` and
-`git push origin` stay denied by the role permission files. Card #3746.
+30, each 1 to 100 characters of letters, digits and `. _ / * -`, not starting with `-`). Give each branch as git shows
+it: `cb squad set` refuses an entry starting with `refs/`, `heads/` or `origin/`, or ending with `/`, since the hook
+could never match it. `cb squad up` and the supervisor then create each new session's pane with
+`CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`), and the dangerous-commands hook blocks a `git push`
+whose destination is on it: `git push origin development`, `x:development`, `HEAD:refs/heads/development`,
+`x:heads/development`, `+x:development`, `--delete origin development`. Plain `git push` and `git push origin` stay
+denied by the role permission files. Card #3746.
 
 - The block says what to do instead: push your own branch and open a PR; the lead merges it.
 - While the list is set, a push whose remote or branch the shell fills in (`$B`, `$(git branch --show-current)`,
   backticks) is blocked too, since the hook cannot see the branch: name it literally.
+- While the list is set, a wildcard destination (`refs/heads/*:refs/heads/*`, `develop*`) is blocked too: it can write
+  a protected branch. Push one branch by name.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
   by `cb squad up` or the supervisor).
+- A lead started by hand (not by `cb squad up`) never gets the variable that way: squad up skips a lead-role session
+  that is live, or was seen in the last day, in the project (its `skip lead:` line names it), and the supervisor never
+  starts it. Close it and restart it by hand in a pane that carries the variable, quoted so no shell expands the `*`
+  (zsh refuses an unmatched glob):
+  - a new herdr tab: `herdr tab create --cwd <repo> --label <name> --env 'CB_PROTECTED_BRANCHES=development,releases/*'`
+    (`herdr --machine <label> tab create ...` on another machine), then start `claude` in that pane;
+  - or set it in the shell that starts `claude`: `export CB_PROTECTED_BRANCHES='development,releases/*'` (bash, zsh),
+    `$env:CB_PROTECTED_BRANCHES = 'development,releases/*'` (PowerShell).
+
+  Then bind it as before (`cb iam <name> <project> --role lead`). From the session, `echo $CB_PROTECTED_BRANCHES`
+  prints the list.
 - The fence is the hook installed on each machine: after a release that changed it, copy it there (Upgrade, above).
 
 ## Squad file: several repos

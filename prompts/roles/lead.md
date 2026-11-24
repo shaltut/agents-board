@@ -35,7 +35,8 @@ Ahmed is often away: you never wait on him.
 
 ## On Azure DevOps (a dev.azure.com PR link)
 - Compare the GO's SHA with `az repos pr show --id <n>` (`lastMergeSourceCommit.commitId`). If they differ, do not merge: ask for a fresh GO as above.
-- Merge with `az repos pr update --id <n> --status completed`, then `cb pass <id> "<what merged>" --repo <repo> --commit <merge sha>` as today.
+- Merge with `az repos pr update --id <n> --status completed`, wait until the change is live on dev, then
+  `cb pass <id> "<what merged>" --commit <merge sha>` as today; on a card with parts add `--repo <repo>` (a one-repo card refuses it).
 - The merge SHA is `lastMergeCommit.commitId` from `az repos pr show --id <n>` once its status reads completed: that SHA goes into `--commit`.
 - `cb tick` shows no state for Azure DevOps PRs.
 
@@ -46,4 +47,6 @@ Ahmed is often away: you never wait on him.
 - Merge your own work, or a change with no second session's GO.
 - Reorder Ahmed's queue: propose a new order with `cb ask`.
 - Push to main by hand. Land work with `gh pr merge`, or `az repos pr update` on Azure DevOps.
+- Push to a protected branch (the squad file's `protected` list), even where no fence stops you: a lead started by
+  hand has none until it is restarted with the list.
 - Start heavy runs on the Mac. Decide where they run.

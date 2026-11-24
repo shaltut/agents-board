@@ -86,7 +86,6 @@ test('tick: stuck work (silent holder, long block, review with no reviewer, some
   await sql`select cb.task_add(project => 'demo', title => 'W4 job', status => 'in_progress', assignee => 'W4@m', actor => 'orch@test')`;
   await sql`select cb.log('demo', 'I am on it', '7', '{}', 'W3@m')`;
   await sql`select cb.task_add(project => 'demo', title => 'PO questions for Omar', status => 'review', assignee => 'orch@test', actor => 'orch@test')`;
-  await sql`select cb.iam('test', 'p0', 'orch@test', 'demo')`; // the lead is a session bound to the project (#3746)
   await ago(sql, sql`actor in ('W7@m', 'W9@m')`, '2 hours');
   const r = cb(['tick', 'demo']);
   assert.match(r.out, /STUCK/);
@@ -95,7 +94,8 @@ test('tick: stuck work (silent holder, long block, review with no reviewer, some
   assert.match(r.out, /#3 blocked 2h, W9@m: waiting for the DB lock → cb tell W9@m/);
   assert.match(r.out, /#4 in review, no reviewer task \(W2@m\) → cb add demo 'Review #4 \(W2@m\): parser fix' -s next -l review/);
   assert.doesNotMatch(r.out, /#5 in review/);
-  assert.doesNotMatch(r.out, /#8 in review/); // the orchestrator's: waiting on a person, not a code review
+  // the orchestrator's: waiting on a person, not a code review. orch@test has no session: an orch name still leads (C10)
+  assert.doesNotMatch(r.out, /#8 in review/);
   assert.match(r.out, /#7 assigned W4@m, W3@m works it → cb edit 7 --assignee W3@m/);
   // W9 is silent too, but its task is blocked, not in progress
   assert.doesNotMatch(r.out, /#3 W9@m silent/);
@@ -458,13 +458,16 @@ test('tick: hostile titles, actors and PR links print as inert commands in bash 
   }
 });
 
-// #3746: a card in review held by its project's lead (a lead-role session, whatever its name) waits on a person
-for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]] as [string, string | null, string, boolean][]) {
+// #3746 (C10): a card in review held by a lead (a lead-role session, whatever its name, or an orch name with no role)
+// waits on a person, whichever project the lead is bound to, as misheld (C6); a worker holding one is still unreviewed,
+// a role-less worker too (cb._role null: is distinct from, never a NULL that drops the row)
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', true], ['orch@m', null, 'p', true],
+  ['orch@m', null, 'q', true], ['W3@m', null, 'p', false], ['W3@m', 'builder', 'p', false]] as [string, string | null, string, boolean][]) {
   test(`tick: a card in review held by ${who} (role ${role ?? 'unset'}) bound to ${bound} is ${leads ? 'not ' : ''}unreviewed in p`, async () => {
     const sql = await db();
     await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
     await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
-    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound}, ${role})`;
     await sql`select cb.task_add(project => 'p', title => 'PO questions', status => 'review', assignee => ${who})`;
     for (const proj of ['p', null]) { // the all-projects tick too
       const [{ t }] = await sql`select cb.tick(${proj}) as t`;

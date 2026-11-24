@@ -187,6 +187,18 @@ const pushBlocked: [string, string][] = [
   ['bash -c "git -C \\"/tmp/my dir\\" push origin staging"', 'staging'],
   ["ssh host 'cd x && git push origin staging'", 'staging'],
   ['git push origin \\\n  development', 'development'],
+  // C11: git reads heads/<x> as refs/heads/<x>, as a destination and as a bare src
+  ['git push origin x:heads/development', 'development'],
+  ['git push origin heads/development', 'development'],
+  ['git push origin +feat/x:heads/staging', 'staging'],
+];
+// C11: a destination holding * is a wildcard refspec: it can write any branch, protected ones too (the word comes back)
+const pushWildcard: [string, string][] = [
+  ['git push origin refs/heads/*:refs/heads/*', 'refs/heads/*'],
+  ['git push origin +refs/heads/*:refs/heads/*', 'refs/heads/*'],
+  ['git push origin develop*', 'develop*'],
+  ['git push origin "feat/*:develop*"', 'develop*'],
+  ['git push origin heads/*', 'heads/*'],
 ];
 // fix round 1: a branch the shell fills in cannot be checked: blocked while the list is set (the word comes back)
 const pushExpanded = [
@@ -222,9 +234,14 @@ const pushPassed = [
   'git -C "/tmp/my dir" push origin feat/x',
   'git -c http.extraheader="AUTHORIZATION: bearer $T" push -u origin feat/x',
   'git push origin feat/x > "$LOG"',
+  // C11: only a leading heads/ (or refs/heads/) is git's; one inside a name is the name
+  'git push origin feat/heads-up',
+  'git push origin heads-up',
+  'git push origin feat/x:feat/heads/development',
 ];
 for (const [c, branch] of pushBlocked) test(`protectedPush blocks ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), branch));
 for (const c of pushExpanded) test(`protectedPush blocks the shell-filled ${JSON.stringify(c)}`, () => assert.match(protectedPush(c, LIST) ?? '', /\$/));
+for (const [c, word] of pushWildcard) test(`protectedPush blocks the wildcard ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), word));
 for (const c of pushPassed) test(`protectedPush passes ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), null));
 test('protectedPush: an empty list blocks nothing', () => assert.equal(protectedPush('git push origin development', []), null));
 test('protectedPush: a glob is anchored, * spans /, and the entry\'s other characters are literal', () => {
@@ -253,8 +270,12 @@ test('as a hook: CB_PROTECTED_BRANCHES set blocks a push to a listed branch with
     assert.equal(r.decision, 'block', c);
     assert.match(r.reason, /^Blocked dangerous command: git push to a branch the shell fills in \(.*\$.*\) while branches are protected: name the branch literally/, c);
   }
+  // a wildcard destination (C11): blocked, and told to push one branch by name
+  assert.equal(hook('git push origin refs/heads/*:refs/heads/*').reason,
+    'Blocked dangerous command: git push to a wildcard destination (refs/heads/*) while branches are protected: push one branch by name, e.g. git push -u origin feat/my-card');
   assert.deepEqual(hook('git push origin feat/x'), {});
   assert.deepEqual(hook('git push -u origin feat/x'), {});
+  assert.deepEqual(hook('git push origin feat/heads-up'), {});
   assert.deepEqual(hook('cb tell X "git push origin development"'), {});
   // a command another pattern already blocks keeps that reason
   assert.equal(hook('git push --force origin main', { CB_PROTECTED_BRANCHES: 'main' }).reason, 'Blocked dangerous command: git push --force main');

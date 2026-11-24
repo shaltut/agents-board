@@ -203,6 +203,25 @@ test('squad_set refuses a bad protected list and says what to give (#3746)', asy
   await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = ['A.z_0/*-9']; }))}, 'ahmed')`;
 });
 
+test('squad_set refuses a protected entry the push hook can never match: refs/, heads/ or origin/ first, / last (#3746 C11)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const asGit = (e: string) => new RegExp(`protected: give the branch name as git shows it, like "development" or "releases/\\*", not ${e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  const bad: [string[], RegExp][] = [
+    [['refs/heads/development'], asGit('"refs/heads/development"')],
+    [['heads/development'], asGit('"heads/development"')],
+    [['origin/development'], asGit('"origin/development"')],
+    [['refs/heads/*'], asGit('"refs/heads/*"')],
+    [['releases/'], asGit('"releases/"')],
+    [['development', 'origin/staging'], asGit('"origin/staging"')], // the bad entry is named, not the list
+  ];
+  for (const [p, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = p; }))}, 'ahmed')`, re, JSON.stringify(p));
+  // the same words inside a name, or without the slash, are names
+  const fine = ['releases/*', 'feat/refs/x', 'my-heads/x', 'origin-x', 'refsx/y', 'release/v1', '*'];
+  await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = fine; }))}, 'ahmed')`;
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s.protected, fine);
+});
+
 test('squad_set accepts absolute paths on both OS shapes', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;

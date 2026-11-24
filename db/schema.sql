@@ -2293,9 +2293,10 @@ begin
        -- a staged card in review is an approval card: the pipeline reviews it, not a "Review #N" card
        and not (t.stage is not null and cb._pipeline(t.project))
        and not cb._is_review(t.labels, t.title) and not cb._has_reviewer(t)
-       -- held by Ahmed, a user or the card's project's lead (#3746), "review" means waiting on a person, not on a code
-       -- review. t.project, not p: p is null on the all-projects tick
-       and coalesce(t.assignee, '') <> 'ahmed' and not cb._is_lead(t.assignee, t.project)
+       -- held by Ahmed, a user or a lead, "review" means waiting on a person, not on a code review. Any lead (cb._role, as
+       -- misheld below, #3746 C10): a lead holds cards of the projects it led before it was bound to another one. "is
+       -- distinct from": cb._role is null for a worker with no role, and that row must stay
+       and coalesce(t.assignee, '') <> 'ahmed' and cb._role(t.assignee) is distinct from 'lead'
        and coalesce(t.assignee, '') not in (select u.name from cb.users u)), '[]'),
     -- in progress, but the last one to move it or write on it is another worker (not Ahmed, the relay or a lead: any
     -- session whose role is lead, whichever project it leads, #3746)
@@ -4501,6 +4502,11 @@ begin
     for ar in select jsonb_array_elements(squad->'protected') loop
       if jsonb_typeof(ar) is distinct from 'string' or length(ar #>> '{}') > 100 or (ar #>> '{}') !~ '^[A-Za-z0-9._/*][A-Za-z0-9._/*-]*$' then
         raise exception 'protected: % is not a branch name or glob: give names like "development" or "releases/*" (letters, digits, . _ / * -, at most 100 characters, not starting with -)', ar;
+      end if;
+      -- the push hook compares branch names (it strips refs/heads/ and heads/ from what is pushed): an entry with a ref
+      -- or remote prefix, or a trailing /, could never match, and the fence would silently hold nothing (C11)
+      if (ar #>> '{}') ~ '^(refs|heads|origin)/' or (ar #>> '{}') ~ '/$' then
+        raise exception 'protected: give the branch name as git shows it, like "development" or "releases/*", not %', ar;
       end if;
     end loop;
   end if;

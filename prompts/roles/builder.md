@@ -18,7 +18,9 @@ You build a card from its approved design, test it and hand it to review.
 ## On Azure DevOps (a dev.azure.com PR link)
 - Push the branch with `git push origin <branch>`. Never push to a protected branch.
 - Open the PR: `az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>`.
-- Pass with its full link: `cb pass <id> "<summary>" --pr https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>`.
+- Its output's `url` is the REST link, which `cb pass` refuses. The PR link is `repository.webUrl` + `/pullrequest/` +
+  `pullRequestId` from that output: pass it, `cb pass <id> "<summary>" --pr https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>`.
+- If az is refused (your permission file fences the merging forms), ask the lead.
 
 ## You pass when
 - The change matches the approved design, you ran the tests for the files you touched and read the counts, and the PR

@@ -31,8 +31,9 @@ const DAY_MS = 24 * 3600_000; // cb.triagers' window: a lead seen within it stil
  *  it with the lead role, whatever its name: then no lead is wanted, unless it goes by one of the squad's lead names (kept,
  *  so it is skipped as live). A lead-role session of the project seen in the last day but not live is still its lead: no
  *  second lead is started beside it (quietLead names it), unless it goes by a squad lead name, restarted as before.
- *  orch@<m> live, or seen in the last day, in another project leads that one: this project's is <project>-orch@<m>. */
-function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = [], now = Date.now()) {
+ *  orch@<m> live, or seen in the last day, in another project leads that one: this project's is <project>-orch@<m>.
+ *  The return type is spelled out: quietLead is set inside the flatMap callback, which TS's narrowing cannot see. */
+function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = [], now = Date.now()): { want: Want[]; quietLead: QuietLead | null } {
   let quietLead: QuietLead | null = null;
   const want = wantList(project, squad).flatMap((w): Want[] => {
     if (w.role !== 'lead') return [w];
@@ -244,7 +245,10 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const toStart = plan.start.filter((l) => !unknown.has(l.name));
   for (const l of plan.start) if (unknown.has(l.name)) lines.push(`skip ${l.name}: could not check herdr on ${l.machine}`);
   const q = plan.quietLead;
-  if (q) lines.push(`skip lead: ${q.actor} leads ${project} but is not live (last seen ${minsAgo(q.mins)}): restart it, or cb iam <name> ${project} --role lead`);
+  // neither squad up nor the supervisor starts it, so its pane never gets the protected list: the line says how (#3746).
+  // Single-quoted: no shell expands the * (zsh would refuse an unmatched glob); list entries never hold a quote
+  const how = squad.protected?.length ? `in a tab made with herdr tab create --env 'CB_PROTECTED_BRANCHES=${squad.protected.join(',')}'` : 'in a new herdr tab';
+  if (q) lines.push(`skip lead: ${q.actor} leads ${project} but is not live (last seen ${minsAgo(q.mins)}): restart it by hand ${how}, or cb iam <name> ${project} --role lead`);
   const herdrOnly = new Set(plan.herdrOnly.map((l) => l.name));
   for (const n of plan.skip) {
     if (plan.heldBy[n]) lines.push(`skip ${n}: lead name held by project ${plan.heldBy[n]}`);

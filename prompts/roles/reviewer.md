@@ -19,9 +19,9 @@ You read a change against its approved design and the project's rules, and give 
 - `az repos pr show --id <n>`: the PR. Its head is `lastMergeSourceCommit.commitId`.
 - The code: `git fetch origin +refs/pull/<n>/merge:refs/remotes/pr/<n>` (works without the az login); the change is `git diff pr/<n>^1 pr/<n>`.
 - Without az, the PR head is `git rev-parse pr/<n>^2` (the merge ref's second parent): quote that in the GO, never `pr/<n>` itself.
-- Your GO goes on the board in the `cb pass` summary with the head SHA, and the same line on the PR: write
-  `{"comments":[{"content":"GO at <sha>"}],"status":"closed"}` to a go.json outside the repo, then run
-  `az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 --url "https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<n>/threads?api-version=7.1" --body @go.json`.
+- Your GO goes on the board in the `cb pass` summary with the head SHA, and the same line on the PR, the body inline
+  (never a shared file: another reviewer on the machine may be posting too):
+  `az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 --url "https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<n>/threads?api-version=7.1" --body '{"comments":[{"content":"GO at <sha>"}],"status":"closed"}'`.
 - If az says to log in: say on the card that az needs a login (`cb log <id> "az needs a login"`), without quoting az's message. The board GO stands.
 
 ## You pass when
