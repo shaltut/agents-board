@@ -67,17 +67,34 @@ Ahmed: "then start" this card, bundling both.
   - builder: push the branch, open the PR with `az repos pr create`, pass with its full link.
   - reviewer: read it with `az repos pr show --id <n>` and the code with
     `git fetch origin +refs/pull/<n>/merge:refs/remotes/pr/<n>` (works without the az login); the GO goes in
-    the `cb pass` summary with the head SHA (`lastMergeSourceCommit`).
+    the `cb pass` summary with the head SHA (`lastMergeSourceCommit`), and on the PR as below.
   - lead: compare that SHA with `az repos pr show`, then `az repos pr update --id <n> --status completed`.
 - The `az repos` lines need Ahmed's QHSLab-tenant `az login`. That is a precondition, not code.
 
-## Questions for Ahmed
+## Ahmed's answers (24 Nov)
 
-1. **Push guard for QHS branches.** The kit blocks pushes to `main` and `master` only. A QHS builder in bypass
-   mode could push straight to `development`, `staging` or a bot's `*-production` branch. Add a per-squad
-   `"protected": [...]` list that the kit's hook also blocks? (Recommended: yes, in this card.)
-2. **Where the GO lives for Azure DevOps.** On the board only (no login needed to review), or also as a PR comment
-   through `az rest` (needs the login for every review)? Recommended: board only.
+- Q2551: approve, build it.
+- Q2552: the push guard also blocks each squad's own branches, in this card.
+- Q2553: for an Azure DevOps PR the GO goes on the board **and** on the PR.
+
+**Protected branches** (`db/schema.sql` squad_set, `cli/squad-up.ts`, `kit/hooks/block-dangerous.mjs`):
+- The squad file may carry `"protected": ["development", "staging", "releases/*", "athena-production"]`: branch
+  names or `*` globs, at most 30, each 1-100 characters of `A-Za-z0-9._/*-`, not starting with `-`. squad_set
+  refuses anything else with a message that says what to fix.
+- `cb squad up` (and the supervisor, through startOne) creates each pane with
+  `--env CB_PROTECTED_BRANCHES=<comma list>` when the squad has a list (tab create, pane split, workspace create).
+- The hook, when `CB_PROTECTED_BRANCHES` is set, blocks a `git push` whose destination is a protected branch:
+  `git push origin development`, `git push -u origin x:development`, `HEAD:refs/heads/development`,
+  `+x:development`, `--delete development`. Without the variable the hook behaves exactly as today. Plain
+  `git push` and `git push origin` stay denied by the role permission files.
+- The hook file is installed per machine (`~/.claude/hooks/block-dangerous.mjs`); the release copies it on the PC
+  and the Mac.
+
+**GO on an Azure DevOps PR:** the reviewer passes review on the board with "GO at <sha>" and also posts the same
+line as a PR comment with `az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 --url
+https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>/pullRequests/<n>/threads?api-version=7.1`
+(body `{"comments":[{"content":"GO at <sha>"}],"status":"closed"}`). This needs Ahmed's QHSLab-tenant `az login`;
+without it the reviewer says so on the card and the board GO stands.
 
 ## Tests (each file the change touches)
 
