@@ -103,6 +103,9 @@ const mustBlock = [
   // a file extension that runs, or a unit that reboots
   'shutdown.exe /r /t 0',
   'systemctl start reboot.target',
+  // #3809: a herdr prompt is message text, but one starting with ! runs as a shell command in that session
+  'herdr agent prompt w1 "!git reset --hard"',
+  "herdr agent prompt w1 '!sudo reboot'",
 ];
 
 const mustPass = [
@@ -213,6 +216,10 @@ const killBlocked = [
   'pkill -f "node.*"',
   'pkill -f node > /dev/null 2>&1',
   'pkill -f relay.ts',
+  'pkill -P 1',
+  'pkill -F <(pgrep node)',
+  'kill -9 -1',
+  'herdr agent prompt w1 "!pkill node"',
   'pkill -f mock_gw.js',
   "pkill -f 'node scripts/mock_gw.js'",
   'ssh macbook pkill -f claude',
@@ -228,8 +235,8 @@ const killBlocked = [
 // The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
 const recommended = [
   'Start-Process -PassThru',
-  'Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object CommandLine',
-  'ps -p <pid> -o command=',
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select-Object ProcessId, CommandLine`,
+  'pgrep -fl node',
   'Stop-Process -Id <pid>',
   'taskkill //PID <pid>',
   'kill <pid>',
@@ -259,11 +266,18 @@ const killPassed = [
   'ps aux | grep node',
   'Get-Process node; Stop-Process -Id 1234',
   'ps aux | grep node && kill 1234',
+  // round 2 (m1): a stop naming its PID, with options around it
+  'Get-Process node; Stop-Process -Id 1234 -ErrorAction SilentlyContinue',
+  'Get-Process node; Stop-Process -Id 1234, 5678',
+  'Get-Process node; Stop-Process -Id:1234',
+  'pgrep -fl node; kill -s TERM 1234',
+  'kill -1 1234',
   // naming a command, asking for help, a dry run (M3)
   'which pkill',
   'man pkill',
   'pkill --help',
   'Get-Help Stop-Process',
+  'command -v killall',
   'Get-Process node | Stop-Process -WhatIf',
   // other tools' ps and kill
   'docker ps -q | xargs docker kill',
