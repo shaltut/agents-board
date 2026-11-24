@@ -75,6 +75,7 @@
       "Bash(git push --atomic origin)",
       "Bash(git -* push --atomic origin)",
       "Bash(gh pr merge*)",
+      "Bash(az repos pr update*complete*)",
       "Edit",
       "Write",
       "NotebookEdit",

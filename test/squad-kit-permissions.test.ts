@@ -74,13 +74,24 @@ test('reviewer, qa and investigator cannot edit, commit or push', () => {
 });
 
 test('only the lead may merge pull requests', () => {
+  // Azure DevOps (#3746): completing a PR merges it. Title, description and reviewer edits stay open to every role.
+  const AZ = 'Bash(az repos pr update*complete*)';
+  const azMerge = ['az repos pr update --id 12 --status completed', 'az repos pr update --status completed --id 12',
+    'az repos pr update --id 12 --auto-complete true'];
+  const azFine = ['az repos pr update --id 12 --title "Fix parser"', 'az repos pr update --id 12 --description x',
+    'az repos pr show --id 12', 'az repos pr create --repository api --source-branch feat/x --target-branch main'];
   for (const r of ROLES) {
     const { deny, allow } = load(r).permissions;
     if (r === 'lead') {
       assert.ok(allow.includes('Bash(gh pr merge*)') && !deny.includes('Bash(gh pr merge*)'));
+      assert.ok(allow.includes('Bash(az repos pr update*)') && !deny.some((d: string) => d.startsWith('Bash(az ')));
+      for (const c of azMerge) assert.equal(denied(deny, c), false, `lead must not deny: ${c}`);
     } else {
       assert.ok(deny.includes('Bash(gh pr merge*)') && !allow.includes('Bash(gh pr merge*)'), r);
       assert.ok(denied(deny, 'gh pr merge 12 --squash'), r);
+      assert.ok(deny.includes(AZ) && !allow.some((a: string) => a.startsWith('Bash(az ')), r);
+      for (const c of azMerge) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
+      for (const c of azFine) assert.equal(denied(deny, c), false, `${r} must allow: ${c}`);
     }
   }
 });
