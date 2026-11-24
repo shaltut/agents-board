@@ -453,8 +453,8 @@ for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', '
   });
 }
 
-// #3746: misheld leaves out the card's project lead by role, whatever its name; a lead bound elsewhere is a worker here
-for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]] as [string, string | null, string, boolean][]) {
+// #3746: misheld leaves out the card's project lead by role, whatever its name; a lead bound elsewhere, orch@ included, is a worker here
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true], ['orch@m', null, 'q', false]] as [string, string | null, string, boolean][]) {
   test(`tick: a note by ${who} (role ${role ?? 'unset'}) bound to ${bound} on W4's card in p is ${leads ? 'not ' : ''}misheld`, async () => {
     const sql = await db();
     await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;

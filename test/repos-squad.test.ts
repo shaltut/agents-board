@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { callFn } from '../server/rpc.ts';
+import { squadUp } from '../cli/squad-up.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -361,4 +362,24 @@ test('squad_set name check: project-wide roles carry no repo in their name', asy
   // longest real names: <p>-x-B1@macbook and <p>-x-R1@macbook, 32 each
   const s = (await sql`select cb.squad_set(${p}, ${sql.json(sq)}, 'ahmed') as s`)[0].s;
   assert.equal(s.roles.qa.count, 1);
+});
+
+// #3746 C1 on real sessions_overview rows (jsonb, last_seen an ISO string): a lead-role session quiet 10 minutes is named,
+// and no other lead is started beside it
+test('squad up on real session rows: a quiet lead-role session is named, no other lead is started', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('qhs')`;
+  await sql`select cb.iam('shaltoot', 'p1', 'QO@shaltoot', 'qhs', 'lead')`;
+  await sql`update cb.sessions set last_seen = now() - interval '10 minutes' where actor = 'QO@shaltoot'`;
+  const rows = await callFn('sessions_overview', { project: null }, sql) as any[];
+  const qo = rows.find((r) => r.actor === 'QO@shaltoot');
+  assert.equal(qo.live, false);
+  assert.equal(qo.project, 'qhs');
+  assert.equal(qo.role, 'lead');
+  assert.equal(typeof qo.last_seen, 'string');
+  const run = (_m: string | null, args: string[]) => (args[1] === 'get'
+    ? { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' } : { status: 0, stdout: '{"agents":[]}', stderr: '' });
+  const out = await squadUp('qhs', true, async (fn, a) => (fn === 'squad_get' ? QHS : callFn(fn, a, sql)), run);
+  assert.match(out, /^skip lead: QO@shaltoot leads qhs but is not live \(last seen 10 min ago\): restart it, or cb iam <name> qhs --role lead$/m);
+  assert.doesNotMatch(out, /start \S*orch/);
 });
