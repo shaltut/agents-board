@@ -709,6 +709,12 @@ begin
   if bad is not null then
     raise exception 'unknown field(s) %; allowed: title, body, priority, assignee, labels, links, project, rank, type, epic, epic_rank, repos', bad;
   end if;
+  -- a cleared holder is null, never a string (#3762): the dashboard clears with '', cb edit --assignee none or ''. The
+  -- rest of the board tests "assignee is null" for unassigned (cb next, claims, cb stage)
+  if fields ? 'assignee' then
+    fields := jsonb_set(fields, '{assignee}', case when lower(coalesce(trim(fields ->> 'assignee'), '')) in ('', 'none')
+                                                   then 'null'::jsonb else to_jsonb(trim(fields ->> 'assignee')) end);
+  end if;
   -- the row lock first: a concurrent cb fail --to design or a second --repo edit cannot slip between these checks and
   -- the update (#3703: repos and parts change together)
   select * into cur from cb.tasks t where t.id = tid for update;
