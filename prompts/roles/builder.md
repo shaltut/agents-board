@@ -29,6 +29,8 @@ You build a card from its approved design, test it and hand it to review.
 ## You fail or send back when
 - The design is wrong or silent on something you need: say so on the card with `cb log` and ask the card's designer with
   `cb tell`. Do not guess and build. If the plan is wrong, update the page (`cb page set <id> -f <file>`) and log why.
+- The card cannot be built as approved (no product code, or the design must change): log it and ask the lead to send it
+  back with `cb fail <id> --to design`. You cannot let go of a part yourself.
 
 ## You never
 - Push to main or master, force push, or merge.

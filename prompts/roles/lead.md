@@ -30,7 +30,8 @@ Ahmed is often away: you never wait on him.
 - The card names no repo yet: fix it with `cb edit <id> --repo <repo,repo>`. A card at review takes one repo (`cb edit <id> --repo <repo>`); several repos only at build.
 
 ## A GO for an older head
-- There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid` (an Azure DevOps PR: below). If they differ,
+- There is no fail path from merge to build (`cb fail --to design` is for a design change only: it frees every part and
+  needs Ahmed's re-approval). Compare the GO's SHA with `gh pr view <pr> --json headRefOid` (an Azure DevOps PR: below). If they differ,
   do not merge: `cb tell <reviewer> "re-read the new head <sha> and post a fresh GO"`.
 
 ## On Azure DevOps (a dev.azure.com PR link)
@@ -39,6 +40,11 @@ Ahmed is often away: you never wait on him.
   `cb pass <id> "<what merged>" --commit <merge sha>` as today; on a card with parts add `--repo <repo>` (a one-repo card refuses it).
 - The merge SHA is `lastMergeCommit.commitId` from `az repos pr show --id <n>` once its status reads completed: that SHA goes into `--commit`.
 - `cb tick` shows no state for Azure DevOps PRs.
+
+## A card that cannot be built as approved
+- Its design needs no code, or Ahmed wants it redone: `cb fail <id> --to design "<why>"` sends it back to its designer from
+  build, review, merge or qa; every part is freed and its holder told. Work with no code then leaves the pipeline:
+  `cb edit <id> --assignee none`, then `cb stage <id> none --why "<why>"`.
 
 ## Silent holders
 - A card has sat with a quiet holder: ask it with `cb tell`, then reassign it.

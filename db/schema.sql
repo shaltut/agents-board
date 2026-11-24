@@ -3650,14 +3650,20 @@ begin
   if s not in ('build', 'none') then raise exception 'stage is build or none'; end if;
   if s = 'none' and t.stage is null then raise exception '#% is not in the pipeline', tid; end if;
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line why this card skips the pipeline'; end if;
+  -- a design waiting for Ahmed is his: the lead neither restages it nor frees it (#3800 review)
+  if t.stage = 'approval' then
+    raise exception '#% waits for Ahmed''s approval: he answers, or the designer takes it back with cb fail % "<why>"', tid, tid;
+  end if;
   if t.assignee is not null or t.status not in ('next', 'backlog') then
-    raise exception '#% is not unclaimed (assignee or status): restage cards nobody holds', tid;
+    raise exception '%', format('#%s is not unclaimed (assignee or status): restage cards nobody holds. Free it first: %s', tid,
+      concat_ws(', then ', case when t.assignee is not null then format('cb edit %s --assignee none', tid) end,
+                           case when t.status not in ('next', 'backlog') then format('cb move %s next', tid) end));
   end if;
   -- a card of several repos is held by its parts (#3703)
   if s = 'none' and exists (select 1 from cb.task_parts p where p.task_id = tid and p.assignee is not null) then
-    raise exception '#% has parts in work: %; restage it once nobody holds a part', tid,
+    raise exception '#% has parts in work: %; free them first: cb fail % --to design "<why>", then cb edit % --assignee none', tid,
       (select string_agg(p.repo || ' (' || p.assignee || ')', ', ' order by array_position(t.repos, p.repo), p.repo)
-         from cb.task_parts p where p.task_id = tid and p.assignee is not null);
+         from cb.task_parts p where p.task_id = tid and p.assignee is not null), tid, tid;
   end if;
   if s = 'build' then
     if t.stage is distinct from 'design' then raise exception '#% is not at design: only a card at design can skip to build', tid; end if;
@@ -3823,11 +3829,13 @@ end $$;
 -- A reviewer or qa session sends the card back (to its builder, or to design); the designer takes a card back from approval.
 -- A card with parts (#3703): a reviewer's NO-GO sends back only its part; qa names the repo that fails; --to design
 -- sends the whole card back and its parts wait, unheld, for re-approval.
+-- The project's lead sends any card past approval back to design with --to design (#3800): a design that turns out to
+-- need no code, or one Ahmed wants redone. Nothing else freed a part held at build.
 create function cb.stage_fail(id text, why text, to_stage text default null, actor text default null, repo text default null)
 returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm_id(id); s text := lower(nullif(trim(to_stage), '')); nxt text; qid bigint;
-        pt cb.task_parts%rowtype; rp text := nullif(trim(repo), ''); parts text;
+        pt cb.task_parts%rowtype; rp text := nullif(trim(repo), ''); parts text; lh text;
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
@@ -3836,11 +3844,23 @@ begin
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
   select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) into parts from cb.task_parts p where p.task_id = tid;
   if rp is not null and parts is null then raise exception '#% has no parts: drop --repo', tid; end if;
-  if parts is not null and t.stage in ('build', 'review', 'merge') then
+  -- what the lead is told when its cb fail has no other path: at merge, a stale GO wants a fresh one, not a redesign
+  lh := case when t.stage = 'merge'
+             then format('nothing goes back from merge: for a GO on an older head, ask the reviewer for a fresh GO; to change the design, cb fail %s --to design "<why>"', tid)
+             else format('the lead sends #%s back to design: cb fail %s --to design "<why>"', tid, tid) end;
+  if s = 'design' and t.stage in ('build', 'review', 'merge', 'qa') and cb._is_lead(a, t.project) then
+    nxt := 'design';  -- the lead's send back (#3800): parts freed and holders told below
+  elsif parts is not null and t.stage in ('build', 'review', 'merge') then
     -- the reviewer's part, at its own stage (the card may be back at build already)
     select * into pt from cb.task_parts p
      where p.task_id = tid and p.assignee = a and p.stage = 'review' and (rp is null or p.repo = rp) order by p.repo limit 1;
-    if not found then raise exception 'you hold no part of #%: claim it first (cb next)', tid; end if;
+    if not found then
+      if cb._is_lead(a, t.project) then raise exception '%', lh; end if;
+      if exists (select 1 from cb.task_parts p where p.task_id = tid and p.assignee = a and p.stage = 'build') then
+        raise exception 'your part of #% is at build: cb fail sends back a part in review. If it cannot be built as approved, ask the lead to send the card back: cb fail % --to design "<why>"', tid, tid;
+      end if;
+      raise exception 'you hold no part of #%: claim it first (cb next)', tid;
+    end if;
     nxt := coalesce(s, 'build');
   elsif t.stage in ('review', 'qa') then
     if t.assignee is distinct from a then raise exception '#% is not held by you: claim it first', tid; end if;
@@ -3857,7 +3877,11 @@ begin
     if qid is not null then perform cb.withdraw(qid::text, a); end if;
     perform set_config('cb.stage_ok', '', true);
   else
-    raise exception 'cb fail is for the holder of a card in review or qa, or the designer taking a card back from approval';
+    if t.stage in ('build', 'merge') and cb._is_lead(a, t.project) then raise exception '%', lh; end if;
+    if t.stage = 'build' and t.assignee = a then
+      raise exception 'you hold #% at build: cb fail sends back a card in review or qa. If it cannot be built as approved, ask the lead to send it back: cb fail % --to design "<why>"', tid, tid;
+    end if;
+    raise exception 'cb fail is for the holder of a card in review or qa, the designer taking a card back from approval, or the project''s lead sending a card back to design';
   end if;
   if pt.repo is not null and nxt = 'build' then
     -- back to its builder; a merged part reopened by qa needs a new merge commit
@@ -3882,6 +3906,7 @@ begin
       from cb.task_parts p where p.task_id = tid and nullif(trim(p.assignee), '') is not null and p.assignee <> a
      order by p.repo;
     update cb.task_parts p set assignee = null, status = 'next' where p.task_id = tid;
+    -- a card held whole (its builder, when the lead sends it back) hears of it through the move's own event (cb.inbox)
   end if;
   return nxt;
 end $$;

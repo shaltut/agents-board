@@ -164,6 +164,89 @@ test('a parts card leaves the pipeline only with no part in work, and takes its 
   assert.deepEqual([(await card(sql, a)).status, await count(a)], ['cancelled', 0]);
 });
 
+// #3800: a parts card at build whose design turns out to need no product code had no way out: builders could not let go of
+// their parts, and cb stage none refused while a part was held. The project's lead now sends the card back to design.
+test('the lead sends a parts card at build back to design: parts freed, holders told; a builder is pointed to the lead (#3800)', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [id]);
+  assert.deepEqual(await claim(sql, 'qhs-dashboard-B1@mac'), [id]);
+  // a builder holding a part at build: not "claim it first", but the way out
+  await assert.rejects(() => fail(sql, id, 'qhs-B1@mac', 'no code here', 'design'),
+    /your part of #\d+ is at build: cb fail sends back a part in review\. If it cannot be built as approved, ask the lead to send the card back: cb fail \d+ --to design/);
+  // the lead without --to design is told how; cb stage none names the way to free the parts
+  await assert.rejects(() => fail(sql, id, 'orch@pc', 'no code here'), /the lead sends #\d+ back to design: cb fail \d+ --to design/);
+  await assert.rejects(() => sql`select cb.stage_set(${id}::text, 'none', 'ops only', 'orch@pc')`,
+    /#\d+ has parts in work: api \(qhs-B1@mac\), dashboard \(qhs-dashboard-B1@mac\); free them first: cb fail \d+ --to design "<why>", then cb edit \d+ --assignee none/);
+  // a lead of another project cannot
+  await sql`select cb.ensure_project('other')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc', 'p9', 'other-L@pc', 'other', 'lead')`;
+  await assert.rejects(() => fail(sql, id, 'other-L@pc', 'no', 'design'), /you hold no part of #\d+: claim it first/);
+  assert.equal((await fail(sql, id, 'orch@pc', 'no product code, measuring scripts only', 'design'))[0].r, 'design');
+  const c = await card(sql, id);
+  assert.deepEqual([c.stage, c.status, c.assignee], ['design', 'next', 'qhs-O1@pc']);
+  assert.deepEqual((await parts(sql, id)).map((p: any) => p.assignee), [null, null]);
+  assert.deepEqual(await msgs(sql, 'p3'), [`#${id} went back to design: no product code, measuring scripts only. Your part api waits for re-approval`]);
+  assert.deepEqual(await msgs(sql, 'p4'), [`#${id} went back to design: no product code, measuring scripts only. Your part dashboard waits for re-approval`]);
+  // the freed builders are free for other work
+  const other = await approved(sql);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [other]);
+  // no part held: once the designer lets go, the lead can take it out of the pipeline (work with no code); the refusal
+  // before that names the step
+  await assert.rejects(() => sql`select cb.stage_set(${id}::text, 'none', 'ops only', 'orch@pc')`,
+    /#\d+ is not unclaimed \(assignee or status\): restage cards nobody holds\. Free it first: cb edit \d+ --assignee none$/);
+  await sql`select cb.task_update(${String(id)}, '{"assignee": "none"}'::jsonb, 'orch@pc')`;
+  await sql`select cb.stage_set(${id}::text, 'none', 'ops only', 'orch@pc')`;
+  assert.equal((await card(sql, id)).stage, null);
+});
+
+test('the lead sends a one-repo card back to design from build; its builder hears of it; approval stays the designer\'s (#3800)', async () => {
+  const sql = await setup();
+  const id = await approved(sql, ['api']);
+  assert.deepEqual(await parts(sql, id), []);
+  assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [id]);
+  // the builder cannot send it back, and is told who can; the lead without --to design is told how
+  await assert.rejects(() => fail(sql, id, 'qhs-B1@mac', 'no', 'design'),
+    /you hold #\d+ at build: cb fail sends back a card in review or qa\. If it cannot be built as approved, ask the lead to send it back: cb fail \d+ --to design/);
+  await assert.rejects(() => fail(sql, id, 'orch@pc', 'no'), /the lead sends #\d+ back to design: cb fail \d+ --to design/);
+  assert.equal((await fail(sql, id, 'orch@pc', 'the design names no code', 'design'))[0].r, 'design');
+  const c = await card(sql, id);
+  assert.deepEqual([c.stage, c.status, c.assignee], ['design', 'next', 'qhs-O1@pc']);
+  // the builder that lost it hears of it once, through the move itself (no extra message)
+  assert.deepEqual(await msgs(sql, 'p3'), []);
+  assert.ok((await inbox(sql, 'p3')).events.some((e: any) => Number(e.task_id) === id && e.summary.includes('the design names no code')));
+  // at approval the lead does not take it back: Ahmed answers, or the designer withdraws it
+  await pass(sql, id, 'qhs-O1@pc', 'redesigned');
+  assert.equal((await card(sql, id)).stage, 'approval');
+  await assert.rejects(() => fail(sql, id, 'orch@pc', 'no', 'design'), /cb fail is for/);
+  // nor takes it out of the pipeline: no step offered around Ahmed's open question
+  await assert.rejects(() => sql`select cb.stage_set(${id}::text, 'none', 'no code', 'orch@pc')`,
+    /#\d+ waits for Ahmed's approval: he answers, or the designer takes it back with cb fail \d+/);
+  assert.deepEqual([(await card(sql, id)).stage, (await card(sql, id)).status], ['approval', 'review']);
+});
+
+test('the lead sends a parts card back to design from review through the CLI; at merge a plain cb fail points to a fresh GO (#3800)', async () => {
+  const sql = await setup();
+  // review: both reviewers hold their parts
+  const r = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await assert.rejects(() => fail(sql, r, 'orch@pc', 'no'), /the lead sends #\d+ back to design/);
+  const out = cb(['fail', String(r), 'Ahmed wants it redone', '--to', 'design'], 'orch@pc');
+  assert.equal(out.code, 0, out.err);
+  assert.deepEqual([(await card(sql, r)).stage, (await parts(sql, r)).map((p: any) => p.assignee)], ['design', [null, null]]);
+  assert.deepEqual(await msgs(sql, 'p6'), [`#${r} went back to design: Ahmed wants it redone. Your part api waits for re-approval`]);
+  assert.deepEqual(await msgs(sql, 'p7'), [`#${r} went back to design: Ahmed wants it redone. Your part dashboard waits for re-approval`]);
+  // merge: both parts passed review; a stale GO is not a redesign
+  const m = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await pass(sql, m, 'qhs-R1@mac', 'GO'); await pass(sql, m, 'qhs-dashboard-R1@mac', 'GO');
+  assert.equal((await card(sql, m)).stage, 'merge');
+  await assert.rejects(() => fail(sql, m, 'orch@pc', 'stale GO'),
+    /nothing goes back from merge: for a GO on an older head, ask the reviewer for a fresh GO; to change the design, cb fail \d+ --to design/);
+  assert.equal((await fail(sql, m, 'orch@pc', 'the contract changed', 'design'))[0].r, 'design');
+  assert.equal((await card(sql, m)).stage, 'design');
+});
+
 test('two builders of different repos claiming one card: each gets its own part or nothing, never the other\'s', async () => {
   const sql = await setup();
   const id = await approved(sql);
