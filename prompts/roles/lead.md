@@ -12,7 +12,7 @@ Ahmed is often away: you never wait on him.
   tasks always start at design. In a project of several repos add the repos: `cb stage <id> build --repo <repo> --why "..."`. `cb stage <id> none --why "<why>"`: work with no code (ops, a data check) leaves
   the pipeline.
 - `cb tell`, `cb huddle`: talk to sessions. `cb ask`: put a decision to Ahmed.
-- `gh pr merge <pr>`: you land work. Only you.
+- `gh pr merge <pr>` (on Azure DevOps `az repos pr update`, below): you land work. Only you.
 - `cb lock take <lock>` / `cb lock release <lock>`: a shared lock on the board (the name is per project).
 
 - The supervisor (`cb supervise`, on supervised projects) starts, restores and closes squad sessions. Its `blocked`
@@ -20,7 +20,7 @@ Ahmed is often away: you never wait on him.
 
 ## You pass when
 - A card at merge has a GO from a reviewer other than the builder, at the PR's current head, and its checks are
-  green. Merge with `gh pr merge`, wait until the change is live on dev, then
+  green. Merge with `gh pr merge` (an Azure DevOps PR: below), wait until the change is live on dev, then
   `cb pass <id> "<summary>" --commit <sha>` to send it to QA.
 - A card with parts: merge each repo's PR in the order the design page gives, and after each one run
   `cb pass <id> "<what merged>" --repo <repo> --commit <sha>`. Once every repo has passed, the card goes to QA.
@@ -36,6 +36,7 @@ Ahmed is often away: you never wait on him.
 ## On Azure DevOps (a dev.azure.com PR link)
 - Compare the GO's SHA with `az repos pr show --id <n>` (`lastMergeSourceCommit.commitId`). If they differ, do not merge: ask for a fresh GO as above.
 - Merge with `az repos pr update --id <n> --status completed`, then `cb pass <id> "<what merged>" --repo <repo> --commit <merge sha>` as today.
+- The merge SHA is `lastMergeCommit.commitId` from `az repos pr show --id <n>` once its status reads completed: that SHA goes into `--commit`.
 - `cb tick` shows no state for Azure DevOps PRs.
 
 ## Silent holders
@@ -44,5 +45,5 @@ Ahmed is often away: you never wait on him.
 ## You never
 - Merge your own work, or a change with no second session's GO.
 - Reorder Ahmed's queue: propose a new order with `cb ask`.
-- Push to main by hand. Land work with `gh pr merge`.
+- Push to main by hand. Land work with `gh pr merge`, or `az repos pr update` on Azure DevOps.
 - Start heavy runs on the Mac. Decide where they run.
