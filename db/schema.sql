@@ -521,6 +521,12 @@ begin
     if old.stage = 'approval' then
       update cb.questions q set status = 'withdrawn' where q.approval_for = old.id and q.status in ('open', 'sent_back', 'dormant');
     end if;
+    -- a part's holder is told: the card was never theirs, so its close reaches them no other way
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    select 'board', new.project, old.id, 'message', format('#%s is %s: your part %s is closed', old.id, new.status, p.repo),
+           jsonb_build_object('to', p.assignee, 'repo', p.repo)
+      from cb.task_parts p where p.task_id = old.id and nullif(trim(p.assignee), '') is not null and p.stage <> 'merged'
+     order by p.repo;
     delete from cb.task_parts p where p.task_id = old.id;
   end if;
   -- a task page follows its task to another project (an area page is moved by cb.project_alias)
@@ -1569,7 +1575,11 @@ begin
                               and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
-                                                 or (e.kind = 'moved' and e.data ->> 'to' = 'next')))
+                                                 or (e.kind = 'moved' and e.data ->> 'to' = 'next')
+                                                 -- a parts card (#3703) stays in Next while its parts move: its stage
+                                                 -- changes, and changes to a part of my repo (sent back, freed), count
+                                                 or (e.kind in ('updated', 'note') and (e.data ? 'stage' or e.data ->> 'repo' = cb._repo(me))
+                                                     and exists (select 1 from cb.task_parts p where p.task_id = t.id))))
                               and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
                               -- a part in work (#3703) is work in progress too
                               and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
@@ -3792,11 +3802,25 @@ begin
     update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null, since = now(), nudged_at = null
      where p.task_id = tid and p.repo = pt.repo;
     perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
+    -- the card stays in Next and unheld: its builder hears of it only by message (busy or not)
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    select 'board', t.project, tid, 'message', format('#%s part %s is back with you at build: %s', tid, pt.repo, trim(why)),
+           jsonb_build_object('to', pt.crew ->> 'build', 'repo', pt.repo)
+     where nullif(trim(pt.crew ->> 'build'), '') is not null;
     return 'build';
   end if;
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
-  -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder
-  if nxt = 'design' then update cb.task_parts p set assignee = null, status = 'next' where p.task_id = tid; end if;
+  -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder. Their holders (but
+  -- the one sending it back) are told: nothing else reaches them.
+  if nxt = 'design' then
+    insert into cb.events (actor, project, task_id, kind, summary, data)
+    select 'board', t.project, tid, 'message',
+           format('#%s went back to design: %s. Your part %s waits for re-approval', tid, trim(why), p.repo),
+           jsonb_build_object('to', p.assignee, 'repo', p.repo)
+      from cb.task_parts p where p.task_id = tid and nullif(trim(p.assignee), '') is not null and p.assignee <> a
+     order by p.repo;
+    update cb.task_parts p set assignee = null, status = 'next' where p.task_id = tid;
+  end if;
   return nxt;
 end $$;
 
@@ -4606,9 +4630,17 @@ begin
     values (coalesce(nullif(current_setting('cb.actor', true), ''), 'board'), t.project, tid, 'note',
             'part ' || r.repo || ' dropped' || coalesce(': close its PR ' || r.pr, ''), '{"digest": true}');
   end loop;
-  insert into cb.task_parts as p (task_id, repo, stage) select tid, x, 'build' from unnest(t.repos) x
-  on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null,
-                                            since = now(), nudged_at = null;
+  -- a kept part's builder is told (the card stays in Next and unheld: nothing else reaches it); a new part has no holder
+  for r in insert into cb.task_parts as p (task_id, repo, stage) select tid, x, 'build' from unnest(t.repos) x
+           on conflict (task_id, repo) do update set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null,
+                                                     since = now(), nudged_at = null
+           returning p.repo, p.assignee loop
+    if nullif(trim(r.assignee), '') is not null then
+      insert into cb.events (actor, project, task_id, kind, summary, data)
+      values ('board', t.project, tid, 'message', format('#%s part %s is back with you at build', tid, r.repo),
+              jsonb_build_object('to', r.assignee, 'repo', r.repo));
+    end if;
+  end loop;
   perform cb._parts_sync(tid);
 end $$;
 

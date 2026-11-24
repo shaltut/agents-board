@@ -86,6 +86,12 @@ async function atMerge(sql: any) {
   return id;
 }
 
+// A parts card stays in Next and unheld while its parts move, so its changes reach sessions by inbox next_work
+// (a stage change, or a change to a part of the session's repo) and by direct messages to part holders
+const inbox = async (sql: any, pane: string, after = 0) => (await sql`select cb.inbox('mac', ${pane}, ${after}) as i`)[0].i;
+const top = async (sql: any) => Number((await sql`select max(id) as m from cb.events`)[0].m);
+const msgs = async (sql: any, pane: string) => (await inbox(sql, pane)).messages.map((m: any) => m.summary);
+
 test('a two-repo card enters build with two parts', async () => {
   const sql = await setup();
   const id = await approved(sql);
@@ -313,6 +319,7 @@ test('a QA fail names the repo', async () => {
   assert.equal(r.code, 0, r.err);
   assert.deepEqual((await parts(sql, id)).map((p: any) => [p.repo, p.stage, p.status, p.assignee, p.commit]),
     [['api', 'merged', 'next', null, 'abc1234'], ['dashboard', 'build', 'next', 'qhs-dashboard-B1@mac', null]]);
+  assert.deepEqual(await msgs(sql, 'p4'), [`#${id} part dashboard is back with you at build: the date is wrong`]);
   let c = await card(sql, id);
   assert.deepEqual([c.stage, c.status, c.assignee], ['build', 'next', null]);
   // the follow-up PR, its review and merge bring the card back to qa
@@ -352,6 +359,80 @@ test('--to design resets the card; re-approval reopens every part with its build
   assert.deepEqual(await claim(sql, 'qhs-B2@mac'), []);
   assert.deepEqual(await claim(sql, 'qhs-B1@mac'), [id]);
   assert.equal((await pass(sql, id, 'qhs-B1@mac', 'rebuilt'))[0].r, 'review');  // its PR is kept
+});
+
+test('an idle reviewer is pushed a parts card once its last part is built', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, 'qhs-B1@mac'); await claim(sql, 'qhs-dashboard-B1@mac');
+  await pass(sql, id, 'qhs-B1@mac', 'built', { pr: API });
+  const e0 = await top(sql);
+  await pass(sql, id, 'qhs-dashboard-B1@mac', 'built', { pr: DASH });
+  assert.deepEqual((await inbox(sql, 'p6', e0)).next_work.map((w: any) => Number(w.id)), [id]);
+  assert.deepEqual((await inbox(sql, 'p7', e0)).next_work.map((w: any) => Number(w.id)), [id]);
+  // a builder has nothing to take there
+  assert.deepEqual((await inbox(sql, 'p5', e0)).next_work, []);
+});
+
+test('a NO-GO or a QA fail on a part messages its builder', async () => {
+  const sql = await setup();
+  const id = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac');
+  await fail(sql, id, 'qhs-R1@mac', 'the error path is missing');
+  assert.deepEqual(await msgs(sql, 'p3'), [`#${id} part api is back with you at build: the error path is missing`]);
+  assert.deepEqual(await msgs(sql, 'p4'), []);
+  // the builder is idle: the card is pushed too
+  assert.ok((await inbox(sql, 'p3')).next_work.some((w: any) => Number(w.id) === id));
+});
+
+test('--to design and a cancel message every part holder; re-approval messages each builder it gives a part back', async () => {
+  const sql = await setup();
+  const id = await atReview(sql);
+  await claim(sql, 'qhs-R1@mac'); await claim(sql, 'qhs-dashboard-R1@mac');
+  await fail(sql, id, 'qhs-R1@mac', 'the contract is wrong', 'design');
+  assert.deepEqual((await parts(sql, id)).map((p: any) => p.assignee), [null, null]);
+  assert.deepEqual(await msgs(sql, 'p7'), [`#${id} went back to design: the contract is wrong. Your part dashboard waits for re-approval`]);
+  assert.deepEqual(await msgs(sql, 'p6'), [], 'the reviewer who sent it back is not told');
+  await pass(sql, id, 'qhs-O1@pc', 'redesigned');
+  await approve(sql, id);
+  assert.deepEqual(await msgs(sql, 'p3'), [`#${id} part api is back with you at build`]);
+  assert.deepEqual(await msgs(sql, 'p4'), [`#${id} part dashboard is back with you at build`]);
+  // Ahmed cancels it from the dashboard: both builders hold their parts
+  await sql`update cb.tasks set status = 'cancelled' where id = ${id}`;
+  assert.deepEqual(await parts(sql, id), []);
+  assert.equal((await msgs(sql, 'p3'))[1], `#${id} is cancelled: your part api is closed`);
+  assert.equal((await msgs(sql, 'p4'))[1], `#${id} is cancelled: your part dashboard is closed`);
+});
+
+test('one-repo card: its events and inbox are unchanged (pin)', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo'), cb.project_pipeline('demo', true, 'ahmed')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, area) values
+    ('mac','p1','O1@mac','demo','owner','claims'), ('mac','p2','B1@mac','demo','builder',null),
+    ('mac','p3','R1@mac','demo','reviewer',null), ('pc','p4','orch@pc','demo',null,null)`;
+  const id = Number((await sql`select cb.task_add(project => 'demo', title => 'c', type => 'bug', labels => '["claims"]', actor => 'orch@pc') as id`)[0].id);
+  await claim(sql, 'O1@mac', 'demo');
+  await sql`select cb.page_set('the design', task => ${String(id)}, actor => 'O1@mac')`;
+  await pass(sql, id, 'O1@mac', 'designed');
+  await approve(sql, id);
+  await claim(sql, 'B1@mac', 'demo');
+  const e0 = await top(sql);
+  await pass(sql, id, 'B1@mac', 'built', { pr: 'https://x/pull/1' });
+  const strip = (es: any[]) => es.map(({ id: _, ...e }: any) => e);
+  let r = await inbox(sql, 'p3', e0);
+  assert.deepEqual(r.next_work, [{ id, title: 'c', priority: 'P2' }]);
+  assert.deepEqual([r.events, r.messages], [[], []]);
+  assert.deepEqual(strip((await inbox(sql, 'p2', e0)).events), []);
+  await claim(sql, 'R1@mac', 'demo');
+  const e1 = await top(sql);
+  await fail(sql, id, 'R1@mac', 'no tests');
+  r = await inbox(sql, 'p2', e1);
+  assert.deepEqual(strip(r.events), [{ task_id: id, kind: 'moved', summary: 'no tests', actor: 'R1@mac', title: 'c', status: 'next' }]);
+  assert.deepEqual(r.next_work, [{ id, title: 'c', priority: 'P2' }]);
+  assert.deepEqual(r.messages, []);
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and kind = 'message'`)[0].n, 0);
+  await sql`update cb.tasks set status = 'cancelled' where id = ${id}`;
+  assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and kind = 'message'`)[0].n, 0);
 });
 
 test('one-repo cards work exactly as today', async () => {
