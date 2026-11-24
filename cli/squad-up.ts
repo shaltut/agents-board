@@ -128,7 +128,9 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
     else if (l.workspace) {
       // the squad's workspace by label; missing: made here, and its first pane takes this session
-      const ws = (find(herdr(l.herdr, ['workspace', 'list']), 'workspaces') ?? []).find((w: any) => w.label === l.workspace)?.workspace_id;
+      const list = find(herdr(l.herdr, ['workspace', 'list']), 'workspaces');
+      if (!Array.isArray(list)) throw new Error('herdr workspace list gave no workspaces'); // never a second workspace by mistake
+      const ws = list.find((w: any) => w.label === l.workspace)?.workspace_id;
       pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id')
         : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus']), 'root_pane'), 'pane_id');
     }

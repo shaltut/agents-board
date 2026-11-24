@@ -305,3 +305,34 @@ test('startOne: no workspace in the squad keeps today\'s tab in the focused work
   assert.ok(!f.calls.some((c) => c.args[0] === 'workspace'));
   assert.ok(!f.calls.find((c) => c.args[0] === 'tab')!.args.includes('--workspace'));
 });
+
+test('startOne: three launches on one machine: a tab in the workspace, a split of it, then a new tab there', () => {
+  let n = 0;
+  const f = fake((c) => {
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w4', 'iHop Squad']);
+    if (c.args[0] === 'tab' || (c.args[0] === 'pane' && c.args[1] === 'split')) return paneOut(`w4:p${++n}`);
+  });
+  const tabs = {};
+  for (const name of ['demo-B1@macbook', 'demo-B2@macbook', 'demo-R1@macbook']) assert.ok(startOne(wsLaunch(name), f.run, tabs).ok);
+  const made = f.calls.filter((c) => c.args[0] === 'tab' || c.args[1] === 'split').map((c) => c.args.slice(0, 4).join(' '));
+  assert.deepEqual(made, ['tab create --workspace w4', 'pane split --pane w4:p1', 'tab create --workspace w4']);
+});
+
+test('startOne: a launch that fails after making the workspace closes only that workspace\'s pane', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList();
+    if (c.args[0] === 'workspace' && c.args[1] === 'create')
+      return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
+    if (c.args[1] === 'start') return { status: 1, stderr: 'boom' };
+  });
+  assert.ok(!startOne(wsLaunch('demo-B1@macbook'), f.run, {}).ok);
+  assert.deepEqual(f.calls.filter((c) => c.args[1] === 'close').map((c) => c.args[2]), ['w7:p1']);
+});
+
+test('startOne: a workspace list herdr did not answer with makes no workspace', () => {
+  const f = fake((c) => { if (c.args[0] === 'workspace' && c.args[1] === 'list') return { status: 0, stdout: 'warning: something', stderr: '' }; });
+  const r = startOne(wsLaunch('demo-B1@macbook'), f.run, {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /herdr workspace list gave no workspaces/);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'workspace' && c.args[1] === 'create'));
+});

@@ -149,6 +149,9 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.machines.macbook.workspace = ''; }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = 'x'.repeat(65); }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = 'a\nb'; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = '   '; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = 'iHop Squad '; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = '--focus'; }), /machine macbook workspace must be a herdr workspace label/],
     // the Mac cap counts by the herdr label, whatever the machine key
     [mod((s) => { s.machines.mac = { ...s.machines.macbook }; s.roles.builder.machine = 'mac'; s.roles.builder.count = 7; s.roles.owner.machine = 'mac'; }), /macbook would run 9 sessions/],
     [[1, 2] as any, /squad needs machines and roles objects/],
