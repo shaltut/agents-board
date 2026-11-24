@@ -9,6 +9,7 @@ after(() => Promise.all(clients.map((c) => c.end())));
 // "Why is this card not moving?": opt-in per card; an hour of silence, then every 30 minutes, to the worker and its orchestrator.
 test('pings_due: stale pinged cards ask their worker and orchestrator every 30 minutes until something happens', async () => {
   const sql = await freshDb(); clients.push(sql); // the dashboard connection (cb-web)
+  await sql`select cb.ensure_project('demo')`; // cb.iam refuses a project that does not exist
   await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
   await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
   await sql`select cb.task_add(project => 'demo', title => 'Fix the thing', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
@@ -34,7 +35,7 @@ test('pings_due: stale pinged cards ask their worker and orchestrator every 30 m
   assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2);
   let m = await sent();
   assert.deepEqual(m.map((x) => x.to_).sort(), ['W1@pc', 'orch@pc']);
-  assert.match(m.find((x) => x.to_ === 'W1@pc').summary, /#1 "Fix the thing" has had no update for 2h 0m\. Why is it not moving\?.*cb log 1/);
+  assert.match(m.find((x) => x.to_ === 'W1@pc').summary, /#1 "Fix the thing" \(in_progress\) has had no update for 2h 0m\. Why is it not moving\?.*cb log 1/);
   assert.match(m.find((x) => x.to_ === 'orch@pc').summary, /assigned to W1@pc/);
 
   // not again within 30 minutes; the board's own asks do not count as an update
@@ -65,6 +66,7 @@ test('pings_due: stale pinged cards ask their worker and orchestrator every 30 m
 
 test('task_ping_bulk: many cards at once, by ids or a whole project; unassigned cards ask the orchestrator only', async () => {
   const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`; // cb.iam refuses a project that does not exist
   await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
   for (const [t, st] of [['A', 'backlog'], ['B', 'next'], ['C', 'blocked'], ['D', 'done']])
     await sql`select cb.task_add(project => 'demo', title => ${t}, status => ${st}, actor => 'orch@pc')`;
@@ -78,13 +80,14 @@ test('task_ping_bulk: many cards at once, by ids or a whole project; unassigned 
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed') as n`)[0].n, 1, 'C only: A and B were on, D is done');
   assert.equal((await sql`select cb.pings_due() as n`)[0].n, 3, 'one line per card to the orchestrator; nobody is assigned');
   const m = await sql`select summary from cb.events where data ? 'nudge' order by id`;
-  assert.match(m[0].summary, /"A" \(unassigned, backlog\) has had no update for 3h 0m\./, 'no "assigned to ," and no session-gone note for a card nobody holds');
+  assert.match(m.find((x) => x.summary.includes('"A"'))?.summary ?? '', /"A" \(unassigned, backlog\) has had no update for 3h 0m\./, 'no "assigned to ," and no session-gone note for a card nobody holds');
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', false, 'ahmed') as n`)[0].n, 3);
   assert.equal((await sql`select count(*)::int as n from cb.task_pings`)[0].n, 0);
 });
 
 test('pings_due: a worker whose session is gone is not pinged, its orchestrator is told so', async () => {
   const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`; // cb.iam refuses a project that does not exist
   await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
   await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
   await sql`select cb.task_add(project => 'demo', title => 'Stuck', status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;

@@ -540,8 +540,9 @@ test('a new bug goes to its project\'s orchestrator (seen today), else to the pr
 test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nobody else can send one (raw)', { timeout: 30_000 }, async () => {
   const sql = await db(); // the dashboard connection (cb-web)
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-typed-` + process.pid : join(tmpdir(), `cb-relay-typed-${process.pid}.sock`);
-  const inbox = fakeInbox(path, 'tok');
+  await sql`select cb.ensure_project('demo')`; // cb.iam refuses a project that does not exist
   await sql`select cb.iam('testbox', 'p7', 'W7@testbox', 'demo')`;
+  const inbox = fakeInbox(path, 'tok'); // after the setup: an open pipe from a failed setup kept the whole suite from ending
   const relay = spawn('node', ['cli/relay.ts', '--child'], {
     stdio: 'ignore',
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p7',
