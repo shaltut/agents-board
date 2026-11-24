@@ -29,7 +29,7 @@ const DAY_MS = 24 * 3600_000; // cb.triagers' window: a lead seen within it stil
  *  it with the lead role, whatever its name: then no lead is wanted, unless it goes by one of the squad's lead names (kept,
  *  so it is skipped as live). A lead-role session of the project seen in the last day but not live is still its lead: no
  *  second lead is started beside it (quietLead names it), unless it goes by a squad lead name, restarted as before.
- *  orch@<m> live in another project leads that one: this project's is <project>-orch@<m>. */
+ *  orch@<m> live, or seen in the last day, in another project leads that one: this project's is <project>-orch@<m>. */
 function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = [], now = Date.now()) {
   let quietLead: QuietLead | null = null;
   const want = wantList(project, squad).flatMap((w): Want[] => {
@@ -45,7 +45,9 @@ function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = []
       quietLead = { actor: q.actor, mins: Math.floor((now - q.at) / 60_000) };
       return [];
     }
-    return [live.some((x) => x.actor === w.name && x.project && x.project !== project) ? alt : w];
+    // orch@<m> live, or seen in the last day, bound to another project leads that one: taking its name here would rebind it
+    const elsewhere = (x: { actor: string; project?: string | null }) => x.actor === w.name && !!x.project && x.project !== project;
+    return [live.some(elsewhere) || quiet.some((x) => elsewhere(x) && now - Date.parse(x.last_seen ?? '') < DAY_MS) ? alt : w];
   });
   return { want, quietLead };
 }

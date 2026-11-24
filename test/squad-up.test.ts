@@ -155,6 +155,17 @@ test('orch@<machine> leading this project but not live is restarted under its ow
   assert.equal(a.quietLead, null);
 });
 
+// orch@<m> quiet in another project within a day still leads that one: taking its name here would rebind it (#3746 I1)
+const quietOrch = (min: number) => ({ actor: 'orch@shaltoot', project: 'other', role: 'lead', last_seen: ago(min) });
+test('orch@<machine> quiet in another project within a day: this project\'s lead is <project>-orch@<machine>; a day gone, orch@<machine>', () => {
+  const p = planSquad('demo', squad, [], {}, 0, [quietOrch(10)]);
+  assert.equal(p.start.find((l) => l.role === 'lead')?.name, 'demo-orch@shaltoot');
+  assert.ok(!names(p).includes('orch@shaltoot'), names(p).join());
+  assert.equal(p.quietLead, null);
+  const old = planSquad('demo', squad, [], {}, 0, [quietOrch(2 * 24 * 60)]);
+  assert.equal(old.start.find((l) => l.role === 'lead')?.name, 'orch@shaltoot');
+});
+
 // ---- squadUp with a fake herdr: nothing real is started ----
 const OK = { status: 0, stdout: '{}', stderr: '' };
 const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
@@ -229,6 +240,15 @@ test('squad up: the alternate lead already running in herdr (quiet on the board)
   const out = await squadUp('demo', false, callFn(rows([['orch@shaltoot', 'other', true, 'lead'], ['demo-orch@shaltoot', 'demo', false]])), f.run);
   assert.match(out, /skip demo-orch@shaltoot: running in herdr but not on the board \(not bound\?\)\n  herdr agent prompt demo-orch-shaltoot "cb iam demo-orch@shaltoot demo --role lead/);
   assert.ok(!f.calls.some((c) => c.args[1] === 'start' && /orch/.test(c.args[2]!)), out);
+});
+
+test('squad up: orch@<machine> quiet in another project: herdr is asked about <project>-orch, never orch-<machine>', async () => {
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
+  const out = await squadUp('demo', true, callFn([{ ...quietOrch(10), live: false, machine: 'shaltoot' }]), f.run);
+  assert.ok(has(f.calls, 'agent', 'get', 'demo-orch-shaltoot'), JSON.stringify(f.calls.map((c) => c.args)));
+  assert.ok(!has(f.calls, 'agent', 'get', 'orch-shaltoot'));
+  assert.match(out, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
+  assert.doesNotMatch(out, /orch@shaltoot demo|start orch@/);
 });
 
 test('squad up: a quiet lead: no lead started, one line names it and how to fix it; seen 2 days ago, the lead starts', async () => {
