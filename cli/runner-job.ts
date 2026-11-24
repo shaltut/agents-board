@@ -5,7 +5,7 @@ import {
   closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { uptime } from 'node:os';
-import { basename, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
 
@@ -306,6 +306,17 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     const r = await git(args);
     if (stop.aborted) return null;
     if (r.code !== 0) throw new Error(`git ${args[0]} exited ${r.code}`);
+  }
+  // the clean keeps node_modules (the install), and with it every build cache inside: tsc's tsbuildinfo there describes a
+  // dist the clean just wiped, so the next build would emit nothing (#3763). Drop node_modules/.cache beside each tracked
+  // package.json; never through a linked node_modules (a job may plant one pointing outside the slot)
+  const pk = await git(['ls-files', '-z', '--', 'package.json', '*/package.json'], true);
+  if (stop.aborted) return null;
+  if (pk.code !== 0) throw new Error(`git ls-files exited ${pk.code}`);
+  for (const f of pk.out.split(' ').filter(Boolean)) {
+    const nm = join(dir, dirname(f), 'node_modules');
+    try { if (lstatSync(nm).isSymbolicLink()) continue; } catch { continue; } // no install there
+    rmSync(join(nm, '.cache'), { recursive: true, force: true });
   }
 
   // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
