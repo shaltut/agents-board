@@ -137,6 +137,11 @@ const mustPass = [
   'git commit -m "$(cat <<\'EOF\'\nfix: reboot handling\n\ndrop table note\nEOF\n)"',
   'git commit -m "$(cat <<\'EOF\'\nfix: say "hi" then\nreboot the docs; drop table idea\nEOF\n)"',
   'gh pr create --title "t" --body "$(cat <<\'EOF\'\n## Summary\n- runs `git reset --hard`, then reboot\nEOF\n)"',
+  // #3809: a leading ! keeps only a herdr prompt (it runs there); cb, git and gh text stays text
+  'cb tell orch "!! urgent: the shutdown is planned"',
+  'git commit -m "!wip: drop table idea"',
+  'gh pr comment 5 --body "!note: avoid reboot"',
+  'herdr agent prompt w1 "do not reboot the VPS"',
 ];
 
 for (const c of mustBlock) test(`blocks ${JSON.stringify(c)}`, () => assert.ok(check(c)));
@@ -219,6 +224,15 @@ const killBlocked = [
   'pkill -P 1',
   'pkill -F <(pgrep node)',
   'kill -9 -1',
+  'kill -9 -1 1234',
+  'kill $(pgrep -P 1)',
+  // round 3 (I1): an option's number is not a PID
+  'Get-Process node -ea 0 | Stop-Process -Force -ea 0',
+  'Get-Process node | Stop-Process -Force -EA 0',
+  'pgrep node | xargs kill -s 9',
+  'Stop-Process -Id 1234,(Get-Process node).Id',
+  'Get-Process node | Stop-Process -OutBuffer 1',
+  "(Get-Process node).ForEach('Kill')",
   'herdr agent prompt w1 "!pkill node"',
   'pkill -f mock_gw.js',
   "pkill -f 'node scripts/mock_gw.js'",
@@ -235,7 +249,7 @@ const killBlocked = [
 // The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
 const recommended = [
   'Start-Process -PassThru',
-  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select-Object ProcessId, CommandLine`,
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
   'pgrep -fl node',
   'Stop-Process -Id <pid>',
   'taskkill //PID <pid>',
@@ -272,6 +286,25 @@ const killPassed = [
   'Get-Process node; Stop-Process -Id:1234',
   'pgrep -fl node; kill -s TERM 1234',
   'kill -1 1234',
+  'Get-Process node; Stop-Process -Id 1234 -ea 0',
+  'Get-Process node; taskkill /PID 1234 /F /T',
+  // round 3: a lookup after the stop is a check, not its source; a quoted word is an argument
+  'node mock.js & PID=$!; sleep 2; kill $PID; ps aux | grep mock',
+  '$p = Start-Process node -ArgumentList mock.js -PassThru; Stop-Process -Id $p.Id; Get-Process node -ErrorAction SilentlyContinue',
+  'kill $(cat /tmp/mock.pid) && pgrep -fl mock_gw.js',
+  'Get-NetTCPConnection -LocalPort 3000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess }; Get-Process node',
+  '$c = Get-NetTCPConnection -LocalPort 3000 -State Listen; Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" | Select-Object CommandLine; Stop-Process -Id $c.OwningProcess',
+  'Get-Process node | Select-Object Id, Path; Get-Content server.log -Tail 50 | Select-String "kill"',
+  'Get-Process node | Format-Table; Write-Host "will terminate the mock later"',
+  'taskkill /F /FI "PID eq $pid"',
+  'kill %1; ps',
+  'ps -fp $PID; kill $PID',
+  'wmic process where processid=1234 delete',
+  "Set-Content -Path stop-mock.ps1 -Value @'\n$id = Get-Content mock.pid\nStop-Process -Id $id\nGet-Process node -ErrorAction SilentlyContinue\n'@",
+  // a pid file, or this shell's (or a named parent's) children, next to a lookup (round 3, m4)
+  'Get-Process node; pkill -P $$',
+  'pgrep -fl node; pkill -F /tmp/mock.pid',
+  'kill $(pgrep -P 1234)',
   // naming a command, asking for help, a dry run (M3)
   'which pkill',
   'man pkill',
@@ -361,6 +394,8 @@ const pushBlocked: [string, string][] = [
   ['git push origin x:heads/development', 'development'],
   ['git push origin heads/development', 'development'],
   ['git push origin +feat/x:heads/staging', 'staging'],
+  // #3809: a herdr prompt starting with ! runs as a shell command in that session
+  ['herdr agent prompt b1 "!git push origin development"', 'development'],
 ];
 // C11: a destination holding * is a wildcard refspec: it can write any branch, protected ones too (the word comes back)
 const pushWildcard: [string, string][] = [
