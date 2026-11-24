@@ -140,7 +140,7 @@ for (const c of mustBlock) test(`blocks ${JSON.stringify(c)}`, () => assert.ok(c
 for (const c of mustPass) test(`passes ${JSON.stringify(c)}`, () => assert.equal(check(c), null));
 
 // ---- kill by process name (#3809): a name stops every process that has it, other sessions' too (on the PC, node is
-// the job runner, the supervisor and every relay). By PID or by port stays allowed, and so does a lookup. ----
+// the job runner, the supervisor and every relay). By PID or by port stays allowed, and so does a lookup on its own. ----
 const killBlocked = [
   // the 24 Nov command, verbatim, and its wrappers
   'powershell "Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force"',
@@ -164,19 +164,47 @@ const killBlocked = [
   'Get-Process -Id (Get-Process node).Id | Stop-Process',
   "[System.Diagnostics.Process]::GetProcessesByName('node') | ForEach-Object { $_.Kill() }",
   'ps node | spps',
+  // fix round 1 (I1): the lookup and the stop anywhere in one command, over lines, script blocks, variables and loops
+  'Get-Process -Name node -ErrorAction SilentlyContinue |\n  Where-Object { $_.Id -ne $PID } |\n  Stop-Process -Force',
+  'Get-Process node\n| Stop-Process -Force',
+  'Get-Process node `\n  | Stop-Process -Force',
+  'Get-Process node -ErrorAction SilentlyContinue | ForEach-Object {\n  Stop-Process -Id $_.Id -Force\n}',
+  'Get-Process node | ForEach-Object { Write-Host "Stopping $($_.Id)"; Stop-Process -Id $_.Id -Force }',
+  '$p = Get-Process -Name node -ErrorAction SilentlyContinue; if ($p) { $p | Stop-Process -Force }',
+  '$procs = Get-Process node\n$procs | Stop-Process -Force',
+  '$ids = (Get-Process node).Id; Stop-Process -Id $ids -Force',
+  'for pid in $(pgrep node); do kill $pid; done',
+  'pids=$(pgrep node); kill $pids',
+  'pgrep node | while read p; do kill $p; done',
+  'pgrep node |\n  xargs kill',
+  'kill "$(pgrep node)"',
+  'kill -9 "$(pgrep -f node)"',
+  "kill -9 `ps aux | grep node | awk '{print $2}'`",
+  // Win32_Process (CIM or WMI) is a lookup too, and Terminate a stop (M4)
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Invoke-CimMethod -MethodName Terminate`,
+  `Get-WmiObject Win32_Process -Filter "Name='node.exe'" | ForEach-Object { $_.Terminate() }`,
+  "Get-CimInstance Win32_Process | Where-Object CommandLine -like '*mock_gw.js*' | ForEach-Object { Stop-Process -Id $_.ProcessId }",
   // Stop-Process by name, its aliases and abbreviations
   'Stop-Process -Name node -Force',
   'Stop-Process -name:node',
   'spps -n node',
   'Stop-Process -ProcessName node',
   'kill -Name node',
-  // taskkill by image name, also as Git Bash spells the switches
+  'kill -n node',
+  `wmic process where "name='node.exe'" delete`,
+  'wmic process where name="node.exe" call terminate',
+  'kill $(lsof -t -c node)',
+  'Stop-Process -Name node `\n  -Force',
+  // taskkill by image name, also as Git Bash spells the switches, or by any filter but one PID
   'taskkill /F /IM node.exe',
   'taskkill //F //IM node.exe',
   'taskkill -f -im node.exe',
   'taskkill /F /FI "IMAGENAME eq node.exe"',
+  'taskkill /F /FI "USERNAME eq dev"',
+  'taskkill /F /FI "WINDOWTITLE eq mock*"',
+  'taskkill /F /FI "PID gt 1000"',
   'C:\\Windows\\System32\\taskkill.exe /im node.exe',
-  // killall, pkill, and a by-name PID lookup feeding kill
+  // killall, pkill (a pattern is still a name: every session's relay.ts matches), and a lookup feeding kill
   'killall node',
   'sudo killall -9 node',
   'pkill node',
@@ -184,35 +212,46 @@ const killBlocked = [
   'pkill -f node',
   'pkill -f "node.*"',
   'pkill -f node > /dev/null 2>&1',
+  'pkill -f relay.ts',
+  'pkill -f mock_gw.js',
+  "pkill -f 'node scripts/mock_gw.js'",
   'ssh macbook pkill -f claude',
   'kill $(pgrep node)',
+  'kill $(pgrep -f mock_gw.js)',
   'pgrep node | xargs kill -9',
   'kill -9 `pgrep -f node`',
   'kill $(pidof node)',
   "ps aux | grep node | awk '{print $2}' | xargs kill",
+  // M1: stripped once, so a kill between two quoted heredocs is still seen
+  "cat > a.txt <<'EOF'\naaa\nEOF\npkill node\ncat > b.txt <<'EOF'\nbbb\nEOF",
+];
+// The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
+const recommended = [
+  'Start-Process -PassThru',
+  'Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object CommandLine',
+  'ps -p <pid> -o command=',
+  'Stop-Process -Id <pid>',
+  'taskkill //PID <pid>',
+  'kill <pid>',
+  'Get-NetTCPConnection -LocalPort <port> -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess }',
+  'kill $(lsof -t -iTCP:<port> -sTCP:LISTEN)',
 ];
 const killPassed = [
-  // what the block reason recommends, verbatim (<pid> = 1234, <port> = 3000)
-  'Stop-Process -Id 1234',
-  'taskkill /PID 1234',
-  'kill 1234',
-  'Start-Process node -ArgumentList mock.js -PassThru',
-  'Get-NetTCPConnection -LocalPort 3000 | ForEach-Object { Stop-Process -Id $_.OwningProcess }',
-  'kill $(lsof -t -i :3000)',
+  ...recommended.map((c) => c.replaceAll('<pid>', '1234').replaceAll('<port>', '3000')),
   // other ways to stop one process
+  'Start-Process node -ArgumentList mock.js -PassThru',
   'Stop-Process -Id 1234 -Force',
+  'Stop-Process -Id 1234,5678',
   'taskkill /PID 1234 /F /T',
   'taskkill /F /FI "PID eq 1234"',
   'kill -9 1234',
   'kill -n 9 1234',
   'Get-Process -Id 1234 | Stop-Process',
-  'pkill -f mock_gw.js',
-  "pkill -f 'node scripts/mock_gw.js'",
+  'ps -p 1234 | xargs kill',
   'pkill -F /tmp/mock.pid',
-  'kill $(pgrep -f mock_gw.js)',
-  "Get-CimInstance Win32_Process | Where-Object CommandLine -like '*mock_gw.js*' | ForEach-Object { Stop-Process -Id $_.ProcessId }",
+  'pkill -P $$',
   'npx kill-port 3000',
-  // a lookup, to find the PID
+  // a lookup, to find the PID; a lookup and a stop of a named PID in one command
   'Get-Process node',
   'Get-Process node | Select-Object Id,StartTime',
   'tasklist /FI "IMAGENAME eq node.exe"',
@@ -220,23 +259,33 @@ const killPassed = [
   'ps aux | grep node',
   'Get-Process node; Stop-Process -Id 1234',
   'ps aux | grep node && kill 1234',
+  // naming a command, asking for help, a dry run (M3)
+  'which pkill',
+  'man pkill',
+  'pkill --help',
+  'Get-Help Stop-Process',
+  'Get-Process node | Stop-Process -WhatIf',
   // other tools' ps and kill
   'docker ps -q | xargs docker kill',
   'docker kill $(docker ps -q --filter name=mock)',
-  // message text
+  // message text, herdr prompts included (M3)
   'cb tell orch "never run taskkill /IM node.exe or Get-Process node | Stop-Process"',
   'git commit -m "block killall and pkill node"',
   'git commit -m "$(cat <<\'EOF\'\nfix: Get-Process node | Stop-Process killed the runner\nEOF\n)"',
+  'herdr agent prompt orch-shaltoot "never run Get-Process node | Stop-Process"',
+  'herdr --machine macbook agent prompt w1 "do not pkill node"',
 ];
 const KILL = check('killall node');
-test('kill by name: the reason names the harm and the way out', () => {
-  assert.match(KILL ?? '', /^kill by process name: .*every process with that name.*runner.*by its PID.*by the port/);
+test('kill by name: the reason names the harm, the PID and port routes, and quotes each recommended command', () => {
+  assert.match(KILL ?? '', /^kill by process name: .*every process with that name.*runner.*by PID.*by the port/);
+  for (const c of recommended) assert.ok(KILL?.includes(c), c);
 });
 // a hook times out at 5 s: one pass over the words, not one per word (an unclosed quote once took 14 s)
 test('kill by name: a long command stays fast', () => {
   const t = Date.now();
   assert.equal(check('ls "' + 'x '.repeat(50000)), null);
-  assert.equal(check('kill ' + '1 '.repeat(2000) + '| ps'), KILL);
+  assert.equal(check('kill '.repeat(20000)), null);
+  assert.equal(check('ps; ' + 'kill '.repeat(20000)), KILL);
   assert.ok(Date.now() - t < 1500, `took ${Date.now() - t} ms`);
 });
 for (const c of killBlocked) test(`kill by name blocks ${JSON.stringify(c)}`, () => assert.equal(check(c), KILL));

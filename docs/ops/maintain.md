@@ -91,8 +91,8 @@ Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on
    An old copy prints `{}` there: the fence is missing. And, the kill-by-name rule (#3809),
    `echo '{"tool_input":{"command":"taskkill /F /IM node.exe"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints
    the block JSON with a reason starting `Blocked dangerous command: kill by process name`; an old copy prints `{}`.
-   A Claude session cannot run these four lines as typed (the installed hook blocks the strings in them): it runs
-   them from a small script that builds the commands.
+   The installed hook blocks the reset line when a Claude session runs it, so a session runs the checks from a small
+   script that builds the command strings.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
    treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
    command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.

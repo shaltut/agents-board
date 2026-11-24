@@ -1,4 +1,4 @@
-// Claude Code PreToolUse hook (matcher: Bash). Blocks dangerous shell commands.
+// Claude Code PreToolUse hook (matcher: Bash; on Windows Bash|PowerShell). Blocks dangerous shell commands.
 // Unlike a grep over the whole command, it ignores message text (cb tell, git commit -m, gh --body,
 // quoted-delimiter heredoc bodies written to files), so "the shutdown is planned" can be posted.
 // What is left is matched ANYWHERE, like the old hook: a fence fails closed (ssh host reboot, nohup, xargs ...).
@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 
 const QUOTED = String.raw`"(?:\\.|[^"\\])*"|'[^']*'`;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
-const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b`;
+const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
 // Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell.
 const HEREDOC = /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/gm;
@@ -67,55 +67,62 @@ export function check(command) {
 
 // Kill by process name (#3809): a name stops every process that has it, other sessions' too. On 24 Nov one session's
 // Get-Process node | Stop-Process killed the PC's job runner, its supervisor and every session's relay, twice.
-const KILL_BY_NAME = "kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). Stop only yours: by its PID (Stop-Process -Id <pid>, taskkill /PID <pid>, kill <pid>; note the PID when you start it: Start-Process -PassThru, or $! in bash) or by the port it listens on (Get-NetTCPConnection -LocalPort <port> | ForEach-Object { Stop-Process -Id $_.OwningProcess }, or kill $(lsof -t -i :<port>))";
-// A statement ends at ; & && || newline outside quotes; its stages end at a single |. 2>&1 ends neither.
-const STATEMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[<>]&|\|(?!\|)|[^;&|\n"'\\])+`, 'g');
-const STAGE = new RegExp(String.raw`(?:${QUOTED}|\\.|[<>]&|[^|"'\\])+`, 'g');
+const KILL_BY_NAME = 'kill by process name: it stops every process with that name on this machine, other sessions\' too (node: the board runner, supervisor and relays). A lookup by name (Get-Process node, pgrep, ps | grep, Win32_Process) and a stop in one command count too. Stop only yours, by PID: note it when you start the process (Start-Process -PassThru, or $! in bash), or look it up in one command and check its command line (Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object CommandLine, or ps -p <pid> -o command=), then stop it in the next: Stop-Process -Id <pid> (Git Bash: taskkill //PID <pid>; Mac: kill <pid>). Or by the port it listens on: Get-NetTCPConnection -LocalPort <port> -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess }, or kill $(lsof -t -iTCP:<port> -sTCP:LISTEN)';
 // a command word as a name: no quotes, no path, lower case, no .exe (C:\Windows\System32\taskkill.exe is taskkill)
 const cmdName = (raw) => raw.replace(/["']/g, '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '');
+const KILL_WORDS = new Set(['stop-process', 'spps', 'kill', 'taskkill', 'killall', 'pkill', 'remove-ciminstance', 'terminate',
+  'get-process', 'gps', 'ps', 'pgrep', 'pidof', 'tasklist', 'win32_process', 'wmic', 'lsof']);
 const OTHER_TOOL = new Set(['docker', 'podman', 'nerdctl', 'kubectl', 'compose', 'pm2']); // docker ps, docker kill
 const PS_BEFORE = new Set(['sudo', '$', 'xargs', 'exec', 'command', 'nohup', 'time', 'env']); // ps as the command
-const KILL_WORDS = new Set(['stop-process', 'spps', 'kill', 'taskkill', 'killall', 'pkill', 'get-process', 'gps', 'ps', 'pgrep', 'pidof', 'tasklist']);
-// pkill / pgrep narrowed to one process: a pid file (-F), or -f with a pattern holding a path or a file extension
-// (mock_gw.js, scripts/x): -f node, or node.*, still matches every node
-function narrow(args) {
-  const end = args.findIndex((a) => /^\d*[<>&]/.test(a));
-  const a = end < 0 ? args : args.slice(0, end);
-  if (a.includes('-F') || a.includes('--pidfile')) return true;
-  const pattern = a.filter((x) => !x.startsWith('-')).pop() ?? '';
-  return a.some((x) => x === '--full' || /^-[a-z\d]*f[a-z\d]*$/.test(x)) && /[\\/]|\.[a-z]/i.test(pattern);
+const NOT_RUN = new Set(['which', 'man', 'type', 'whereis', 'where', 'get-command', 'gcm', 'get-help', 'help', 'tldr']); // which pkill
+const ARGS = 64; // a command's arguments are read this far: one pass over the words, not one per word
+// pkill / pgrep limited to this shell's processes: a pid file (-F) or a parent PID (-P $$). A pattern is not enough:
+// pkill -f relay.ts matches every session's relay, and the killer's own shell holds the pattern too.
+const narrow = (args) => args.some((a) => /^(?:-F|--pidfile|-P|--parent)(?:=|$)/.test(a));
+// a stop that names its PIDs (Stop-Process -Id 1234, kill -9 1234, taskkill /PID 1234 /F), not one fed by a lookup
+const isFlag = (x) => /^(?:-|\/\/?[a-z])/i.test(x);
+const literalPids = (args) => { const t = args.filter((x) => !isFlag(x)); return t.length > 0 && t.every((x) => /^\d+(?:,\d+)*$/.test(x)); };
+
+// Fails closed like the patterns: a command word anywhere counts, and a quoted command (powershell "...", ssh host '...',
+// "$(pgrep node)") is read as a command too. Blocks a kill that names the image (Stop-Process -Name, taskkill /IM or a
+// filter other than PID eq, killall, pkill), and a by-name lookup anywhere in the command together with a stop that does
+// not name its PIDs: Get-Process node | Stop-Process, $p = Get-Process node; $p | Stop-Process, kill $(pgrep node).
+// Get-Process -Id and ps -p are not by-name lookups. text has had its messages stripped already (check).
+function killByName(text) {
+  const seen = { lookup: false, stop: false };
+  const joined = text.replace(/`\r?\n/g, ' ').replace(/\\\r?\n/g, ' ').replace(/`/g, ' $ ');
+  return scanKills(joined, seen) || (seen.lookup && seen.stop);
 }
 
-// Fails closed like the patterns: a command word anywhere in a stage counts, and a quoted command (powershell "...",
-// ssh host '...') is read as a command too. Blocks a kill that names the image (Stop-Process -Name, taskkill /IM,
-// killall, pkill <name>), and a by-name lookup feeding a stop in the same statement (Get-Process node | Stop-Process,
-// kill $(pgrep node)); Get-Process -Id <pid> is not a by-name lookup.
-function killByName(cmd) {
-  const text = stripMessages(String(cmd)).replace(/\\\r?\n/g, ' ').replace(/`/g, ' ');
-  for (const statement of text.match(STATEMENT) ?? []) {
-    let lookup = false, stop = false;
-    for (const stage of statement.match(STAGE) ?? []) {
-      const raw = stage.match(WORD) ?? [];
-      const w = raw.map(unquote);
-      for (let i = 0; i < w.length; i++) {
-        if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && killByName(w[i])) return true;
-      }
-      const name = raw.map(cmdName);
-      for (let i = 0; i < w.length; i++) {
-        const n = name[i];
-        if (!KILL_WORDS.has(n) && !n.endsWith('.kill') && !n.includes('getprocessesbyname')) continue; // keeps it linear
-        const rest = w.slice(i + 1), prev = name[i - 1];
-        if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
-        if (n === 'kill' && rest.some((x) => /^-(?:name|processname)(?::|$)/i.test(x))) return true;
-        if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x) || (/^(?:\/\/?|-)fi$/i.test(x) && /imagename/i.test(rest[k + 1] ?? '')))) return true;
-        if (n === 'killall' || (n === 'pkill' && !narrow(rest))) return true;
-        const byId = rest.some((x) => /^-id(?::|$)/i.test(x));
-        if (((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
-          || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist' || n.includes('getprocessesbyname')) lookup = true;
-        if (n === 'stop-process' || n === 'spps' || n === 'taskkill' || n.endsWith('.kill') || (n === 'kill' && !OTHER_TOOL.has(prev))) stop = true;
-      }
+function scanKills(text, seen) {
+  for (const seg of text.match(SEGMENT) ?? []) {
+    const raw = seg.match(WORD) ?? [];
+    const w = raw.map(unquote);
+    const name = raw.map(cmdName);
+    for (let i = 0; i < w.length; i++) {
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen)) return true;
+      const n = name[i], prev = name[i - 1];
+      if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate)$/.test(n) && !n.includes('getprocessesbyname')) continue;
+      if (NOT_RUN.has(prev)) continue;
+      let rest = w.slice(i + 1, i + 1 + ARGS);
+      const cut = rest.findIndex((x) => /^\d*[<>&]/.test(x)); // a redirection ends the arguments
+      if (cut >= 0) rest = rest.slice(0, cut);
+      if (/^--(?:help|version)$/.test(rest[0] ?? '') || rest.some((x) => /^-whatif(?::\$true)?$/i.test(x))) continue;
+      if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
+      // PowerShell's kill is Stop-Process: kill -n node is -Name; bash's kill -n takes a signal number
+      if (n === 'kill' && rest.some((x, k) => /^-(?:name|processname)(?::|$)/i.test(x) || (/^-n[a-z]*$/i.test(x) && !/^\d+$/.test(rest[k + 1] ?? '')))) return true;
+      if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x)
+        || (/^(?:\/\/?|-)fi$/i.test(x) && !/^\s*pid\s+eq\s+\d+\s*$/i.test(rest[k + 1] ?? '')))) return true;
+      if (n === 'killall' || (n === 'pkill' && !narrow(rest))) return true;
+      const byId = rest.some((x) => /^(?:-id|-p|--pid|-q)(?::|=|$)/i.test(x));
+      if (((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
+        || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist' || n === 'win32_process'
+        || (n === 'wmic' && /^process$/i.test(rest[0] ?? '')) || (n === 'lsof' && rest.some((x) => /^-c/.test(x))) // lsof -c node
+        || n.includes('getprocessesbyname')) seen.lookup = true;
+      if (((n === 'stop-process' || n === 'spps' || n === 'taskkill' || n === 'remove-ciminstance'
+        || (n === 'kill' && !OTHER_TOOL.has(prev))) && !literalPids(rest)) || n === 'terminate' || /\.(?:kill|terminate)$/.test(n)
+        || (n === 'wmic' && rest.some((x) => /^delete$/i.test(x)))) seen.stop = true;
     }
-    if (lookup && stop) return true;
   }
   return false;
 }
