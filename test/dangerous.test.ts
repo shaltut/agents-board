@@ -247,6 +247,13 @@ const killBlocked = [
   '& "$env:SystemRoot\\System32\\taskkill.exe" /F /IM node.exe',
   'cmd /c "taskkill" /F /IM node.exe',
   'kill 2>/dev/null $(pgrep node)',
+  // round 5: Terminate first, its query after; colon-bound
+  `Invoke-CimMethod -MethodName Terminate -Query "select * from Win32_Process where name like 'node%'"`,
+  `Invoke-CimMethod -Name Terminate -Query "SELECT * FROM Win32_Process WHERE Name = 'node.exe'"`,
+  `Invoke-WmiMethod -Name Terminate -InputObject (Get-WmiObject Win32_Process -Filter "Name='node.exe'")`,
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Invoke-CimMethod -MethodName:Terminate`,
+  `$p=@{Query="select * from Win32_Process where name like 'node%'";MethodName='Terminate'}; Invoke-CimMethod @p`,
+  'ForEach-Object -Process { Stop-Process -Id $_.Id } -InputObject (Get-Process node)',
   'herdr agent prompt w1 "!pkill node"',
   'pkill -f mock_gw.js',
   "pkill -f 'node scripts/mock_gw.js'",
@@ -263,11 +270,11 @@ const killBlocked = [
 // The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
 const recommended = [
   'Start-Process -PassThru',
-  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
   'pgrep -fl node',
   'Stop-Process -Id <pid>',
   'taskkill //PID <pid>',
   'kill <pid>',
+  String.raw`powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Format-List ProcessId, CommandLine"`,
   'powershell -NoProfile { ... }',
   'netstat -ano | findstr :<port>',
   'kill $(lsof -t -iTCP:<port> -sTCP:LISTEN)',
@@ -320,6 +327,14 @@ const killPassed = [
   `powershell -NoProfile { Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine }`,
   'Get-CimInstance Win32_Process -Filter "ProcessId=1234" | Invoke-CimMethod -MethodName Terminate',
   'Write-Host "will terminate the mock"; Get-Process node',
+  'Invoke-CimMethod -MethodName Terminate -Query "select * from Win32_Process where ProcessId = 1234"',
+  'ps aux | grep -c "[n]ode"; grep -c "kill" app.log',
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
+  // a stop's arguments end at a brace: the other branch of an if or a try is not its source
+  'try { Stop-Process -Id $id -ErrorAction Stop } catch { Get-Process node | Format-Table Id, StartTime }',
+  'if ($p) { Stop-Process -Id $p.Id 2>$null } else { Get-Process node }',
+  'kill $PID; sleep 1; diff <(pgrep -fl mock) /dev/null',
+  'Get-Process node; grep -c "Stop-Process" scripts/stop.ps1',
   "Set-Content -Path stop-mock.ps1 -Value @'\n$id = Get-Content mock.pid\nStop-Process -Id $id\nGet-Process node -ErrorAction SilentlyContinue\n'@",
   // a pid file, or this shell's (or a named parent's) children, next to a lookup (round 3, m4)
   'Get-Process node; pkill -P $$',

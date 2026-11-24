@@ -70,7 +70,7 @@ export function check(command) {
 // Kill by process name (#3809): a name stops every process that has it, other sessions' too. On 24 Nov one session's
 // Get-Process node | Stop-Process killed the PC's job runner, its supervisor and every session's relay, twice.
 // (pwsh 7.6 preview on the PC cannot load CIM, so its list and port commands run in Windows PowerShell or netstat)
-const KILL_BY_NAME = `kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). A lookup by name (Get-Process node, pgrep, ps | grep, Win32_Process) feeding a stop counts too. Stop only yours, by PID: note it when you start the process (Start-Process -PassThru, or $! in bash), or list them with their command lines and pick yours (Windows PowerShell: Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine; from pwsh wrap it in powershell -NoProfile { ... }; Mac: pgrep -fl node), then stop it in the next command: Stop-Process -Id <pid> (Git Bash: taskkill //PID <pid>; Mac: kill <pid>). Or by the port it listens on: netstat -ano | findstr :<port> (the PID ends the LISTENING line), or on the Mac kill $(lsof -t -iTCP:<port> -sTCP:LISTEN); a port Docker publishes belongs to Docker: stop the container instead`;
+const KILL_BY_NAME = `kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). A lookup by name (Get-Process node, pgrep, ps | grep, Win32_Process) feeding a stop counts too. Stop only yours, by PID: note it when you start the process (Start-Process -PassThru, or $! in bash), or list them with their command lines and pick yours (Git Bash: powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name='node.exe'\\" | Format-List ProcessId, CommandLine"; in Windows PowerShell the inner command alone; from pwsh wrap it in powershell -NoProfile { ... }; Mac: pgrep -fl node), then stop it in the next command: Stop-Process -Id <pid> (Git Bash: taskkill //PID <pid>; Mac: kill <pid>). Or by the port it listens on: netstat -ano | findstr :<port> (the PID ends the LISTENING line), or on the Mac kill $(lsof -t -iTCP:<port> -sTCP:LISTEN); a port Docker publishes belongs to Docker: stop the container instead`;
 // a command word as a name: no quotes, no path, lower case, no .exe (C:\Windows\System32\taskkill.exe is taskkill)
 // (a leading ! too: herdr agent prompt w1 "!pkill node" runs pkill in that session)
 const cmdName = (raw) => raw.replace(/["']/g, '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '').replace(/^!/, '');
@@ -118,14 +118,19 @@ function killByName(text) {
 }
 
 // a single-clause ProcessId filter names one process: -Filter "ProcessId=1234", where processid=1234 (not "... OR ProcessId=1")
-const oneProcess = (w) => w.some((x) => /^\s*processid\s*=\s*\S+\s*$/i.test(x));
-const RUNS_NEXT = new Set(['c', 'k', '-c', '-command']); // cmd /c "taskkill" ..., bash -c, pwsh -Command: the next word runs
+const oneProcess = (w) => w.some((x) => /^\s*processid\s*=\s*\S+\s*$/i.test(x))
+  || (/\bprocessid\s*=\s*\d+\b/i.test(w.join(' ')) && !/\b(?:or|and)\b/i.test(w.join(' '))); // where ProcessId = 1234
+// a segment for kills also ends at a brace: a stop's arguments never run into the next block (if/else, try/catch)
+const KILL_SEGMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[^;&|\n{}"'\\])+`, 'g');
+// cmd /c "taskkill" ..., bash -c, pwsh -Command: after a shell, the next word runs (grep -c "kill" is grep's)
+const RUNS_NEXT = new Set(['c', 'k', '-c', '-command']);
+const SHELLS = new Set(['cmd', 'bash', 'sh', 'zsh', 'pwsh', 'powershell']);
 const TERMINATE_AFTER = new Set(['-methodname', '-name', 'call', '=', 'methodname']); // Invoke-CimMethod -Name Terminate, splats
 
 // seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; inArgs: this text is inside a
 // stop's arguments
 function scanKills(text, seen, inArgs) {
-  for (const seg of text.match(SEGMENT) ?? []) {
+  for (const seg of text.match(KILL_SEGMENT) ?? []) {
     const raw = seg.match(WORD) ?? [];
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
@@ -135,9 +140,15 @@ function scanKills(text, seen, inArgs) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args)) return true;
       const n = name[i], prev = name[i - 1];
       // CIM/WMI Terminate, quoted or not: Invoke-CimMethod -MethodName "Terminate", -Name Terminate, @{ MethodName = 'Terminate' }
-      if (n === 'terminate' && TERMINATE_AFTER.has(prev)) { if (seen.lookup) return true; seen.stop = true; continue; }
+      // (-MethodName:Terminate too); its arguments, like any stop's, hold its source: -MethodName Terminate -Query "..."
+      if ((n === 'terminate' && TERMINATE_AFTER.has(prev)) || /^(?:-(?:method)?name:|methodname=)terminate$/.test(n)) {
+        if (seen.lookup) return true;
+        seen.stop = true;
+        argsEnd = Math.max(argsEnd, Math.min(w.length - 1, i + ARGS));
+        continue;
+      }
       // a quoted word is an argument (Select-String "kill"), unless it is the command: & 'taskkill' /IM node.exe
-      if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !RUNS_NEXT.has(prev)) continue;
+      if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !(RUNS_NEXT.has(prev) && SHELLS.has(name[i - 2]))) continue;
       if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate|foreach)$/.test(n) && !n.includes('getprocessesbyname')) continue;
       if (NOT_RUN.has(prev) || (prev === '-v' && name[i - 2] === 'command')) continue; // which pkill, command -v pkill
       let rest = w.slice(i + 1, i + 1 + ARGS);
@@ -159,7 +170,12 @@ function scanKills(text, seen, inArgs) {
         || (n === 'lsof' && rest.some((x) => /^-c/.test(x))) // lsof -c node
         || n.includes('getprocessesbyname');
       // inside a stop's arguments, or fed to an earlier stop's input: xargs kill < <(pgrep node), done < <(pgrep node)
-      if (lookup) { if (args || (seen.stop && w.slice(0, i).includes('<'))) return true; seen.lookup = true; }
+      // ... or -InputObject (Get-Process node) after a ForEach-Object { Stop-Process ... } block
+      if (lookup) {
+        if (args || (seen.stop && (prev === '-inputobject'
+          || w.slice(0, i).some((x, k) => x === '<' && (w[k - 1] === '<' || name[k - 1] === 'done'))))) return true;
+        seen.lookup = true;
+      }
       const stop = ((n === 'stop-process' || n === 'spps' || n === 'taskkill' || n === 'remove-ciminstance'
         || (n === 'kill' && !OTHER_TOOL.has(prev))) && !literalPids(rest))
         || /\.(?:kill|terminate)$/.test(n)
