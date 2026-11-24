@@ -7,10 +7,12 @@ import { spawnSync } from 'node:child_process';
 type Machine = { herdr: string | null; repo?: string; board: string; workspace?: string };
 type Role = { count?: number | Record<string, number>; model: string; machine: string };
 type Repo = { home: boolean; paths: Record<string, string> };
+// protected (#3746): branch names or * globs; each session's pane gets CB_PROTECTED_BRANCHES, read by the push hook
 export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; repos?: Record<string, Repo>;
-  areas: (string | { name: string; repo: string })[]; supervise?: boolean };
+  areas: (string | { name: string; repo: string })[]; supervise?: boolean; protected?: string[] };
 export type Want = { name: string; role: string; area?: string; repo: string };
-export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string; workspace?: string };
+// env: set in the session's pane (herdr --env), so the agent and its hooks inherit it
+export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string; workspace?: string; env?: Record<string, string> };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
 const ORDER = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
@@ -95,6 +97,7 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     ? `. Repos: ${Object.entries(repos).filter(([, r]) => r.paths[machine]).map(([k, r]) => `${k} ${r.paths[machine]}`).join(', ')}` : '';
   return {
     ...w, model: role.model, machine, herdr: mc.herdr, cwd: repos[w.repo]?.paths[machine] ?? '', ...(mc.workspace ? { workspace: mc.workspace } : {}),
+    ...(squad.protected?.length ? { env: { CB_PROTECTED_BRANCHES: squad.protected.join(',') } } : {}),
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}${squad.repos ? ` --repo ${w.repo}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
   };
@@ -164,18 +167,20 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
   let pane: string | undefined, started = false;
+  // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
+  const env = Object.entries(l.env ?? {}).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   try {
     const t = tabs[l.machine];
-    if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
+    if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus', ...env]), 'pane_id');
     else if (l.workspace) {
       // the squad's workspace by label; missing: made here, and its first pane takes this session
       const list = find(herdr(l.herdr, ['workspace', 'list']), 'workspaces');
       if (!Array.isArray(list)) throw new Error('herdr workspace list gave no workspaces'); // never a second workspace by mistake
       const ws = list.find((w: any) => w.label === l.workspace)?.workspace_id;
-      pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id')
-        : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus']), 'root_pane'), 'pane_id');
+      pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus', ...env]), 'pane_id')
+        : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus', ...env]), 'root_pane'), 'pane_id');
     }
-    else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
+    else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus', ...env]), 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
     let blocked = false;
     try {

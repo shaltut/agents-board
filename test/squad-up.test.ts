@@ -534,3 +534,52 @@ test('startOne: busy, then a startup dialog: the split is kept as blocked and co
   assert.ok(!has(f.calls, 'pane', 'close'));
   assert.ok(!f.calls.some((c) => c.args[1] === 'prompt'));
 });
+
+// ---- protected branches (#3746): every pane a squad session gets carries the squad's list, for the push hook ----
+const ENV = ['--env', 'CB_PROTECTED_BRANCHES=development,staging'];
+const paneMaker = (c: Call) => (c.args[0] === 'tab' && c.args[1] === 'create') || (c.args[0] === 'pane' && c.args[1] === 'split')
+  || (c.args[0] === 'workspace' && c.args[1] === 'create');
+// four launches: the Mac's workspace is made, then split, then a new tab there; the lead on the PC opens a plain tab
+function launchFour(s: any) {
+  const launch = (name: string) => launchFor('demo', s, wantList('demo', s).find((w) => w.name === name)!);
+  let made = false, n = 1;
+  const f = fake((c) => {
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return made ? wsList(['w7', 'iHop Squad']) : wsList();
+    if (c.args[0] === 'workspace' && c.args[1] === 'create') {
+      made = true;
+      return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
+    }
+    if (c.args[0] === 'tab' || c.args[1] === 'split') return paneOut(`w7:p${++n}`);
+  });
+  const tabs = {};
+  for (const name of ['demo-B1@macbook', 'demo-B2@macbook', 'demo-R1@macbook', 'orch@shaltoot']) assert.ok(startOne(launch(name), f.run, tabs).ok);
+  assert.deepEqual(f.calls.filter(paneMaker).map((c) => c.args.slice(0, 2).join(' ')), ['workspace create', 'pane split', 'tab create', 'tab create']);
+  return { f, launch };
+}
+
+test('protected branches: tab create, pane split and workspace create each carry --env CB_PROTECTED_BRANCHES (#3746)', () => {
+  const { f, launch } = launchFour({ ...wsSquad, protected: ['development', 'staging'] });
+  assert.deepEqual(launch('demo-B1@macbook').env, { CB_PROTECTED_BRANCHES: 'development,staging' });
+  for (const c of f.calls.filter(paneMaker)) assert.deepEqual(c.args.slice(-2), ENV, c.args.join(' '));
+  assert.ok(f.calls.filter((c) => !paneMaker(c)).every((c) => !c.args.includes('--env')), 'only the calls that make a pane');
+});
+
+test('protected branches: a squad without them, or with an empty list, passes no --env (#3746)', () => {
+  for (const s of [wsSquad, { ...wsSquad, protected: [] }]) {
+    const { f, launch } = launchFour(s);
+    assert.ok(!('env' in launch('demo-B1@macbook')));
+    assert.ok(f.calls.every((c) => !c.args.includes('--env')));
+  }
+});
+
+test('squad up: the saved squad\'s protected list reaches every pane it makes (#3746)', async () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'agent' && c.args[1] === 'list') return { status: 0, stdout: '{"agents":[]}', stderr: '' };
+    if (c.args[0] === 'agent' && c.args[1] === 'get') return GONE;
+    if (c.args[0] === 'tab' || c.args[1] === 'split') return paneOut('p1');
+  });
+  const out = await squadUp('demo', false, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'staging'] } : []), f.run);
+  const made = f.calls.filter(paneMaker);
+  assert.ok(made.length >= 2 && made.some((c) => c.args[1] === 'split'), out);
+  for (const c of made) assert.deepEqual(c.args.slice(-2), ENV, c.args.join(' '));
+});

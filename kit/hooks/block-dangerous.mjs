@@ -65,11 +65,58 @@ export function check(command) {
   return PATTERNS.find(([, re]) => re.test(text))?.[0] ?? null;
 }
 
+// Protected branches (#3746): a squad session's pane carries CB_PROTECTED_BRANCHES (cb squad up), and a git push whose
+// destination is one of them is blocked. Unset or empty: no check at all.
+const GIT_OPT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']); // git -C <path> push
+const PUSH_OPT_ARG = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']); // git push -o ci.skip ...
+// a list entry with * is a glob: * is any run of characters, / included; the rest is literal; the whole name must match
+const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const globRe = (e) => new RegExp(`^${e.split('*').map(literal).join('.*')}$`);
+
+// The protected branch a git push in cmd writes to, or null. Message text is ignored (stripMessages); a git ... push
+// anywhere in a segment counts, like the patterns above, so it fails closed (echo git push origin development blocks).
+export function protectedPush(cmd, list) {
+  if (!list.length) return null;
+  const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
+  for (const seg of stripMessages(String(cmd ?? '')).split(/[;&|\n]/)) {
+    // words as the shell hands them on: quotes and escapes gone ("devel"opment is development), ( ) { } ` break words
+    const w = seg.split(/[\s(){}`]+/).map((x) => x.replace(/["'\\]/g, '')).filter(Boolean);
+    for (let i = 0; i < w.length; i++) {
+      if (!/(?:^|\/)git(?:\.exe)?$/.test(w[i])) continue;
+      let j = i + 1;
+      while (j < w.length && w[j].startsWith('-')) j += GIT_OPT_ARG.has(w[j]) ? 2 : 1;
+      if (w[j] !== 'push') continue;
+      const words = [];
+      let del = false;
+      for (j++; j < w.length; j++) {
+        const x = w[j];
+        if (/^\d*[<>]/.test(x)) { if (/^\d*[<>]+$/.test(x)) j++; continue; } // a redirection, and its file when apart
+        if (x === '--delete' || /^-\w*d\w*$/.test(x)) del = true;
+        else if (x.startsWith('-')) { if (PUSH_OPT_ARG.has(x)) j++; }
+        else words.push(x);
+      }
+      // the first word is the remote; each refspec's destination: dst of src:dst (:dst too), a bare src itself, and
+      // under --delete the word as given; without a leading + or refs/heads/
+      for (const r of words.slice(1)) {
+        const s = r.replace(/^\+/, '');
+        const dst = (del || !s.includes(':') ? s : s.slice(s.lastIndexOf(':') + 1)).replace(/^refs\/heads\//, '');
+        if (hit(dst)) return dst;
+      }
+    }
+  }
+  return null;
+}
+
 // realpath: a symlinked or junction install must still run as the hook (import.meta.url is the real path).
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   let reason = null;
   try {
-    reason = check(JSON.parse(readFileSync(0, 'utf8'))?.tool_input?.command);
+    const command = JSON.parse(readFileSync(0, 'utf8'))?.tool_input?.command;
+    reason = check(command);
+    // only adds a block: a command already blocked keeps its reason
+    const list = (process.env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const branch = reason || !list.length ? null : protectedPush(command, list);
+    if (branch) reason = `git push to protected branch ${branch}`;
   } catch {} // bad or empty stdin: allow, never block everything
   process.stdout.write(JSON.stringify(reason ? { decision: 'block', reason: `Blocked dangerous command: ${reason}` } : {}));
 }

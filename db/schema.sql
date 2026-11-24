@@ -4489,8 +4489,20 @@ begin
      or jsonb_typeof(squad->'roles') is distinct from 'object' then
     raise exception 'squad needs machines and roles objects';
   end if;
-  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise','repos')) then
-    raise exception 'squad has an unknown key: only machines, roles, areas and supervise (and repos, for a project of several repos)';
+  if exists (select 1 from jsonb_object_keys(squad) k where k not in ('machines','roles','areas','supervise','repos','protected')) then
+    raise exception 'squad has an unknown key: only machines, roles, areas and supervise (and repos, for a project of several repos; protected, the branches no session may push to)';
+  end if;
+  -- protected (#3746): branch names or * globs the push hook fences (CB_PROTECTED_BRANCHES, comma-joined: no commas)
+  if squad ? 'protected' then
+    -- a non-array gets the same refusal (c 31). An if, not OR: jsonb_array_length errors on a non-array, and SQL
+    -- does not promise OR's order
+    if jsonb_typeof(squad->'protected') is distinct from 'array' then c := 31; else c := jsonb_array_length(squad->'protected'); end if;
+    if c > 30 then raise exception 'protected: give a list of at most 30 branch names or globs, like ["development", "releases/*"]'; end if;
+    for ar in select jsonb_array_elements(squad->'protected') loop
+      if jsonb_typeof(ar) is distinct from 'string' or length(ar #>> '{}') > 100 or (ar #>> '{}') !~ '^[A-Za-z0-9._/*][A-Za-z0-9._/*-]*$' then
+        raise exception 'protected: % is not a branch name or glob: give names like "development" or "releases/*" (letters, digits, . _ / * -, at most 100 characters, not starting with -)', ar;
+      end if;
+    end loop;
   end if;
   -- "repos": null is a mistake, not "no repos": refused here, before a machine's repo is judged against it
   if squad ? 'repos' and jsonb_typeof(squad->'repos') is distinct from 'object' then
@@ -4666,7 +4678,8 @@ begin
   if nm is not null then raise exception 'repo % still has open work (%): finish or move those cards first', nm, busy; end if;
   ns :=jsonb_build_object('machines', squad->'machines', 'roles', roles, 'areas', areas)
         || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
-        || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end;
+        || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end
+        || case when squad ? 'protected' then jsonb_build_object('protected', squad->'protected') else '{}'::jsonb end;
   update cb.projects pr set squad = ns where pr.slug = p;
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
