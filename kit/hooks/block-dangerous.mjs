@@ -62,7 +62,62 @@ const PATTERNS = [
 // Returns the name of the matched pattern, or null when the command is fine.
 export function check(command) {
   const text = stripMessages(String(command ?? ''));
-  return PATTERNS.find(([, re]) => re.test(text))?.[0] ?? null;
+  return PATTERNS.find(([, re]) => re.test(text))?.[0] ?? (killByName(text) ? KILL_BY_NAME : null);
+}
+
+// Kill by process name (#3809): a name stops every process that has it, other sessions' too. On 24 Nov one session's
+// Get-Process node | Stop-Process killed the PC's job runner, its supervisor and every session's relay, twice.
+const KILL_BY_NAME = "kill by process name: it stops every process with that name on this machine, other sessions' too (node: the board runner, supervisor and relays). Stop only yours: by its PID (Stop-Process -Id <pid>, taskkill /PID <pid>, kill <pid>; note the PID when you start it: Start-Process -PassThru, or $! in bash) or by the port it listens on (Get-NetTCPConnection -LocalPort <port> | ForEach-Object { Stop-Process -Id $_.OwningProcess }, or kill $(lsof -t -i :<port>))";
+// A statement ends at ; & && || newline outside quotes; its stages end at a single |. 2>&1 ends neither.
+const STATEMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[<>]&|\|(?!\|)|[^;&|\n"'\\])+`, 'g');
+const STAGE = new RegExp(String.raw`(?:${QUOTED}|\\.|[<>]&|[^|"'\\])+`, 'g');
+// a command word as a name: no quotes, no path, lower case, no .exe (C:\Windows\System32\taskkill.exe is taskkill)
+const cmdName = (raw) => raw.replace(/["']/g, '').split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '');
+const OTHER_TOOL = new Set(['docker', 'podman', 'nerdctl', 'kubectl', 'compose', 'pm2']); // docker ps, docker kill
+const PS_BEFORE = new Set(['sudo', '$', 'xargs', 'exec', 'command', 'nohup', 'time', 'env']); // ps as the command
+const KILL_WORDS = new Set(['stop-process', 'spps', 'kill', 'taskkill', 'killall', 'pkill', 'get-process', 'gps', 'ps', 'pgrep', 'pidof', 'tasklist']);
+// pkill / pgrep narrowed to one process: a pid file (-F), or -f with a pattern holding a path or a file extension
+// (mock_gw.js, scripts/x): -f node, or node.*, still matches every node
+function narrow(args) {
+  const end = args.findIndex((a) => /^\d*[<>&]/.test(a));
+  const a = end < 0 ? args : args.slice(0, end);
+  if (a.includes('-F') || a.includes('--pidfile')) return true;
+  const pattern = a.filter((x) => !x.startsWith('-')).pop() ?? '';
+  return a.some((x) => x === '--full' || /^-[a-z\d]*f[a-z\d]*$/.test(x)) && /[\\/]|\.[a-z]/i.test(pattern);
+}
+
+// Fails closed like the patterns: a command word anywhere in a stage counts, and a quoted command (powershell "...",
+// ssh host '...') is read as a command too. Blocks a kill that names the image (Stop-Process -Name, taskkill /IM,
+// killall, pkill <name>), and a by-name lookup feeding a stop in the same statement (Get-Process node | Stop-Process,
+// kill $(pgrep node)); Get-Process -Id <pid> is not a by-name lookup.
+function killByName(cmd) {
+  const text = stripMessages(String(cmd)).replace(/\\\r?\n/g, ' ').replace(/`/g, ' ');
+  for (const statement of text.match(STATEMENT) ?? []) {
+    let lookup = false, stop = false;
+    for (const stage of statement.match(STAGE) ?? []) {
+      const raw = stage.match(WORD) ?? [];
+      const w = raw.map(unquote);
+      for (let i = 0; i < w.length; i++) {
+        if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && killByName(w[i])) return true;
+      }
+      const name = raw.map(cmdName);
+      for (let i = 0; i < w.length; i++) {
+        const n = name[i];
+        if (!KILL_WORDS.has(n) && !n.endsWith('.kill') && !n.includes('getprocessesbyname')) continue; // keeps it linear
+        const rest = w.slice(i + 1), prev = name[i - 1];
+        if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
+        if (n === 'kill' && rest.some((x) => /^-(?:name|processname)(?::|$)/i.test(x))) return true;
+        if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x) || (/^(?:\/\/?|-)fi$/i.test(x) && /imagename/i.test(rest[k + 1] ?? '')))) return true;
+        if (n === 'killall' || (n === 'pkill' && !narrow(rest))) return true;
+        const byId = rest.some((x) => /^-id(?::|$)/i.test(x));
+        if (((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
+          || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist' || n.includes('getprocessesbyname')) lookup = true;
+        if (n === 'stop-process' || n === 'spps' || n === 'taskkill' || n.endsWith('.kill') || (n === 'kill' && !OTHER_TOOL.has(prev))) stop = true;
+      }
+    }
+    if (lookup && stop) return true;
+  }
+  return false;
 }
 
 // Protected branches (#3746): a squad session's pane carries CB_PROTECTED_BRANCHES (cb squad up), and a git push whose

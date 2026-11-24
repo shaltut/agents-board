@@ -63,7 +63,7 @@ Then the workers, right away, because their `cb` must match the schema:
 - **The dangerous-commands hook**, when the release changed `kit/hooks/block-dangerous.mjs`: each machine runs its
   own installed copy, not the checkout's. With Ahmed's yes, copy `kit/hooks/block-dangerous.mjs` to
   `~/.claude/hooks/block-dangerous.mjs` on the PC and on the Mac (from `~/Work/claude-board`, after the tar step), then
-  run the three checks in [Installing the dangerous-commands hook](#installing-the-dangerous-commands-hook-on-a-machine).
+  run the four checks in [Installing the dangerous-commands hook](#installing-the-dangerous-commands-hook-on-a-machine).
 
 If the schema change drops or renames a function the old CLI calls, a worker's `cb` fails until it is updated: that
 is the window to keep short.
@@ -78,7 +78,8 @@ Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on
 
 1. Copy the file: `kit/hooks/block-dangerous.mjs` to `~/.claude/hooks/block-dangerous.mjs`.
 2. In `~/.claude/settings.json`, change the PreToolUse Bash hook command from
-   `bash ~/.claude/hooks/block-dangerous-commands.sh` to `node ~/.claude/hooks/block-dangerous.mjs`.
+   `bash ~/.claude/hooks/block-dangerous-commands.sh` to `node ~/.claude/hooks/block-dangerous.mjs`. On Windows, set
+   that entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
 3. Keep the old `.sh` file in place; it is the way back.
 4. Check it:
    `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`, and
@@ -87,7 +88,11 @@ Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on
    `echo '{"tool_input":{"command":"git push origin development"}}' | CB_PROTECTED_BRANCHES=development node ~/.claude/hooks/block-dangerous.mjs`
    prints the block JSON
    (`{"decision":"block","reason":"Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it"}`).
-   An old copy prints `{}` there: the fence is missing.
+   An old copy prints `{}` there: the fence is missing. And, the kill-by-name rule (#3809),
+   `echo '{"tool_input":{"command":"taskkill /F /IM node.exe"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints
+   the block JSON with a reason starting `Blocked dangerous command: kill by process name`; an old copy prints `{}`.
+   A Claude session cannot run these four lines as typed (the installed hook blocks the strings in them): it runs
+   them from a small script that builds the commands.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
    treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
    command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
