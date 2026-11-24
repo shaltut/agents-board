@@ -305,8 +305,8 @@ denied by the role permission files. Card #3746.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
   by `cb squad up` or the supervisor).
 - A lead started by hand (not by `cb squad up`) never gets the variable that way: squad up skips a lead-role session
-  that is live, or was seen in the last day, in the project (its `skip lead:` line names it), and the supervisor never
-  starts it. Close it and restart it by hand in a pane that carries the variable, quoted so no shell expands the `*`
+  of the project (a live one with no line; one seen in the last day but not live is named in a `skip lead:` line),
+  and the supervisor never starts a lead. Close it and restart it by hand in a pane that carries the variable, quoted so no shell expands the `*`
   (zsh refuses an unmatched glob):
   - a new herdr tab: `herdr tab create --cwd <repo> --label <name> --env 'CB_PROTECTED_BRANCHES=development,releases/*'`
     (`herdr --machine <label> tab create ...` on another machine), then start `claude` in that pane;
