@@ -2,7 +2,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -560,4 +560,39 @@ test('slot clones per repo', async () => {
   assert.equal((await one(900012, 'flat'))?.state, 'passed');
   assert.equal((await one(900013, 'qhs', 'bot'))?.summary, 'error: bad job row: no repo bot for qhs on this PC');
   assert.equal((await one(900014, 'qhs'))?.summary, 'error: bad job row: no repo main for qhs on this PC');
+});
+
+// #3763: git clean keeps node_modules (the install) and so every build cache inside it. tsc's tsbuildinfo there
+// described a dist the clean had just wiped, and the next build emitted nothing. The slot reset drops node_modules/.cache
+// beside each tracked package.json; the install itself stays.
+test('a slot reset drops each package\'s node_modules/.cache, keeps the install', async () => {
+  git('checkout', '-q', '-b', 'caches', 'main');
+  for (const d of ['a', 'b', 'c']) mkdirSync(join(WORK, 'pkg', d), { recursive: true });
+  const C = commit('packages', { 'package.json': '{"name":"root"}\n', 'pkg/a/package.json': '{"name":"a"}\n', 'pkg/b/package.json': '{"name":"b"}\n',
+    'pkg/c/package.json': '{"name":"c"}\n' });
+  git('push', '-q', 'origin', 'caches');
+  git('checkout', '-q', 'main');
+  assert.equal((await direct('caches', ORIGIN, 900030, C))?.state, 'passed');
+  const slot = join(TMP, 'direct', 'caches-1');
+  const plant = (rel: string) => { mkdirSync(join(slot, rel, '..'), { recursive: true }); writeFileSync(join(slot, rel), '1'); };
+  for (const f of ['node_modules/.cache/tsbuildinfo', 'pkg/a/node_modules/.cache/tsbuildinfo', 'node_modules/keep.txt', 'pkg/a/node_modules/dep/index.js', 'other/node_modules/.cache/x'])
+    plant(f);
+  // a node_modules a job linked outside the slot: what it points at is never touched
+  const outside = join(TMP, 'outside-nm');
+  mkdirSync(join(outside, '.cache'), { recursive: true }); writeFileSync(join(outside, '.cache', 'x'), '1');
+  symlinkSync(outside, join(slot, 'pkg', 'b', 'node_modules'), 'junction');
+  // a tracked package folder the job swapped for a link to a copy outside the slot: the copy's cache stays too
+  const copy = join(TMP, 'outside-pkg');
+  mkdirSync(join(copy, 'node_modules', '.cache'), { recursive: true });
+  writeFileSync(join(copy, 'package.json'), '{"name":"c"}\n'); writeFileSync(join(copy, 'node_modules', '.cache', 'x'), '1');
+  rmSync(join(slot, 'pkg', 'c'), { recursive: true, force: true });
+  symlinkSync(copy, join(slot, 'pkg', 'c'), 'junction');
+  assert.equal((await direct('caches', ORIGIN, 900031, C))?.state, 'passed');
+  assert.ok(existsSync(join(outside, '.cache', 'x')), 'a linked node_modules is skipped');
+  assert.ok(existsSync(join(copy, 'node_modules', '.cache', 'x')), 'a linked package folder is skipped');
+  assert.ok(existsSync(join(slot, 'other', 'node_modules', '.cache', 'x')), 'a node_modules with no tracked package.json beside it is not touched');
+  assert.ok(!existsSync(join(slot, 'node_modules', '.cache')), 'the root cache is gone');
+  assert.ok(!existsSync(join(slot, 'pkg', 'a', 'node_modules', '.cache')), 'a package cache is gone');
+  assert.ok(existsSync(join(slot, 'node_modules', 'keep.txt')) && existsSync(join(slot, 'pkg', 'a', 'node_modules', 'dep', 'index.js')), 'the install stays');
+  assert.doesNotMatch(dlog(900031), /^installed$/m, 'no reinstall');
 });

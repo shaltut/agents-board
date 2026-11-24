@@ -2,10 +2,10 @@
 // the recipe's steps and finally steps, and build the board summary. The daemon (cli/runner.ts) claims and finishes.
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
-  closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync, writeSync,
+  closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { uptime } from 'node:os';
-import { basename, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
 
@@ -306,6 +306,21 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     const r = await git(args);
     if (stop.aborted) return null;
     if (r.code !== 0) throw new Error(`git ${args[0]} exited ${r.code}`);
+  }
+  // the clean keeps node_modules (the install), and with it every build cache inside: tsc's tsbuildinfo there describes a
+  // dist the clean just wiped, so the next build would emit nothing (#3763). Drop node_modules/.cache beside each tracked
+  // package.json, only when that node_modules really sits inside the slot: a link anywhere on its path (a job may plant
+  // one pointing outside the slot) is skipped
+  const pk = await git(['ls-files', '-z', '--', 'package.json', '*/package.json'], true);
+  if (stop.aborted) return null;
+  if (pk.code !== 0) throw new Error(`git ls-files exited ${pk.code}`);
+  const root = realpathSync.native(dir) + sep;
+  for (const f of pk.out.split('\0').filter(Boolean)) {
+    const nm = join(dir, dirname(f), 'node_modules');
+    let real: string;
+    try { real = realpathSync.native(nm); } catch { continue; } // no install there
+    if (real !== join(root, dirname(f), 'node_modules')) continue;
+    rmSync(join(nm, '.cache'), { recursive: true, force: true, maxRetries: 3 });
   }
 
   // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
