@@ -415,9 +415,14 @@ test('prRef: an Azure DevOps link is never looked up on GitHub, even with GITHUB
   try {
     assert.equal(prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
     assert.equal(prRef('dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
-    // GitHub links resolve as before: a full URL, and a bare number through GITHUB_REPO_QHS
+    // the clone URL's userinfo form, the old visualstudio.com host, any other site: none is a PR of GITHUB_REPO_QHS
+    assert.equal(prRef('https://o@dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('https://o.visualstudio.com/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('https://gitlab.example.org/o/r/-/merge_requests/7', 'qhs'), null);
+    // GitHub links resolve as before: a full URL, and a bare number (with or without # and a trailing slash) through GITHUB_REPO_QHS
     assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'qhs'), { repo: 'acme/app', n: '9' });
     assert.deepEqual(prRef('#15', 'qhs'), { repo: 'o/r', n: '15' });
+    assert.deepEqual(prRef('15/', 'qhs'), { repo: 'o/r', n: '15' });
   } finally {
     if (had === undefined) delete process.env.GITHUB_REPO_QHS; else process.env.GITHUB_REPO_QHS = had;
   }

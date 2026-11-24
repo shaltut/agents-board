@@ -30,7 +30,7 @@ Ahmed is often away: you never wait on him.
 - The card names no repo yet: fix it with `cb edit <id> --repo <repo,repo>`. A card at review takes one repo (`cb edit <id> --repo <repo>`); several repos only at build.
 
 ## A GO for an older head
-- There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid`. If they differ,
+- There is no fail path from merge. Compare the GO's SHA with `gh pr view <pr> --json headRefOid` (an Azure DevOps PR: below). If they differ,
   do not merge: `cb tell <reviewer> "re-read the new head <sha> and post a fresh GO"`.
 
 ## On Azure DevOps (a dev.azure.com PR link)

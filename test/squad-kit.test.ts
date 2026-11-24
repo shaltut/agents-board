@@ -300,5 +300,6 @@ test('role texts name the repo rules', () => {
   for (const r of ['builder', 'reviewer', 'lead']) has(r, '## On Azure DevOps (a dev.azure.com PR link)');
   has('builder', 'az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>');
   has('reviewer', 'az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798');
+  has('reviewer', 'git rev-parse pr/<n>^2');
   has('lead', 'az repos pr update --id <n> --status completed');
 });
