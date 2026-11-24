@@ -521,6 +521,9 @@ begin
     if old.stage = 'approval' then
       update cb.questions q set status = 'withdrawn' where q.approval_for = old.id and q.status in ('open', 'sent_back', 'dormant');
     end if;
+    -- who built and reviewed each part stays on the card (build:<repo>, review:<repo>: keys no rule reads)
+    new.crew := new.crew || coalesce((select jsonb_object_agg(c.key || ':' || p.repo, c.value)
+                                        from cb.task_parts p cross join lateral jsonb_each(p.crew) c where p.task_id = old.id), '{}');
     -- a part's holder is told: the card was never theirs, so its close reaches them no other way
     insert into cb.events (actor, project, task_id, kind, summary, data)
     select 'board', new.project, old.id, 'message', format('#%s is %s: your part %s is closed', old.id, new.status, p.repo),
@@ -854,13 +857,20 @@ returns setof cb.tasks language plpgsql as $$
 #variable_conflict use_variable
 declare a text := coalesce(nullif(trim(actor), ''), nullif(current_setting('cb.actor', true), ''), 'unknown');
 begin
-  return query select t.* from cb.tasks t
-   where (t.assignee = a
-          and (t.status not in ('done', 'cancelled') or t.updated_at > now() - interval '24 hours'))
-      or (t.assignee is distinct from a and exists (
-            select 1 from cb.events e where e.task_id = t.id and e.data -> 'assignee' ->> 'from' = a
-               and e.at > now() - interval '24 hours'))
-   order by t.status, t.priority, t.rank;
+  -- a card whose part a holds (#3703) shows as a's, at the part's stage and status (as cb.resume shows it)
+  return query select (w.v).* from (
+    select case when h.repo is null then t
+                else jsonb_populate_record(t, jsonb_build_object('status', h.status, 'stage', h.stage, 'assignee', a)) end as v
+      from cb.tasks t
+      left join lateral (select x.repo, x.stage, x.status from cb._held_parts() x where x.task_id = t.id and x.assignee = a
+                          order by x.repo limit 1) h on true
+     where (t.assignee = a
+            and (t.status not in ('done', 'cancelled') or t.updated_at > now() - interval '24 hours'))
+        or (t.assignee is distinct from a and exists (
+              select 1 from cb.events e where e.task_id = t.id and e.data -> 'assignee' ->> 'from' = a
+                 and e.at > now() - interval '24 hours'))
+        or h.repo is not null) w
+   order by (w.v).status, (w.v).priority, (w.v).rank;
 end $$;
 
 -- ---------------------------------------------------------------- questions
@@ -1668,9 +1678,16 @@ begin
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
-      'doing', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) order by t.updated_at desc)
-                           from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)), '[]'),
-      'queued', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'next' and (p is null or t.project = p)),
+      'doing', coalesce((select jsonb_agg(d.j order by d.at desc) from (
+                           select jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) as j, t.updated_at as at
+                             from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)
+                           union all  -- a part in work (#3703), named by its repo
+                           select jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', h.status, 'part', h.repo), t.updated_at
+                             from cb._held_parts() h join cb.tasks t on t.id = h.task_id
+                            where h.assignee = a.actor and h.status = 'in_progress' and (p is null or t.project = p)) d), '[]'),
+      'queued', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'next' and (p is null or t.project = p))
+                + (select count(*) from cb._held_parts() h join cb.tasks t on t.id = h.task_id
+                    where h.assignee = a.actor and h.status = 'next' and (p is null or t.project = p)),
       'done_24h', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'done' and t.done_at > now() - interval '24 hours' and (p is null or t.project = p)),
       'open_questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open' and (p is null or q.project = p)),
       'last', (select jsonb_build_object('at', e.at, 'kind', e.kind, 'summary', e.summary, 'task_id', e.task_id)
@@ -1679,6 +1696,7 @@ begin
       select s2.actor from cb.sessions s2 where p is null or s2.project = p
       union select e.actor from cb.events e where e.at > now() - interval '7 days' and (p is null or e.project = p)
       union select t.assignee from cb.tasks t where t.assignee is not null and t.status not in ('done', 'cancelled') and (p is null or t.project = p)
+      union select h.assignee from cb._held_parts() h join cb.tasks t on t.id = h.task_id where p is null or t.project = p
     ) a
     left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
     where a.actor is not null and a.actor not in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner') and a.actor not in (select u.name from cb.users u)
@@ -4170,7 +4188,13 @@ begin
       from cb.tasks t
      where t.project = p and t.stage in ('build', 'review') and t.status not in ('done', 'cancelled')
        and cardinality(coalesce(t.repos, '{}')) = 0 and cb._multi_repo(p)
-       and not exists (select 1 from cb.task_parts tp where tp.task_id = t.id))
+       and not exists (select 1 from cb.task_parts tp where tp.task_id = t.id)
+    union all
+    -- 14: a parts card at build or review, its parts in plain words (#3703)
+    select 14, t.priority = 'P0', t.id, format('#%s %s', t.id, cb._parts_words(t.id))
+      from cb.tasks t
+     where t.project = p and t.stage in ('build', 'review') and t.status not in ('done', 'cancelled')
+       and exists (select 1 from cb.task_parts tp where tp.task_id = t.id))
   -- at most 5 lines per group (the last says +N more), then 19 lines in all with a closing "+N more" line: no group buries another
   , capped as (
     select x.grp, x.p0, x.id,
@@ -4259,7 +4283,8 @@ create function cb._finish_line(t cb.tasks, a text default null) returns text la
       when 'review' then format('cb pass %s "<verdict>" --repo %s or cb fail %s "<what is wrong>" --repo %s', t.id, h.repo, t.id, h.repo) end
     from cb._held_parts() h where h.task_id = t.id and h.assignee = a and cb._pipeline(t.project) order by h.repo limit 1),
   case when not cb._pipeline(t.project) then format('cb done %s "<summary>"', t.id) else case t.stage
-    when 'design' then format('cb page set %s -f page.md, then cb pass %s "<summary>"', t.id, t.id)
+    when 'design' then format('cb page set %s -f page.md, %sthen cb pass %s "<summary>"', t.id,
+      case when t.repos is null and cb._multi_repo(t.project) then format('cb edit %s --repo <repo,repo>, ', t.id) else '' end, t.id)
     when 'build' then format('cb pass %s "<summary>" --pr <url>', t.id)
     when 'review' then format('cb pass %s "<verdict>" or cb fail %s "<what is wrong>"', t.id, t.id)
     when 'merge' then case when exists (select 1 from cb.task_parts p where p.task_id = t.id)

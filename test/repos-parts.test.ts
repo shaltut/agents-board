@@ -534,3 +534,15 @@ test('one-repo cards work exactly as today', async () => {
   const plain = Number((await sql`select cb.task_add(project => 'solo', title => 'p', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`)[0].id);
   assert.deepEqual((await claim(sql, 'solo-B1@mac', 'solo')).concat(await claim(sql, 'solo-B1@mac', 'solo')).sort(), [tagged, plain].sort());
 });
+
+test('a parts card at done keeps who built and reviewed each part', async () => {
+  const sql = await setup();
+  const id = await atMerge(sql);
+  await pass(sql, id, 'orch@pc', 'merged', { commit: 'abc1234' }, 'api');
+  await pass(sql, id, 'orch@pc', 'merged', { commit: 'def5678' }, 'dashboard');
+  assert.deepEqual(await claim(sql, 'qhs-Q1@mac'), [id]);
+  assert.equal((await pass(sql, id, 'qhs-Q1@mac', 'checked'))[0].r, 'done');
+  assert.deepEqual((await sql`select crew from cb.tasks where id = ${id}`)[0].crew, {
+    design: 'qhs-O1@pc', 'build:api': 'qhs-B1@mac', 'review:api': 'qhs-R1@mac',
+    'build:dashboard': 'qhs-dashboard-B1@mac', 'review:dashboard': 'qhs-dashboard-R1@mac' });
+});

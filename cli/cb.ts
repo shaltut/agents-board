@@ -143,6 +143,12 @@ async function addImages(tx: any, id: unknown, pics: ReturnType<typeof images>, 
                                           replace_all => ${replace && n === 0}, actor => ${actor})`;
 }
 
+/** cb.mine rows, a part holder's (#3703) showing the part it holds: [part api: in_progress], as cb next does. */
+async function partShown(rows: any[], who: string) {
+  const held = new Map((await sql`select task_id, repo from cb._held_parts() where assignee = ${who}`).map((h: any) => [Number(h.task_id), h.repo]));
+  return rows.map((t) => held.has(Number(t.id)) ? { ...t, status: `part ${held.get(Number(t.id))}: ${t.status}` } : t);
+}
+
 const line = (t: any) =>
   `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
 
@@ -265,7 +271,7 @@ async function start() {
   const asks = (await callFn('asks_list', { to_actor: actor, include_closed: false }) as any[]).filter((a) => a.awaiting);
   if (asks.length) out.push('AHMED ASKS YOU', ...asks.map((a) =>
     `  A${a.id}${a.late ? ` LATE ${dur((Date.now() - +new Date(a.delivered_at)) / 60000)}` : ''}${a.from_terminal ? ' (asked in your terminal)' : ''}: ${cut(flat(a.body))}`));
-  out.push(`YOUR TASKS (cb mine)`, ...(mine.length ? mine.map((t: any) => '  ' + line(t)) : ['  none']),
+  out.push(`YOUR TASKS (cb mine)`, ...(mine.length ? (await partShown(mine, actor)).map((t: any) => '  ' + line(t)) : ['  none']),
     `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line({ ...t, status: '' })) : ['  empty']),
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
@@ -276,7 +282,8 @@ async function start() {
   if (!doing) out.push(`  already working on something not listed? register it first: cb add ${project ?? '<project>'} "<title>" -s in_progress -b "<context>"`);
   if (doing) {
     // a staged card in a pipeline project finishes with its stage's command, never cb done
-    const [st] = await sql`select cb._finish_line(t) as finish from cb.tasks t where t.id = ${doing.id} and t.stage is not null and cb._pipeline(t.project)`;
+    // a part holder (#3703): its part's line
+    const [st] = await sql`select cb._finish_line(t, ${actor}) as finish from cb.tasks t where t.id = ${doing.id} and t.stage is not null and cb._pipeline(t.project)`;
     out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
@@ -538,7 +545,7 @@ async function run(): Promise<unknown> {
         const head = `${r.actor}${r.role ? ` (${r.role})` : ''} ${r.live ? 'relay live' : 'no relay'}${r.pane ? ` · ${r.pane}` : ''} · idle ${dur(idle(r))}` +
           ` · ${r.queued} queued · ${r.done_24h} done 24h${r.open_questions ? ` · ${r.open_questions} asking Ahmed` : ''}` +
           (!r.live && r.doing.length && idle(r) > 60 ? '  ⚠ holds work, gone quiet' : '');
-        return [head, ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.status}]`) : ['  (nothing in progress)'])].join('\n');
+        return [head, ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.part ? `part ${t.part}: ` : ''}${t.status}]`) : ['  (nothing in progress)'])].join('\n');
       });
       const quiet = rows.length - open.length;
       return { out: (out.join('\n') || 'no sessions') + (quiet ? `\n(${quiet} quiet sessions hidden: no relay, nothing open)` : ''), json: rows };
@@ -594,10 +601,11 @@ async function run(): Promise<unknown> {
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
-      const [{ project, all, stage }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage from cb.tasks t where t.id = ${id}`;
+      const [{ project, all, stage, multi }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
+        t.repos is null and cb._multi_repo(t.project) as multi from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
       const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
-      if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
+      if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build${multi ? ' --repo <repo,repo>' : ''} --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
         : all.length ? `you triage it: cb edit ${id} --assignee <worker>` : `no session works in ${project} yet: it waits in Next`;
       return { out: `#${id} bug filed in ${project}; ${who}`, json: { id, project, told } };
@@ -768,14 +776,15 @@ ${body}`, json: pg };
       const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit 10`;
       const goals = await sql`select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = ${n} and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank`;
-      return { out: [line(t), ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
+      const [{ parts }] = await sql`select cb._parts_words(${n}) as parts`; // a parts card (#3703): its parts in plain words
+      return { out: [line(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
         t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first)`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
         .filter(Boolean).join('\n'), json: { ...t, notes } };
     }
     case 'mine': {
       const rows: any = await callFn('mine', { actor });
-      return { out: rows.length ? rows.map(line).join('\n') : 'no tasks assigned to ' + actor, json: rows };
+      return { out: rows.length ? (await partShown(rows, actor)).map(line).join('\n') : 'no tasks assigned to ' + actor, json: rows };
     }
     case 'ask': {
       need(2, 'ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>"');

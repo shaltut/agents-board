@@ -336,3 +336,54 @@ test('a parts card is not handed to one session', async () => {
   await edit({ assignee: null });
   assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, null);
 });
+
+test('a part holder sees its part in cb start, cb mine and cb sessions', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, D);
+  assert.deepEqual((await sql`select * from cb.mine(${D})`).map((r: any) => [Number(r.id), r.status, r.stage, r.assignee]), [[id, 'in_progress', 'build', D]]);
+  assert.equal(cb(['mine'], D).out, `#${id} [part dashboard: in_progress] P2 feature: c (${D}) · qhs`);
+  const s = cb(['start'], D);
+  assert.ok(s.out.includes(`  #${id} [part dashboard: in_progress] P2 feature: c (${D}) · qhs`), s.out);
+  assert.ok(s.out.includes(`  continue #${id} c: cb log ${id} "<finding>" as you go, cb pass ${id} "<summary>" --pr <url> --repo dashboard, when finished`), s.out);
+  const ss = cb(['sessions', 'qhs'], 'orch@pc');
+  assert.ok(ss.out.includes(`  #${id} c [part dashboard: in_progress]`), ss.out);
+  const row = ((await sql`select cb.sessions_overview('qhs') as r`)[0].r as any[]).find((r) => r.actor === D);
+  assert.deepEqual(row.doing, [{ id, title: 'c', priority: 'P2', status: 'in_progress', part: 'dashboard' }]);
+  // holding nothing: nothing, as before
+  assert.equal((await sql`select count(*)::int n from cb.mine('qhs-B1@mac')`)[0].n, 0);
+  assert.equal(cb(['mine'], 'qhs-B1@mac').out, 'no tasks assigned to qhs-B1@mac');
+});
+
+test('cb show and the digest show a parts card\'s parts', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, D);
+  const line = 'build: api waits for a builder, dashboard building (qhs-dashboard-B1@mac)';
+  const s = cb(['show', String(id)], 'orch@pc');
+  assert.equal(s.code, 0, s.err);
+  assert.equal(s.out.split('\n')[1], `parts: ${line}`);
+  assert.ok((await digest(sql)).includes(`#${id} ${line}`));
+  // a card with no parts: as before
+  const one = await approved(sql, ['dashboard']);
+  assert.ok(!cb(['show', String(one)], 'orch@pc').out.includes('parts:'));
+  assert.ok(!(await digest(sql)).some((l) => l.startsWith(`#${one} `)));
+});
+
+test('the design line and cb bug name the repos in a project of several', async () => {
+  const sql = await setup();
+  const add = async (repos: string[] | null) =>
+    Number((await sql`select cb.task_add(project => 'qhs', title => 'd', type => 'feature', repos => ${repos ? sql.json(repos) : null}, actor => 'orch@pc') as id`)[0].id);
+  const fin = async (id: number) => (await sql`select cb._finish_line(t) as f from cb.tasks t where t.id = ${id}`)[0].f;
+  const bare = await add(null);
+  assert.equal(await fin(bare), `cb page set ${bare} -f page.md, cb edit ${bare} --repo <repo,repo>, then cb pass ${bare} "<summary>"`);
+  const named = await add(['api']);
+  assert.equal(await fin(named), `cb page set ${named} -f page.md, then cb pass ${named} "<summary>"`);
+  const b = cb(['bug', 'qhs', 'broken', '-b', 'it breaks'], 'orch@pc');
+  assert.equal(b.code, 0, b.err);
+  const n = b.out.match(/^#(\d+)/)![1];
+  assert.equal(b.out, `#${n} starts at design; a small fix can skip it: the lead runs cb stage ${n} build --repo <repo,repo> --why "..."`);
+  const r = cb(['bug', 'qhs', 'broken', '-b', 'it breaks', '--repo', 'api'], 'orch@pc');
+  const m = r.out.match(/^#(\d+)/)![1];
+  assert.equal(r.out, `#${m} starts at design; a small fix can skip it: the lead runs cb stage ${m} build --why "..."`);
+});
