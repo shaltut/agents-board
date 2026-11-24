@@ -362,19 +362,41 @@ test('startOne: a pane still busy after the retries is closed and the launch fai
     if (c.args[0] === 'pane' && c.args[1] === 'split') return paneOut('w4:p2');
     if (c.args[1] === 'start') { starts++; return BUSY; }
   });
-  const r = startOne(wsLaunch('demo-B2@macbook'), f.run, { macbook: { pane: 'w4:p1', panes: 1 } }, () => {});
+  const waits: number[] = [];
+  const r = startOne(wsLaunch('demo-B2@macbook'), f.run, { macbook: { pane: 'w4:p1', panes: 1 } }, (ms) => waits.push(ms));
   assert.ok(!r.ok);
-  assert.ok(starts > 1 && starts <= 10, `tried ${starts} times`);
+  assert.equal(starts, 6);
+  assert.equal(waits.length, 5);
+  assert.ok(waits.reduce((a, b) => a + b, 0) >= 8000, 'about 10 s of waiting in all');
   assert.match(r.line, /agent_pane_busy/);
   assert.deepEqual(f.calls.filter((c) => c.args[1] === 'close').map((c) => c.args[2]), ['w4:p2']);
 });
 
 test('startOne: any other start error is not retried', () => {
   let starts = 0;
+  const waits: number[] = [];
   const f = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('p1');
     if (c.args[1] === 'start') { starts++; return { status: 1, stderr: '{"error":{"code":"model_missing"}}' }; }
   });
-  assert.ok(!startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => { throw new Error('no wait expected'); }).ok);
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, (ms) => waits.push(ms));
+  assert.ok(!r.ok);
   assert.equal(starts, 1);
+  assert.equal(waits.length, 0);
+  assert.match(r.line, /model_missing/);
+});
+
+test('startOne: busy, then a startup dialog: the split is kept as blocked and counts toward its tab', () => {
+  let starts = 0;
+  const f = fake((c) => {
+    if (c.args[0] === 'pane' && c.args[1] === 'split') return paneOut('w4:p2');
+    if (c.args[1] === 'start') return ++starts === 1 ? BUSY : { status: 1, stderr: '{"error":{"code":"agent_not_ready","message":"blocked during startup"}}' };
+  });
+  const tabs = { macbook: { pane: 'w4:p1', panes: 1 } };
+  const r = startOne(wsLaunch('demo-B2@macbook'), f.run, tabs, () => {});
+  assert.ok(r.ok && r.blocked, r.line);
+  assert.equal(r.pane, 'w4:p2');
+  assert.equal(tabs.macbook.panes, 2);
+  assert.ok(!has(f.calls, 'pane', 'close'));
+  assert.ok(!f.calls.some((c) => c.args[1] === 'prompt'));
 });
