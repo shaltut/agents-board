@@ -114,6 +114,18 @@ test('resume lists a card by its part', async () => {
   assert.deepEqual([c.part, c.parts], [null, null]);
 });
 
+test('cb next after a part claim prints the part, not the card\'s Next', async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  const n = cb(['next', 'qhs'], D);
+  assert.equal(n.code, 0, n.err);
+  assert.equal(n.out.split('\n')[0], `#${id} [part dashboard: in_progress] P2 feature: c · qhs`);
+  assert.ok(n.out.includes('  your part: dashboard'), n.out);
+  // a card without parts: its own status, as before
+  const one = await approved(sql, ['dashboard']);
+  assert.equal(cb(['next', 'qhs'], D).out.split('\n')[0], `#${one} [in_progress] P2 feature: c (${D}) · qhs`);
+});
+
 test('a reviewer whose part is ahead of the card resumes at its part\'s stage', async () => {
   const sql = await setup();
   const id = await approved(sql);

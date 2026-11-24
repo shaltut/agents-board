@@ -707,7 +707,9 @@ ${body}`, json: pg };
       if (!rows.length) return { out: 'nothing to claim', json: null };
       const t = rows[0];
       const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
-      return { out: `${line(t)}${t.body ? '\n\n' + t.body : ''}${staged ? '\n\n' + cardBlock(staged, false) : ''}`, json: staged ? { ...t, ...staged } : t };
+      // a part claim (#3703) leaves the card in Next: show the part taken and its status instead
+      const shown = staged?.part ? { ...t, status: `part ${staged.part.repo}: ${staged.status}` } : t;
+      return { out: `${line(shown)}${t.body ? '\n\n' + t.body : ''}${staged ? '\n\n' + cardBlock(staged, false) : ''}`, json: staged ? { ...t, ...staged } : t };
     }
     case 'resume': {
       const r: any = await callFn('resume', { actor });
