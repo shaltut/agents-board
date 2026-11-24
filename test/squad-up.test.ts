@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, startOne, type Runner } from '../cli/squad-up.ts';
 
 const mach = (herdr: string | null, board: string) => ({ herdr, repo: '/Users/me/Work/demo', board });
 const squad = {
@@ -259,4 +259,49 @@ test('no repos: names, folders and prompts exactly as before', () => {
   assert.ok(ls.every((x) => x.repo === 'main'));
   assert.deepEqual(ls.map(({ repo, ...x }) => x), IHOP_LAUNCH);
   assert.deepEqual(w.map((x) => launchFor('ihop', IHOP, x, 'resume').prompt), IHOP_RESUME);
+});
+
+// ---- a machine's herdr workspace (#3719): new tabs open in the squad's workspace, not the focused one ----
+const wsSquad = { ...squad, machines: { ...squad.machines, macbook: { ...mach('macbook', '/Users/me/board'), workspace: 'iHop Squad' } } };
+const wsLaunch = (name: string) => launchFor('demo', wsSquad, wantList('demo', wsSquad).find((w) => w.name === name)!);
+const wsList = (...ws: [string, string][]) => ({ status: 0, stdout: JSON.stringify({ result: { workspaces: ws.map(([workspace_id, label]) => ({ workspace_id, label })) } }), stderr: '' });
+
+test('launchFor carries the machine workspace; none when the squad names none', () => {
+  assert.equal(wsLaunch('demo-B1@macbook').workspace, 'iHop Squad');
+  assert.equal(wsLaunch('orch@shaltoot').workspace, undefined);
+});
+
+test('startOne: the tab opens in the named workspace when herdr has it', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w1', 'Workers'], ['w4', 'iHop Squad']);
+    if (c.args[0] === 'tab') return paneOut('w4:p9');
+  });
+  const r = startOne(wsLaunch('demo-B1@macbook'), f.run, {});
+  assert.ok(r.ok, r.line);
+  const tab = f.calls.find((c) => c.args[0] === 'tab' && c.args[1] === 'create')!;
+  assert.deepEqual(tab.args.slice(2, 4), ['--workspace', 'w4']);
+  assert.ok(f.calls.every((c) => c.m === 'macbook'));
+  assert.ok(f.calls.some((c) => c.args[1] === 'start' && c.args.includes('w4:p9')));
+});
+
+test('startOne: a missing workspace is created with its label, and its first pane takes the session', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w1', 'Workers']);
+    if (c.args[0] === 'workspace' && c.args[1] === 'create')
+      return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7', label: 'iHop Squad' }, tab: { tab_id: 'w7:t1' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
+  });
+  const r = startOne(wsLaunch('demo-B1@macbook'), f.run, {});
+  assert.ok(r.ok, r.line);
+  const ws = f.calls.find((c) => c.args[0] === 'workspace' && c.args[1] === 'create')!;
+  assert.equal(ws.args[ws.args.indexOf('--label') + 1], 'iHop Squad');
+  assert.equal(ws.args[ws.args.indexOf('--cwd') + 1], '/Users/me/Work/demo');
+  assert.ok(!has(f.calls, 'tab', 'create'));
+  assert.ok(f.calls.some((c) => c.args[1] === 'start' && c.args.includes('w7:p1')));
+});
+
+test('startOne: no workspace in the squad keeps today\'s tab in the focused workspace', () => {
+  const f = fake((c) => { if (c.args[0] === 'tab') return paneOut('p1'); });
+  assert.ok(startOne(wsLaunch('orch@shaltoot'), f.run, {}).ok);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'workspace'));
+  assert.ok(!f.calls.find((c) => c.args[0] === 'tab')!.args.includes('--workspace'));
 });

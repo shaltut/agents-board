@@ -4480,8 +4480,13 @@ begin
   for m in select * from jsonb_each(squad->'machines') loop
     if jsonb_typeof(m.value) is distinct from 'object' then raise exception 'machine % must be an object', m.key; end if;
     if rp is not null and m.value ? 'repo' then raise exception 'machine % repo: with repos, each repo lists its own paths', m.key; end if;
-    if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('herdr','repo','board')) then
-      raise exception 'machine % has an unknown key: only herdr, repo and board', m.key;
+    if exists (select 1 from jsonb_object_keys(m.value) k where k not in ('herdr','repo','board','workspace')) then
+      raise exception 'machine % has an unknown key: only herdr, repo, board and workspace', m.key;
+    end if;
+    -- workspace (#3719): the herdr workspace label new sessions open in; passed as one argument, never through a shell
+    if m.value ? 'workspace' and (jsonb_typeof(m.value->'workspace') is distinct from 'string'
+       or length(m.value->>'workspace') not between 1 and 64 or m.value->>'workspace' ~ '[[:cntrl:]]') then
+      raise exception 'machine % workspace must be a herdr workspace label: 1 to 64 characters, no control characters', m.key;
     end if;
     if m.key !~ '^[a-z][a-z0-9-]{0,31}$' then raise exception 'machine % must be a slug: lower-case letters, digits, dashes', m.key; end if;
     if not (m.value ? 'herdr') then raise exception 'machine % needs a herdr key: the herdr machine name, or null for this PC', m.key; end if;

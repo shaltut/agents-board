@@ -145,6 +145,10 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.machines.macbook.repo = '/Users/me/my work'; }), /machine macbook repo must be an absolute path/],
     [mod((s) => { s.machines.macbook.repo = '/x; rm -rf y'; }), /machine macbook repo must be an absolute path/],
     [mod((s) => { s.machines.macbook.board = '/x\ny'; }), /machine macbook board must be an absolute path/],
+    [mod((s) => { s.machines.macbook.workspace = 5; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = ''; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = 'x'.repeat(65); }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = 'a\nb'; }), /machine macbook workspace must be a herdr workspace label/],
     // the Mac cap counts by the herdr label, whatever the machine key
     [mod((s) => { s.machines.mac = { ...s.machines.macbook }; s.roles.builder.machine = 'mac'; s.roles.builder.count = 7; s.roles.owner.machine = 'mac'; }), /macbook would run 9 sessions/],
     [[1, 2] as any, /squad needs machines and roles objects/],
@@ -152,6 +156,14 @@ test('squad_set refuses each invalid squad with the field named', async () => {
   await assert.rejects(() => sql`select cb.squad_set('', ${sql.json(SQUAD)}, 'ahmed')`, /project is required|unknown project/);
   assert.equal((await sql`select count(*)::int as n from cb.events where summary = 'squad updated'`)[0].n, 0);
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re);
+});
+
+test('squad_set keeps a machine workspace label (#3719)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const s = mod((x) => { x.machines.macbook.workspace = 'iHop Squad'; });
+  await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
+  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'iHop Squad');
 });
 
 test('squad_set accepts absolute paths on both OS shapes', async () => {

@@ -3,13 +3,14 @@
 import { spawnSync } from 'node:child_process';
 
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
-type Machine = { herdr: string | null; repo?: string; board: string };
+// machine.workspace: the herdr workspace (its label) new sessions open in; none: herdr's focused one (#3719)
+type Machine = { herdr: string | null; repo?: string; board: string; workspace?: string };
 type Role = { count?: number | Record<string, number>; model: string; machine: string };
 type Repo = { home: boolean; paths: Record<string, string> };
 export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; repos?: Record<string, Repo>;
   areas: (string | { name: string; repo: string })[]; supervise?: boolean };
 export type Want = { name: string; role: string; area?: string; repo: string };
-export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string };
+export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string; workspace?: string };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
 const ORDER = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
@@ -58,7 +59,7 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
   const across = squad.repos && (w.role === 'architect' || w.role === 'qa')
     ? `. Repos: ${Object.entries(repos).filter(([, r]) => r.paths[machine]).map(([k, r]) => `${k} ${r.paths[machine]}`).join(', ')}` : '';
   return {
-    ...w, model: role.model, machine, herdr: mc.herdr, cwd: repos[w.repo]?.paths[machine] ?? '',
+    ...w, model: role.model, machine, herdr: mc.herdr, cwd: repos[w.repo]?.paths[machine] ?? '', ...(mc.workspace ? { workspace: mc.workspace } : {}),
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}${squad.repos ? ` --repo ${w.repo}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
   };
@@ -125,6 +126,12 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   try {
     const t = tabs[l.machine];
     if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
+    else if (l.workspace) {
+      // the squad's workspace by label; missing: made here, and its first pane takes this session
+      const ws = (find(herdr(l.herdr, ['workspace', 'list']), 'workspaces') ?? []).find((w: any) => w.label === l.workspace)?.workspace_id;
+      pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id')
+        : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus']), 'root_pane'), 'pane_id');
+    }
     else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
     let blocked = false;

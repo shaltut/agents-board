@@ -268,6 +268,15 @@ It never:
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
 - frees a card held by a down session, or runs anything heavy itself.
 
+## Squad file: herdr workspace
+
+A machine may name the herdr workspace its squad sessions open in: `"macbook": {"herdr": "macbook", "board": "...",
+"workspace": "iHop Squad"}` (the workspace's label, 1 to 64 characters). `cb squad up` and the supervisor then open each
+new session as a tab there (two per tab, as before), and make the workspace when herdr has none by that label; its first
+pane takes the first session. Without `workspace` a session opens in whichever workspace is focused on that machine.
+Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
+Card #3719.
+
 ## Squad file: several repos
 
 One board project can hold several git repos. QHS is four: `api`, `dashboard`, `app`, `bot`. Add a `repos` key to the
