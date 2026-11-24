@@ -94,7 +94,8 @@ test('tick: stuck work (silent holder, long block, review with no reviewer, some
   assert.match(r.out, /#3 blocked 2h, W9@m: waiting for the DB lock → cb tell W9@m/);
   assert.match(r.out, /#4 in review, no reviewer task \(W2@m\) → cb add demo 'Review #4 \(W2@m\): parser fix' -s next -l review/);
   assert.doesNotMatch(r.out, /#5 in review/);
-  assert.doesNotMatch(r.out, /#8 in review/); // the orchestrator's: waiting on a person, not a code review
+  // the orchestrator's: waiting on a person, not a code review. orch@test has no session: an orch name still leads (C10)
+  assert.doesNotMatch(r.out, /#8 in review/);
   assert.match(r.out, /#7 assigned W4@m, W3@m works it → cb edit 7 --assignee W3@m/);
   // W9 is silent too, but its task is blocked, not in progress
   assert.doesNotMatch(r.out, /#3 W9@m silent/);
@@ -407,6 +408,26 @@ test('q quotes for bash and PowerShell: safe words bare, the rest single-quoted 
   assert.equal(q('$(id)'), "'$(id)'");
 });
 
+test('prRef: an Azure DevOps link is never looked up on GitHub, even with GITHUB_REPO_<PROJECT> set (#3746)', async () => {
+  const { prRef } = await import('../cli/tick.ts');
+  const had = process.env.GITHUB_REPO_QHS;
+  process.env.GITHUB_REPO_QHS = 'o/r';
+  try {
+    assert.equal(prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    // the clone URL's userinfo form, the old visualstudio.com host, any other site: none is a PR of GITHUB_REPO_QHS
+    assert.equal(prRef('https://o@dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('https://o.visualstudio.com/p/_git/r/pullrequest/7', 'qhs'), null);
+    assert.equal(prRef('https://gitlab.example.org/o/r/-/merge_requests/7', 'qhs'), null);
+    // GitHub links resolve as before: a full URL, and a bare number (with or without # and a trailing slash) through GITHUB_REPO_QHS
+    assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'qhs'), { repo: 'acme/app', n: '9' });
+    assert.deepEqual(prRef('#15', 'qhs'), { repo: 'o/r', n: '15' });
+    assert.deepEqual(prRef('15/', 'qhs'), { repo: 'o/r', n: '15' });
+  } finally {
+    if (had === undefined) delete process.env.GITHUB_REPO_QHS; else process.env.GITHUB_REPO_QHS = had;
+  }
+});
+
 test('tick: hostile titles, actors and PR links print as inert commands in bash and PowerShell', async () => {
   const sql = await db();
   const evil = "x’; touch PWN1; ’ $(touch PWN2) `touch PWN3` it's";
@@ -435,4 +456,46 @@ test('tick: hostile titles, actors and PR links print as inert commands in bash 
     assert.deepEqual(readdirSync(cwd), [], `${sh} ran something:\n${cmds.join('\n')}`);
     assert.match(run.stdout, /\$\(touch PWN4\)/, sh); // arrives as text
   }
+});
+
+// #3746 (C10): a card in review held by a lead (a lead-role session, whatever its name, or an orch name with no role)
+// waits on a person, whichever project the lead is bound to, as misheld (C6); a worker holding one is still unreviewed,
+// a role-less worker too (cb._role null: is distinct from, never a NULL that drops the row)
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', true], ['orch@m', null, 'p', true],
+  ['orch@m', null, 'q', true], ['W3@m', null, 'p', false], ['W3@m', 'builder', 'p', false]] as [string, string | null, string, boolean][]) {
+  test(`tick: a card in review held by ${who} (role ${role ?? 'unset'}) bound to ${bound} is ${leads ? 'not ' : ''}unreviewed in p`, async () => {
+    const sql = await db();
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound}, ${role})`;
+    await sql`select cb.task_add(project => 'p', title => 'PO questions', status => 'review', assignee => ${who})`;
+    for (const proj of ['p', null]) { // the all-projects tick too
+      const [{ t }] = await sql`select cb.tick(${proj}) as t`;
+      assert.deepEqual(t.unreviewed.map((x: any) => x.id), leads ? [] : [1], `tick(${proj})`);
+    }
+  });
+}
+
+// #3746 (C6): misheld catches a worker writing on another worker's card, so it leaves out ANY lead (cb._role), whatever
+// its name and whichever project it is bound to; a worker bound here is still misheld
+for (const [who, role, bound, leads] of [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', true], ['orch@m', null, 'p', true],
+  ['orch@m', null, 'q', true], ['W3@m', null, 'p', false]] as [string, string | null, string, boolean][]) {
+  test(`tick: a note by ${who} (role ${role ?? 'unset'}) bound to ${bound} on W4's card in p is ${leads ? 'not ' : ''}misheld`, async () => {
+    const sql = await db();
+    await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+    await sql`select cb.iam('m', 'p2', ${who}, 'p', ${role})`;
+    if (bound !== 'p') await sql`select cb.iam('m', 'p2', ${who}, ${bound}, ${role})`;
+    await sql`select cb.task_add(project => 'p', title => 'job', status => 'in_progress', assignee => 'W4@m', actor => 'W4@m')`;
+    await sql`select cb.log('p', 'looked at it', '1', '{}', ${who})`;
+    const [{ t }] = await sql`select cb.tick('p') as t`;
+    assert.deepEqual(t.misheld.map((x: any) => x.id), leads ? [] : [1]);
+  });
+}
+
+test('tick: idle leaves out the project\'s lead by role, whatever its name (#3746)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('p')`;
+  await sql`select cb.iam('m', 'p1', 'W1@m', 'p'), cb.iam('m', 'p2', 'QO@m', 'p', 'lead'), cb.iam('m', 'p3', 'orch@m', 'p')`;
+  const [{ t }] = await sql`select cb.tick('p', 'ahmed') as t`;
+  assert.deepEqual(t.idle.map((x: any) => x.actor), ['W1@m']);
 });

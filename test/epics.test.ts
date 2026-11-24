@@ -324,3 +324,16 @@ test('races: an edit that does not name the epic leaves a concurrent epic change
   const x = await task(web, t);
   assert.deepEqual([x.title, Number(x.epic_id)], ['renamed', e]);
 });
+
+// #3746: the freed task's message goes to the project's lead by role, whatever its name; a lead of another project, no
+test('blockers: with no assignee the project\'s lead-role session gets the message, not another project\'s lead', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo'), cb.ensure_project('q')`;
+  await sql`select cb.iam('pc', 'o1', 'QO@pc', 'demo', 'lead'), cb.iam('pc', 'p1', 'W2@pc', 'demo'), cb.iam('pc', 'o2', 'QL@pc', 'q', 'lead')`;
+  const a = await add(sql, 'a'), t = await add(sql, 'waits', { status: 'backlog' });
+  await sql`select cb.task_block(${String(t)}, ${String(a)}, 'W1@pc')`;
+  const [{ start }] = await sql`select max(id) as start from cb.events`;
+  await sql`select cb.task_move(${String(a)}, 'cancelled', null, 'W1@pc')`;
+  const to = (await sql`select data ->> 'to' as to_ from cb.events where kind = 'message' and id > ${start}`).map((r: any) => r.to_);
+  assert.deepEqual(to, ['QO@pc']);
+});

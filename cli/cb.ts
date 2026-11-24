@@ -602,10 +602,12 @@ async function run(): Promise<unknown> {
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
-      const [{ project, all, stage, multi }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
-        t.repos is null and cb._multi_repo(t.project) as multi from cb.tasks t where t.id = ${id}`;
+      // orch: one of those told is the project's lead (the lead role, whatever its name; #3746)
+      const [{ project, all, stage, multi, orch }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
+        t.repos is null and cb._multi_repo(t.project) as multi,
+        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch
+        from cb.tasks t where t.id = ${id}`;
       const told = all.filter((a: string) => a !== actor);
-      const orch = told.some((a: string) => a === 'orch' || a.startsWith('orch@'));
       if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build${multi ? ' --repo <repo,repo>' : ''} --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
         : all.length ? `you triage it: cb edit ${id} --assignee <worker>` : `no session works in ${project} yet: it waits in Next`;

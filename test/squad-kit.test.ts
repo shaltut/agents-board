@@ -132,7 +132,7 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.areas = [null]; }), /area null must be a slug/],
     [mod((s) => { s.areas = ['claims', 'claims']; }), /area claims is listed twice/],
     [mod((s) => { s.roles.builder.count = 7; }), /macbook would run 9 sessions/],
-    [mod((s) => { s.extra = 1; }), /unknown key: only machines, roles, areas and supervise/],
+    [mod((s) => { s.extra = 1; }), /unknown key: only machines, roles, areas and supervise .*protected/],
     [mod((s) => { s.roles.builder.extra = 1; }), /role builder has an unknown key/],
     [mod((s) => { s.machines.macbook.extra = 1; }), /machine macbook has an unknown key/],
     [mod((s) => { s.roles.owner.count = 2; }), /owner takes no count/],
@@ -167,6 +167,59 @@ test('squad_set keeps a machine workspace label (#3719)', async () => {
   const s = mod((x) => { x.machines.macbook.workspace = 'iHop Squad'; });
   await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
   assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'iHop Squad');
+});
+
+test('squad_set keeps protected branches; a squad without them saves no protected key (#3746)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const list = ['development', 'releases/*', 'athena-production'];
+  await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = list; }))}, 'ahmed')`;
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s.protected, list);
+  await sql`select cb.squad_set('demo', ${sql.json(SQUAD)}, 'ahmed')`;
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, SQUAD);
+});
+
+test('squad_set refuses a bad protected list and says what to give (#3746)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const list = /protected: give a list of at most 30 branch names or globs, like \["development", "releases\/\*"\]/;
+  const entry = (e: string) => new RegExp(`protected: ${e} is not a branch name or glob: give names like "development" or "releases/\\*" \\(letters, digits, \\. _ / \\* -, at most 100 characters, not starting with -\\)`);
+  const bad: [any, RegExp][] = [
+    ['development', list],
+    [{ development: true }, list],
+    [null, list],
+    [Array.from({ length: 31 }, (_, i) => `b${i}`), list],
+    [[''], entry('""')],
+    [['-x'], entry('"-x"')],
+    [['my branch'], entry('"my branch"')],
+    [['dev;rm'], entry('"dev;rm"')],
+    [['x'.repeat(101)], entry(`"${'x'.repeat(101)}"`)],
+    [[5], entry('5')],
+    [[null], entry('null')],
+  ];
+  for (const [p, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = p; }))}, 'ahmed')`, re, JSON.stringify(p));
+  // the edges that pass: 30 entries, 100 characters, every allowed character
+  await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = [...Array.from({ length: 29 }, (_, i) => `b${i}`), 'x'.repeat(100)]; }))}, 'ahmed')`;
+  await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = ['A.z_0/*-9']; }))}, 'ahmed')`;
+});
+
+test('squad_set refuses a protected entry the push hook can never match: refs/, heads/ or origin/ first, / last (#3746 C11)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const asGit = (e: string) => new RegExp(`protected: give the branch name as git shows it, like "development" or "releases/\\*", not ${e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  const bad: [string[], RegExp][] = [
+    [['refs/heads/development'], asGit('"refs/heads/development"')],
+    [['heads/development'], asGit('"heads/development"')],
+    [['origin/development'], asGit('"origin/development"')],
+    [['refs/heads/*'], asGit('"refs/heads/*"')],
+    [['releases/'], asGit('"releases/"')],
+    [['development', 'origin/staging'], asGit('"origin/staging"')], // the bad entry is named, not the list
+  ];
+  for (const [p, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = p; }))}, 'ahmed')`, re, JSON.stringify(p));
+  // the same words inside a name, or without the slash, are names
+  const fine = ['releases/*', 'feat/refs/x', 'my-heads/x', 'origin-x', 'refsx/y', 'release/v1', '*'];
+  await sql`select cb.squad_set('demo', ${sql.json(mod((x) => { x.protected = fine; }))}, 'ahmed')`;
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s.protected, fine);
 });
 
 test('squad_set accepts absolute paths on both OS shapes', async () => {
@@ -296,4 +349,10 @@ test('role texts name the repo rules', () => {
   has('lead', 'cb stage <id> build --repo');
   has('owner', 'cb edit <id> --repo');
   has('architect', 'cb edit <id> --repo');
+  // #3746: an Azure DevOps PR has its own block in each role that handles PRs
+  for (const r of ['builder', 'reviewer', 'lead']) has(r, '## On Azure DevOps (a dev.azure.com PR link)');
+  has('builder', 'az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>');
+  has('reviewer', 'az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798');
+  has('reviewer', 'git rev-parse pr/<n>^2');
+  has('lead', 'az repos pr update --id <n> --status completed');
 });

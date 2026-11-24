@@ -74,13 +74,31 @@ test('reviewer, qa and investigator cannot edit, commit or push', () => {
 });
 
 test('only the lead may merge pull requests', () => {
+  // Azure DevOps (#3746): completing a PR merges it, and so do auto-complete and bypass-policy, on create as on update.
+  // Title, description and reviewer edits, and a plain create, stay open to every role.
+  const AZ = ['Bash(az repos pr update*complete*)', 'Bash(az repos pr create*complete*)',
+    'Bash(az repos pr create*bypass-policy*)', 'Bash(az repos pr update*bypass-policy*)'];
+  const azMerge = ['az repos pr update --id 12 --status completed', 'az repos pr update --status completed --id 12',
+    'az repos pr update --id 12 --auto-complete true',
+    'az repos pr create --source-branch x --target-branch y --auto-complete true',
+    'az repos pr create --repository api --source-branch x --target-branch y --bypass-policy true --bypass-policy-reason r',
+    'az repos pr update --id 7 --bypass-policy true'];
+  const azFine = ['az repos pr update --id 12 --title "Fix parser"', 'az repos pr update --id 12 --description x',
+    'az repos pr show --id 12', 'az repos pr create --repository api --source-branch feat/x --target-branch main'];
   for (const r of ROLES) {
     const { deny, allow } = load(r).permissions;
     if (r === 'lead') {
       assert.ok(allow.includes('Bash(gh pr merge*)') && !deny.includes('Bash(gh pr merge*)'));
+      assert.ok(allow.includes('Bash(az repos pr update*)') && allow.includes('Bash(az repos pr create*)'));
+      assert.ok(!deny.some((d: string) => d.startsWith('Bash(az ')));
+      for (const c of azMerge) assert.equal(denied(deny, c), false, `lead must not deny: ${c}`);
     } else {
       assert.ok(deny.includes('Bash(gh pr merge*)') && !allow.includes('Bash(gh pr merge*)'), r);
       assert.ok(denied(deny, 'gh pr merge 12 --squash'), r);
+      for (const d of AZ) assert.ok(deny.includes(d), `${r} must list: ${d}`);
+      assert.ok(!allow.some((a: string) => a.startsWith('Bash(az ')), r);
+      for (const c of azMerge) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
+      for (const c of azFine) assert.equal(denied(deny, c), false, `${r} must allow: ${c}`);
     }
   }
 });

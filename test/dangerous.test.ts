@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { check } from '../kit/hooks/block-dangerous.mjs';
+import { check, protectedPush } from '../kit/hooks/block-dangerous.mjs';
 
 const mustBlock = [
   'git reset --hard',
@@ -139,7 +139,9 @@ const mustPass = [
 for (const c of mustBlock) test(`blocks ${JSON.stringify(c)}`, () => assert.ok(check(c)));
 for (const c of mustPass) test(`passes ${JSON.stringify(c)}`, () => assert.equal(check(c), null));
 
-const run = (input: string) => spawnSync('node', ['kit/hooks/block-dangerous.mjs'], { input, encoding: 'utf8' });
+// CB_PROTECTED_BRANCHES '' = unset: a squad pane running this suite would otherwise pass its own list down
+const run = (input: string, env: Record<string, string> = {}) =>
+  spawnSync('node', ['kit/hooks/block-dangerous.mjs'], { input, encoding: 'utf8', env: { ...process.env, CB_PROTECTED_BRANCHES: '', ...env } });
 
 test('as a hook: block JSON, empty object, and no crash on bad input', () => {
   const blocked = run(JSON.stringify({ tool_input: { command: 'git reset --hard' } }));
@@ -149,4 +151,142 @@ test('as a hook: block JSON, empty object, and no crash on bad input', () => {
   assert.equal(run(JSON.stringify({ tool_input: {} })).stdout.trim(), '{}');
   assert.equal(run('not json').stdout.trim(), '{}');
   assert.equal(run('').stdout.trim(), '{}');
+});
+
+// ---- protected branches (#3746): with CB_PROTECTED_BRANCHES set, a git push to one of them is blocked ----
+const LIST = ['development', 'staging', 'releases/*', 'athena-production'];
+const pushBlocked: [string, string][] = [
+  ['git push origin development', 'development'],
+  ['git push -u origin feat/x:development', 'development'],
+  ['git -C /r/api push origin HEAD:refs/heads/development', 'development'],
+  ['git push origin +x:development', 'development'],
+  ['git push --delete origin development', 'development'],
+  ['git push origin :development', 'development'],
+  ['git push origin releases/2026-11-12', 'releases/2026-11-12'],
+  ['cd x && git push origin staging', 'staging'],
+  // the git word anywhere in a segment, and the shell's quotes do not hide a name
+  ['git -c push.default=current -C wt push origin feat/x athena-production', 'athena-production'],
+  ['X=1 timeout 60 git push origin development', 'development'],
+  ['git fetch & git push origin development', 'development'],
+  ['git push origin "development"', 'development'],
+  ['git push origin "devel"opment', 'development'],
+  ['bash -c "git push origin development"', 'development'],
+  ['(git push origin development)', 'development'],
+  ['git push -o ci.skip origin development', 'development'],
+  ['git push -d origin refs/heads/staging', 'staging'],
+  ['git commit -m "wip" && git push origin development', 'development'],
+  ['git push origin feat/x\ngit push origin staging', 'staging'],
+  // matched anywhere in a segment, like the other patterns (grep -n reboot blocks too): it fails closed
+  ['echo git push origin development > notes.txt', 'development'],
+  // fix round 1: a quoted option value with spaces is one word, and a quoted ; does not end the command
+  ['git -C "/tmp/my dir" push origin development', 'development'],
+  ['git -c "core.sshCommand=ssh -i k" push origin development', 'development'],
+  ['git -c http.extraheader="AUTHORIZATION: bearer $T" push origin development', 'development'],
+  ["git -c credential.helper='!f() { echo x; }; f' push origin development", 'development'],
+  // a command inside quotes is read as a command, one layer of quoting off at a time
+  ['bash -c "git -C \\"/tmp/my dir\\" push origin staging"', 'staging'],
+  ["ssh host 'cd x && git push origin staging'", 'staging'],
+  ['git push origin \\\n  development', 'development'],
+  // C11: git reads heads/<x> as refs/heads/<x>, as a destination and as a bare src
+  ['git push origin x:heads/development', 'development'],
+  ['git push origin heads/development', 'development'],
+  ['git push origin +feat/x:heads/staging', 'staging'],
+];
+// C11: a destination holding * is a wildcard refspec: it can write any branch, protected ones too (the word comes back)
+const pushWildcard: [string, string][] = [
+  ['git push origin refs/heads/*:refs/heads/*', 'refs/heads/*'],
+  ['git push origin +refs/heads/*:refs/heads/*', 'refs/heads/*'],
+  ['git push origin develop*', 'develop*'],
+  ['git push origin "feat/*:develop*"', 'develop*'],
+  ['git push origin heads/*', 'heads/*'],
+];
+// fix round 1: a branch the shell fills in cannot be checked: blocked while the list is set (the word comes back)
+const pushExpanded = [
+  'git push -u origin $(git branch --show-current)',
+  'git push -u origin "$(git rev-parse --abbrev-ref HEAD)"',
+  'B=development; git push origin $B',
+  'git push origin `git branch --show-current`',
+  'git push origin HEAD:${B}',
+  'git push origin feat/x:"$B"',
+  // an unquoted $R may split into a remote and a branch
+  'git push $R feat/x',
+];
+const pushPassed = [
+  'git push origin feature/development-fix',
+  'git push origin my-staging',
+  'git push origin feat/x',
+  'git commit -m "push to development"',
+  'cb tell X "git push origin development"',
+  'git push origin feat/x:feature/development',
+  'git push origin development-2',
+  'git push origin Development',
+  'git log origin/development',
+  'git fetch origin development',
+  'git push origin feat/x > development.log',
+  'git push origin feat/x 2>&1 | tee development',
+  'git push',
+  'git push origin',
+  // fix round 1: a push option's value is not a refspec, quoted or joined with =
+  'git push origin feat/x -o "merge_request.title=Fix staging bug"',
+  'git push origin feat/x --push-option "title=Fix staging bug"',
+  'git push origin feat/x --push-option="title=Fix staging bug"',
+  // quoted option values with spaces, or a $ in one, are not branches
+  'git -C "/tmp/my dir" push origin feat/x',
+  'git -c http.extraheader="AUTHORIZATION: bearer $T" push -u origin feat/x',
+  'git push origin feat/x > "$LOG"',
+  // C11: only a leading heads/ (or refs/heads/) is git's; one inside a name is the name
+  'git push origin feat/heads-up',
+  'git push origin heads-up',
+  'git push origin feat/x:feat/heads/development',
+];
+for (const [c, branch] of pushBlocked) test(`protectedPush blocks ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), branch));
+for (const c of pushExpanded) test(`protectedPush blocks the shell-filled ${JSON.stringify(c)}`, () => assert.match(protectedPush(c, LIST) ?? '', /\$/));
+for (const [c, word] of pushWildcard) test(`protectedPush blocks the wildcard ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), word));
+for (const c of pushPassed) test(`protectedPush passes ${JSON.stringify(c)}`, () => assert.equal(protectedPush(c, LIST), null));
+test('protectedPush: an empty list blocks nothing', () => assert.equal(protectedPush('git push origin development', []), null));
+test('protectedPush: a glob is anchored, * spans /, and the entry\'s other characters are literal', () => {
+  assert.equal(protectedPush('git push origin releases/2026', ['releases/*']), 'releases/2026');
+  assert.equal(protectedPush('git push origin releases', ['releases/*']), null);
+  assert.equal(protectedPush('git push origin xreleases/1', ['releases/*']), null);
+  assert.equal(protectedPush('git push origin releases/a/b', ['releases/*']), 'releases/a/b');
+  assert.equal(protectedPush('git push origin rel-1.2', ['rel-1.2']), 'rel-1.2');
+  assert.equal(protectedPush('git push origin rel-1x2', ['rel-1.2']), null);
+  assert.equal(protectedPush('git push origin hotfix-9', ['*-9']), 'hotfix-9');
+});
+
+test('as a hook: CB_PROTECTED_BRANCHES set blocks a push to a listed branch with the block JSON', () => {
+  const env = { CB_PROTECTED_BRANCHES: ' development, releases/* ,,staging ' };
+  const hook = (command: string, e = env) => JSON.parse(run(JSON.stringify({ tool_input: { command } }), e).stdout);
+  const blocked = run(JSON.stringify({ tool_input: { command: 'cd x && git push origin releases/2026-11-12' } }), env);
+  assert.equal(blocked.status, 0);
+  // the reason says what to do next (fix round 1)
+  assert.deepEqual(JSON.parse(blocked.stdout), { decision: 'block',
+    reason: 'Blocked dangerous command: git push to protected branch releases/2026-11-12: push your own branch and open a PR; the lead merges it' });
+  assert.equal(hook('git push origin staging').reason,
+    'Blocked dangerous command: git push to protected branch staging: push your own branch and open a PR; the lead merges it');
+  // a branch the shell fills in: blocked, and told to name the branch
+  for (const c of ['git push -u origin $(git branch --show-current)', 'B=development; git push origin $B']) {
+    const r = hook(c);
+    assert.equal(r.decision, 'block', c);
+    assert.match(r.reason, /^Blocked dangerous command: git push to a branch the shell fills in \(.*\$.*\) while branches are protected: name the branch literally/, c);
+  }
+  // a wildcard destination (C11): blocked, and told to push one branch by name
+  assert.equal(hook('git push origin refs/heads/*:refs/heads/*').reason,
+    'Blocked dangerous command: git push to a wildcard destination (refs/heads/*) while branches are protected: push one branch by name, e.g. git push -u origin feat/my-card');
+  assert.deepEqual(hook('git push origin feat/x'), {});
+  assert.deepEqual(hook('git push -u origin feat/x'), {});
+  assert.deepEqual(hook('git push origin feat/heads-up'), {});
+  assert.deepEqual(hook('cb tell X "git push origin development"'), {});
+  // a command another pattern already blocks keeps that reason
+  assert.equal(hook('git push --force origin main', { CB_PROTECTED_BRANCHES: 'main' }).reason, 'Blocked dangerous command: git push --force main');
+  assert.equal(hook('git reset --hard && git push origin development').reason, 'Blocked dangerous command: git reset --hard');
+  assert.equal(run('not json', env).stdout.trim(), '{}');
+});
+
+test('as a hook: CB_PROTECTED_BRANCHES unset or empty: a push to any branch passes, as before', () => {
+  const input = JSON.stringify({ tool_input: { command: 'git push origin development' } });
+  assert.equal(run(input).stdout.trim(), '{}');
+  assert.equal(run(input, { CB_PROTECTED_BRANCHES: ' , ' }).stdout.trim(), '{}');
+  const { CB_PROTECTED_BRANCHES: _, ...unset } = process.env;
+  assert.equal(spawnSync('node', ['kit/hooks/block-dangerous.mjs'], { input, encoding: 'utf8', env: unset }).stdout.trim(), '{}');
 });

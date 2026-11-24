@@ -75,6 +75,10 @@
       "Bash(git push --atomic origin)",
       "Bash(git -* push --atomic origin)",
       "Bash(gh pr merge*)",
+      "Bash(az repos pr update*complete*)",
+      "Bash(az repos pr create*complete*)",
+      "Bash(az repos pr create*bypass-policy*)",
+      "Bash(az repos pr update*bypass-policy*)",
       "PowerShell"
     ],
     "allow": [

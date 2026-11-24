@@ -30,11 +30,15 @@ const conditional = (verdict: string) => { const i = verdict.search(/\bGO\b/); r
 const REPO = /^[\w.-]+\/[\w.-]+$/;
 const SHA = /^[0-9a-f]{40}$/;
 
-/** owner/repo and number of a PR link: a GitHub URL, or "#2800" with GITHUB_REPO_<PROJECT> from the env or .env. */
-function prRef(link: string, project: string) {
+/** owner/repo and number of a PR link: a GitHub URL, or a bare "#2800" (or "2800") with GITHUB_REPO_<PROJECT> from the
+ *  env or .env. Any other link is null: an Azure DevOps PR in any spelling, or another site's, is not a PR of that repo,
+ *  and gh can't read it (#3746). */
+export function prRef(link: string, project: string) {
   const u = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(link);
+  const bare = u ? undefined : /^#?(\d+)\/?$/.exec(link)?.[1];
+  if (!u && !bare) return null;
   const key = `GITHUB_REPO_${project.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-  const repo = u ? u[1] : process.env[key] || dotenv(key), n = u ? u[2] : /(\d+)\/?$/.exec(link)?.[1];
+  const repo = u ? u[1] : process.env[key] || dotenv(key), n = u ? u[2] : bare;
   return n && repo && REPO.test(repo) ? { repo, n } : null;  // a repo that isn't owner/name never reaches gh
 }
 

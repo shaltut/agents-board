@@ -7,16 +7,54 @@ import { spawnSync } from 'node:child_process';
 type Machine = { herdr: string | null; repo?: string; board: string; workspace?: string };
 type Role = { count?: number | Record<string, number>; model: string; machine: string };
 type Repo = { home: boolean; paths: Record<string, string> };
+// protected (#3746): branch names or * globs; each session's pane gets CB_PROTECTED_BRANCHES, read by the push hook
 export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; repos?: Record<string, Repo>;
-  areas: (string | { name: string; repo: string })[]; supervise?: boolean };
+  areas: (string | { name: string; repo: string })[]; supervise?: boolean; protected?: string[] };
 export type Want = { name: string; role: string; area?: string; repo: string };
-export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string; workspace?: string };
+// env: set in the session's pane (herdr --env), so the agent and its hooks inherit it
+export type Launch = { name: string; role: string; area?: string; repo: string; model: string; machine: string; herdr: string | null; cwd: string; settings: string; prompt: string; workspace?: string; env?: Record<string, string> };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
 const ORDER = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
 const MAC = 'macbook', MAC_CAP = 8;
 
-type Live = { actor: string; machine: string; project?: string | null };
+type Live = { actor: string; machine: string; project?: string | null; role?: string | null };
+// a session not live now, as sessions_overview gives it: its actor's latest session, last_seen as an ISO time
+type Seen = { actor: string; project?: string | null; role?: string | null; last_seen?: string | null };
+export type QuietLead = { actor: string; mins: number };
+
+// A session's role as cb._role reads it: unset, an orch name is the lead
+const roleOf = (l: { actor: string; role?: string | null }) => l.role ?? (l.actor === 'orch' || l.actor.startsWith('orch@') ? 'lead' : null);
+const DAY_MS = 24 * 3600_000; // cb.triagers' window: a lead seen within it still leads
+
+/** The squad's wanted sessions with the lead settled against who is live (#3746). A project's lead is the session live in
+ *  it with the lead role, whatever its name: then no lead is wanted, unless it goes by one of the squad's lead names (kept,
+ *  so it is skipped as live). A lead-role session of the project seen in the last day but not live is still its lead: no
+ *  second lead is started beside it (quietLead names it), unless it goes by a squad lead name, restarted as before.
+ *  orch@<m> live, or seen in the last day, in another project leads that one: this project's is <project>-orch@<m>.
+ *  The return type is spelled out: quietLead is set inside the flatMap callback, which TS's narrowing cannot see. */
+function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = [], now = Date.now()): { want: Want[]; quietLead: QuietLead | null } {
+  let quietLead: QuietLead | null = null;
+  const want = wantList(project, squad).flatMap((w): Want[] => {
+    if (w.role !== 'lead') return [w];
+    const here = live.filter((x) => x.project === project), alt = { ...w, name: `${project}-${w.name}` };
+    for (const c of [w, alt]) if (here.some((x) => x.actor === c.name)) return [c];
+    if (here.some((x) => roleOf(x) === 'lead')) return [];
+    const q = quiet.map((x) => ({ actor: x.actor, project: x.project, role: x.role, at: Date.parse(x.last_seen ?? '') }))
+      .filter((x) => x.project === project && roleOf(x) === 'lead' && now - x.at < DAY_MS) // no last_seen: NaN, never in
+      .sort((a, b) => b.at - a.at)[0];
+    if (q) {
+      for (const c of [w, alt]) if (q.actor === c.name) return [c];
+      quietLead = { actor: q.actor, mins: Math.floor((now - q.at) / 60_000) };
+      return [];
+    }
+    // orch@<m> live, or seen in the last day, bound to another project leads that one: taking its name here would rebind it
+    const elsewhere = (x: { actor: string; project?: string | null }) => x.actor === w.name && !!x.project && x.project !== project;
+    return [live.some(elsewhere) || quiet.some((x) => elsewhere(x) && now - Date.parse(x.last_seen ?? '') < DAY_MS) ? alt : w];
+  });
+  return { want, quietLead };
+}
+const minsAgo = (m: number) => (m < 60 ? `${m} min ago` : `${Math.floor(m / 60)}h ${m % 60}m ago`);
 
 /** A squad's repos, home first, then by name (as cb._repos_of). No repos: one repo, main, in each machine's repo folder. */
 export function reposOf(squad: Squad): Record<string, Repo> {
@@ -60,12 +98,14 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     ? `. Repos: ${Object.entries(repos).filter(([, r]) => r.paths[machine]).map(([k, r]) => `${k} ${r.paths[machine]}`).join(', ')}` : '';
   return {
     ...w, model: role.model, machine, herdr: mc.herdr, cwd: repos[w.repo]?.paths[machine] ?? '', ...(mc.workspace ? { workspace: mc.workspace } : {}),
+    ...(squad.protected?.length ? { env: { CB_PROTECTED_BRANCHES: squad.protected.join(',') } } : {}),
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${role.model}${squad.repos ? ` --repo ${w.repo}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
   };
 }
 
-export function planSquad(project: string, squad: Squad, live: Live[], herdrAgents: Record<string, string[]>, macAgents = 0) {
+// quiet: the sessions not live now (sessions_overview rows), read only to find a quiet lead
+export function planSquad(project: string, squad: Squad, live: Live[], herdrAgents: Record<string, string[]>, macAgents = 0, quiet: Seen[] = []) {
   // the Mac cap counts by the herdr label: a machine whose herdr is 'macbook' is the Mac, whatever its key
   const isMac = (key: string) => key === MAC || squad.machines[key]?.herdr === MAC;
   const running = new Set([...live.map((l) => l.actor), ...Object.values(herdrAgents).flat()]);
@@ -73,11 +113,12 @@ export function planSquad(project: string, squad: Squad, live: Live[], herdrAgen
   // macAgents = how many agents herdr itself lists on the Mac (catches quiet or unnamed ones)
   let mac = Math.max(new Set([...live.filter((l) => isMac(l.machine)).map((l) => l.actor),
     ...Object.entries(herdrAgents).filter(([k]) => isMac(k)).flatMap(([, v]) => v)]).size, macAgents);
-  const out = { start: [] as Launch[], skip: [] as string[], refused: [] as string[], heldBy: {} as Record<string, string>, herdrOnly: [] as Launch[] };
-  for (const w of wantList(project, squad)) {
+  const { want, quietLead } = wantNow(project, squad, live, quiet);
+  const out = { start: [] as Launch[], skip: [] as string[], refused: [] as string[], heldBy: {} as Record<string, string>, herdrOnly: [] as Launch[], quietLead };
+  for (const w of want) {
     const machine = w.name.split('@')[1];
     const l = launchFor(project, squad, w);
-    const onBoard = live.find((x) => x.actor === w.name || (w.role === 'lead' && x.actor === 'orch'));
+    const onBoard = live.find((x) => x.actor === w.name);
     if (onBoard) {
       out.skip.push(w.name);
       if (w.role === 'lead' && onBoard.project && onBoard.project !== project) out.heldBy[w.name] = onBoard.project;
@@ -127,18 +168,20 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
   let pane: string | undefined, started = false;
+  // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
+  const env = Object.entries(l.env ?? {}).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   try {
     const t = tabs[l.machine];
-    if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus']), 'pane_id');
+    if (t && t.panes < 2) pane = find(herdr(l.herdr, ['pane', 'split', '--pane', t.pane, '--direction', 'right', '--cwd', l.cwd, '--no-focus', ...env]), 'pane_id');
     else if (l.workspace) {
       // the squad's workspace by label; missing: made here, and its first pane takes this session
       const list = find(herdr(l.herdr, ['workspace', 'list']), 'workspaces');
       if (!Array.isArray(list)) throw new Error('herdr workspace list gave no workspaces'); // never a second workspace by mistake
       const ws = list.find((w: any) => w.label === l.workspace)?.workspace_id;
-      pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id')
-        : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus']), 'root_pane'), 'pane_id');
+      pane = ws ? find(herdr(l.herdr, ['tab', 'create', '--workspace', ws, '--cwd', l.cwd, '--label', l.name, '--no-focus', ...env]), 'pane_id')
+        : find(find(herdr(l.herdr, ['workspace', 'create', '--cwd', l.cwd, '--label', l.workspace, '--no-focus', ...env]), 'root_pane'), 'pane_id');
     }
-    else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus']), 'pane_id');
+    else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus', ...env]), 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
     let blocked = false;
     try {
@@ -174,7 +217,10 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
   const rows = await callFn('sessions_overview', { project: null }) as any[];
-  const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string, project: (r.project ?? null) as string | null }));
+  const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string,
+    project: (r.project ?? null) as string | null, role: (r.role ?? null) as string | null }));
+  const quiet = rows.filter((r) => !r.live).map((r) => ({ actor: r.actor as string, project: (r.project ?? null) as string | null,
+    role: (r.role ?? null) as string | null, last_seen: (r.last_seen ?? null) as string | null }));
   const lines: string[] = [];
   let macAgents = 0, macDown = false;
   const macKey = Object.keys(squad.machines).find((k) => squad.machines[k].herdr === MAC);
@@ -186,8 +232,8 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const herdrAgents: Record<string, string[]> = {};
   const unknown = new Set<string>();
   const onBoard = new Set(live.map((l) => l.actor));
-  for (const w of wantList(project, squad)) {
-    if (onBoard.has(w.name) || (w.role === 'lead' && onBoard.has('orch'))) continue;
+  for (const w of wantNow(project, squad, live, quiet).want) {
+    if (onBoard.has(w.name)) continue;
     const machine = w.name.split('@')[1];
     if (isMac(machine) && macDown) { unknown.add(w.name); continue; }
     if (!validHerdrName(herdrName(w.name))) continue; // fails at launch with a clear line
@@ -195,9 +241,14 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
     if (c === 'live') (herdrAgents[machine] ??= []).push(w.name);
     else if (c === 'unknown') unknown.add(w.name);
   }
-  const plan = planSquad(project, squad, live, herdrAgents, macAgents);
+  const plan = planSquad(project, squad, live, herdrAgents, macAgents, quiet);
   const toStart = plan.start.filter((l) => !unknown.has(l.name));
   for (const l of plan.start) if (unknown.has(l.name)) lines.push(`skip ${l.name}: could not check herdr on ${l.machine}`);
+  const q = plan.quietLead;
+  // neither squad up nor the supervisor starts it, so its pane never gets the protected list: the line says how (#3746).
+  // Single-quoted: no shell expands the * (zsh would refuse an unmatched glob); list entries never hold a quote
+  const how = squad.protected?.length ? `in a tab made with herdr tab create --env 'CB_PROTECTED_BRANCHES=${squad.protected.join(',')}'` : 'in a new herdr tab';
+  if (q) lines.push(`skip lead: ${q.actor} leads ${project} but is not live (last seen ${minsAgo(q.mins)}): restart it by hand ${how}, or cb iam <name> ${project} --role lead`);
   const herdrOnly = new Set(plan.herdrOnly.map((l) => l.name));
   for (const n of plan.skip) {
     if (plan.heldBy[n]) lines.push(`skip ${n}: lead name held by project ${plan.heldBy[n]}`);

@@ -78,7 +78,9 @@
     ],
     "allow": [
       "Bash(cb *)",
-      "Bash(gh pr merge*)"
+      "Bash(gh pr merge*)",
+      "Bash(az repos pr update*)",
+      "Bash(az repos pr create*)"
     ]
   }
 }
