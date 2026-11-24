@@ -143,9 +143,10 @@ async function addImages(tx: any, id: unknown, pics: ReturnType<typeof images>, 
                                           replace_all => ${replace && n === 0}, actor => ${actor})`;
 }
 
-/** cb.mine rows, a part holder's (#3703) showing the part it holds: [part api: in_progress], as cb next does. */
+/** cb.mine rows, a part holder's (#3703) showing the part it holds: [part api: in_progress], as cb next does.
+ *  repo desc: the Map keeps the last, so the first part by repo wins, as in mine, resume and stage_pass. */
 async function partShown(rows: any[], who: string) {
-  const held = new Map((await sql`select task_id, repo from cb._held_parts() where assignee = ${who}`).map((h: any) => [Number(h.task_id), h.repo]));
+  const held = new Map((await sql`select task_id, repo from cb._held_parts() where assignee = ${who} order by repo desc`).map((h: any) => [Number(h.task_id), h.repo]));
   return rows.map((t) => held.has(Number(t.id)) ? { ...t, status: `part ${held.get(Number(t.id))}: ${t.status}` } : t);
 }
 

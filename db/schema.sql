@@ -1684,10 +1684,10 @@ begin
                            union all  -- a part in work (#3703), named by its repo
                            select jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', h.status, 'part', h.repo), t.updated_at
                              from cb._held_parts() h join cb.tasks t on t.id = h.task_id
-                            where h.assignee = a.actor and h.status = 'in_progress' and (p is null or t.project = p)) d), '[]'),
+                            where h.assignee = a.actor and h.status = 'in_progress' and t.assignee is distinct from a.actor and (p is null or t.project = p)) d), '[]'),
       'queued', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'next' and (p is null or t.project = p))
                 + (select count(*) from cb._held_parts() h join cb.tasks t on t.id = h.task_id
-                    where h.assignee = a.actor and h.status = 'next' and (p is null or t.project = p)),
+                    where h.assignee = a.actor and h.status = 'next' and t.assignee is distinct from a.actor and (p is null or t.project = p)),
       'done_24h', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status = 'done' and t.done_at > now() - interval '24 hours' and (p is null or t.project = p)),
       'open_questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open' and (p is null or q.project = p)),
       'last', (select jsonb_build_object('at', e.at, 'kind', e.kind, 'summary', e.summary, 'task_id', e.task_id)
@@ -4277,8 +4277,10 @@ $$;
 
 -- The command that finishes this card's stage for whoever holds it. a holding a part (#3703): its part's stage, not the
 -- card's (a NO-GO on another part may have pulled the card back to build), with --repo.
-create function cb._finish_line(t cb.tasks, a text default null) returns text language sql stable as $$
-  select coalesce((select case h.stage
+-- plpgsql, not sql: a sql body is checked at create time, and cb._multi_repo is created further down this file.
+create function cb._finish_line(t cb.tasks, a text default null) returns text language plpgsql stable as $$
+begin
+  return (select coalesce((select case h.stage
       when 'build' then format('cb pass %s "<summary>" --pr <url> --repo %s', t.id, h.repo)
       when 'review' then format('cb pass %s "<verdict>" --repo %s or cb fail %s "<what is wrong>" --repo %s', t.id, h.repo, t.id, h.repo) end
     from cb._held_parts() h where h.task_id = t.id and h.assignee = a and cb._pipeline(t.project) order by h.repo limit 1),
@@ -4293,7 +4295,8 @@ create function cb._finish_line(t cb.tasks, a text default null) returns text la
     when 'qa' then format('cb pass %s "<checked on dev>" or cb fail %s "<what fails>"', t.id, t.id)
     when 'approval' then format('waiting for Ahmed (Q%s)',
       (select max(q.id) from cb.questions q where q.approval_for = t.id and q.status in ('open', 'answered')))
-    else format('cb done %s "<summary>"', t.id) end end)
+    else format('cb done %s "<summary>"', t.id) end end));
+end
 $$;
 
 -- Who takes the card now: its holder by name, a parts card's parts in words (#3703), else the role the stage needs.
