@@ -201,6 +201,17 @@ Set up, once, on the PC:
    `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the
    runner has no config for the new name (a claimed job ends `error: bad job row`), and a restart under the old name
    publishes the old name again (the moved jobs stay queued).
+5. runner.json takes a project's shape from its squad file: a squad with a `repos` key (even one repo) needs that
+   project's runner.json entry under `repos` with the same names. A one-entry `repos` squad's home is not `main`, so
+   its sessions start with `--repo <name>` and `cb run` defaults to that name; a flat entry offers only `main` and
+   every `cb run` is refused.
+6. Switching a project from flat to `repos`:
+   - runner.json and the squad file switch together; until both list the same repos, `cb run` is refused.
+   - Slot clones are named `<project>-<slot>` for `main` and `<project>-<repo>-<slot>` for any other repo (`ihop-1`
+     becomes `ihop-<repo>-1`). The old `<project>-<slot>` folders under `base` and their files in
+     `~/.claude-board/runner/state` are orphaned: delete them by hand. The first job in each slot clones and installs again.
+   - Jobs still queued as `main` at the switch are never claimed by the new runner: cancel them (`cb job cancel <id>`)
+     and queue them again.
 
 What each result means:
 
