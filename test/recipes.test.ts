@@ -57,23 +57,6 @@ test('loadConfig refuses a misspelled key, an empty install and an optional cwd 
   assert.ok(example());
 });
 
-// #4014: extra steps that run only when the commit changes files under some paths since a base branch
-test('loadConfig: a recipe changed block', () => {
-  const ok = { against: 'main', paths: ['scripts/'], steps: [['node', 'x.mjs']] };
-  const load = (changed: unknown) => loadConfig(cfgWith({ steps: [['a']], changed }));
-  assert.deepEqual(load(ok).projects.p!.repos.main!.recipes.r!.changed, ok);
-  assert.equal(loadConfig(cfgWith({ steps: [['a']] })).projects.p!.repos.main!.recipes.r!.changed, undefined);
-  assert.throws(() => load([]), /recipes\.r\.changed: must be an object/);
-  assert.throws(() => load({ ...ok, path: ['x'] }), /recipes\.r\.changed: unknown key "path"/);
-  for (const against of [undefined, '', '-x', 'a..b', 'a b', 'main:x']) assert.throws(() => load({ ...ok, against }), /changed\.against/, String(against));
-  for (const paths of [undefined, [], [''], ['-r'], [':(exclude)x'], ['../x'], 'scripts/']) assert.throws(() => load({ ...ok, paths }), /changed\.paths/, JSON.stringify(paths));
-  for (const steps of [undefined, [], [[]]]) assert.throws(() => load({ ...ok, steps }), /changed\.steps/, JSON.stringify(steps));
-  assert.throws(() => load({ ...ok, steps: [['a', '{nope}']] }), /changed\.steps\[0\].*nope/);
-  const guards = example().projects.ihop!.repos.main!.recipes.guards!;
-  assert.deepEqual(guards.changed?.paths, ['scripts/']);
-  assert.equal(guards.changed?.against, 'main');
-});
-
 test('checkParams refuses flag- and path-shaped values and the pattern', () => {
   const test_ = example().projects.ihop!.repos.main!.recipes.test!;
   const bad = (files: string[]) => checkParams(test_, { app: ['claims-api'], files });

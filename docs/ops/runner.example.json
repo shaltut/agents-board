@@ -101,11 +101,6 @@
             ["node", "scripts/llm-client-boundary.mjs"],
             ["node", "scripts/check-auth-error-envelope.mjs"]
           ],
-          "changed": {
-            "against": "main",
-            "paths": ["scripts/"],
-            "steps": [["pnpm", "exec", "lefthook", "run", "pre-push", "--commands", "program-script-tests", "--no-tty"]]
-          },
           "timeout": 900
         }
       }

@@ -349,25 +349,13 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     if (d.startFailed || d.code !== 0) return err('error: Docker is not running');
   }
 
-  // the extra steps of a `changed` block: run when the commit changed those paths since it left the base branch
-  // (three dots: from the merge base). A diff that cannot be made runs them: a check is never skipped on a doubt.
-  let list = recipe.steps;
-  if (recipe.changed) {
-    const { against, paths, steps: extra } = recipe.changed;
-    const d = await git(['diff', '--name-only', '--no-renames', `origin/${against}...${full}`, '--', ...paths], true);
-    if (stop.aborted) return null;
-    if (d.code !== 0 || d.out.trim()) list = [...list, ...extra];
-    else writeSync(io.fd, `# nothing changed under ${paths.join(' ')} since origin/${against}: the extra steps are skipped
-`);
-  }
-
   // 5. steps under one deadline; 6. finally steps always run once steps have started, even after a throw
   const cwd = jobCwd(dir, recipe, params);
   const from = fstatSync(io.fd).size;
   const deadline = Date.now() + recipe.timeout * 1000;
   let out: Draft | undefined;
   try {
-    for (const argv of list) {
+    for (const argv of recipe.steps) {
       const a = expand(argv, params);
       const r = await run(a, { cwd, env, io, ms: Math.max(0, deadline - Date.now()), stop });
       if (r.stopped) { out = null; break; }
