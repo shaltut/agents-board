@@ -219,6 +219,10 @@ Set up, once, on the PC:
      runner refuses to start otherwise.
    - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
      then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
+   - A recipe may hold `"changed": { "against": "main", "paths": ["scripts/"], "steps": [...] }`: those extra steps
+     run after `steps`, only when the commit changed a file under `paths` since it left `origin/<against>` (or when
+     that cannot be told). iHop's `guards` uses it to run the repo's script tests, as its pre-push hook does.
+     Add the key only after the runner and the supervisor run code that knows it: both refuse an unknown key.
 3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
 4. runner.json must follow a project merge (`cb.project_alias`): rename that project's key to the target and restart
    `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the

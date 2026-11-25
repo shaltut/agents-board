@@ -2,7 +2,9 @@
 import { resolve, sep } from 'node:path';
 
 export type Param = { pattern: string; min: number; max: number };
-export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env: Record<string, string>; timeout: number; db: boolean; params: Record<string, Param> };
+// extra steps run after `steps`, only when the commit changes a file under `paths` since it left origin/<against>
+export type Changed = { against: string; paths: string[]; steps: string[][] };
+export type Recipe = { steps: string[][]; changed?: Changed; finally: string[][]; cwd: string; env: Record<string, string>; timeout: number; db: boolean; params: Record<string, Param> };
 export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
 // a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
 export type Project = { base: string; repos: Record<string, Repo> };
@@ -54,9 +56,22 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
   });
 }
 
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+
+function loadChanged(raw: unknown, path: string, params: Record<string, Param>): Changed {
+  if (!isObj(raw)) fail(path, 'must be an object');
+  only(raw, path, ['against', 'paths', 'steps']);
+  const against = raw.against;
+  if (typeof against !== 'string' || !BRANCH.test(against) || against.includes('..')) fail(`${path}.against`, 'must be a branch name of origin');
+  const paths = strList(raw.paths, `${path}.paths`);
+  // plain paths inside the repo: no option, no git pathspec magic, no way up
+  if (!paths.length || paths.some((x) => !x || x.startsWith('-') || x.startsWith(':') || x.split('/').includes('..'))) fail(`${path}.paths`, 'must be a non-empty list of paths in the repo');
+  return { against, paths, steps: argvList(raw.steps, `${path}.steps`, params, true) };
+}
+
 function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string[]): Recipe {
   if (!isObj(raw)) fail(path, 'must be an object');
-  only(raw, path, ['params', 'cwd', 'steps', 'finally', 'env', 'timeout', 'db']);
+  only(raw, path, ['params', 'cwd', 'steps', 'changed', 'finally', 'env', 'timeout', 'db']);
   const params: Record<string, Param> = {};
   if (raw.params !== undefined && !isObj(raw.params)) fail(`${path}.params`, 'must be an object');
   for (const [n, pr] of Object.entries(raw.params ?? {})) {
@@ -90,6 +105,7 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string
   }
   return {
     steps: argvList(raw.steps, `${path}.steps`, params, true),
+    ...(raw.changed === undefined ? {} : { changed: loadChanged(raw.changed, `${path}.changed`, params) }),
     finally: argvList(raw.finally, `${path}.finally`, params, false),
     cwd, env: env as Record<string, string>,
     timeout: int(raw.timeout, `${path}.timeout`, 1, 7200),
