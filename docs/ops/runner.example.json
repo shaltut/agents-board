@@ -1,6 +1,7 @@
 {
   "slots": 2,
   "dbLanes": 2,
+  "laneEnv": ["TEST_STACK_PROJECT", "TEST_STACK_PG_PORT", "TEST_STACK_REDIS_PORT", "TEST_STACK_S3_PORT"],
   "log": { "host": "100.64.0.1", "port": 7600, "peers": ["100.64.0.1", "100.64.0.2"] },
   "passEnv": [],
   "projects": {
@@ -42,9 +43,9 @@
             "DB_SSL_DISABLE": "true",
             "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "TEST_STACK_PROJECT": "cb-runner-it-{lane}",
-            "TEST_STACK_PG_PORT": "5543{lane}",
-            "TEST_STACK_REDIS_PORT": "5637{lane}",
-            "TEST_STACK_S3_PORT": "5900{lane}"
+            "TEST_STACK_PG_PORT": "5544{lane}",
+            "TEST_STACK_REDIS_PORT": "5638{lane}",
+            "TEST_STACK_S3_PORT": "5901{lane}"
           },
           "timeout": 2400,
           "db": true
@@ -62,9 +63,9 @@
             "DB_SSL_DISABLE": "true",
             "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "TEST_STACK_PROJECT": "cb-runner-it-{lane}",
-            "TEST_STACK_PG_PORT": "5543{lane}",
-            "TEST_STACK_REDIS_PORT": "5637{lane}",
-            "TEST_STACK_S3_PORT": "5900{lane}"
+            "TEST_STACK_PG_PORT": "5544{lane}",
+            "TEST_STACK_REDIS_PORT": "5638{lane}",
+            "TEST_STACK_S3_PORT": "5901{lane}"
           },
           "timeout": 2400,
           "db": true

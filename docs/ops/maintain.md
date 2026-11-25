@@ -211,10 +211,14 @@ Set up, once, on the PC:
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
-     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "5543{lane}"`,
-     `"TEST_STACK_REDIS_PORT": "5637{lane}"`, `"TEST_STACK_S3_PORT": "5900{lane}"`. With `dbLanes` above 1 a DB recipe
-     without `{lane}` is refused at start. Before the first start with lanes, remove a stack left from before
-     (`docker compose -p cb-runner-it down -v`): it still holds the old ports.
+     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "5544{lane}"`,
+     `"TEST_STACK_REDIS_PORT": "5638{lane}"`, `"TEST_STACK_S3_PORT": "5901{lane}"`. Keep lane ports off the old
+     single-stack ports (55432, 56379, 59000) and any stack you start by hand.
+   - With `dbLanes` above 1, `laneEnv` names those env values. Every DB recipe must set each of them with `{lane}`,
+     and all DB recipes must write each one the same way, so lane n is one stack whichever recipe runs in it. The
+     runner refuses to start otherwise.
+   - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
+     then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
 3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
 4. runner.json must follow a project merge (`cb.project_alias`): rename that project's key to the target and restart
    `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the

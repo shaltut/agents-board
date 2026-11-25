@@ -6,7 +6,7 @@ export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env:
 export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
 // a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
 export type Project = { base: string; repos: Record<string, Repo> };
-export type RunnerConfig = { name?: string; slots: number; dbLanes: number; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
+export type RunnerConfig = { name?: string; slots: number; dbLanes: number; laneEnv: string[]; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
 
 const NAME = /^[a-z][a-z0-9-]*$/;
 const SLOT = /\{([^{}]*)\}/g;
@@ -54,7 +54,7 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
   });
 }
 
-function loadRecipe(raw: unknown, path: string, dbLanes: number): Recipe {
+function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string[]): Recipe {
   if (!isObj(raw)) fail(path, 'must be an object');
   only(raw, path, ['params', 'cwd', 'steps', 'finally', 'env', 'timeout', 'db']);
   const params: Record<string, Param> = {};
@@ -82,7 +82,12 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number): Recipe {
   if (raw.db !== undefined && typeof raw.db !== 'boolean') fail(`${path}.db`, 'must be true or false');
   const lane = Object.values(env).some((x) => (x as string).includes(LANE));
   if (lane && raw.db !== true) fail(`${path}.env`, `${LANE} is for DB recipes only`);
-  if (!lane && raw.db === true && dbLanes > 1) fail(`${path}.env`, `needs ${LANE} in a value (the test stack's name and ports): dbLanes is ${dbLanes}, and two DB jobs at once must not share a stack`);
+  // with lanes, every laneEnv value (the test stack's name and ports) holds {lane}: one shared value is enough for
+  // two lanes to tear down each other's stack
+  if (raw.db === true && dbLanes > 1) for (const n of laneEnv) {
+    const v = (env as Record<string, unknown>)[n];
+    if (typeof v !== 'string' || !v.includes(LANE)) fail(`${path}.env.${n}`, `needs ${LANE}: dbLanes is ${dbLanes}, and two DB jobs at once must not share a test stack`);
+  }
   return {
     steps: argvList(raw.steps, `${path}.steps`, params, true),
     finally: argvList(raw.finally, `${path}.finally`, params, false),
@@ -92,13 +97,13 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number): Recipe {
   };
 }
 
-function loadRepo(p: Record<string, unknown>, pp: string, dbLanes: number): Repo {
+function loadRepo(p: Record<string, unknown>, pp: string, dbLanes: number, laneEnv: string[]): Repo {
   if (!isObj(p.recipes)) fail(pp, 'needs a recipes object');
   if (!Array.isArray(p.install) || !p.install.length || p.install.some((x) => typeof x !== 'string' || !x)) fail(`${pp}.install`, 'must be a non-empty list of strings');
   const recipes: Record<string, Recipe> = {};
   for (const [rn, r] of Object.entries(p.recipes)) {
     if (!NAME.test(rn)) fail(`${pp}.recipes`, `name "${rn}" must match ${NAME}`);
-    recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`, dbLanes);
+    recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`, dbLanes, laneEnv);
   }
   return {
     git: str(p.git, `${pp}.git`), lockfile: str(p.lockfile, `${pp}.lockfile`),
@@ -110,7 +115,7 @@ export function loadConfig(text: string): RunnerConfig {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`runner.json: not valid JSON (${(e as Error).message})`); }
   if (!isObj(raw)) fail('runner.json', 'must be an object');
-  only(raw, 'runner.json', ['name', 'slots', 'dbLanes', 'log', 'passEnv', 'projects']);
+  only(raw, 'runner.json', ['name', 'slots', 'dbLanes', 'laneEnv', 'log', 'passEnv', 'projects']);
   if (!isObj(raw.log)) fail('log', 'is required: { host, port, peers }');
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
@@ -118,6 +123,9 @@ export function loadConfig(text: string): RunnerConfig {
   // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "5543{lane}")
   const dbLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
   if (dbLanes > slots) fail('dbLanes', `is above slots (${slots})`);
+  // the env values that set one lane's test stack apart from another's (its compose name and ports)
+  const laneEnv = strList(raw.laneEnv, 'laneEnv', []);
+  if (dbLanes > 1 && !laneEnv.length) fail('laneEnv', 'must name the env values that set a DB lane apart (its test stack name and ports) when dbLanes is above 1');
   if (!isObj(raw.projects) || !Object.keys(raw.projects).length) fail('projects', 'must hold at least one project');
   const projects: Record<string, Project> = {};
   const stems = new Map<string, string>();
@@ -128,7 +136,7 @@ export function loadConfig(text: string): RunnerConfig {
     const repos: Record<string, Repo> = {};
     if (p.repos === undefined) {
       only(p, pp, ['git', 'base', 'lockfile', 'install', 'installTimeout', 'recipes']);
-      repos.main = loadRepo(p, pp, dbLanes);
+      repos.main = loadRepo(p, pp, dbLanes, laneEnv);
     } else {
       only(p, pp, ['base', 'repos']);
       if (!isObj(p.repos) || !Object.keys(p.repos).length) fail(`${pp}.repos`, 'must hold at least one repo');
@@ -136,7 +144,7 @@ export function loadConfig(text: string): RunnerConfig {
         if (!NAME.test(rn)) fail(`${pp}.repos`, `name "${rn}" must match ${NAME}`);
         if (!isObj(r)) fail(`${pp}.repos.${rn}`, 'must be an object');
         only(r, `${pp}.repos.${rn}`, ['git', 'lockfile', 'install', 'installTimeout', 'recipes']);
-        repos[rn] = loadRepo(r, `${pp}.repos.${rn}`, dbLanes);
+        repos[rn] = loadRepo(r, `${pp}.repos.${rn}`, dbLanes, laneEnv);
       }
     }
     projects[pn] = { base: str(p.base, `${pp}.base`), repos };
@@ -147,9 +155,19 @@ export function loadConfig(text: string): RunnerConfig {
       stems.set(stem, who);
     }
   }
+  // lane n is one stack whatever the recipe: every DB recipe writes each laneEnv value the same way
+  if (dbLanes > 1) for (const n of laneEnv) {
+    let first: [string, string] | undefined;
+    for (const [pn, pr] of Object.entries(projects)) for (const [rn, rp] of Object.entries(pr.repos)) for (const [cn, rc] of Object.entries(rp.recipes)) {
+      if (!rc.db) continue;
+      const at = rn === 'main' ? `projects.${pn}.recipes.${cn}` : `projects.${pn}.repos.${rn}.recipes.${cn}`;
+      if (!first) first = [at, rc.env[n]!];
+      else if (rc.env[n] !== first[1]) fail(`${at}.env.${n}`, `is "${rc.env[n]}" but ${first[0]} has "${first[1]}": every DB recipe writes it the same way`);
+    }
+  }
   return {
     ...(raw.name === undefined ? {} : { name: str(raw.name, 'name') }),
-    slots, dbLanes, log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
+    slots, dbLanes, laneEnv, log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
   };
 }
 
