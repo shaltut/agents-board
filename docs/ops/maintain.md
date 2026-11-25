@@ -209,6 +209,12 @@ Set up, once, on the PC:
    and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
+   - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
+     be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
+     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "5543{lane}"`,
+     `"TEST_STACK_REDIS_PORT": "5637{lane}"`, `"TEST_STACK_S3_PORT": "5900{lane}"`. With `dbLanes` above 1 a DB recipe
+     without `{lane}` is refused at start. Before the first start with lanes, remove a stack left from before
+     (`docker compose -p cb-runner-it down -v`): it still holds the old ports.
 3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
 4. runner.json must follow a project merge (`cb.project_alias`): rename that project's key to the target and restart
    `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the
