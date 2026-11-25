@@ -32,8 +32,8 @@ test('loadConfig names the bad field', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{nope}']] })), /steps\[0\].*nope/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{x}{y}']], params: { x: { pattern: '.' }, y: { pattern: '.' } } })), /one slot/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], params: { x: { pattern: '(' } } })), /pattern/);
-  assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 9 })), /slots/);
-  assert.equal(loadConfig(cfgWith({ steps: [['a']] }, { slots: 8 })).slots, 8); // the PC runs up to 8 jobs at once
+  assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 11 })), /slots/);
+  assert.equal(loadConfig(cfgWith({ steps: [['a']] }, { slots: 10 })).slots, 10); // the PC runs up to 10 jobs at once
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], cwd: '{x}', params: { x: { pattern: '.', max: 2 } } })), /cwd/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], params: { X: { pattern: '.' } } })), /params/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], params: { x: { pattern: '.', max: 21 } } })), /max/);
