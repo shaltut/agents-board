@@ -141,7 +141,7 @@ export function loadConfig(text: string): RunnerConfig {
   }
   return {
     ...(raw.name === undefined ? {} : { name: str(raw.name, 'name') }),
-    slots: int(raw.slots, 'slots', 1, 4, 2), log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
+    slots: int(raw.slots, 'slots', 1, 8, 2), log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
   };
 }
 
