@@ -120,7 +120,7 @@ export function loadConfig(text: string): RunnerConfig {
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
   const slots = int(raw.slots, 'slots', 1, 10, 2);
-  // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "5543{lane}")
+  // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "5544{lane}")
   const dbLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
   if (dbLanes > slots) fail('dbLanes', `is above slots (${slots})`);
   // the env values that set one lane's test stack apart from another's (its compose name and ports)
