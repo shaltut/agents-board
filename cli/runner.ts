@@ -7,7 +7,7 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmS
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
-import { loadConfig, published, type RunnerConfig } from './recipes.ts';
+import { freeLane, loadConfig, published, type RunnerConfig } from './recipes.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob } from './runner-job.ts';
 
@@ -86,14 +86,14 @@ const prune = () => {
 prune();
 setInterval(prune, 86_400_000);
 
-// slot number → the job in it
-const slots = new Map<number, { id: number; db: boolean; stop: AbortController }>();
+// slot number → the job in it; a DB job also holds a lane (its own test stack and ports), dbLanes of them at once
+const slots = new Map<number, { id: number; lane?: number; stop: AbortController }>();
 
-function start(slot: number, j: any) {
+function start(slot: number, j: any, lane: number | undefined) {
   const stop = new AbortController();
-  slots.set(slot, { id: Number(j.id), db: j.db === true, stop });
-  say(`job #${j.id} started in slot ${slot}`);
-  runJob(j, { cfg, home: HOME, slot, stop: stop.signal })
+  slots.set(slot, { id: Number(j.id), lane, stop });
+  say(`job #${j.id} started in slot ${slot}${lane === undefined ? '' : `, DB lane ${lane}`}`);
+  runJob(j, { cfg, home: HOME, slot, lane, stop: stop.signal })
     .then(async (r) => {
       if (!r) return say(`job #${j.id} cancelled`);
       const done = await finish(sql, NAME, Number(j.id), r, say);
@@ -114,10 +114,10 @@ async function claim() {
       for (;;) {
         const free = Array.from({ length: cfg.slots }, (_, i) => i + 1).find((s) => !slots.has(s));
         if (free === undefined) break;
-        const allowDb = ![...slots.values()].some((s) => s.db);
-        const j = (await sql`select cb.job_claim(${NAME}, ${allowDb}) as j`)[0]!.j;
+        const lane = freeLane([...slots.values()].flatMap((s) => s.lane === undefined ? [] : [s.lane]), cfg.dbLanes);
+        const j = (await sql`select cb.job_claim(${NAME}, ${lane !== undefined}) as j`)[0]!.j;
         if (!j) break;
-        start(free, j);
+        start(free, j, j.db === true ? lane : undefined);
       }
     } while (again);
   } catch (e: any) {

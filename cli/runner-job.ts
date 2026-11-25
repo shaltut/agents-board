@@ -185,7 +185,7 @@ type Draft = { state: Result['state']; exit_code: number | null; text: string } 
 const err = (text: string): Draft => ({ state: 'error', exit_code: null, text });
 
 /** Runs one claimed job. Returns its result, or null when it was cancelled (the board already holds its end). */
-export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; stop: AbortSignal }): Promise<Result | null> {
+export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal }): Promise<Result | null> {
   const log = join(o.home, 'logs', `${j.id}.log`);
   const io: Io = { fd: -1, pids: join(o.home, 'state', `slot-${o.slot}.pids`), nostart: join(o.home, 'state', `slot-${o.slot}.nostart`), live: new Map(), headers: new Set() };
   try {
@@ -205,7 +205,7 @@ export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; sl
   }
 }
 
-async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; stop: AbortSignal }, io: Io, log: string): Promise<Draft> {
+async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal }, io: Io, log: string): Promise<Draft> {
   const { cfg, home, slot, stop } = o;
   // 1. trust nothing in the row: sha shape, project, repo and recipe from this PC's own config, params a map of string
   // lists. A row without a repo (a board before #3703) is main.
@@ -219,6 +219,8 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   if (typeof j.sha !== 'string' || !SHA.test(j.sha) || !p || !recipe || !isLists(params)) return err('error: bad job row');
   const bad = checkParams(recipe, params);
   if (bad) return err(bad);
+  // a DB job runs in the lane the claim gave it (its own test stack and ports): without one it could share another's
+  if (recipe.db && o.lane === undefined) return err('error: a DB job got no DB lane');
 
   // the summary reads the log from `from` on (the commands that matter), at most its last 1 MB, without the `$ argv`
   // lines: the commands never leave the PC
@@ -325,7 +327,7 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 
   // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
   // always when the blob cannot be read (a lockfile missing at the sha, a wrong lockfile path)
-  const env = jobEnv(process.env, cfg, recipe);
+  const env = jobEnv(process.env, cfg, recipe, recipe.db ? o.lane : undefined);
   const lb = await git(['rev-parse', `${full}:${p.lockfile}`], true);
   const blob = lb.code === 0 ? lb.out.trim() : '';
   if (stop.aborted) return null;

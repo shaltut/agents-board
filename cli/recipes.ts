@@ -6,12 +6,13 @@ export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env:
 export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
 // a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
 export type Project = { base: string; repos: Record<string, Repo> };
-export type RunnerConfig = { name?: string; slots: number; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
+export type RunnerConfig = { name?: string; slots: number; dbLanes: number; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
 
 const NAME = /^[a-z][a-z0-9-]*$/;
 const SLOT = /\{([^{}]*)\}/g;
 const VALUE = /^[A-Za-z0-9@._/-]{1,200}$/;
 const MAX_VALUES = 20;
+const LANE = '{lane}'; // a DB recipe's env names its lane: two DB jobs at once each get their own test stack and ports
 const BASE_ENV = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'NUMBER_OF_PROCESSORS', 'VOLTA_HOME'];
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -53,7 +54,7 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
   });
 }
 
-function loadRecipe(raw: unknown, path: string): Recipe {
+function loadRecipe(raw: unknown, path: string, dbLanes: number): Recipe {
   if (!isObj(raw)) fail(path, 'must be an object');
   only(raw, path, ['params', 'cwd', 'steps', 'finally', 'env', 'timeout', 'db']);
   const params: Record<string, Param> = {};
@@ -79,6 +80,9 @@ function loadRecipe(raw: unknown, path: string): Recipe {
   const env = raw.env ?? {};
   if (!isObj(env) || Object.values(env).some((x) => typeof x !== 'string')) fail(`${path}.env`, 'must be an object of strings');
   if (raw.db !== undefined && typeof raw.db !== 'boolean') fail(`${path}.db`, 'must be true or false');
+  const lane = Object.values(env).some((x) => (x as string).includes(LANE));
+  if (lane && raw.db !== true) fail(`${path}.env`, `${LANE} is for DB recipes only`);
+  if (!lane && raw.db === true && dbLanes > 1) fail(`${path}.env`, `needs ${LANE} in a value (the test stack's name and ports): dbLanes is ${dbLanes}, and two DB jobs at once must not share a stack`);
   return {
     steps: argvList(raw.steps, `${path}.steps`, params, true),
     finally: argvList(raw.finally, `${path}.finally`, params, false),
@@ -88,13 +92,13 @@ function loadRecipe(raw: unknown, path: string): Recipe {
   };
 }
 
-function loadRepo(p: Record<string, unknown>, pp: string): Repo {
+function loadRepo(p: Record<string, unknown>, pp: string, dbLanes: number): Repo {
   if (!isObj(p.recipes)) fail(pp, 'needs a recipes object');
   if (!Array.isArray(p.install) || !p.install.length || p.install.some((x) => typeof x !== 'string' || !x)) fail(`${pp}.install`, 'must be a non-empty list of strings');
   const recipes: Record<string, Recipe> = {};
   for (const [rn, r] of Object.entries(p.recipes)) {
     if (!NAME.test(rn)) fail(`${pp}.recipes`, `name "${rn}" must match ${NAME}`);
-    recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`);
+    recipes[rn] = loadRecipe(r, `${pp}.recipes.${rn}`, dbLanes);
   }
   return {
     git: str(p.git, `${pp}.git`), lockfile: str(p.lockfile, `${pp}.lockfile`),
@@ -106,10 +110,14 @@ export function loadConfig(text: string): RunnerConfig {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`runner.json: not valid JSON (${(e as Error).message})`); }
   if (!isObj(raw)) fail('runner.json', 'must be an object');
-  only(raw, 'runner.json', ['name', 'slots', 'log', 'passEnv', 'projects']);
+  only(raw, 'runner.json', ['name', 'slots', 'dbLanes', 'log', 'passEnv', 'projects']);
   if (!isObj(raw.log)) fail('log', 'is required: { host, port, peers }');
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
+  const slots = int(raw.slots, 'slots', 1, 10, 2);
+  // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "5543{lane}")
+  const dbLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
+  if (dbLanes > slots) fail('dbLanes', `is above slots (${slots})`);
   if (!isObj(raw.projects) || !Object.keys(raw.projects).length) fail('projects', 'must hold at least one project');
   const projects: Record<string, Project> = {};
   const stems = new Map<string, string>();
@@ -120,7 +128,7 @@ export function loadConfig(text: string): RunnerConfig {
     const repos: Record<string, Repo> = {};
     if (p.repos === undefined) {
       only(p, pp, ['git', 'base', 'lockfile', 'install', 'installTimeout', 'recipes']);
-      repos.main = loadRepo(p, pp);
+      repos.main = loadRepo(p, pp, dbLanes);
     } else {
       only(p, pp, ['base', 'repos']);
       if (!isObj(p.repos) || !Object.keys(p.repos).length) fail(`${pp}.repos`, 'must hold at least one repo');
@@ -128,7 +136,7 @@ export function loadConfig(text: string): RunnerConfig {
         if (!NAME.test(rn)) fail(`${pp}.repos`, `name "${rn}" must match ${NAME}`);
         if (!isObj(r)) fail(`${pp}.repos.${rn}`, 'must be an object');
         only(r, `${pp}.repos.${rn}`, ['git', 'lockfile', 'install', 'installTimeout', 'recipes']);
-        repos[rn] = loadRepo(r, `${pp}.repos.${rn}`);
+        repos[rn] = loadRepo(r, `${pp}.repos.${rn}`, dbLanes);
       }
     }
     projects[pn] = { base: str(p.base, `${pp}.base`), repos };
@@ -141,7 +149,7 @@ export function loadConfig(text: string): RunnerConfig {
   }
   return {
     ...(raw.name === undefined ? {} : { name: str(raw.name, 'name') }),
-    slots: int(raw.slots, 'slots', 1, 10, 2), log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
+    slots, dbLanes, log, passEnv: strList(raw.passEnv, 'passEnv', []), projects,
   };
 }
 
@@ -183,9 +191,9 @@ export function jobCwd(slotDir: string, recipe: Recipe, params: Record<string, s
   return out;
 }
 
-/** A job's env, built from nothing. The runner's own git and docker calls use it too, with `recipe.env` holding their
+/** A job's env, built from nothing. A DB job's lane fills {lane} in its recipe's env values. The runner's own git and docker calls use it too, with `recipe.env` holding their
  *  extras: they never get the runner's whole env (its CB_* and database URL). */
-export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<Recipe, 'env'>): Record<string, string> {
+export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<Recipe, 'env'>, lane?: number): Record<string, string> {
   // Windows env names are case-insensitive (Path vs PATH): match that way, emit the listed spelling
   const lower = new Map(Object.entries(from).map(([k, v]) => [k.toUpperCase(), v]));
   const out: Record<string, string> = {};
@@ -195,7 +203,16 @@ export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<
   }
   // NoDefaultCurrentDirectoryInExePath: on Windows the process that looks a program up (the launcher, or a job's own
   // child) must not take a committed git.exe / docker.exe from its cwd before PATH. Inert elsewhere.
-  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', ...recipe.env };
+  const extra = lane === undefined ? recipe.env
+    : Object.fromEntries(Object.entries(recipe.env).map(([k, v]) => [k, v.replaceAll(LANE, String(lane))]));
+  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', ...extra };
+}
+
+/** The lowest DB lane (1..lanes) no running job holds, or undefined when all are taken. */
+export function freeLane(used: Iterable<number>, lanes: number): number | undefined {
+  const held = new Set(used);
+  for (let l = 1; l <= lanes; l++) if (!held.has(l)) return l;
+  return undefined;
 }
 
 export function published(cfg: RunnerConfig) {

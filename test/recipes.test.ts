@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { loadConfig, checkParams, expand, jobCwd, jobEnv, published } from '../cli/recipes.ts';
+import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, published } from '../cli/recipes.ts';
 
 const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'utf8'));
 
@@ -99,4 +99,36 @@ test('prototype names are not parameters', () => {
   assert.equal(checkParams(r, JSON.parse('{"ws":["@ihop/a"],"__proto__":["-rf"]}')), 'error: bad parameter __proto__: unknown');
   assert.deepEqual(expand(['a', '{toString}'], {}), ['a']);
   assert.deepEqual(expand(['a', '{ws}'], JSON.parse('{"__proto__":["x"]}')), ['a']);
+});
+
+// DB lanes: dbLanes DB jobs at once, each with its own test stack (the lane fills {lane} in its recipe's env)
+const dbEnv = { TEST_STACK_PROJECT: 'cb-runner-it-{lane}', TEST_STACK_PG_PORT: '5543{lane}', DB_SSL_DISABLE: 'true' };
+test('dbLanes: 1 by default, 1-9, never above slots', () => {
+  assert.equal(loadConfig(cfgWith({ steps: [['a']] })).dbLanes, 1);
+  assert.equal(example().dbLanes, 2);
+  assert.equal(loadConfig(cfgWith({ steps: [['a']], db: true, env: dbEnv }, { slots: 10, dbLanes: 9 })).dbLanes, 9);
+  for (const dbLanes of [0, 10, 1.5, '2']) assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 10, dbLanes })), /dbLanes/);
+  assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 2, dbLanes: 3 })), /dbLanes: is above slots/);
+});
+test('dbLanes above 1: a DB recipe whose env has no {lane} is refused; {lane} outside a DB recipe is refused', () => {
+  const shared = { TEST_STACK_PROJECT: 'cb-runner-it', TEST_STACK_PG_PORT: '55432' };
+  assert.throws(() => loadConfig(cfgWith({ steps: [['a']], db: true, env: shared }, { dbLanes: 2 })), /recipes\.r\.env: needs \{lane\}/);
+  assert.equal(loadConfig(cfgWith({ steps: [['a']], db: true, env: shared }, { dbLanes: 1 })).dbLanes, 1); // one at a time, as before
+  assert.ok(loadConfig(cfgWith({ steps: [['a']], db: true, env: dbEnv }, { dbLanes: 2 })));
+  assert.throws(() => loadConfig(cfgWith({ steps: [['a']], env: { PORT: '300{lane}' } })), /recipes\.r\.env: \{lane\} is for DB recipes only/);
+});
+test('jobEnv fills every {lane} with the job\'s lane; no lane leaves the env as written', () => {
+  const cfg = loadConfig(cfgWith({ steps: [['a']], db: true, env: { ...dbEnv, BOTH: '{lane}-{lane}' } }, { dbLanes: 2 }));
+  const recipe = cfg.projects.p!.repos.main!.recipes.r!;
+  const env = jobEnv({}, cfg, recipe, 2);
+  assert.deepEqual([env.TEST_STACK_PROJECT, env.TEST_STACK_PG_PORT, env.BOTH, env.DB_SSL_DISABLE], ['cb-runner-it-2', '55432', '2-2', 'true']);
+  assert.equal(jobEnv({}, cfg, recipe).TEST_STACK_PROJECT, 'cb-runner-it-{lane}');
+  assert.equal(recipe.env.TEST_STACK_PROJECT, 'cb-runner-it-{lane}'); // the recipe itself is untouched
+});
+test('freeLane: the lowest lane no running job holds, none when all are taken', () => {
+  assert.equal(freeLane([], 4), 1);
+  assert.equal(freeLane([1, 2, 4], 4), 3);
+  assert.equal(freeLane([2, 1, 3, 4], 4), undefined);
+  assert.equal(freeLane([], 1), 1);
+  assert.equal(freeLane([1], 1), undefined);
 });
