@@ -104,15 +104,38 @@ const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 const QUOTA = /usage limit reached|you['’]ve hit your (?:usage )?limit|(?:5-hour|weekly|session) limit reached|out of extra usage/i;
 const RATE = /rate[ _-]?limit|\b429\b|overloaded_error/i;
 
+// #4346 review I1: a seat runs with bypassPermissions, so its --settings file is the whole fence. A missing role file,
+// truncated JSON or a deny list without the fence would start a seat with no fence, so the launch is refused instead.
+// Checked on this checkout's copy: the seat's own path (l.board) may be on another machine, but it is the same repo.
+const PERMISSIONS = new URL('../../kit/permissions/', import.meta.url);
+export function checkRoleSettings(role: string, dir: string | URL = PERMISSIONS) {
+  const file = typeof dir === 'string' ? join(dir, `${role}.json`) : new URL(`${role}.json`, dir);
+  const where = typeof file === 'string' ? file : `kit/permissions/${role}.json`;
+  const refuse = (why: string): never => { throw new Error(`refusing to start a ${role} seat: ${where} ${why}`); };
+  if (!/^[a-z][a-z0-9-]*$/.test(role)) refuse('is not a role file name');
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch { return refuse('does not exist'); }
+  let f: any;
+  try { f = JSON.parse(text); } catch { return refuse('is not valid JSON'); }
+  const deny = f?.permissions?.deny;
+  if (!Array.isArray(deny)) refuse('has no permissions.deny list');
+  for (const must of ['mcp__*', 'PowerShell']) if (!deny.includes(must)) refuse(`does not deny ${must}`);
+}
+
 export const claudeAdapter: AgentAdapter = {
   kind: 'claude',
   relayStart: 'session-hook',
 
   // The args after `--` of `herdr agent start <name> --kind claude --pane <pane>`, as cli/squad-up.ts has always sent them.
+  // #4346: --strict-mcp-config with an empty --mcp-config loads no MCP server at all (no process spawned with the
+  // seat's env), on top of the mcp__* deny in the role file. Checked live: 83 MCP tools without, 0 with either.
   buildLaunch(l) {
+    checkRoleSettings(l.role);
+    const board = l.board.replace(/[\/]+$/, '');
     return {
       kind: 'claude',
-      args: ['--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', `${l.board.replace(/[\/]+$/, '')}/kit/permissions/${l.role}.json`],
+      args: ['--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', `${board}/kit/permissions/${l.role}.json`,
+        '--strict-mcp-config', '--mcp-config', `${board}/kit/mcp/none.json`],
       env: { ...(l.env ?? {}) },
     };
   },

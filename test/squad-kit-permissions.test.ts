@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
+// review M2: a new role file must not slip past these tests
+test('the role list here is exactly the files in kit/permissions', () => {
+  const files = readdirSync(new URL('../kit/permissions', import.meta.url)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5));
+  assert.deepEqual(files.sort(), [...ROLES].sort());
+});
 const READ_ONLY = ['reviewer', 'qa', 'investigator'];
 const load = (r: string) => JSON.parse(readFileSync(new URL(`../kit/permissions/${r}.json`, import.meta.url), 'utf8'));
 

@@ -7,7 +7,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
-import { claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
+import { checkRoleSettings, claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
@@ -58,12 +58,31 @@ test("buildLaunch: today's claude args, trailing slashes stripped", () => {
   const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/w/board//', cwd: 'C:/w/x' };
   assert.deepEqual(claudeAdapter.buildLaunch(input), {
     kind: 'claude',
-    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/w/board/kit/permissions/builder.json'],
+    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/w/board/kit/permissions/builder.json',
+      '--strict-mcp-config', '--mcp-config', 'C:/w/board/kit/mcp/none.json'],
     env: {},
   });
   assert.deepEqual(claudeAdapter.buildLaunch({ ...input, board: '/Users/x/board', env: { CB_ROLE: 'builder' } }).env, { CB_ROLE: 'builder' });
   assert.equal(claudeAdapter.kind, 'claude');
   assert.equal(claudeAdapter.relayStart, 'session-hook');
+});
+
+// #4346 review I1: a bypassPermissions seat whose --settings file is missing or broken has no fence at all, so a seat
+// is never started on one. Checked on this checkout's copy (the seat's own path may be on another machine).
+test('buildLaunch refuses a role with no permission file, or one that is malformed or lacks the fence', () => {
+  const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: '/b', cwd: '/x' };
+  assert.throws(() => claudeAdapter.buildLaunch({ ...input, role: 'no-such-role' }), /refusing to start a no-such-role seat: .*no-such-role\.json/);
+  const dir = join(tmpdir(), `cb-perm-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(join(dir, 'builder.json'), '{ "permissions": { "deny": [');
+    assert.throws(() => checkRoleSettings('builder', dir), /refusing to start a builder seat: .*not valid JSON/);
+    writeFileSync(join(dir, 'builder.json'), JSON.stringify({ permissions: { deny: ['PowerShell'], allow: [] } }));
+    assert.throws(() => checkRoleSettings('builder', dir), /refusing to start a builder seat: .*mcp__\*/);
+    writeFileSync(join(dir, 'builder.json'), JSON.stringify({ disableClaudeAiConnectors: true, permissions: { deny: ['PowerShell', 'mcp__*'], allow: [] } }));
+    assert.doesNotThrow(() => checkRoleSettings('builder', dir));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  for (const r of ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) assert.doesNotThrow(() => checkRoleSettings(r), r);
 });
 
 test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file left', () => {
