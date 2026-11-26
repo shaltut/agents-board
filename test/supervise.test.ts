@@ -43,14 +43,14 @@ type Call = { m: string | null; args: string[] };
 const OK = { status: 0, stdout: '{}', stderr: '' };
 const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
 const json = (o: unknown) => ({ status: 0, stdout: JSON.stringify(o), stderr: '' });
-function fakeHerdr(o: { down?: string[]; start?: (c: Call) => any; prompt?: (c: Call) => any } = {}) {
+function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => any; prompt?: (c: Call) => any } = {}) {
   const calls: Call[] = [], live = new Map<string, string>(); // herdr name → pane
   let panes = 0;
   const run: Runner = (m, args) => {
     const c = { m, args }; calls.push(c);
     const [a, b, x] = args;
     if (a === 'agent' && b === 'list') return o.down?.includes(m ?? 'local') ? { status: 1, stdout: '', stderr: 'machine unreachable' }
-      : json({ id: 'cli:agent:list', result: { agents: [...live].map(([name, pane_id]) => ({ name, pane_id, agent: 'claude', agent_status: 'idle' })), type: 'agent_list' } });
+      : json({ id: 'cli:agent:list', result: { agents: [...live].map(([name, pane_id]) => ({ name, pane_id, agent: 'claude', agent_status: o.status ?? 'idle' })), type: 'agent_list' } });
     if (a === 'agent' && b === 'get') return live.has(x!) ? json({ result: { agent: { name: x, pane_id: live.get(x!) } } }) : GONE;
     if (a === 'tab' || (a === 'pane' && b === 'split')) return json({ result: { pane: { pane_id: `p${++panes}` } } });
     if (a === 'agent' && b === 'start') { const r = o.start?.(c); live.set(x!, args[args.indexOf('--pane') + 1]!); return r ?? OK; }
@@ -182,6 +182,21 @@ test('closeOne delegates through Claude adapter and safely skips unregistered ag
     assert.equal(await closingAt(sql), null, 'the mark is cleared');
     assert.equal((await events(sql, 'close')).length, 0);
   }
+});
+
+test('a working seat is never marked closing: the tick reads its herdr status', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' }); // idle on the board long enough to be a close candidate
+  const h = fakeHerdr({ status: 'working' });
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const marks: string[] = [];
+  const spy = new Proxy(sup, {
+    apply(t, self, args: any[]) { marks.push(String(args[0]?.join?.('?'))); return Reflect.apply(t, self, args); },
+  });
+  const out = await tick(deps(spy, h.run));
+  assert.ok(!marks.some((q) => /supervise_mark\(.*, true\)/.test(q)), 'never marked closing');
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
 });
 
 test('a claim between mark and re-check stops the close', async () => {

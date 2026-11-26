@@ -142,14 +142,16 @@ test('deliver: retries once when the endpoint file rotated to a live socket', as
 
 test('isAlive: true while the socket exists, false when it is gone or there is no endpoint', async () => {
   const pane = fresh(), sock = sockName(pane); cleanup(pane);
+  let srv: Awaited<ReturnType<typeof listen>> | undefined;
   try {
     assert.equal(await claudeAdapter.isAlive(seatOf(pane)), false);
-    const srv = await listen(sock);
+    srv = await listen(sock);
     writeClaudeEndpoint(M, pane, { socket: sock, token: 'T' });
     assert.equal(await claudeAdapter.isAlive(seatOf(pane)), true);
     await srv.close();
+    srv = undefined;
     assert.equal(await claudeAdapter.isAlive(seatOf(pane)), false);
-  } finally { cleanup(pane); }
+  } finally { await srv?.close(); cleanup(pane); }
 });
 
 test('readStatus: idle and done are safe to close; the rest are not', async () => {
