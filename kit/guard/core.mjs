@@ -506,6 +506,25 @@ function pastOpts(w, j, valueOpt) {
   return j;
 }
 
+// Secret files (#4347). What a seat reads goes to the model provider, and the board holds client work (one client is in
+// healthcare), so no role reads a secret file into its context: .env and its real variants (not .env.example/sample/
+// template), private keys, .pgpass, .netrc, git and npm credentials, the seat's messaging token file. Using one where it
+// lives (node --env-file=.env, docker compose --env-file) passes: no read word names it. kit/permissions/<role>.json
+// denies the same files to Read. Linear: every name starts at a path boundary, so a long word is read once.
+const SECRET_NAME = new RegExp(String.raw`(?:^|[\s"'=:(\\/~@<])(?:\.env(?:\.(?!(?:example|sample|template|dist)(?![\w.-]))[\w.-]+)?|[\w.-]+\.(?:pem|key|p12|pfx)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|cb-seat-[\w.-]*\.claude\.json)(?=[\s"';&|)<>]|$)`, 'i');
+const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
+  'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
+  'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',
+  '7z', 'jq', 'yq', 'source', 'readallbytes', 'readalltext', 'readalllines'];
+const SECRET_READER = new RegExp(String.raw`(?<![\w.-])(?:${SECRET_READERS.join('|')})(?![\w.-])|(?:^|[\s;&|(])\.(?=[ \t])`, 'i');
+const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git or npm credentials or a seat token file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+// Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first).
+function secretRead(command) {
+  if (!SECRET_NAME.test(command)) return null;
+  const text = stripMessages(command);
+  return SECRET_NAME.test(text) && SECRET_READER.test(text) ? SECRET : null;
+}
+
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
@@ -513,6 +532,8 @@ function pastOpts(w, j, valueOpt) {
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
+  const secret = secretRead(String(command ?? ''));
+  if (secret) return secret;
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);

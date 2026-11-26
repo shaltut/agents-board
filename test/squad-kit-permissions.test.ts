@@ -149,6 +149,21 @@ test('push options that name no branch are denied, with twins; the git -* twins 
   }
 });
 
+// #4347: //** is "anywhere on the filesystem" (a cwd-relative **/ would miss the board checkout's deploy/.env or
+// ~/.pgpass). A Read deny also covers Grep/Glob (best effort), the Bash commands Claude can parse (cat, sed, a redirect
+// target) and Edit/Write of the same path. ! carve-outs cannot reopen // rules, so the real .env variants are listed
+// and .env.example/sample/template stay readable.
+const SECRETS = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.prod', '.env.development', '.env.dev',
+  '.env.staging', '.env.test', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.pgpass',
+  '.netrc', '.git-credentials', '.npmrc', '.pypirc', 'cb-seat-*.claude.json'];
+test('every role denies reading secret files anywhere, and keeps .env.example readable', () => {
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const s of SECRETS) assert.ok(deny.includes(`Read(//**/${s})`), `${r}: Read(//**/${s})`);
+    assert.equal(deny.some((d: string) => /^Read\(.*\.env\.(?:example|sample|template)\)$/.test(d) || d === 'Read(//**/.env.*)'), false, r);
+  }
+});
+
 test('no role may use the PowerShell tool: squad sessions work through Bash', () => {
   for (const r of ROLES) assert.ok(load(r).permissions.deny.includes('PowerShell'), r);
 });
