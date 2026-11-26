@@ -29,7 +29,7 @@ test('the iHop example loads and publishes names only', () => {
 });
 
 // #4014 (Q2790, every pull request): guards runs the repo's script tests as its pre-push hook does
-test('the iHop guards recipe runs the hook script tests on every job', () => {
+test('the example guards recipe runs the hook script tests on every job', () => {
   const guards = example().projects.ihop!.repos.main!.recipes.guards!;
   assert.deepEqual(guards.steps.at(-1), ['pnpm', 'exec', 'lefthook', 'run', 'pre-push', '--commands', 'program-script-tests', '--no-tty']);
 });
