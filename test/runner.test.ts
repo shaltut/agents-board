@@ -86,6 +86,7 @@ const recipes = {
   wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
+  swap: { steps: [node('swap.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
   headless: { steps: [node('-e', "require('fs').writeFileSync('.git/HEAD', '')")], timeout: 60 },
@@ -433,6 +434,33 @@ test('hooks, config and git locks a job plants in the slot clone never run or st
   assert.equal(existsSync(hookMark), false, 'the planted hook ran');
   assert.equal(existsSync(filterMark), false, 'the planted filter ran');
   assert.ok(existsSync(join(inside, 'keep')) && existsSync(join(outside, 'y.lock')), 'the lock clearing went through a link');
+});
+
+// #3776: a link a job leaves where a tracked folder was survived checkout --force (a junction, on Windows), and the
+// clean then deleted untracked files inside its target, outside the clone. The runner drops every link before checkout.
+test('a link a job leaves over a tracked folder is removed before the checkout: nothing outside the slot is deleted', async () => {
+  const outside = join(TMP, 'swap-target').replaceAll('\\', '/');
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, 'package.json'), '{}\n'); // the same as the tracked one, as in the report
+  writeFileSync(join(outside, 'victim.txt'), 'outside the slot');
+  const swap = [
+    "import { rmSync, symlinkSync } from 'node:fs';",
+    `rmSync('pkg', { recursive: true, force: true }); symlinkSync('${outside}', 'pkg', 'junction');`,
+    "console.log('planted');",
+  ].join('\n');
+  git('checkout', '-q', '-b', 'swap', 'main');
+  mkdirSync(join(WORK, 'pkg'), { recursive: true });
+  const P = commit('swap', { 'swap.mjs': swap, 'pkg/package.json': '{}\n' });
+  git('push', '-q', 'origin', 'swap');
+  git('checkout', '-q', 'main');
+  const jp = await ended(await add('swap', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const qid = await add('ok', P);
+  const jq = await ended(qid);
+  assert.equal(jq.state, 'passed', jq.summary);
+  assert.ok(existsSync(join(outside, 'victim.txt')), 'the clean deleted a file outside the slot, through the link');
+  assert.ok(existsSync(join(outside, 'package.json')));
+  assert.match(logOf(qid), /removed 1 link\(s\) a job left in the slot: pkg/);
 });
 
 test('a NUL folder a job plants in the slot does not break the next job', { skip: !WIN && 'Windows only' }, async () => {
