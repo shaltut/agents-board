@@ -1,6 +1,5 @@
 // Runner recipes: load and validate runner.json, check job parameters, build argv/cwd/env. Pure: no DB, no spawn.
-import { existsSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 
 // paths: each value names a file or folder in the job's folder at the sha, checked before the steps run (#4338)
 export type Param = { pattern: string; min: number; max: number; paths: boolean };
@@ -200,7 +199,7 @@ function cwdRel(recipe: Recipe, params: Record<string, string[]>): string | null
   let missing = false;
   const rel = recipe.cwd.replace(SLOT, (_, n: string) => {
     const v = Object.hasOwn(params, n) ? params[n]![0] : undefined;
-    if (typeof v !== 'string') { missing = true; return ''; }
+    if (typeof v !== 'string' || !VALUE.test(v)) { missing = true; return ''; } // unchecked rows: checkParams names it (review M3)
     return v;
   });
   return missing ? null : rel.replace(/\\/g, '/').replace(/^(?:\.\/)+|\/+$/g, '').replace(/^\.$/, '');
@@ -217,10 +216,19 @@ export function relPaths(recipe: Recipe, params: Record<string, string[]>): Reco
       ? vals.map((v) => (typeof v === 'string' && v.startsWith(prefix) && v.length > prefix.length ? v.slice(prefix.length) : v)) : vals]));
 }
 
-/** #4338: the path values not in the job's folder (checked after checkParams, so each is a plain relative path). */
-export function missingPaths(cwd: string, recipe: Recipe, params: Record<string, string[]>): string[] {
+/** #4338: the path values that name nothing tracked in the job's folder at the sha. tracked is git's file list there,
+ *  relative to that folder (the working tree would pass node_modules and, on Windows, a wrong-case name). A value counts
+ *  when a tracked file is it, ends with it, or sits inside it, cut only at a / (review C1: a tool that runs from a
+ *  package folder, pnpm --filter ... exec vitest, takes names relative to that package, so an existing runner.json keeps
+ *  working unchanged). That proves each name matches a real file or folder; it proves the named tests ran only for a
+ *  tool that loads exactly what it is given (node --test). Checked after checkParams: each value is a plain path. */
+export function missingPaths(tracked: string[], recipe: Recipe, params: Record<string, string[]>): string[] {
+  const files = tracked.map((f) => `/${f}/`);
   return Object.entries(recipe.params).filter(([, spec]) => spec.paths)
-    .flatMap(([n]) => (Object.hasOwn(params, n) ? params[n]! : []).filter((v) => !existsSync(join(cwd, v))));
+    .flatMap(([n]) => (Object.hasOwn(params, n) ? params[n]! : []).filter((v) => {
+      const seg = `/${v.replace(/^(?:\.\/)+|\/+$/g, '')}/`;
+      return seg === '//' ? false : !files.some((f) => f.includes(seg));
+    }));
 }
 
 /** The recipe's folder as the requester wrote it ('.' for the repo root), for an error message. */

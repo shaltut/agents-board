@@ -328,8 +328,17 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 
   // #4338: every path parameter names something in the recipe's folder at this sha (a test tool drops a name it cannot
   // find and passes on the rest, so a green job would not prove the named tests ran). Before the install: it is cheap.
-  const gone = missingPaths(jobCwd(dir, recipe, params), recipe, params);
-  if (gone.length) return err(`error: not in the repo at ${j.sha.slice(0, 12)}: ${gone.join(', ')} (paths are relative to the recipe's folder, ${recipeFolder(recipe, params)})`);
+  // git's tree at the sha, not the working tree (review M1): exact, case-sensitive, and no node_modules
+  const folder = recipeFolder(recipe, params);
+  let gone: string[] = [];
+  if (Object.values(recipe.params).some((spec) => spec.paths)) {
+    const ls = await git(['ls-tree', '-r', '-z', '--name-only', full, '--', folder], true);
+    if (stop.aborted) return null;
+    if (ls.code !== 0) throw new Error(`git ls-tree exited ${ls.code}`);
+    const prefix = folder === '.' ? '' : `${folder}/`;
+    gone = missingPaths(ls.out.split('\0').filter((f) => f && f.startsWith(prefix)).map((f) => f.slice(prefix.length)), recipe, params);
+  }
+  if (gone.length) return err(`error: not in the repo at ${j.sha.slice(0, 12)}: ${gone.join(', ')} (paths are relative to the recipe's folder, ${folder})`);
 
   // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
   // always when the blob cannot be read (a lockfile missing at the sha, a wrong lockfile path)

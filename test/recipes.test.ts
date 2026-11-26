@@ -83,16 +83,17 @@ test('relPaths takes a repo-relative path as relative to the job folder; other p
   assert.deepEqual(relPaths(test_, { files: ['apps/claims-api/tests/a.test.ts'] }), { files: ['apps/claims-api/tests/a.test.ts'] });
 });
 
-test('missingPaths names the path values not in the job folder; a path parameter can be turned off', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cb-paths-'));
-  try {
-    mkdirSync(join(dir, 'tests'));
-    writeFileSync(join(dir, 'tests', 'a.test.ts'), '');
-    const r = { ...example().projects.ihop!.repos.main!.recipes.test! };
-    assert.deepEqual(missingPaths(dir, r, { app: ['x'], files: ['tests/a.test.ts', 'tests/made-up.test.ts', 'tests'] }), ['tests/made-up.test.ts']);
-    const off = { ...r, params: { ...r.params, files: { ...r.params.files!, paths: false } } };
-    assert.deepEqual(missingPaths(dir, off, { app: ['x'], files: ['tests/made-up.test.ts'] }), []);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+test('missingPaths: a name counts when a tracked file is it, ends with it or sits in it, cut at a /; a path parameter can be turned off', () => {
+  const r = { ...example().projects.ihop!.repos.main!.recipes.test! };
+  const tracked = ['tests/a.test.ts', 'tests/b.test.tsx', 'client/src/components/bell.test.ts', 'package.json'];
+  // review C1: vitest under pnpm --filter runs from the package folder, so its names are package-relative: still found
+  assert.deepEqual(missingPaths(tracked, r, { app: ['x'], files: ['tests/a.test.ts', 'tests/made-up.test.ts', 'tests', 'components/bell.test.ts'] }), ['tests/made-up.test.ts']);
+  // cut only at a /: no partial names, and b.test.ts is not b.test.tsx
+  assert.deepEqual(missingPaths(tracked, r, { app: ['x'], files: ['ests/a.test.ts', 'tests/b.test.ts', 'a.test', './tests/a.test.ts', 'tests/'] }), ['ests/a.test.ts', 'tests/b.test.ts', 'a.test']);
+  // review M1: node_modules is never tracked, and a wrong-case name is not the file
+  assert.deepEqual(missingPaths(tracked, r, { app: ['x'], files: ['node_modules/x/index.js', 'tests/A.test.ts'] }), ['node_modules/x/index.js', 'tests/A.test.ts']);
+  const off = { ...r, params: { ...r.params, files: { ...r.params.files!, paths: false } } };
+  assert.deepEqual(missingPaths(tracked, off, { app: ['x'], files: ['tests/made-up.test.ts'] }), []);
   const withParam = (p: object) => loadConfig(cfgWith({ steps: [['a', '{files}', '{spec}']], params: { files: { pattern: '.', ...p }, spec: { pattern: '.', paths: true } } }));
   const params = withParam({ paths: false }).projects.p!.repos.main!.recipes.r!.params;
   assert.equal(params.files!.paths, false);
