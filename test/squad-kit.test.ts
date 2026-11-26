@@ -468,6 +468,52 @@ test('stage_stalls_due: no nudge to the holder of a card waiting on a person (Q2
   assert.equal(await due(), 1, 'a dormant question does not hold it');
 });
 
+// #4335: a builder waiting on the review of its open PR was quiet, so the sweep freed the card: the builder could no
+// longer pass it and the digest still said it held it. A card (or part) with a linked PR keeps its holder; it is nudged
+// (once a quiet spell, never told it goes back to the queue).
+test('stage_stalls_due: a card or a part with a linked PR keeps its holder, and is nudged without the threat (#4335)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p2','B1@mac','demo','builder'), ('pc','p4','orch@pc','demo',null)`;
+  for (const t of ['With a PR', 'No PR']) await sql`select cb.task_add(project => 'demo', title => ${t}, type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`;
+  await sql`update cb.tasks set status = 'in_progress', assignee = 'B1@mac', stage = 'review' where id in (1, 2)`;
+  await sql`update cb.tasks set links = '{"pr": "https://github.com/o/r/pull/5947"}' where id = 1`;
+  const quiet = async (m: string) => {
+    await sql`update cb.tasks set updated_at = now() - ${m}::interval where id in (1, 2)`;
+    await sql`update cb.sessions set started_at = now() - ${m}::interval where actor = 'B1@mac'`;
+    await sql`update cb.events set at = now() - ${m}::interval where (task_id in (1, 2) or actor = 'B1@mac') and not (data ? 'nudge')`;
+  };
+  const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
+  const nudge = async (id: number) => (await sql`select summary from cb.events where task_id = ${id} and data ? 'nudge' order by id desc limit 1`)[0]?.summary;
+  await quiet('40 minutes');
+  assert.equal(await due(), 2, 'both nudged');
+  assert.match(await nudge(1), /^#1 "With a PR" has its PR open with no update for 0h 40m at .*cb log 1/);
+  assert.doesNotMatch(await nudge(1), /back to the queue/);
+  assert.match(await nudge(2), /goes back to the queue in an hour/);
+  // 70 minutes after the nudges, 110 quiet: the card without a PR is freed, the one with a PR is not, nor nudged again
+  await sql`update cb.stage_nudges set nudged_at = now() - interval '70 minutes'`;
+  await quiet('110 minutes');
+  assert.equal(await due(), 2, 'only the card without a PR is freed (a note and a message)');
+  const rows = await sql`select id, assignee, status, stage from cb.tasks where id in (1, 2) order by id`;
+  assert.deepEqual(rows.map((r: any) => [String(r.id), r.assignee, r.status]), [['1', 'B1@mac', 'in_progress'], ['2', null, 'next']]);
+  // a hold (Next) with a PR is not freed either
+  await sql`update cb.tasks set status = 'next' where id = 1`;
+  await quiet('110 minutes');
+  assert.equal(await due(), 0);
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac');
+
+  // a part with its PR: the same
+  await sql`select cb.task_add(project => 'demo', title => 'Parts', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`;
+  await sql`update cb.tasks set status = 'in_progress', stage = 'build' where id = 3`;
+  await sql`insert into cb.task_parts (task_id, repo, stage, status, assignee, pr, since, nudged_at) values
+    (3, 'api', 'review', 'in_progress', 'B1@mac', 'https://github.com/o/r/pull/6001', now() - interval '110 minutes', now() - interval '70 minutes')`;
+  await sql`update cb.events set at = now() - interval '110 minutes' where task_id = 3 or actor = 'B1@mac'`;
+  await sql`update cb.tasks set updated_at = now() - interval '110 minutes'`;
+  await due();
+  assert.equal((await sql`select assignee from cb.task_parts where task_id = 3`)[0].assignee, 'B1@mac', 'a part with a PR keeps its holder');
+});
+
 test('role texts name the repo rules', () => {
   const role = (r: string) => readFileSync(`prompts/roles/${r}.md`, 'utf8');
   const has = (r: string, s: string) => assert.ok(role(r).includes(s), `${r} lacks: ${s}`);
