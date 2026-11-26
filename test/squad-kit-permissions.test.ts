@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
+// review M2: a new role file must not slip past these tests
+test('the role list here is exactly the files in kit/permissions', () => {
+  const files = readdirSync(new URL('../kit/permissions', import.meta.url)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5));
+  assert.deepEqual(files.sort(), [...ROLES].sort());
+});
 const READ_ONLY = ['reviewer', 'qa', 'investigator'];
 const load = (r: string) => JSON.parse(readFileSync(new URL(`../kit/permissions/${r}.json`, import.meta.url), 'utf8'));
 
@@ -146,6 +151,20 @@ test('push options that name no branch are denied, with twins; the git -* twins 
     const { deny } = load(r).permissions;
     for (const c of bad) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
     for (const c of fine.filter((x) => !(READ_ONLY.includes(r) && x.startsWith('git push')))) assert.equal(denied(deny, c), false, `${r} must allow: ${c}`);
+  }
+});
+
+// #4346: the guard sees only Bash/PowerShell, so an MCP tool (a mail send, a SQL execute, a drive share...) was open
+// to any seat acting on an injected [GitHub · untrusted] line. No role's work uses MCP. Under bypassPermissions allow
+// rules do nothing and deny rules always hold, so the fence is a deny: mcp__* covers every server and also takes the
+// tools out of the session's context; disableClaudeAiConnectors stops the account's claude.ai connectors loading.
+// A role that one day needs a server gets a narrower deny, never an allow (it would be ignored).
+test('every role denies every MCP tool and loads no claude.ai connectors', () => {
+  for (const r of ROLES) {
+    const f = load(r);
+    assert.ok(f.permissions.deny.includes('mcp__*'), `${r}: mcp__*`);
+    assert.equal(f.disableClaudeAiConnectors, true, `${r}: disableClaudeAiConnectors`);
+    assert.equal(f.permissions.allow.some((a: string) => a.startsWith('mcp__')), false, `${r}: an MCP allow does nothing under bypass`);
   }
 });
 

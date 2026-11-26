@@ -1,5 +1,6 @@
 {
   "crossSessionInbound": "accept",
+  "disableClaudeAiConnectors": true,
   "permissions": {
     "deny": [
       "Bash(git push)",
@@ -80,6 +81,7 @@
       "Bash(az repos pr create*bypass-policy*)",
       "Bash(az repos pr update*bypass-policy*)",
       "PowerShell",
+      "mcp__*",
       "Read(//**/.env)",
       "Read(//**/.env.local)",
       "Read(//**/.env.*.local)",
