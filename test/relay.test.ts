@@ -295,6 +295,55 @@ test('broadcasts reach every session once, filtered by project', async () => {
   assert.deepEqual(b.broadcasts.map((x: any) => x.summary), ['ihop only', 'relay is live, run cb relay']);
 });
 
+// #4336: the relay re-checks a settled Next offer right before pushing it: still in Next, still unassigned or mine,
+// still mine to claim. The lead's create-then-assign (seconds apart) no longer reaches another idle builder.
+test('work_still_open: a card assigned to someone else, or moved out of Next, since it was offered is dropped', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
+  await sql`select cb.iam('pc', 'p1', 'W1', 'ihop')`;
+  const add = async (title: string) => Number((await sql`select cb.task_add(project => 'ihop', title => ${title}, status => 'next', actor => 'orch') as id`)[0].id);
+  const free = await add('still free'), taken = await add('given to B7'), mine = await add('given to me'), moved = await add('moved on');
+  await sql`update cb.tasks set assignee = 'B7' where id = ${taken}`;
+  await sql`update cb.tasks set assignee = 'W1' where id = ${mine}`;
+  await sql`update cb.tasks set status = 'in_progress', assignee = 'B9' where id = ${moved}`;
+  const [{ ids }] = await sql`select cb.work_still_open(${[free, taken, mine, moved, 999999]}::bigint[], 'W1') as ids`;
+  assert.deepEqual(ids.map(Number).sort((a: number, b: number) => a - b), [free, mine]);
+  // review I1: holding a part in progress (#3703) is work in progress too, as in the inbox's next_work
+  const parts = await add('a parts card');
+  await sql`update cb.tasks set stage = 'build' where id = ${parts}`; // a part hold counts on a staged card
+  await sql`insert into cb.task_parts (task_id, repo, stage, status, assignee) values (${parts}, 'main', 'build', 'in_progress', 'W1')`;
+  const [{ part }] = await sql`select cb.work_still_open(${[free]}::bigint[], 'W1') as part`;
+  assert.deepEqual(part, []);
+  await sql`delete from cb.task_parts where task_id = ${parts}`;
+  // an unassigned bug outside a pipeline goes to triage, never offered (as the inbox)
+  const bug = Number((await sql`select cb.task_add(project => 'ihop', title => 'a bug', status => 'next', type => 'bug', actor => 'orch') as id`)[0].id);
+  const [{ b }] = await sql`select cb.work_still_open(${[free, bug]}::bigint[], 'W1') as b`;
+  assert.deepEqual(b.map(Number), [free]);
+  // started something meanwhile: nothing is offered
+  await sql`update cb.tasks set status = 'in_progress' where id = ${mine}`;
+  const [{ busy }] = await sql`select cb.work_still_open(${[free]}::bigint[], 'W1') as busy`;
+  assert.deepEqual(busy, []);
+  const [{ none }] = await sql`select cb.work_still_open('{}'::bigint[], 'W1') as none`;
+  assert.deepEqual(none, []);
+});
+
+// #4343: a new seat in a reused herdr pane id inherits the old row (and its broadcast_seen), so it was pushed every
+// broadcast since, days old. Broadcasts now age out at 24 h, as messages, answers and huddle lines do.
+test('broadcasts older than 24 h are never pushed, so a reused pane gets no days-old backlog', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'ihop', title => 'x')`;
+  await sql`select cb.iam('pc', 'w8:p1', 'old-seat', 'ihop')`;
+  await sql`select cb.broadcast('four days old: stop all merges', 'ihop', 'orch')`;
+  await sql`select cb.broadcast('yesterday morning, 25 h ago', 'ihop', 'orch')`;
+  await sql`update cb.events set at = now() - interval '4 days' where kind = 'broadcast' and summary like 'four days%'`;
+  await sql`update cb.events set at = now() - interval '25 hours' where kind = 'broadcast' and summary like 'yesterday%'`;
+  await sql`select cb.broadcast('23 h ago, still in the window', 'ihop', 'orch')`;
+  await sql`update cb.events set at = now() - interval '23 hours' where kind = 'broadcast' and summary like '23 h%'`;
+  await sql`select cb.broadcast('fresh: relay is live', 'ihop', 'orch')`;
+  const [{ i }] = await sql`select cb.inbox('pc', 'w8:p1', 0) as i`;
+  assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['23 h ago, still in the window', 'fresh: relay is live']);
+});
+
 test('inbox: a task created for me, and new Next work when I am idle', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
