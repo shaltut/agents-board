@@ -74,7 +74,13 @@
       "Bash(git -* push --follow-tags)",
       "Bash(git push --atomic origin)",
       "Bash(git -* push --atomic origin)",
-      "PowerShell"
+      "PowerShell",
+      "Edit(~/.claude/settings*.json)",
+      "Write(~/.claude/settings*.json)",
+      "Edit(//**/.claude/settings*.json)",
+      "Write(//**/.claude/settings*.json)",
+      "Edit(~/.claude-board/**)",
+      "Write(~/.claude-board/**)"
     ],
     "allow": [
       "Bash(cb *)",

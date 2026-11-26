@@ -79,7 +79,13 @@
       "Bash(az repos pr create*complete*)",
       "Bash(az repos pr create*bypass-policy*)",
       "Bash(az repos pr update*bypass-policy*)",
-      "PowerShell"
+      "PowerShell",
+      "Edit(~/.claude/settings*.json)",
+      "Write(~/.claude/settings*.json)",
+      "Edit(//**/.claude/settings*.json)",
+      "Write(//**/.claude/settings*.json)",
+      "Edit(~/.claude-board/**)",
+      "Write(~/.claude-board/**)"
     ],
     "allow": [
       "Bash(cb *)"
