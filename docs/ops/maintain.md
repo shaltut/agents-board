@@ -282,6 +282,7 @@ What each result means:
 | `error: runner restarted` | the runner stopped mid-job | queue again |
 | `error: could not start <cmd>` | the program is missing or is a `.cmd` file | fix `runner.json` or the PC's PATH |
 | `error: bad parameter <name>: <value>` | the runner's own check refused a value | fix the value; if it looks right, the recipe's pattern is too tight |
+| `error: not in the repo at <sha>: <paths>` | a path parameter (`files`, or one with `"paths": true`) names something not in the recipe's folder at that commit (#4338) | fix the name; a path from the repo root is taken too. `"paths": false` on a parameter turns the check off |
 | `error: could not fetch from origin` | no network, or no access to the repo | check git credentials on the PC |
 | `error: bad job row` | the job row is malformed | `cb job show <id>`; report it |
 | `error: runner fault: see cb job log <id>` | the runner itself failed | read the log, then the runner's pane |

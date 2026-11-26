@@ -1,7 +1,9 @@
 // Runner recipes: load and validate runner.json, check job parameters, build argv/cwd/env. Pure: no DB, no spawn.
-import { resolve, sep } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 
-export type Param = { pattern: string; min: number; max: number };
+// paths: each value names a file or folder in the job's folder at the sha, checked before the steps run (#4338)
+export type Param = { pattern: string; min: number; max: number; paths: boolean };
 export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env: Record<string, string>; timeout: number; db: boolean; params: Record<string, Param> };
 export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
 // a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
@@ -63,13 +65,16 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string
     const pp = `${path}.params.${n}`;
     if (!NAME.test(n)) fail(`${path}.params`, `name "${n}" must match ${NAME}`);
     if (!isObj(pr)) fail(pp, 'must be an object');
-    only(pr, pp, ['pattern', 'min', 'max']);
+    only(pr, pp, ['pattern', 'min', 'max', 'paths']);
     const pattern = str(pr.pattern, `${pp}.pattern`);
     try { new RegExp(pattern); } catch { fail(`${pp}.pattern`, 'does not compile'); }
     const min = int(pr.min, `${pp}.min`, 0, MAX_VALUES, 1);
     const max = int(pr.max, `${pp}.max`, 1, MAX_VALUES, 1);
     if (min > max) fail(pp, 'min is above max');
-    params[n] = { pattern, min, max };
+    // a parameter named files is a list of paths unless the recipe says paths: false (#4338: a test tool drops a name it
+    // cannot find and passes on the rest, so the runner checks them)
+    if (pr.paths !== undefined && typeof pr.paths !== 'boolean') fail(`${pp}.paths`, 'must be true or false');
+    params[n] = { pattern, min, max, paths: typeof pr.paths === 'boolean' ? pr.paths : n === 'files' };
   }
   const cwd = raw.cwd === undefined ? '.' : str(raw.cwd, `${path}.cwd`);
   for (const n of slotsOf(cwd)) {
@@ -187,6 +192,40 @@ export function checkParams(recipe: Recipe, params: Record<string, string[]>): s
   }
   for (const n of Object.keys(params)) if (!Object.hasOwn(recipe.params, n)) return bad(n, 'unknown');
   return null;
+}
+
+// The recipe's folder with its parameters filled in, relative to the repo root ('' for the root), or null when a
+// parameter it needs is missing (checkParams names that).
+function cwdRel(recipe: Recipe, params: Record<string, string[]>): string | null {
+  let missing = false;
+  const rel = recipe.cwd.replace(SLOT, (_, n: string) => {
+    const v = Object.hasOwn(params, n) ? params[n]![0] : undefined;
+    if (typeof v !== 'string') { missing = true; return ''; }
+    return v;
+  });
+  return missing ? null : rel.replace(/\\/g, '/').replace(/^(?:\.\/)+|\/+$/g, '').replace(/^\.$/, '');
+}
+
+/** #4338: a path value given from the repo root (apps/claims-api/tests/a.test.ts) is taken as the same path from the
+ *  recipe's folder (tests/a.test.ts). Other values, and other parameters, are left as they are. */
+export function relPaths(recipe: Recipe, params: Record<string, string[]>): Record<string, string[]> {
+  const rel = cwdRel(recipe, params);
+  if (!rel) return params;
+  const prefix = `${rel}/`;
+  return Object.fromEntries(Object.entries(params).map(([n, vals]) => [n,
+    Object.hasOwn(recipe.params, n) && recipe.params[n]!.paths && Array.isArray(vals)
+      ? vals.map((v) => (typeof v === 'string' && v.startsWith(prefix) && v.length > prefix.length ? v.slice(prefix.length) : v)) : vals]));
+}
+
+/** #4338: the path values not in the job's folder (checked after checkParams, so each is a plain relative path). */
+export function missingPaths(cwd: string, recipe: Recipe, params: Record<string, string[]>): string[] {
+  return Object.entries(recipe.params).filter(([, spec]) => spec.paths)
+    .flatMap(([n]) => (Object.hasOwn(params, n) ? params[n]! : []).filter((v) => !existsSync(join(cwd, v))));
+}
+
+/** The recipe's folder as the requester wrote it ('.' for the repo root), for an error message. */
+export function recipeFolder(recipe: Recipe, params: Record<string, string[]>): string {
+  return cwdRel(recipe, params) || '.';
 }
 
 export function expand(argv: string[], params: Record<string, string[]>): string[] {

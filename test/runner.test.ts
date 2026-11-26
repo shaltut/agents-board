@@ -80,6 +80,7 @@ const recipes = {
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
+  named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
   multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
@@ -270,6 +271,15 @@ test('bad parameters end the job before any git work', async () => {
   const j = await ended(id);
   assert.equal(j.summary, 'error: bad parameter files: fail.mjs');
   assert.doesNotMatch(logOf(id), /git/);
+});
+
+// #4338: a made-up name in --files used to be dropped by the test tool, and the job passed on the other tests
+test('a file named in a path parameter that is not there at the sha fails the job, naming it', async () => {
+  const id = await add('named', MAIN, { files: ['ok.mjs', 'made-up.mjs'] });
+  const j = await ended(id);
+  assert.equal(j.state, 'error');
+  assert.match(j.summary, new RegExp(`^error: not in the repo at ${MAIN.slice(0, 12)}: made-up\\.mjs \\(paths are relative to the recipe's folder, \\.\\)$`));
+  assert.equal((await ended(await add('named', MAIN, { files: ['ok.mjs'] }))).state, 'passed');
 });
 
 test('a row written around job_add is refused', async () => {
