@@ -9,6 +9,9 @@ import { neverSent, withConnectRetry } from '../cli/connect-retry.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
 
+// Windows and Linux route all of 127/8 to loopback; macOS binds only 127.0.0.1 unless an alias is added
+const noAlias = await new Promise<string | false>((r) => { const s = net.createServer(); s.once('error', () => r('127.0.0.2 is not bound here (macOS: sudo ifconfig lo0 alias 127.0.0.2)')); s.listen(0, '127.0.0.2', () => s.close(() => r(false))); });
+
 const err = (code: string, syscall?: string, message = `${syscall ?? 'read'} ${code}`) => Object.assign(new Error(message), { code, ...(syscall ? { syscall } : {}) });
 
 test('neverSent: refused, DNS and connect timeouts; never an error that can come after a statement was sent', () => {
@@ -88,7 +91,7 @@ function proxy(port: number, onData?: (chunk: Buffer, client: net.Socket) => boo
     client.on('data', (d) => { up.write(d); if (onData?.(d, client)) client.resetAndDestroy(); });
     client.on('close', () => up.end());
   });
-  return new Promise<net.Server>((r) => server.listen(port, '127.0.0.2', () => r(server)));
+  return new Promise<net.Server>((r, j) => { server.once('error', j); server.listen(port, '127.0.0.2', () => r(server)); });
 }
 const freePort = () => new Promise<number>((r) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = (s.address() as net.AddressInfo).port; s.close(() => r(p)); }); });
 function cbAsync(args: string[], port: number) {
@@ -100,7 +103,7 @@ function cbAsync(args: string[], port: number) {
 
 const remote = (port: number) => { const u = new URL(TEST_URL); u.hostname = '127.0.0.2'; u.port = String(port); return u.href; };
 
-test('a statement asked while nothing listens waits until the board is back, on a real connection', async () => {
+test('a statement asked while nothing listens waits until the board is back, on a real connection', { skip: noAlias }, async () => {
   const sql = await freshDb(); clients.push(sql);
   const port = await freePort();
   const db = connect(remote(port), { max: 1 }); clients.push(db);
@@ -116,7 +119,7 @@ test('a statement asked while nothing listens waits until the board is back, on 
   } finally { server.close(); }
 });
 
-test('cb says it tried and that the call never reached a board that stays away', async () => {
+test('cb says it tried and that the call never reached a board that stays away', { skip: noAlias }, async () => {
   const port = await freePort(); // nothing ever listens
   const r = await cbAsync(['add', 'demo', 'Never sent'], port);
   assert.equal(r.code, 1, r.out);
@@ -124,7 +127,7 @@ test('cb says it tried and that the call never reached a board that stays away',
   assert.match(r.err, /keep working/);
 });
 
-test('cb never resends a write whose connection dropped after it was sent', async () => {
+test('cb never resends a write whose connection dropped after it was sent', { skip: noAlias }, async () => {
   const sql = await freshDb(); clients.push(sql);
   const port = await freePort();
   // postgres.js sends a new statement's text first (parse, describe), then bind and execute: cut the client off right

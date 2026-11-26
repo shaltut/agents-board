@@ -973,7 +973,7 @@ async function main() {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
     const network = ['ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND'].includes(e?.code);
-    if (!network) throw e;
+    if (!network && !neverSent(e)) throw e;
     // A remote board (another machine) can't be started from here: say so and let the session carry on. Whether the
     // failed call ran is said plainly (#4337): a resend of one that may have run can do it twice.
     const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
