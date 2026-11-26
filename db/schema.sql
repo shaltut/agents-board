@@ -93,6 +93,9 @@ create table if not exists cb.events (
   data        jsonb not null default '{}'
 );
 create index if not exists events_actor_at on cb.events (actor, at desc);
+-- "An actor's latest event" (sessions_overview's `last`, order by id desc limit 1): without it the planner walks events_pkey
+-- backwards and, for an actor with no events (a fresh squad session), reads the whole table: 25 s per call, 504s on every page (2026-11-26).
+create index if not exists events_actor_id on cb.events (actor, id desc);
 alter table cb.events drop constraint if exists events_kind_check;
 alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor'));
 
@@ -1680,7 +1683,9 @@ end $$;
 
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
-create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable as $$
+-- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
+-- every call's 2.3 s (2026-11-26; ~100 ms without). On tables this small JIT never pays back.
+create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable set jit = off as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);
 begin
