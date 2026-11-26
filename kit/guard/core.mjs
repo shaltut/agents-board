@@ -506,6 +506,84 @@ function pastOpts(w, j, valueOpt) {
   return j;
 }
 
+// The fence (#4345). A squad seat runs under bypassPermissions, so the guard's hook entry in ~/.claude/settings*.json
+// (or a repo's .claude/settings*.json) and ~/.claude-board (the installed guard, the runner config) are all that stand
+// between it and anything: no role writes them from a shell, and none runs the guard installer (it installs whatever
+// guard its own checkout holds). Reading stays open. kit/permissions/<role>.json denies the same paths to Edit/Write
+// (Claude seats only: other agents' shims have no path for an edit, #4392).
+// A tripwire, not a sandbox: it reads command text, so a script the seat wrote and then runs (node fix.mjs) or a path
+// built in a variable passes. It stops the accident and the injected command; the boundary is OS permissions.
+// Per segment (review I3): a segment that names a fence path blocks when it also has a writer, an in-place edit, an
+// interpreter with a write call, or a redirect INTO a fence path; after a cd into ~/.claude or ~/.claude-board any
+// later writer or redirect blocks. Fence paths: .claude/settings*.json anywhere, the .claude folder itself (moving or
+// deleting it, git -C it), and .claude-board; a repo's .claude/skills, agents, worktrees are ordinary work. Spellings
+// that hide the path count: quote pairs and a backslash inside the word (.cla""ude, .cl\aude), a glob (.cl*, .claud?),
+// trailing dots (.claude.), the 8.3 name (CLAUDE~1). Fail closed. Linear: a few single-pass tests per segment.
+const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~])`;
+const FENCE_END = String.raw`(?=[\s"';&|)>]|$)`;
+const FENCE_NAME = String.raw`(?:\.claude\.*|claude~\d)`;
+const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\/\s"';&|)>]|$)|${FENCE_NAME}(?:[\\/]+settings[\w.*?-]*\.json|[\\/]*)${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}[\\/]+settings[\w.*?-]*\.json${FENCE_END})`, 'i');
+// the cd argument is in the fence: anything under .claude-board, or the .claude folder itself
+const IN_BOARD_DIR = /(?:^|[\\/~])\.claude-board\.*(?:[\\/]|$)/i;
+const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
+const fenceDir = (seg) => {
+  const arg = seg.replace(CD, '').trim().replace(/^["']|["']$/g, '');
+  return [arg, unhide(arg)].some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a));
+};
+const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
+// a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device
+const REDIRECT_TARGET = /(?<![-\d&])\d?>>?[ \t]*["']?(\S*)/g;
+const NULL_DEVICE = /^(?:\/dev\/null|\$null|nul)(?![\w/.\\-])/i;
+const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
+  'curl', 'wget', 'git', 'sponge', 'patch', 'tar', 'unzip', '7z', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
+  'new-item', 'ni', 'remove-item', 'ri', 'del', 'erase', 'copy-item', 'cpi', 'copy', 'move-item', 'mi', 'move',
+  'rename-item', 'rni', 'ren', 'clear-content', 'clc', 'mklink', 'robocopy', 'xcopy', 'icacls', 'takeown', 'attrib',
+  'expand-archive', 'invoke-webrequest', 'iwr',
+  // .NET from PowerShell ([IO.File]::WriteAllText(...)), and editors
+  'writealltext', 'writeallbytes', 'writealllines', 'appendalltext', 'appendalllines',
+  'vi', 'vim', 'nvim', 'nano', 'emacs', 'code', 'notepad'];
+// a whole word (not part of a path or a longer word): touch in ~/.claude/touch is not the command
+const FENCE_WRITER = new RegExp(String.raw`(?<![\w.\\/-])(?:${FENCE_WORDS.join('|')})(?![\w.\\/-])`, 'i');
+// an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
+const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
+const WRITE_CALL = /write|append|unlink|rename|copy|move|remove|delete|rmdir|rmsync|truncate|chmod|replace|dump|mkdir|\bopen\s*\([^),]{0,300},\s*["'][wax+]|-i\b|--in-place/i;
+const IN_PLACE = thenLater(SEGMENTS, String.raw`(?<![\w.-])(?:sed|perl)(?![\w.-])`, String.raw`[ \t](?:-[a-z]*i|--in-place)`);
+// the guard's installer, not any project's install.mjs: the file named under a guard folder, or run from inside one
+const INSTALLER = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
+const GUARD_DIR = /(?:^|[\s"'\\/])guard(?=[\\/\s"';&|)]|$)/i;
+const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && GUARD_DIR.test(s) };
+const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), the .claude folder itself and ~/.claude-board (the guard, the runner config) are Ahmed\'s; a squad seat never writes them or runs the guard installer. Reading them is fine. A change there is his: cb ask';
+// a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
+// original is tested too, so a Windows path keeps its separators)
+const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi, '');
+const fencePath = (t) => FENCE_PATH.test(t) || FENCE_PATH.test(unhide(t));
+function redirects(seg, anyTarget) {
+  for (const m of seg.matchAll(REDIRECT_TARGET)) {
+    const target = m[1] ?? '';
+    if (!target || target.startsWith('&') || NULL_DEVICE.test(target)) continue;
+    if (anyTarget || fencePath(` ${target}`)) return true;
+  }
+  return false;
+}
+// Stripping only removes text, so a raw command naming neither a fence path nor the installer cannot name one stripped:
+// skip the second stripMessages (the costly step on big heredocs) for nearly every command.
+const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d/i;
+function fenceWrite(command) {
+  if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
+  const text = stripMessages(command);
+  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
+  if (!fencePath(text)) return null;
+  let inFence = false;
+  for (const seg of text.match(SEGMENTS) ?? []) {
+    if (CD.test(seg)) { inFence = fenceDir(seg); continue; }
+    const names = fencePath(seg);
+    if (!names && !inFence) continue;
+    if (redirects(seg, inFence && !names)) return FENCE;
+    if (FENCE_WRITER.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg))) return FENCE;
+  }
+  return null;
+}
+
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
@@ -513,6 +591,8 @@ function pastOpts(w, j, valueOpt) {
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
+  const fence = fenceWrite(String(command ?? ''));
+  if (fence) return fence;
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);
