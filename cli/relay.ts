@@ -18,7 +18,7 @@ import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
-import { clearClaudeEndpoint, readClaudeEndpoint, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
+import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 
 const flag = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
@@ -46,7 +46,10 @@ const touch = () => { if (lockPid() !== process.pid) return; const now = new Dat
 /** The adapter's answer; an unknown one counts as alive (it never stops a relay, never takes a seat). */
 const aliveNow = async () => { try { return await adapter.isAlive(seat); } catch { return true; } };
 const relaunch = () => spawn(process.execPath, [import.meta.filename, '--child', '--pane', PANE, '--agent', adapter.kind],
-  { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
+/** The env inbox answers: its socket is there (statSync, never a connect to a Windows pipe) and, on POSIX, accepts a
+ *  connection (a killed Claude can leave its socket file behind, so a file is not enough). Same probe as isAlive. */
+const envInboxAnswers = async () => socketExists(SOCKET) && (process.platform === 'win32' || await probeSocket(SOCKET));
 /** Claude's endpoint file names a socket that is there. Never existsSync: a busy Windows pipe reads as missing. */
 const liveEndpoint = () => { const ep = readClaudeEndpoint(M, PANE); return !!ep && socketExists(ep.socket); };
 const handOver = (pid?: number) => {
@@ -74,9 +77,9 @@ if (!process.argv.includes('--child')) {
 }
 
 // A child with Claude's inbox in its env (a Stage A relay restarting into this code, a test) hands it over itself when
-// no newer endpoint is there: no file, or one whose agent the adapter reads dead (on POSIX a probe: a killed Claude can
-// leave its socket file behind). Before the lock check, so a child that leaves on a live lock still corrects a stale file.
-if (claude && SOCKET && TOKEN && socketExists(SOCKET) && !(await aliveNow()) && handOver()) log('endpoint handed over from env');
+// no newer endpoint is there: no file, or one whose agent the adapter reads dead, and only when that inbox answers
+// (on POSIX a probe: a killed Claude can leave its socket file behind; a relaunch carries no inbox in its env at all). Before the lock check, so a child that leaves on a live lock still corrects a stale file.
+if (claude && SOCKET && TOKEN && !(await aliveNow()) && (await envInboxAnswers()) && handOver()) log('endpoint handed over from env');
 { const held = seatLockHolder(LOCK); if (held && held !== process.pid) process.exit(0); } // one relay per seat
 writeFileSync(LOCK, String(process.pid));
 const keepFresh = setInterval(touch, 2000); // from the start: setting up can outlast 15 s while the board is unreachable

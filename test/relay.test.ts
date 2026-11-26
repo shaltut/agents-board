@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
 import { bridgeFiles, seatKey } from '../cli/bridge.ts';
-import { claudeEndpointPath, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
+import { claudeEndpointPath, readClaudeEndpoint, relaunchEnv, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -847,6 +847,32 @@ test('R1 on POSIX: a --child replaces an endpoint whose socket file a killed Cla
   } finally {
     owner.kill('SIGKILL');
     await inbox.close();
+    fs.rmSync(stale, { force: true });
+    rmSeat(pane);
+  }
+});
+
+test('F2: a relaunch env drops the first session socket and token and keeps the rest', () => {
+  const env = { A: '1', CLAUDE_CODE_MESSAGING_SOCKET: 'x', CLAUDE_CODE_MESSAGING_TOKEN: 'y', CLAUDE_CODE_OTHER: 'z' };
+  assert.deepEqual(relaunchEnv(env), { A: '1', CLAUDE_CODE_OTHER: 'z' });
+  assert.deepEqual(env.CLAUDE_CODE_MESSAGING_SOCKET, 'x', 'the input is not changed');
+});
+
+test('F2 on POSIX: a --child whose env socket file has no listener does not write the endpoint', { skip: process.platform === 'win32' && 'a Windows pipe vanishes with its owner', timeout: 30_000 }, async () => {
+  const pane = `p-seed-dead-${process.pid}`, stale = sockPath('seed-dead');
+  rmSeat(pane); fs.rmSync(stale, { force: true });
+  const owner = spawn(process.execPath, ['-e', "require('net').createServer().listen(process.argv[1], () => console.log('up'))", stale], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await new Promise<void>((r) => owner.stdout!.on('data', (d) => { if (String(d).includes('up')) r(); }));
+    owner.kill('SIGKILL');
+    await exitOf(owner);
+    assert.ok(fs.lstatSync(stale).isSocket(), 'the killed owner left its socket file');
+    fs.writeFileSync(seatFiles(pane).lock, String(process.pid)); // a live relay holds the seat: the child leaves at once
+    const p = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, stale) });
+    assert.equal(await Promise.race([exitOf(p), wait(10_000).then(() => { p.kill(); return 'timeout'; })]), 0);
+    assert.equal(fs.existsSync(seatFiles(pane).endpoint), false, 'a dead env inbox is never handed over');
+  } finally {
+    owner.kill('SIGKILL');
     fs.rmSync(stale, { force: true });
     rmSeat(pane);
   }

@@ -80,9 +80,16 @@ export function socketExists(path: string): boolean {
   try { statSync(path); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
+/** The env a relaunched relay gets: the parent's, without the first Claude's inbox (socket and token). The endpoint
+ *  file is the only way a relay learns of one, so a relaunch never serves a dead first Claude's. */
+export function relaunchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { CLAUDE_CODE_MESSAGING_SOCKET: _s, CLAUDE_CODE_MESSAGING_TOKEN: _t, ...rest } = env;
+  return rest;
+}
+
 /** Connect and hang up without sending a byte. False only when nothing listens (or, on macOS, its accept queue is full):
  *  ECONNREFUSED / ENOENT. */
-function probeSocket(path: string): Promise<boolean> {
+export function probeSocket(path: string): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false;
     const c = net.connect(path);
