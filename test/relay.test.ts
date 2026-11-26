@@ -295,6 +295,27 @@ test('broadcasts reach every session once, filtered by project', async () => {
   assert.deepEqual(b.broadcasts.map((x: any) => x.summary), ['ihop only', 'relay is live, run cb relay']);
 });
 
+// #4336: the relay re-checks a settled Next offer right before pushing it: still in Next, still unassigned or mine,
+// still mine to claim. The lead's create-then-assign (seconds apart) no longer reaches another idle builder.
+test('work_still_open: a card assigned to someone else, or moved out of Next, since it was offered is dropped', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
+  await sql`select cb.iam('pc', 'p1', 'W1', 'ihop')`;
+  const add = async (title: string) => Number((await sql`select cb.task_add(project => 'ihop', title => ${title}, status => 'next', actor => 'orch') as id`)[0].id);
+  const free = await add('still free'), taken = await add('given to B7'), mine = await add('given to me'), moved = await add('moved on');
+  await sql`update cb.tasks set assignee = 'B7' where id = ${taken}`;
+  await sql`update cb.tasks set assignee = 'W1' where id = ${mine}`;
+  await sql`update cb.tasks set status = 'in_progress', assignee = 'B9' where id = ${moved}`;
+  const [{ ids }] = await sql`select cb.work_still_open(${[free, taken, mine, moved, 999999]}::bigint[], 'W1') as ids`;
+  assert.deepEqual(ids.map(Number).sort((a: number, b: number) => a - b), [free, mine]);
+  // started something meanwhile: nothing is offered
+  await sql`update cb.tasks set status = 'in_progress' where id = ${mine}`;
+  const [{ busy }] = await sql`select cb.work_still_open(${[free]}::bigint[], 'W1') as busy`;
+  assert.deepEqual(busy, []);
+  const [{ none }] = await sql`select cb.work_still_open('{}'::bigint[], 'W1') as none`;
+  assert.deepEqual(none, []);
+});
+
 test('inbox: a task created for me, and new Next work when I am idle', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'seed')`;

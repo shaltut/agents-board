@@ -3471,6 +3471,7 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb.work_still_open cascade;
 drop function if exists cb._repo_fits cascade;
 drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
@@ -4023,6 +4024,17 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
                      and not exists (select 1 from cb.task_parts p where p.task_id = t.id and p.crew ->> 'build' = a)
       else false end, false)
     end
+$$;
+
+-- #4336: the relay holds a "new work in Next" offer a few seconds (the lead creates a card in Next, then assigns it),
+-- then pushes only what this returns: the cards still in Next, unassigned or mine, and still mine to claim, while I
+-- still have nothing in progress.
+create function cb.work_still_open(ids bigint[], actor text) returns bigint[] language sql stable as $$
+  select coalesce(array_agg(t.id order by t.id), '{}')
+    from cb.tasks t
+   where t.id = any(ids) and t.status = 'next' and (t.assignee is null or t.assignee = actor) and cb._claimable(t, actor)
+     -- offered only while I have nothing in progress (as the inbox's next_work): I may have started something meanwhile
+     and not exists (select 1 from cb.tasks w where w.assignee = actor and w.status = 'in_progress')
 $$;
 
 -- Quiet staged cards (never approval, never unstaged ones such as investigations): a live holder is nudged after 30 minutes

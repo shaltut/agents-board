@@ -20,6 +20,7 @@ import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
+import { settleWork, type Work } from './settle.ts';
 
 const flag = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
 const SOCKET = process.env.CLAUDE_CODE_MESSAGING_SOCKET || '';
@@ -233,6 +234,9 @@ function format(raw: any): string {
 }
 
 let deadLogged = false;
+const SETTLE_MS = 8_000;
+const pendingWork = new Map<number, { t: Work; at: number }>();
+let settleTimer: ReturnType<typeof setTimeout> | undefined;
 async function check() {
   if (busy) { again = true; return; }
   busy = true;
@@ -252,6 +256,22 @@ async function check() {
       // The inbox only marks `raw` for his own events; everything else keeps the indented, labelled format.
       const typed = i.messages.filter((m: any) => m.raw);
       i.messages = i.messages.filter((m: any) => !m.raw);
+      // #4336: a Next offer waits SETTLE_MS (the lead creates a card in Next, then assigns it seconds later), then goes
+      // out only if the board still has it open for this session; everything else is delivered at once
+      const settled = settleWork(pendingWork, i.next_work ?? [], Date.now(), SETTLE_MS);
+      let open = new Set<number>();
+      if (settled.due.length && i.actor) {
+        try {
+          open = new Set(((await sql`select cb.work_still_open(${settled.due.map((t) => Number(t.id))}::bigint[], ${i.actor}) as ids`)[0]!.ids as any[]).map(Number));
+        } catch (e: any) {
+          // a board without cb.work_still_open yet (schema not applied): offer as before, never fail the whole check
+          log(`next re-check failed (offered unchecked): ${e?.message}`);
+          open = new Set(settled.due.map((t) => Number(t.id)));
+        }
+      }
+      i.next_work = settled.due.filter((t) => open.has(Number(t.id)));
+      clearTimeout(settleTimer);
+      if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
