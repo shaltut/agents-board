@@ -4,12 +4,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { withDeadline } from '../cli/deadline.ts';
+import { DeadlineError, withDeadline } from '../cli/deadline.ts';
 
 test('withDeadline: a value in time passes through, a rejection stays itself, never becomes a named timeout', async () => {
   assert.equal(await withDeadline(Promise.resolve(7), 1_000, 'tick'), 7);
   await assert.rejects(withDeadline(Promise.reject(new Error('board down')), 1_000, 'tick'), /^Error: board down$/);
   await assert.rejects(withDeadline(new Promise(() => {}), 50, 'the lock check'), /the lock check did not answer within 0\.05 s/);
+  // a class, not a message match, decides the reconnect (review M1); a board error is never one
+  await assert.rejects(withDeadline(new Promise(() => {}), 50, 'x'), (e: any) => e instanceof DeadlineError);
+  await assert.rejects(withDeadline(Promise.reject(new Error('did not answer within')), 50, 'x'), (e: any) => !(e instanceof DeadlineError));
 });
 
 test('a loop awaiting a promise that never settles logs it and goes on, instead of exiting with code 13', () => {

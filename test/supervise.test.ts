@@ -346,6 +346,16 @@ test('runner: no beat and its port free, it is started in a herdr tab', async ()
   assert.equal(ev[0].data.note, 'started');
 });
 
+// #4261 review I1: a tick abandoned at its deadline must not keep acting (start or close seats with its log writes
+// failing). An aborted tick stops at its next step: no herdr call, no board write.
+test('a tick whose signal is aborted acts on nothing: no herdr call, no supervise_log row', async () => {
+  const { sql, sup } = await setup();
+  const h = fakeHerdr();
+  await assert.rejects(tick(deps(sup, h.run, { runnerConfig: runnerJson(), probe: async () => false, signal: AbortSignal.abort() })), /abort/i);
+  assert.deepEqual(h.calls.filter((c) => c.args[0] !== 'agent' || c.args[1] !== 'list'), []);
+  assert.equal((await sql`select count(*)::int n from cb.events where kind in ('supervisor', 'runner')`)[0].n, 0);
+});
+
 test('runner: a beating runner is left alone; a held port is reported at most hourly', async () => {
   const { sql, sup } = await setup();
   const cfg = runnerJson();

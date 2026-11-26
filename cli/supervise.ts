@@ -11,9 +11,10 @@ import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
 import { planTick, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
-import { withDeadline } from './deadline.ts';
+import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
 
+const TICK_MS = 20 * 60_000;
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
   CLOSE_RETRY = 10 * 60_000;
 const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC: the runner tab's folder
@@ -26,6 +27,8 @@ export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; 
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
+  // #4261: aborted when the loop gives up on this tick (its deadline): checked before every step that acts
+  signal?: AbortSignal;
 };
 const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
 
@@ -86,6 +89,7 @@ export async function tick(d: Deps): Promise<string[]> {
   }
 
   for (const state of states) {
+    d.signal?.throwIfAborted();
     try {
       const safeToClose = await safeToCloseOf(state, herdrStatus);
       const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose });
@@ -98,6 +102,7 @@ export async function tick(d: Deps): Promise<string[]> {
     }
   }
   const leads = [...new Set(states.map(leadOf).filter((x) => x !== undefined))];
+  d.signal?.throwIfAborted();
   try { await runnerCheck(d, out, log, leads); } catch (e) { out.push(`runner check failed: ${msg(e)}`); }
   return out;
 }
@@ -129,6 +134,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
   const tabs: Record<string, { pane: string; panes: number }> = {};
   for (const [what, list] of [['restore', plan.restore], ['start', plan.start]] as const) {
     for (const l of list) {
+      d.signal?.throwIfAborted();
       if (dryRun) { out.push(`would ${what} ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`); continue; }
       const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
       if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); continue; }
@@ -150,6 +156,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
     }
   }
   for (const name of plan.close) {
+    d.signal?.throwIfAborted();
     if (now - (memory.closeSkipAt.get(name) ?? -Infinity) < CLOSE_RETRY) continue;
     if (dryRun) out.push(`would close ${name}`);
     else out.push(await closeOne(d, state, name, log));
@@ -200,10 +207,12 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
     try { adapter = getAdapter(s.agent ?? 'claude'); } catch (e) { await unmark(); return `skip closing ${name}: ${msg(e)}`; }
     const seat = seatOf(state, name, adapter.kind, pane, s.machine);
     if (status !== undefined && !(await adapter.readStatus(seat, { agent_status: status })).safeToClose) { await unmark(); return `skip closing ${name}: herdr shows it ${status}`; }
+    d.signal?.throwIfAborted(); // last moment before /exit: an abandoned tick sends none
     if (await adapter.close(seat, run) !== 'sent') { await unmark(); return `could not close ${name}: /exit was not sent`; }
   } catch (e) { await unmark(); throw e; }
   for (const until = clock() + CLOSE_WAIT; clock() < until;) { // wall time: one agent get can take 30 s
     await sleep(POLL);
+    d.signal?.throwIfAborted();
     if (classifyAgentGet(run(m, ['agent', 'get', hn], 30_000)) !== 'absent') continue;
     const closed = run(m, ['pane', 'close', pane], 30_000).status === 0;
     await log(state.project, 'close', name, s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
@@ -287,7 +296,9 @@ if (import.meta.main) {
   // anything acts: re-entrant (true); board unreachable: the tick fails and the next one tries again
   let lock = dryRun ? null : lockClient(app);
   const isLocked = async () => !lock || await withDeadline(locked(lock), 30_000, 'the supervisor lock check');
-  if (!(await isLocked())) { console.log('another supervisor is running'); process.exit(1); }
+  // review I3: a board down at start is a failed first tick (retried every 60 s), not a crash with a stack trace
+  try { if (!(await isLocked())) { console.log('another supervisor is running'); process.exit(1); } }
+  catch (e) { console.log(`${new Date().toISOString()} board unreachable at start (${msg(e)}): trying again every 60 s`); }
   const home = process.env.CB_SUPERVISOR_HOME || join(homedir(), '.claude-board', 'supervisor');
   const say = (line: string) => {
     const at = new Date().toISOString();
@@ -308,13 +319,20 @@ if (import.meta.main) {
       if (!(await isLocked())) { say('another supervisor is running'); process.exit(1); }
       const now = ((await withDeadline(sql`select now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
-      for (const line of await withDeadline(tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe }), 300_000, 'the tick')) say(line);
+      // the whole tick's cap is far above its worst case (3 starts at up to 180 s of herdr each, closes at 60 s each):
+      // it catches a hang, not a slow tick; the DB waits above have their own 30 s. A tick given up on is aborted, so
+      // it stops at its next step instead of acting on with its log writes failing (review I1, I2)
+      const stop = new AbortController();
+      try {
+        for (const line of await withDeadline(tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
+      } finally { stop.abort(); }
       code = 0;
     } catch (e) {
       say(`tick failed: ${msg(e)}`); code = 1;
       // #4261: a hung query means a dead connection that may never error: drop both clients and start fresh (the lock
       // goes with its connection; the next check takes it again, or finds another supervisor and exits)
-      if (/did not answer within/.test(msg(e))) {
+      if (e instanceof DeadlineError) {
+        say('reconnecting to the board: fresh clients');
         const old = [sql, lock];
         sql = connect(undefined, { app, max: 1 });
         if (lock) lock = lockClient(app);
