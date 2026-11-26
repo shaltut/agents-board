@@ -17,6 +17,9 @@ import { join } from 'node:path';
 const V = 1; // bump when a message changes: an older relay is then refused and cb connects itself
 const IN = '\u0000cb-in'; // sql(list) inside a template: `where id in ${sql(ids)}`
 
+/** The relay's per-seat key: the same for every process on one machine and pane, whatever agent runs there. */
+export const seatKey = (machine: string, pane: string) => createHash('sha1').update(`${machine.trim().toLowerCase()}:${pane.trim()}`).digest('hex').slice(0, 12);
+
 export function bridgeFiles(key: string) {
   return {
     info: join(tmpdir(), `cb-relay-${key}.bridge`),
