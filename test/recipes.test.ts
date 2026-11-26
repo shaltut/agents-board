@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { parse, resolve } from 'node:path';
 import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, published } from '../cli/recipes.ts';
 
 const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'utf8'));
@@ -78,7 +78,8 @@ test('jobCwd stays inside the slot', () => {
   const slot = resolve('C:/r/ihop-1');
   assert.equal(jobCwd(slot, r, { app: ['claims-api'] }), resolve(slot, 'apps/claims-api'));
   assert.throws(() => jobCwd(slot, { ...r, cwd: '../x' }, {}), /outside/);
-  assert.throws(() => jobCwd(slot, { ...r, cwd: 'C:/elsewhere' }, {}), /outside/);
+  // an absolute path on this machine (C:/elsewhere is one only on Windows: #4401)
+  assert.throws(() => jobCwd(slot, { ...r, cwd: parse(slot).root + 'elsewhere' }, {}), /outside/);
   assert.equal(jobCwd(slot, { ...r, cwd: '.' }, {}), slot);
 });
 
