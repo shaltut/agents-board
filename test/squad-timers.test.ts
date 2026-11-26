@@ -287,6 +287,19 @@ test('an unheld review card whose only live reviewer built it is named; a down h
   assert.ok(lines.some((l) => /^W7@mac is down and holds #3:/.test(l)), lines.join('\n'));
 });
 
+test('a holder whose relay is down but who still writes to the board is not called down (#4341)', async () => {
+  const { sql } = await setup();
+  await sql`update cb.sessions set last_seen = now() - interval '20 minutes' where actor = 'B1@mac'`;
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, at) values ('B1@mac', 'demo', 1, 'note', 'working', now() - interval '5 minutes')`;
+  let lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.includes(`B1@mac's relay is down, but the session last wrote to the board 5m ago; it holds #1: have it run cb relay --restart (a cb tell to it waits for its relay)`), lines.join('\n'));
+  assert.ok(!lines.some((l) => /B1@mac is down/.test(l)), lines.join('\n'));
+  // nothing from it for 30 minutes: down, as before
+  await sql`update cb.events set at = now() - interval '31 minutes' where actor = 'B1@mac'`;
+  lines = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.some((l) => /^B1@mac is down and holds #1: restore it, or cb edit 1 --assignee <session>$/.test(l)), lines.join('\n'));
+});
+
 test('cb digest --all shows what the digest caps', async () => {
   const { sql } = await setup();
   for (let i = 0; i < 8; i++) await sql`select cb.task_add(project => 'demo', title => ${'plain ' + i}, status => 'next', actor => 'github')`;

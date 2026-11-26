@@ -3495,6 +3495,7 @@ drop function if exists cb.stage_stalls_due cascade;
 drop function if exists cb._role_model cascade;
 drop function if exists cb._expected_model cascade;
 drop function if exists cb.digest cascade;
+drop function if exists cb._board_active cascade;
 drop function if exists cb.digests_due cascade;
 drop function if exists cb._stage_words cascade;
 drop function if exists cb._held_parts cascade;
@@ -4175,6 +4176,14 @@ begin
   return coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, agent));
 end $$;
 
+-- Minutes since a session last wrote to the board itself, when that was in the last 30 minutes (the "silent" window of
+-- cb tick), else null. Its relay not live plus a number here = the relay is down but the session still acts (#4341):
+-- the digest and cb tell say so instead of "down". A lead acting with --as writes as the session too, so callers say
+-- "last wrote to the board", never that the session is alive.
+create function cb._board_active(who text) returns int language sql stable as $$
+  select floor(extract(epoch from now() - max(e.at)) / 60)::int from cb.events e where e.actor = who and e.at > now() - interval '30 minutes'
+$$;
+
 -- What needs the lead in a pipeline project: plain lines, the stage count first, P0 cards next, at most 20. Reads only:
 -- it frees nothing and writes nothing on any card.
 create function cb.digest(project text, since timestamptz default now() - interval '15 minutes', cap boolean default true) returns jsonb language plpgsql stable as $$
@@ -4218,7 +4227,7 @@ begin
     union all
     -- 5: answers nobody collected: the lead asked, or the asker's relay has been gone for 10 minutes
     select 5, false, q.id, format('Q%s answered for %s (%s): cb pending', q.id, q.asked_by,
-                                  case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its session has been gone 10 minutes' end)
+                                  case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its relay has been down 10 minutes' end)
       from cb.questions q
      where q.project = p and q.status = 'answered' and q.approval_for is null and q.asked_by not in ('ahmed', 'board')
        and q.answered_at > now() - interval '24 hours'  -- as the old copies: older answers are history
@@ -4243,20 +4252,25 @@ begin
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
     union all
-    -- 9: a holder that is down keeps its cards and parts (Q2324); a name with no session row is a re-bound pane. cb edit
-    -- hands over a card, not a part: a holder of parts only is restored
+    -- 9: a holder whose relay has been gone 10 minutes keeps its cards and parts (Q2324); a name with no session row is a
+    -- re-bound pane. Still writing to the board (cb._board_active): only its relay is down, so restart that (#4341). Else
+    -- it is down: cb edit hands over a card, not a part, so a holder of parts only is restored
     select 9, bool_or(x.p0), min(x.id),
-           format('%s is down and holds %s: restore it', x.holder, string_agg(x.what, ', ' order by x.id, x.what))
-           || coalesce(', or cb edit ' || min(x.id) filter (where x.repo is null) || ' --assignee <session>', '')
+           case when a.mins is not null
+                then format('%s''s relay is down, but the session last wrote to the board %sm ago; it holds %s: have it run cb relay --restart (a cb tell to it waits for its relay)',
+                            x.holder, a.mins, string_agg(x.what, ', ' order by x.id, x.what))
+                else format('%s is down and holds %s: restore it', x.holder, string_agg(x.what, ', ' order by x.id, x.what))
+                     || coalesce(', or cb edit ' || min(x.id) filter (where x.repo is null) || ' --assignee <session>', '') end
       from (select t.id, t.priority = 'P0' as p0, t.assignee as holder, null::text as repo, '#' || t.id as what
               from cb.tasks t
              where t.project = p and t.status in ('in_progress', 'next', 'blocked') and nullif(trim(t.assignee), '') is not null
             union all
             select t.id, t.priority = 'P0', h.assignee, h.repo, format('#%s (part %s)', t.id, h.repo)
               from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p) x
+     cross join lateral (select cb._board_active(x.holder) as mins) a
      where not exists (select 1 from cb.sessions s where s.actor = x.holder and s.last_seen > now() - interval '10 minutes')
        and (x.holder like '%@%' or exists (select 1 from cb.sessions s where s.actor = x.holder))
-     group by x.holder
+     group by x.holder, a.mins
     union all
     -- 10: a live session on the wrong model for its seat (#4002: the squad's seat or role model, else the role's
     -- default); a session with no model to expect (an agent without a default) is not judged
