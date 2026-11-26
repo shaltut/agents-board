@@ -14,11 +14,11 @@ It also has its own `postgres` container on 5432: unrelated, leave it alone; the
 
 ## 1. Get the code
 
-The repo is private (`github.com/shaltut/claude-board`). Clone with a read-only deploy key or `gh auth login`:
+The repo is public (`github.com/shaltut/agents-board`; the old `claude-board` URL redirects). Clone it (the install folder keeps its old name):
 
 ```bash
 sudo mkdir -p /opt/claude-board && sudo chown "$USER" /opt/claude-board
-git clone https://github.com/shaltut/claude-board.git /opt/claude-board
+git clone https://github.com/shaltut/agents-board.git /opt/claude-board
 cd /opt/claude-board
 git checkout main   # with the vps branch merged first (the PC's and the Mac's cb run main)
 ```
