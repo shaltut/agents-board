@@ -373,18 +373,21 @@ test('kill by name: a long command stays fast', () => {
 for (const c of killBlocked) test(`kill by name blocks ${JSON.stringify(c)}`, () => assert.equal(check(c), KILL));
 for (const c of killPassed) test(`kill by name passes ${JSON.stringify(c)}`, () => assert.equal(check(c), null));
 
-// CB_PROTECTED_BRANCHES '' = unset: a squad pane running this suite would otherwise pass its own list down
+// CB_* '' = unset: a squad pane running this suite would otherwise pass its own list, role and ask switch down
 const run = (input: string, env: Record<string, string> = {}) =>
-  spawnSync('node', ['kit/hooks/block-dangerous.mjs'], { input, encoding: 'utf8', env: { ...process.env, CB_PROTECTED_BRANCHES: '', ...env } });
+  spawnSync('node', ['kit/hooks/block-dangerous.mjs'], {
+    input, encoding: 'utf8', env: { ...process.env, CB_PROTECTED_BRANCHES: '', CB_ROLE: '', CB_AGENT: '', CB_ALLOW_ASK: '', ...env },
+  });
 
 test('as a hook: block JSON, empty object, and no crash on bad input', () => {
   const blocked = run(JSON.stringify({ tool_input: { command: 'git reset --hard' } }));
   assert.equal(blocked.status, 0);
   assert.deepEqual(JSON.parse(blocked.stdout), { decision: 'block', reason: 'Blocked dangerous command: git reset --hard' });
   assert.equal(run(JSON.stringify({ tool_input: { command: 'ls' } })).stdout.trim(), '{}');
-  assert.equal(run(JSON.stringify({ tool_input: {} })).stdout.trim(), '{}');
-  assert.equal(run('not json').stdout.trim(), '{}');
-  assert.equal(run('').stdout.trim(), '{}');
+  // fail closed (#4002): input the hook cannot read blocks, it is never allowed
+  assert.equal(JSON.parse(run(JSON.stringify({ tool_input: {} })).stdout).decision, 'block');
+  assert.equal(JSON.parse(run('not json').stdout).decision, 'block');
+  assert.equal(JSON.parse(run('').stdout).decision, 'block');
   // #3809: the block JSON carries the kill-by-name reason
   const kill = JSON.parse(run(JSON.stringify({ tool_input: { command: 'taskkill /F /IM node.exe' } })).stdout);
   assert.equal(kill.decision, 'block');
@@ -520,7 +523,7 @@ test('as a hook: CB_PROTECTED_BRANCHES set blocks a push to a listed branch with
   // a command another pattern already blocks keeps that reason
   assert.equal(hook('git push --force origin main', { CB_PROTECTED_BRANCHES: 'main' }).reason, 'Blocked dangerous command: git push --force main');
   assert.equal(hook('git reset --hard && git push origin development').reason, 'Blocked dangerous command: git reset --hard');
-  assert.equal(run('not json', env).stdout.trim(), '{}');
+  assert.equal(JSON.parse(run('not json', env).stdout).decision, 'block');
 });
 
 test('as a hook: CB_PROTECTED_BRANCHES unset or empty: a push to any branch passes, as before', () => {
@@ -528,5 +531,7 @@ test('as a hook: CB_PROTECTED_BRANCHES unset or empty: a push to any branch pass
   assert.equal(run(input).stdout.trim(), '{}');
   assert.equal(run(input, { CB_PROTECTED_BRANCHES: ' , ' }).stdout.trim(), '{}');
   const { CB_PROTECTED_BRANCHES: _, ...unset } = process.env;
-  assert.equal(spawnSync('node', ['kit/hooks/block-dangerous.mjs'], { input, encoding: 'utf8', env: unset }).stdout.trim(), '{}');
+  assert.equal(spawnSync('node', ['kit/hooks/block-dangerous.mjs'], {
+    input, encoding: 'utf8', env: { ...unset, CB_ROLE: '', CB_AGENT: '', CB_ALLOW_ASK: '' },
+  }).stdout.trim(), '{}');
 });
