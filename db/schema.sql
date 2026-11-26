@@ -4131,7 +4131,8 @@ $$;
 -- The model a session should run (#4002): its squad seat's, else its squad role's, else the role default. The seat key is
 -- the one wantList (cli/squad-up.ts) names the session by: the lead 1, an owner its area, else the number in its name
 -- (demo-B2@m: 2), with repos <repo>:2 for builders and reviewers (no repo named: the home repo). The home repo is read
--- from the squad here, not cb._home_repo, which is created further down.
+-- from the squad here, not cb._home_repo, which is created further down. A session running another agent than its seat's
+-- (bound with --agent codex in a claude seat, say) runs that agent's model: null, not judged.
 create function cb._expected_model(project text, actor text, role text, area text, repo text, agent text) returns text language plpgsql stable as $$
 #variable_conflict use_variable
 declare sq jsonb := (select pr.squad from cb.projects pr where pr.slug = project); k text;
@@ -4143,6 +4144,9 @@ begin
     if sq->'repos' is not null and role in ('builder', 'reviewer') then
       k := coalesce(nullif(repo, ''), (select h.key from jsonb_each(sq->'repos') h where h.value->>'home' = 'true' limit 1)) || ':' || k;
     end if;
+  end if;
+  if coalesce(agent, 'claude') <> coalesce(sq->'roles'->role->'seats'->k->>'agent', sq->'roles'->role->>'agent', 'claude') then
+    return null;
   end if;
   return coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, agent));
 end $$;

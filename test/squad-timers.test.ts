@@ -352,6 +352,12 @@ test('digest group 10 uses cb._expected_model and matches wantList seat keys (#4
   assert.deepEqual(await wrong('demo'), ['demo-B2@macbook is a builder on claude-sonnet-4-6; the role runs opus: restart it with --model opus']);
   assert.equal(await expected('demo', 'demo-O-claims@macbook', 'owner', 'claims', null), 'sonnet');
   assert.equal(await expected('demo', 'demo-O-other@macbook', 'owner', 'other', null), 'opus', 'an area with no seat: the role model');
+  // a session bound as codex in a claude seat (cb iam --agent codex) runs another agent's model: not judged; a claude
+  // session on the wrong model still is (demo-B2 above)
+  assert.equal(await expected('demo', 'demo-B1@macbook', 'builder', null, null, 'codex'), null);
+  assert.equal(await expected('demo', 'orch@macbook', 'lead', null, null, 'opencode'), null);
+  await sql`update cb.sessions set agent = 'codex', model = 'gpt-6.1-sol' where actor = 'demo-B1@macbook'`;
+  assert.deepEqual(await wrong('demo'), ['demo-B2@macbook is a builder on claude-sonnet-4-6; the role runs opus: restart it with --model opus']);
 
   // several repos, web home: api's second builder's seat (api:2) runs opus; the home repo's seat web:1 too, found when
   // the session names no repo
