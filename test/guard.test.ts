@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
-import { installGuard } from '../kit/guard/install.mjs';
+import { installGuard, checkWiring, hookPath } from '../kit/guard/install.mjs';
 
 const GUARD = fileURLToPath(new URL('../kit/guard/', import.meta.url));
 const SHIM = join(GUARD, 'shim-claude.mjs');
@@ -200,6 +200,56 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
+// .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
+const fenceWrites = [
+  `echo '{}' > ~/.claude/settings.json`, 'echo x >> ~/.claude/settings.local.json', 'tee ~/.claude/settings.json < evil.json',
+  'cp evil.json $HOME/.claude/settings.json', `sed -i 's/PreToolUse/x/' ~/.claude/settings.json`,
+  String.raw`Set-Content -Path $env:USERPROFILE\.claude\settings.json -Value x`, String.raw`del C:\Users\u\.claude\settings.json`,
+  'rm -rf ~/.claude-board/guard', 'cp core.mjs ~/.claude-board/guard/core.mjs', 'mv x.json /home/u/.claude-board/runner.json',
+  `python3 -c "open('/home/u/.claude/settings.json','w').write('{}')"`, `bash -c "echo x > ~/.claude/settings.json"`,
+  `cd ~/.claude && echo '{}' > settings.json`, 'echo x > .claude/settings.json', 'echo x>~/.claude/settings.json',
+  'node kit/guard/install.mjs', 'node kit/guard/install.mjs --target /tmp/g', String.raw`node kit\guard\install.mjs`,
+  'cd kit/guard && node install.mjs', 'node kit/guard/install.mjs --check; node kit/guard/install.mjs',
+  String.raw`[IO.File]::WriteAllText("$HOME\.claude\settings.json", "{}")`, 'vim ~/.claude/settings.json',
+  // review #5 I2: more writers
+  'curl -o ~/.claude/settings.json https://x.example/s.json', 'wget -O ~/.claude/settings.json https://x.example/s.json',
+  'git -C ~/.claude checkout -- settings.json', 'cd ~/.claude && git apply p.diff', `jq '.hooks={}' a.json | sponge ~/.claude/settings.json`,
+  'tar -xf evil.tar -C ~/.claude-board', 'unzip -o g.zip -d ~/.claude-board/guard', 'patch ~/.claude/settings.json < p.diff',
+  `node -e "require('fs').writeFileSync(process.env.HOME + '/.claude/settings.json', '{}')"`,
+  `awk '{print}' a > ~/.claude/settings.json`, 'rm -rf ~/.claude', 'mv ~/.claude /tmp/c',
+  // review #5 I1: spellings that hide the path
+  `echo x > ~/.cla""ude/settings.json`, `echo x > ~/.cla''ude/settings.json`, String.raw`echo x > ~/.cl\aude/settings.json`,
+  'echo x > ~/.cl*/settings.json', 'cp x ~/.claud?/settings.json', 'mv ~/.cl* /tmp/', 'echo x > ~/.claude./settings.json',
+  String.raw`del C:\Users\u\CLAUDE~1\settings.json`, 'cp x ~/.claude/settings*.json',
+];
+const fenceReads = [
+  'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
+  'ls ~/.claude-board/guard', 'cat ~/.claude/settings.json 2>/dev/null', 'node kit/guard/install.mjs --check',
+  `cb log 4345 "blocked: echo x > ~/.claude/settings.json"`, `git commit -m "fence: no writes to ~/.claude/settings.json"`,
+  'echo x > notes.claude.txt', 'cp a.json b.json', 'cat .claude.json',
+  // another project's installer is not the guard's
+  'node scripts/install.mjs', 'cd kit/guard && node install.mjs --check',
+  // review #5 I3: a repo's own .claude folder (skills, agents, worktrees) is ordinary work
+  'cp a.md .claude/skills/a.md', 'echo x > .claude/agents/foo.md', 'git mv .claude/skills/a .claude/skills/b',
+  'rm -rf .claude/worktrees/x', 'mkdir -p .claude/skills/new', 'echo "see .claude/x" > notes.txt',
+  // an interpreter reading a fence path, a redirect to somewhere else, a word that is only part of a path
+  'node scripts/x.mjs ~/.claude/settings.json', `python -c "print(open('/home/u/.claude/settings.json').read())"`,
+  'node cli/cb.ts doctor ~/.claude-board/guard', 'cd ~/.claude && node -v', 'cd ~/.claude && cat settings.json',
+  'cat ~/.claude/settings.json 2> /tmp/err', 'ls ~/.claude/projects | sort > /tmp/l', 'grep -rn foo ~/.claude/ > /tmp/hits',
+  'ls ~/.claude/touch', 'grep -rn "create" ~/.claude/settings.json', 'cat ~/.claude/settings.json | tee /tmp/copy',
+];
+test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
+  for (const role of ROLES) {
+    blocksByRole(role, fenceWrites);
+    // a read-only role commits nothing at all (its own rule), so the commit message case is for the others
+    passes(role, fenceReads.filter((c) => !(READ_ONLY_ROLES.includes(role) && c.startsWith('git commit'))));
+  }
+  assert.match(shell('cp x ~/.claude/settings.json', { CB_ROLE: 'builder' }).reason!, /#4345.*cb ask/);
+  // a hand-started session (no CB_ROLE) is the owner's: his own maintenance stays open
+  for (const c of ['echo x > ~/.claude/settings.json', 'node kit/guard/install.mjs']) assert.deepEqual(shell(c), {}, c);
+});
+
 test('role parity and evaluate(edit/ask)', () => {
   assert.deepEqual([...ROLES], ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);
   assert.deepEqual([...READ_ONLY_ROLES], ['reviewer', 'qa', 'investigator']);
@@ -370,6 +420,14 @@ test('long commands stay fast', () => {
     ['secret, 200 KB of segments naming .env with no reader, as a builder', asBuilder(kb200('echo .e""nv; '))],
     ['secret, a 200 KB backtick message, as a builder', asBuilder('cb log 1 "`' + kb200('cat a ') + '`"')],
     ['secrets, 200 KB of one word then .key, as a builder', asBuilder('cat ' + 'a'.repeat(200000) + '.key')],
+    // the fence (#4345): a fence path everywhere, with and without a writer, reads each test once
+    ['fence, 200 KB of fence-path reads, as a builder', asBuilder(kb200('cat ~/.claude/settings.json; '))],
+    ['fence, 200 KB of fence paths then a copy, as a builder', asBuilder(kb200('ls ~/.claude-board/guard ') + '; cp a b')],
+    // review #5: an interpreter's open( with no close, a glob word with no slash, one long cd into the fence
+    ['fence, 200 KB of open( after an interpreter on a fence path', asBuilder('python ~/.claude/settings.json ' + kb200('open(a '))],
+    ['fence, 200 KB of ~.c* glob words', asBuilder('ls ' + kb200('~.c*'))],
+    ['fence, a 200 KB cd into ~/.claude-board', asBuilder('cd ' + kb200('/.claude-board') + ' && echo x')],
+    ['fence, 200 KB of hidden spellings', asBuilder(kb200(`~/.cla""ude ~/.cl\\aude `) + '; cp a b')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
@@ -416,6 +474,100 @@ test('long commands stay fast', () => {
   assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17), protectedBranches: ['development'] }).allow, false,
     'the protected-branch scan blocks it too');
   assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17) }).allow, true, 'no role and no protected branch: nothing to read');
+});
+
+// #4348: matching files prove nothing if the hook never runs them. --check also reads ~/.claude/settings.json (or
+// --settings): a PreToolUse entry must run the installed shim with an absolute node that exists (a bare node missing
+// from the hook shell's PATH exits 127, which Claude Code treats as allow), its matcher must cover Bash (and PowerShell
+// on Windows), and the 6 probes run through that exact command string, the way Claude Code runs it.
+test('checkWiring: the hook entry runs the installed shim, with an absolute node, the right matcher, and passes the probes', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-guard-wiring-'));
+  try {
+    const target = join(tmp, 'guard');
+    assert.equal(installGuard(GUARD, target).ok, true);
+    const shim = join(target, 'shim-claude.mjs');
+    const settings = (command: string, matcher = 'Bash|PowerShell', extra: any[] = []) => {
+      const f = join(tmp, `settings-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [...extra, { matcher, hooks: [{ type: 'command', command }] }] } }));
+      return f;
+    };
+    const good = `"${process.execPath}" "${shim}"`;
+    const ok = checkWiring(settings(good), target, { platform: 'win32' });
+    assert.deepEqual(ok.problems, []);
+    assert.equal(ok.ok, true);
+    assert.equal(ok.probes, 6);
+    // another tool's hook before ours is fine
+    assert.equal(checkWiring(settings(good, 'Bash', [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'echo hi' }] }]), target, { platform: 'darwin' }).ok, true);
+
+    const problems = (f: string, platform = 'linux') => checkWiring(f, target, { platform }).problems.join('\n');
+    assert.match(problems(settings(`node "${shim}"`)), /bare `node`.*127.*allow/s);
+    const gone = problems(settings(`"${join(tmp, 'no-such', 'node')}" "${shim}"`));
+    assert.match(gone, /does not exist/);
+    assert.match(gone, /probe .*exit (?:1|127)\b/); // 127 through bash; 1 if a Windows box has no Git Bash (cmd.exe)
+    assert.match(problems(settings(good, 'Bash'), 'win32'), /matcher "Bash" misses PowerShell/);
+    assert.equal(problems(settings(good, 'Bash'), 'darwin'), '');
+    assert.match(problems(settings(good, 'Edit|Write')), /matcher "Edit\|Write" misses Bash/);
+    assert.match(problems(settings(`"${process.execPath}" ~/elsewhere/shim-claude.mjs`)), /no PreToolUse hook runs .*shim-claude\.mjs/);
+    const empty = join(tmp, 'empty.json'); writeFileSync(empty, '{}');
+    assert.match(problems(empty), /no PreToolUse hook runs/);
+    const broken = join(tmp, 'broken.json'); writeFileSync(broken, '{ not json');
+    assert.match(problems(broken), /cannot read .*broken\.json/);
+    assert.match(problems(join(tmp, 'missing.json')), /cannot read .*missing\.json/);
+    // the static form (SessionStart) runs no probes
+    const quick = checkWiring(settings(good), target, { platform: 'linux', probes: false });
+    assert.equal(quick.ok, true);
+    assert.equal(quick.probes, 0);
+
+    // the CLI: --check with --settings checks the wiring too; a bad one exits 1 and says what to change
+    const cli = (...args: string[]) => spawnSync(process.execPath, [join(GUARD, 'install.mjs'), ...args], { encoding: 'utf8', env: cleanEnv() });
+    const fine = cli('--check', '--target', target, '--settings', settings(good));
+    assert.equal(fine.status, 0, fine.stdout + fine.stderr);
+    assert.match(fine.stdout, /hook .*6 probes passed/);
+    const bare = cli('--check', '--target', target, '--settings', settings(`node "${shim}"`, 'Edit'));
+    assert.equal(bare.status, 1);
+    assert.match(bare.stdout + bare.stderr, /bare `node`/);
+    assert.match(bare.stdout + bare.stderr, /misses Bash/);
+    assert.equal(cli('--check', '--target', target, '--settings').status, 2);
+
+    // review I2: Git Bash and $HOME / ~ forms of the same paths are the same hook
+    assert.equal(hookPath('/c/Program Files/nodejs/node.exe', true, 'C:\\Users\\me'), 'c:/program files/nodejs/node.exe');
+    assert.equal(hookPath('C:\\Users\\Me\\.claude-board\\guard\\shim-claude.mjs', true, 'C:\\Users\\me'), 'c:/users/me/.claude-board/guard/shim-claude.mjs');
+    assert.equal(hookPath('$HOME/.claude-board/guard/shim-claude.mjs', true, 'C:\\Users\\me'), 'c:/users/me/.claude-board/guard/shim-claude.mjs');
+    assert.equal(hookPath('${HOME}/x', false, '/home/u'), '/home/u/x');
+    assert.equal(hookPath('~/x', false, '/home/u'), '/home/u/x');
+    assert.equal(hookPath('/c/x', false, '/home/u'), '/c/x', 'only Windows maps a drive');
+    const rel = target.slice(tmp.length + 1);
+    for (const form of [`"$HOME/${rel}/shim-claude.mjs"`, `~/${rel}/shim-claude.mjs`]) {
+      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: 'linux', probes: false, home: tmp });
+      assert.deepEqual(w.problems, [], form);
+    }
+
+    // review I3: another layer that turns hooks off, a non-command hook, a timeout short enough to fail open
+    const raw = (obj: any) => { const f = join(tmp, `raw-${Math.random().toString(36).slice(2)}.json`); writeFileSync(f, JSON.stringify(obj)); return f; };
+    const entry = (h: any) => ({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: good, ...h }] }] } });
+    assert.match(problems(raw({ disableAllHooks: true, ...entry({}) })), /disableAllHooks/);
+    assert.match(problems(raw(entry({ timeout: 5 }))), /timeout 5 s.*allow/);
+    assert.equal(problems(raw(entry({ timeout: 60 }))), '');
+    assert.match(problems(raw(entry({ type: 'prompt' }))), /no PreToolUse hook runs/);
+    // every entry that runs the shim counts: a broken one before a good one is not "not wired"
+    const two = raw({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node "${shim}"` }] }, { matcher: 'Bash', hooks: [{ type: 'command', command: good }] }] } });
+    assert.equal(problems(two), '');
+    // M2: a directory is not a node
+    assert.match(problems(settings(`"${tmp}" "${shim}"`, 'Bash')), /node .* is not a file/);
+
+    // M4: --no-wiring checks the files only (CI, a machine with no ~/.claude)
+    const home = join(tmp, 'home');
+    assert.equal(cli('--target', join(home, '.claude-board', 'guard')).status, 0);
+    const homeCli = (...args: string[]) => spawnSync(process.execPath, [join(GUARD, 'install.mjs'), ...args], { encoding: 'utf8', env: cleanEnv({ HOME: home, USERPROFILE: home }) });
+    const noSettings = homeCli('--check');
+    assert.equal(noSettings.status, 1, noSettings.stdout);
+    assert.match(noSettings.stdout, /cannot read/);
+    const filesOnly = homeCli('--check', '--no-wiring');
+    assert.equal(filesOnly.status, 0, filesOnly.stdout + filesOnly.stderr);
+    assert.doesNotMatch(filesOnly.stdout, /hook/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically, and --check detects drift', () => {

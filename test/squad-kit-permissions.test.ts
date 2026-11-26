@@ -168,6 +168,18 @@ test('every role denies reading secret files anywhere, and keeps .env.example re
   }
 });
 
+// #4345: the seat's own fence. Edit rules cover every built-in file-editing tool; Write is listed too in case a
+// release narrows that. ~ is the home folder; //**/ is any absolute path, so a repo's .claude/settings*.json in a
+// worktree beside the session's folder is covered too (review #5 I4: **/ alone is relative to the session's folder).
+// The real proof is the live check at release (a seat's Edit of ~/.claude/settings.json is refused).
+const FENCE = ['~/.claude/settings*.json', '//**/.claude/settings*.json', '~/.claude-board/**'];
+test('every role denies editing the hook settings and ~/.claude-board (the guard, the runner config)', () => {
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const p of FENCE) for (const t of ['Edit', 'Write']) assert.ok(deny.includes(`${t}(${p})`), `${r}: ${t}(${p})`);
+  }
+});
+
 test('no role may use the PowerShell tool: squad sessions work through Bash', () => {
   for (const r of ROLES) assert.ok(load(r).permissions.deny.includes('PowerShell'), r);
 });
