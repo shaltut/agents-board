@@ -7,7 +7,7 @@
 // with Ahmed's yes.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -28,6 +28,14 @@ const PROBES = [
 
 const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
 
+// The shell Claude Code runs a hook command in: sh elsewhere; on Windows Git Bash (review I1: cmd.exe quotes, expands
+// and fails differently, and exits 1, not 127, for a missing program), falling back to cmd.exe only with no Git Bash.
+function hookShell() {
+  if (process.platform !== 'win32') return null;
+  const candidates = [process.env.CLAUDE_CODE_GIT_BASH_PATH, join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')];
+  return candidates.find((b) => b && existsSync(b)) ?? null;
+}
+
 // The probe's failure, or null. The env is this process's minus every CB_* the guard reads (any case: Windows env
 // names are case-insensitive), so a squad seat running the installer cannot change what the probes see. `shim` is the
 // shim's path (run with this node), or { command } to run a hook's command string through a shell, as Claude Code does.
@@ -36,7 +44,9 @@ function probe(shim, p) {
   for (const k of Object.keys(env)) if (CB_ENV.includes(k.toUpperCase())) delete env[k];
   Object.assign(env, p.env);
   const opts = { input: p.raw ?? JSON.stringify(p.input), encoding: 'utf8', env, timeout: 15_000, windowsHide: true };
-  const r = typeof shim === 'string' ? spawnSync(process.execPath, [shim], opts) : spawnSync(shim.command, { ...opts, shell: true });
+  const bash = typeof shim === 'string' ? null : hookShell();
+  const r = typeof shim === 'string' ? spawnSync(process.execPath, [shim], opts)
+    : bash ? spawnSync(bash, ['-c', shim.command], opts) : spawnSync(shim.command, { ...opts, shell: true });
   if (r.error || r.status !== 0) return `${p.name}: exit ${r.status}${r.error ? ` (${r.error.message})` : ''} ${String(r.stderr ?? '').trim().slice(0, 200)}`;
   const text = String(r.stdout).trim();
   if (p.allow) return text === '{}' ? null : `${p.name}: expected {}, got ${text.slice(0, 200)}`;
@@ -77,45 +87,79 @@ export function installGuard(srcDir, targetDir, { checkOnly = false } = {}) {
 }
 
 // #4348: the hook wiring in a Claude settings file. Matching files prove nothing if no hook runs them, so: a PreToolUse
-// entry whose command runs <target>/shim-claude.mjs, with an absolute node that exists (a bare `node` missing from the
+// command hook that runs <target>/shim-claude.mjs, with an absolute node that is a file (a bare `node` missing from the
 // hook shell's PATH exits 127, which Claude Code treats as allow), a matcher covering Bash (and PowerShell on Windows),
-// and, unless probes is false, the 6 probes through that exact command string. Returns { ok, problems, probes }.
-const slash = (s, win) => (win ? s.replace(/\\/g, '/').toLowerCase() : s);
+// no timeout short enough to fail open, hooks not turned off in this file, and, unless probes is false, the 6 probes
+// through that exact command string. Several entries may run the shim: wired when one of them passes everything (a
+// hook that errors is not a block, so only a good one protects). Only this file is read: settings.local.json, project
+// settings and managed policy are other layers. Returns { ok, problems, probes }.
+const MIN_TIMEOUT_S = 15;
+// A path from a hook command as one comparable form (review I2): ~, $HOME and ${HOME} expanded; on Windows Git Bash's
+// /c/... read as c:/..., backslashes as slashes, case folded.
+export function hookPath(p, win, home = homedir()) {
+  let s = p.replace(/^(?:~|\$HOME|\$\{HOME\})(?=[\\/]|$)/, home);
+  if (!win) return s;
+  s = s.replace(/\\/g, '/').replace(/^\/([a-z])(?=\/)/i, '$1:');
+  return s.toLowerCase();
+}
 const covers = (matcher, tool) => {
   if (matcher === undefined || matcher === '' || matcher === '*') return true;
   try { return new RegExp(`^(?:${matcher})$`).test(tool); } catch { return matcher === tool; }
 };
-export function checkWiring(settingsFile, targetDir, { platform = process.platform, probes = true } = {}) {
+// the quoted or bare words of a command, so each path in it can be compared whole
+const words = (command) => [...command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+const isFile = (f) => { try { return statSync(f).isFile(); } catch { return false; } };
+
+export function checkWiring(settingsFile, targetDir, { platform = process.platform, probes = true, home = homedir() } = {}) {
   const win = platform === 'win32';
   const shim = join(resolve(targetDir), 'shim-claude.mjs');
+  const want = hookPath(shim, win, home);
   const fix = `point it at "${process.execPath}" "${shim}" (docs/ops/maintain.md, Installing the guard)`;
   let settings;
   try { settings = JSON.parse(readFileSync(settingsFile, 'utf8')); } catch (e) {
     return { ok: false, probes: 0, problems: [`cannot read ${settingsFile}: ${e?.code ?? e?.message ?? e}`] };
   }
+  if (settings?.disableAllHooks === true) {
+    return { ok: false, probes: 0, problems: [`${settingsFile} sets disableAllHooks: true, so no hook runs, the guard included: remove it`] };
+  }
   const entries = Array.isArray(settings?.hooks?.PreToolUse) ? settings.hooks.PreToolUse : [];
-  const found = entries.flatMap((e) => (Array.isArray(e?.hooks) ? e.hooks : []).map((h) => ({ matcher: e.matcher, command: h?.command })))
-    .find((h) => typeof h.command === 'string' && slash(h.command, win).includes(slash(shim, win)));
-  if (!found) return { ok: false, probes: 0, problems: [`no PreToolUse hook runs ${shim} in ${settingsFile}: ${fix}`] };
+  const found = entries.flatMap((e) => (Array.isArray(e?.hooks) ? e.hooks : []).map((h) => ({ matcher: e.matcher, command: h?.command, type: h?.type, timeout: h?.timeout })))
+    .filter((h) => h.type === 'command' && typeof h.command === 'string' && words(h.command).some((w) => hookPath(w, win, home) === want));
+  if (!found.length) return { ok: false, probes: 0, problems: [`no PreToolUse hook runs ${shim} (as a command hook) in ${settingsFile}: ${fix}`] };
+  let best = null;
+  for (const h of found) {
+    const r = checkHook(h, { win, home, probes, fix });
+    if (r.problems.length === 0) return { ok: true, probes: r.probes, problems: [] };
+    if (!best) best = r;
+  }
+  return { ok: false, probes: best.probes, problems: best.problems };
+}
+
+function checkHook(h, { win, home, probes, fix }) {
   const problems = [];
-  const node = /^\s*(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(found.command);
-  const exe = node?.[1] ?? node?.[2] ?? node?.[3] ?? '';
-  if (!/^(?:\/|[a-z]:[\\/])/i.test(exe)) {
+  const exe = words(h.command)[0] ?? '';
+  const exePath = hookPath(exe, win, home);
+  if (!/^(?:\/|[a-z]:[\\/])/i.test(exePath)) {
     problems.push(`the hook runs bare \`${exe}\`: where it is not on the hook shell's PATH the hook exits 127, which Claude Code treats as allow; ${fix}`);
-  } else if (!existsSync(exe)) {
+  } else if (!existsSync(exePath)) {
     problems.push(`the hook's node ${exe} does not exist: ${fix}`);
+  } else if (!isFile(exePath)) {
+    problems.push(`the hook's node ${exe} is not a file: ${fix}`);
   }
   for (const tool of win ? ['Bash', 'PowerShell'] : ['Bash']) {
-    if (!covers(found.matcher, tool)) problems.push(`the hook's matcher "${found.matcher}" misses ${tool}: set it to "${win ? 'Bash|PowerShell' : 'Bash'}"`);
+    if (!covers(h.matcher, tool)) problems.push(`the hook's matcher "${h.matcher}" misses ${tool}: set it to "${win ? 'Bash|PowerShell' : 'Bash'}"`);
+  }
+  if (h.timeout !== undefined && !(Number(h.timeout) >= MIN_TIMEOUT_S)) {
+    problems.push(`the hook's timeout ${h.timeout} s is too short: a hook that times out counts as allow; remove it or set it to ${MIN_TIMEOUT_S} or more`);
   }
   let ran = 0;
   if (probes) {
     for (const p of PROBES) {
-      const f = probe({ command: found.command }, p);
+      const f = probe({ command: h.command }, p);
       if (f) problems.push(`probe ${f}`); else ran++;
     }
   }
-  return { ok: problems.length === 0, probes: ran, problems };
+  return { problems, probes: ran };
 }
 
 let main = false;
@@ -127,21 +171,24 @@ if (process.argv[1]) {
   }
 }
 if (main) {
-  const usage = 'usage: node kit/guard/install.mjs [--target <dir>] [--check [--settings <file>]]';
+  const usage = 'usage: node kit/guard/install.mjs [--target <dir>] [--check [--settings <file> | --no-wiring]]';
   const args = process.argv.slice(2);
   const defaultTarget = join(homedir(), '.claude-board', 'guard');
   let target = defaultTarget;
   let settingsFile = null;
   let checkOnly = false;
+  let noWiring = false;
   let bad = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--check') checkOnly = true;
+    else if (args[i] === '--no-wiring') noWiring = true;
     else if (args[i] === '--target' && args[i + 1] && !args[i + 1].startsWith('-')) target = args[++i];
     else if (args[i] === '--settings' && args[i + 1] && !args[i + 1].startsWith('-')) settingsFile = args[++i];
     else bad = true;
   }
   // the wiring is this machine's ~/.claude/settings.json for the default target; for another target only when named
-  if (checkOnly && !settingsFile && resolve(target) === resolve(defaultTarget)) settingsFile = join(homedir(), '.claude', 'settings.json');
+  // --no-wiring: the files only (CI, a machine with no ~/.claude)
+  if (checkOnly && !noWiring && !settingsFile && resolve(target) === resolve(defaultTarget)) settingsFile = join(homedir(), '.claude', 'settings.json');
   if (bad) {
     console.error(usage);
     process.exitCode = 2;

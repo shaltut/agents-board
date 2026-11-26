@@ -12,6 +12,9 @@ if (process.env.HERDR_PANE_ID) {
     const { checkWiring } = await import('../kit/guard/install.mjs');
     const w = checkWiring(join(homedir(), '.claude', 'settings.json'), join(homedir(), '.claude-board', 'guard'), { probes: false });
     if (!w.ok) context += `\nGuard: ${w.problems[0]}. The command guard may not be running in this session: tell Ahmed with cb ask, and do not change ~/.claude yourself.`;
-  } catch {}
+  } catch (e) {
+    // review M1: a hook copied away from kit/guard loses the check; say so rather than go quiet
+    context += `\nGuard: wiring check unavailable (${String(e?.message ?? e).slice(0, 120)}).`;
+  }
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }));
 }

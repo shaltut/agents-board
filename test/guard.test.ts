@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
-import { installGuard, checkWiring } from '../kit/guard/install.mjs';
+import { installGuard, checkWiring, hookPath } from '../kit/guard/install.mjs';
 
 const GUARD = fileURLToPath(new URL('../kit/guard/', import.meta.url));
 const SHIM = join(GUARD, 'shim-claude.mjs');
@@ -391,7 +391,7 @@ test('checkWiring: the hook entry runs the installed shim, with an absolute node
     assert.match(problems(settings(`node "${shim}"`)), /bare `node`.*127.*allow/s);
     const gone = problems(settings(`"${join(tmp, 'no-such', 'node')}" "${shim}"`));
     assert.match(gone, /does not exist/);
-    assert.match(gone, /probe .*exit 127/);
+    assert.match(gone, /probe .*exit (?:1|127)\b/); // 127 through bash; 1 if a Windows box has no Git Bash (cmd.exe)
     assert.match(problems(settings(good, 'Bash'), 'win32'), /matcher "Bash" misses PowerShell/);
     assert.equal(problems(settings(good, 'Bash'), 'darwin'), '');
     assert.match(problems(settings(good, 'Edit|Write')), /matcher "Edit\|Write" misses Bash/);
@@ -416,6 +416,43 @@ test('checkWiring: the hook entry runs the installed shim, with an absolute node
     assert.match(bare.stdout + bare.stderr, /bare `node`/);
     assert.match(bare.stdout + bare.stderr, /misses Bash/);
     assert.equal(cli('--check', '--target', target, '--settings').status, 2);
+
+    // review I2: Git Bash and $HOME / ~ forms of the same paths are the same hook
+    assert.equal(hookPath('/c/Program Files/nodejs/node.exe', true, 'C:\\Users\\me'), 'c:/program files/nodejs/node.exe');
+    assert.equal(hookPath('C:\\Users\\Me\\.claude-board\\guard\\shim-claude.mjs', true, 'C:\\Users\\me'), 'c:/users/me/.claude-board/guard/shim-claude.mjs');
+    assert.equal(hookPath('$HOME/.claude-board/guard/shim-claude.mjs', true, 'C:\\Users\\me'), 'c:/users/me/.claude-board/guard/shim-claude.mjs');
+    assert.equal(hookPath('${HOME}/x', false, '/home/u'), '/home/u/x');
+    assert.equal(hookPath('~/x', false, '/home/u'), '/home/u/x');
+    assert.equal(hookPath('/c/x', false, '/home/u'), '/c/x', 'only Windows maps a drive');
+    const rel = target.slice(tmp.length + 1);
+    for (const form of [`"$HOME/${rel}/shim-claude.mjs"`, `~/${rel}/shim-claude.mjs`]) {
+      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: 'linux', probes: false, home: tmp });
+      assert.deepEqual(w.problems, [], form);
+    }
+
+    // review I3: another layer that turns hooks off, a non-command hook, a timeout short enough to fail open
+    const raw = (obj: any) => { const f = join(tmp, `raw-${Math.random().toString(36).slice(2)}.json`); writeFileSync(f, JSON.stringify(obj)); return f; };
+    const entry = (h: any) => ({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: good, ...h }] }] } });
+    assert.match(problems(raw({ disableAllHooks: true, ...entry({}) })), /disableAllHooks/);
+    assert.match(problems(raw(entry({ timeout: 5 }))), /timeout 5 s.*allow/);
+    assert.equal(problems(raw(entry({ timeout: 60 }))), '');
+    assert.match(problems(raw(entry({ type: 'prompt' }))), /no PreToolUse hook runs/);
+    // every entry that runs the shim counts: a broken one before a good one is not "not wired"
+    const two = raw({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node "${shim}"` }] }, { matcher: 'Bash', hooks: [{ type: 'command', command: good }] }] } });
+    assert.equal(problems(two), '');
+    // M2: a directory is not a node
+    assert.match(problems(settings(`"${tmp}" "${shim}"`, 'Bash')), /node .* is not a file/);
+
+    // M4: --no-wiring checks the files only (CI, a machine with no ~/.claude)
+    const home = join(tmp, 'home');
+    assert.equal(cli('--target', join(home, '.claude-board', 'guard')).status, 0);
+    const homeCli = (...args: string[]) => spawnSync(process.execPath, [join(GUARD, 'install.mjs'), ...args], { encoding: 'utf8', env: cleanEnv({ HOME: home, USERPROFILE: home }) });
+    const noSettings = homeCli('--check');
+    assert.equal(noSettings.status, 1, noSettings.stdout);
+    assert.match(noSettings.stdout, /cannot read/);
+    const filesOnly = homeCli('--check', '--no-wiring');
+    assert.equal(filesOnly.status, 0, filesOnly.stdout + filesOnly.stderr);
+    assert.doesNotMatch(filesOnly.stdout, /hook/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

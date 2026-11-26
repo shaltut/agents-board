@@ -108,7 +108,12 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
    match the checkout AND `~/.claude/settings.json` has a PreToolUse hook that runs the installed shim with an absolute
    node that exists and a matcher covering Bash (and PowerShell on Windows), and the 6 probes pass through that exact
    hook command (#4348). Each problem prints one `hook:` line saying what to change. A herdr seat whose wiring is off
-   hears one `Guard:` line at session start.
+   hears one `Guard:` line at session start. Also checked: `disableAllHooks` is not set in that file, the hook is a
+   `command` hook, and any `timeout` is 15 s or more (a hook that times out counts as allow). Git Bash forms
+   (`/c/...`, `$HOME/...`, `~/...`) count as the same paths. On Windows the probes run through Git Bash, as Claude
+   Code runs hooks (`CLAUDE_CODE_GIT_BASH_PATH`, else `%ProgramFiles%\Git\bin\bash.exe`; cmd.exe only with neither).
+   Only this one settings file is read: `settings.local.json`, project settings and managed policy are not.
+   `--check --no-wiring` checks the files only (CI, a machine with no `~/.claude`), where plain `--check` exits 1.
 2. In `~/.claude/settings.json`, point the PreToolUse hook command at
    `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`: the full home path, e.g. `C:/Users/<you>` on Windows, `/Users/<you>` on the Mac). On Windows, set that
    entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
