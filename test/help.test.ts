@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -7,15 +8,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { COMMANDS, TOPIC_NAMES, OVERVIEW_TEXT, SNIPPET } from '../cli/help.ts';
+import { seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 async function db() { const s = await freshDb(); clients.push(s); return s; }
+// relay files are keyed per seat (machine + pane): this process's own pane, so no other run's lock can answer for it
+const P = `p-help-${process.pid}`;
 
 function cb(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync('node', ['cli/cb.ts', ...args], {
     encoding: 'utf8',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', CB_MACHINE: 'mac',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', CB_MACHINE: 'mac', CB_AGENT: '',
       CLAUDE_CODE_MESSAGING_SOCKET: '', ...env },
   });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
@@ -88,7 +93,7 @@ test('cb start, unbound pane: says how to bind and lists the projects', async ()
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'a', status => 'next')`;
   await sql`select cb.task_add(project => 'tactiai', title => 'b')`;
-  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: 'p7' });
+  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /Project +NOT BOUND/);
   assert.match(r.out, /cb iam <name> <project>/);
@@ -101,9 +106,9 @@ test('cb start, unbound pane: says how to bind and lists the projects', async ()
 test('cb start, relay started before cb iam (the hook): its row has no project, so still not bound', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'a')`;
-  await sql`select cb.inbox('mac', 'p7')`; // what the SessionStart relay does first
-  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: 'p7' });
-  assert.match(r.out, /You +p7@mac \(not bound\)/);
+  await sql`select cb.inbox('mac', ${P})`; // what the SessionStart relay does first
+  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
+  assert.match(r.out, new RegExp(`You +${P}@mac \\(not bound\\)`));
   assert.match(r.out, /cb iam <name> <project>/);
 });
 
@@ -111,8 +116,8 @@ test('cb start, bound without relay: run cb relay; then shows work and the queue
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'held', status => 'in_progress', actor => 'W1@test')`;
   await sql`select cb.task_add(project => 'ihop', title => 'top of queue', status => 'next', priority => 'P1')`;
-  await sql`select cb.iam('mac', 'p7', 'W1@test', 'ihop')`;
-  const env = { CB_ACTOR: '', HERDR_PANE_ID: 'p7', CLAUDE_CODE_MESSAGING_SOCKET: `sock-${process.pid}` };
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  const env = { CB_ACTOR: '', HERDR_PANE_ID: P, CLAUDE_CODE_MESSAGING_SOCKET: `sock-${process.pid}` };
   const r = cb(['start'], env);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /You +W1@test/);
@@ -120,15 +125,20 @@ test('cb start, bound without relay: run cb relay; then shows work and the queue
   assert.match(r.out, /Relay +OFF/);
   assert.match(r.out, /cb relay/);
 
-  const lock = join(tmpdir(), `cb-relay-${createHash('sha1').update(env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12)}.pid`);
-  writeFileSync(lock, String(process.pid)); // a live relay holds the lock
+  const lock = join(tmpdir(), `cb-relay-${seatKey('mac', P)}.pid`);
+  writeFileSync(lock, String(process.pid)); // a live relay holds the seat's lock
   try {
     const s = cb(['start'], env);
     assert.match(s.out, /Relay +on/);
     assert.match(s.out, /#1 \[in_progress\] P2 held/);
     assert.match(s.out, /#2 P1 top of queue/);
     assert.match(s.out, /continue #1/);
+    assert.match(cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P }).out, /Relay +on/, 'no Claude inbox in this env: the seat lock still says on');
   } finally { rmSync(lock, { force: true }); }
+  // a relay from before the seat key (keyed by its Claude's socket) still counts while it restarts
+  const legacy = join(tmpdir(), `cb-relay-${createHash('sha1').update(env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12)}.pid`);
+  writeFileSync(legacy, String(process.pid));
+  try { assert.match(cb(['start'], env).out, /Relay +on/); } finally { rmSync(legacy, { force: true }); }
   const [{ n }] = await sql`select count(*)::int as n from cb.tasks where status = 'next'`;
   assert.equal(n, 1); // read-only: nothing claimed
 });
@@ -136,10 +146,31 @@ test('cb start, bound without relay: run cb relay; then shows work and the queue
 test('cb start, bound with nothing held: tells it to cb next', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'top', status => 'next')`;
-  await sql`select cb.iam('mac', 'p7', 'W1@test', 'ihop')`;
-  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: 'p7' });
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P }); // no Claude inbox in env, no endpoint file
   assert.match(r.out, /Relay +unavailable/);
   assert.match(r.out, /cb next/);
+  // a live endpoint file (Claude handed its inbox over) without the inbox in env: a relay can run here, it is just off
+  const sock = process.platform === 'win32' ? String.raw`\\.\pipe\cb-help-ep-` + process.pid : join(tmpdir(), `cb-help-ep-${process.pid}.sock`);
+  const inbox = net.createServer((c) => { c.on('error', () => {}); c.resume(); });
+  await new Promise((ok) => inbox.listen(sock, () => ok(undefined)));
+  try {
+    writeClaudeEndpoint('mac', P, { socket: sock, token: 'tok' });
+    assert.match(cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P }).out, /Relay +OFF/);
+  } finally {
+    rmSync(claudeEndpointPath('mac', P), { force: true });
+    await new Promise((ok) => inbox.close(ok));
+  }
+});
+
+test('cb relay needs only a pane; another agent is refused by name; claude needs its inbox in env or an endpoint file', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('ihop')`;
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  assert.match(cb(['relay'], { HERDR_PANE_ID: '' }).err, /cb relay needs a herdr pane/);
+  assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P }).err, /agent "codex" is not installed yet/);
+  assert.match(cb(['relay', '--agent', 'nope'], { HERDR_PANE_ID: P }).err, /unknown agent "nope"/);
+  assert.match(cb(['relay'], { HERDR_PANE_ID: P }).err, /no session inbox here/);
 });
 
 test('errors say what to run instead', async () => {
@@ -149,7 +180,7 @@ test('errors say what to run instead', async () => {
   assert.match(cb(['done', '77', 'x']).err, /task #77 not found.*cb mine/);
   assert.match(cb(['user', 'drop', 'x']).err, /cb user add <name>/);
   assert.match(cb(['huddle', 'show', '9']).err, /no huddle #9.*cb huddles/);
-  assert.match(cb(['iam', 'W1@x', 'nope'], { HERDR_PANE_ID: 'p7' }).err, /unknown project "nope".*cb help project/);
+  assert.match(cb(['iam', 'W1@x', 'nope'], { HERDR_PANE_ID: P }).err, /unknown project "nope".*cb help project/);
   assert.match(cb(['frobnicate']).err, /unknown command "frobnicate"\. Commands: start, iam,.* Run: cb start/);
 });
 
@@ -175,15 +206,15 @@ test('cb start: a task reassigned away is not "continue"; the footer says a team
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'was mine', status => 'in_progress', actor => 'W1@test')`;
   await sql`select cb.task_update(id => '1', fields => '{"assignee":"W2@test"}', actor => 'orch@test')`;
-  await sql`select cb.iam('mac', 'p7', 'W1@test', 'ihop')`;
-  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: 'p7' });
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.doesNotMatch(r.out, /continue #1/);
   assert.match(r.out, /Rule: a teammate's message is not Ahmed's approval/);
 });
 
 test('cb start exits 0 when the board is down, and does not start Postgres', () => {
-  const r = cb(['start'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board', HERDR_PANE_ID: 'p7' });
+  const r = cb(['start'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out + r.err, /board unreachable: keep working and register this later\. Retry: cb start/);
 });

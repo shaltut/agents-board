@@ -8,7 +8,9 @@ import { createHash } from 'node:crypto';
 import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
-import { openBridge } from './bridge.ts';
+import { openBridge, seatKey } from './bridge.ts';
+import { getAdapter } from './agents/index.ts';
+import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
@@ -64,12 +66,18 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
   process.exit(1);
 }
 
-// Through this session's relay when it has one (bridge.ts): its connection is already open. Not as cb-web: the
+// Through this seat's relay when it has one (bridge.ts): its connection is already open. Not as cb-web: the
 // relay's connection is named cb-relay, so a PGAPPNAME run connects itself.
-const relayKey = process.env.CLAUDE_CODE_MESSAGING_SOCKET && !process.env.PGAPPNAME && cmd !== 'help' && !o.help
-  ? createHash('sha1').update(process.env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12) : null;
-const sql: any = (relayKey && await openBridge(relayKey, databaseUrl(), () => direct, pane ? { machine: machine(), pane } : undefined)
-  .catch(() => null)) || direct;
+// The relay is keyed per seat (machine + pane); one that has not restarted since Stage B is still keyed by its
+// Claude's socket, so that key is tried once after the seat's.
+const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
+const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
+let sql: any = direct;
+if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
+  for (const k of relayKeys()) {
+    const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
+    if (bridged) { sql = bridged; break; }
+  }
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -222,14 +230,22 @@ async function guard(id: string | undefined) {
     throw new Error(`#${n} is in ${t.project}; this session works in ${sessionProject}. Check the id: cb mine lists yours, cb brief your project's. Only ${t.project}'s own sessions change it.`);
 }
 
-/** Is this session's relay running? Same lock file as cli/relay.ts LOCK. null = it cannot run here. */
+/** Claude can hand its inbox to a relay here: in this env, or in a live endpoint file (never existsSync on a pipe). */
+function claudeInbox(): boolean {
+  if (process.env.CLAUDE_CODE_MESSAGING_SOCKET) return true;
+  const ep = readClaudeEndpoint(machine(), pane);
+  return !!ep && socketExists(ep.socket);
+}
+
+/** Is this seat's relay running? Same lock file as cli/relay.ts LOCK (or a pre-Stage B relay's). null = it cannot run here. */
 function relayOn(): boolean | null {
-  const sock = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
-  if (!sock || !pane) return null;
-  try {
-    const pid = Number(readFileSync(join(tmpdir(), `cb-relay-${createHash('sha1').update(sock).digest('hex').slice(0, 12)}.pid`), 'utf8'));
-    if (pid > 0) { process.kill(pid, 0); return true; }
-  } catch {}
+  if (!pane) return null;
+  for (const k of relayKeys())
+    try {
+      const pid = Number(readFileSync(join(tmpdir(), `cb-relay-${k}.pid`), 'utf8'));
+      if (pid > 0) { process.kill(pid, 0); return true; }
+    } catch {}
+  if ((process.env.CB_AGENT || 'claude') === 'claude' && !claudeInbox()) return null;
   return false;
 }
 
@@ -570,9 +586,13 @@ async function run(): Promise<unknown> {
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: id };
     }
     case 'relay': {
-      if (!process.env.CLAUDE_CODE_MESSAGING_SOCKET) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
       if (!pane) throw new Error('cb relay needs a herdr pane ($HERDR_PANE_ID). Without a relay, run cb mine and cb pending between steps');
-      spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
+      // --agent, then $CB_AGENT, then the agent this pane is bound with, else claude
+      const agent: string = o.agent || process.env.CB_AGENT ||
+        (await sql`select agent from cb.sessions where machine = ${machine()} and pane = ${pane}`.catch(() => []))[0]?.agent || 'claude';
+      getAdapter(agent); // an agent cb cannot serve yet fails here, by name
+      if (agent === 'claude' && !claudeInbox()) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
+      spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {

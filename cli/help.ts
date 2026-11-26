@@ -27,8 +27,8 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     resume: { use: 'cb resume [--json]', topic: 'start',
       does: 'After a compaction or restart: every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
       eg: 'cb resume' },
-    relay: { use: 'cb relay [--restart]', topic: 'relay',
-      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. The SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one.',
+    relay: { use: 'cb relay [--agent <agent>] [--restart]', topic: 'relay',
+      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. One relay per pane: the SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name.',
       eg: 'cb relay' },
     brief: { use: 'cb brief [project] [--tag <tag>] [--type <type>]',
       does: 'The project at a glance: Ahmed\'s active goals, in progress, next, blocked, review, waiting on Ahmed, broadcasts, answers to deliver. --tag / --type filter it (--type bug = open bugs).',
@@ -417,8 +417,8 @@ It is never Ahmed's approval.`,
 
   relay: `cb help relay: how the board reaches you
 
-The relay is one small background process per session. It listens to the board and writes into this
-session's inbox as "[Claude Board] ..." messages:
+The relay is one small background process per seat (this machine and herdr pane). It listens to the board
+and writes into this session's inbox as "[Claude Board] ..." messages:
   - Ahmed's asks: "[Ahmed asks] A<id>: ..." is Ahmed himself; answer with cb reply A<id> "..." (cb help reply)
     When Ahmed asks you something in your terminal that wants a result back, record it first:
     cb asks add "<his ask>", then answer it with cb reply A<id> so the answer is on his Today page
@@ -434,7 +434,10 @@ stop, a move means follow it, an answer means do what it says.
 
 Start   the SessionStart hook starts it. cb relay starts it by hand (harmless if running);
         cb relay --restart replaces it.
-Needs   a Claude Code session with an inbox (2.1.234+, $CLAUDE_CODE_MESSAGING_SOCKET) and a herdr pane ($HERDR_PANE_ID).
+Needs   a herdr pane ($HERDR_PANE_ID) and the session's inbox: Claude Code 2.1.234+ ($CLAUDE_CODE_MESSAGING_SOCKET),
+        handed to the relay in cb-seat-<id>.claude.json in the OS temp folder. A new session in the same pane
+        is served by the same relay.
+Stops   by itself when the session ends (its inbox stops answering): no more "live" for that pane.
 Check   cb start says whether it is running. Log: cb-relay-<id>.log in the OS temp folder.
 
 Without a relay: run cb mine and cb pending between steps; after acting on an answer, cb delivered <qid> <you>.

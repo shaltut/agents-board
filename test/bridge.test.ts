@@ -2,6 +2,7 @@
 // connect (TCP, SCRAM, type fetch: ~5 round trips, ~650 ms from Egypt to the VPS) and re-uses prepared statements.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -9,11 +10,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from '../server/db.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { serveBridge, openBridge, bridgeFiles } from '../cli/bridge.ts';
+import { serveBridge, openBridge, bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath } from '../cli/agents/claude.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// A relay's files are keyed per seat (machine + pane): each test has its own pane, with this process's pid in it.
+const rmSeat = (machine: string, pane: string) => {
+  const k = seatKey(machine, pane);
+  for (const f of [join(tmpdir(), `cb-relay-${k}.pid`), join(tmpdir(), `cb-relay-${k}.log`), bridgeFiles(k).info, claudeEndpointPath(machine, pane)]) fs.rmSync(f, { force: true });
+};
+/** A stand-in for Claude's inbox that takes whatever comes: a relay stays up only while its agent's inbox is there. */
+const listening = (path: string) => new Promise<net.Server>((r) => {
+  const s = net.createServer((c) => { c.on('error', () => {}); c.resume(); });
+  s.listen(path, () => r(s));
+});
+const closed = (s: net.Server) => new Promise((r) => s.close(r));
 
 async function served(url = TEST_URL, opts: any = {}) {
   const sql = await freshDb(); clients.push(sql);
@@ -59,12 +73,15 @@ test('the bridge refuses a cb that points at another database, or has the wrong 
 test('cb in a session with a relay runs through it, and opens no connection of its own', { timeout: 30_000 }, async () => {
   const sql = await freshDb(); clients.push(sql);
   const inbox = process.platform === 'win32' ? String.raw`\\.\pipe\cb-bridge-test-` + process.pid : join(tmpdir(), `cb-bridge-${process.pid}.sock`);
-  const key = createHash('sha1').update(inbox).digest('hex').slice(0, 12);
+  const pane = `p-bridge-${process.pid}`, key = seatKey('testbox', pane);
+  rmSeat('testbox', pane);
   fs.writeFileSync(join(tmpdir(), `cb-relay-${key}.pid`), '');
-  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p7', CB_ACTOR: 'W7',
+  const box = await listening(inbox);
+  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_ACTOR: 'W7', CB_AGENT: '',
                 CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok', PGAPPNAME: '' };
   const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
   const exited = new Promise((r) => relay.on('exit', r));
+  let leftBridge = false;
   try {
     for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
     assert.ok(fs.existsSync(bridgeFiles(key).info), 'relay published its bridge');
@@ -83,8 +100,11 @@ test('cb in a session with a relay runs through it, and opens no connection of i
   } finally {
     relay.kill();
     await exited;
+    await closed(box);
+    leftBridge = fs.existsSync(bridgeFiles(key).info);
+    rmSeat('testbox', pane);
   }
-  assert.ok(!fs.existsSync(bridgeFiles(key).info) || process.platform === 'win32', 'a stopped relay leaves no bridge behind');
+  assert.ok(!leftBridge || process.platform === 'win32', 'a stopped relay leaves no bridge behind');
 });
 
 // Speed 6 (#3256): the relay keeps its pane's binding (cb iam) and hands it to cb with the hello, so a cb call is one
@@ -126,14 +146,15 @@ test('the hello carries the binding the relay holds: for its own pane only', asy
 test('cb uses the name the hello hands it, not a lookup of its own', { timeout: 30_000 }, async () => {
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo')`;
-  await sql`select cb.iam('testbox', 'p9', 'InTheTable', 'demo')`;
+  const pane = `p-hello-${process.pid}`;
+  await sql`select cb.iam('testbox', ${pane}, 'InTheTable', 'demo')`;
   const inbox = join(tmpdir(), `cb-hello-${process.pid}.sock`);
-  const key = createHash('sha1').update(inbox).digest('hex').slice(0, 12);
+  const key = seatKey('testbox', pane);
   const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
   const stop = await serveBridge(relaySql, key, TEST_URL, undefined,
-    { binding: (who: any) => who.machine === 'testbox' && who.pane === 'p9' ? { actor: 'FromTheHello', project: 'demo' } : undefined });
+    { binding: (who: any) => who.machine === 'testbox' && who.pane === pane ? { actor: 'FromTheHello', project: 'demo' } : undefined });
   try {
-    const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p9', PGAPPNAME: '',
+    const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, PGAPPNAME: '',
                   CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
     delete (env as any).CB_ACTOR;
     // not spawnSync: the bridge lives in this process and must answer cb's hello meanwhile
@@ -150,11 +171,15 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo')`;
   const inbox = process.platform === 'win32' ? String.raw`\\.\pipe\cb-bind-test-` + process.pid : join(tmpdir(), `cb-bind-${process.pid}.sock`);
-  const key = createHash('sha1').update(inbox).digest('hex').slice(0, 12);
+  const pane = `p-bind-${process.pid}`, key = seatKey('testbox', pane);
+  rmSeat('testbox', pane);
   fs.writeFileSync(join(tmpdir(), `cb-relay-${key}.pid`), '');
-  const base = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p8', PGAPPNAME: '' };
+  const box = await listening(inbox);
+  // base: a cb that does not use the relay (PGAPPNAME set: cb connects itself, as 'cb')
+  const base = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', PGAPPNAME: 'cb',
+                 CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '' };
   delete (base as any).CB_ACTOR;
-  const env = { ...base, CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  const env = { ...base, PGAPPNAME: '', CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
   const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
   const exited = new Promise((r) => relay.on('exit', r));
   const cb = (e: any, ...a: string[]) => { const r = spawnSync('node', ['cli/cb.ts', ...a], { encoding: 'utf8', env: e }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
@@ -164,7 +189,7 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
     cb(env, 'iam', 'W8', 'demo');
     assert.equal(await addedBy(), 'W8', 'its own cb iam, through the relay');
-    await sql`select cb.iam('testbox', 'p8', 'W9', null)`;          // the dashboard's way
+    await sql`select cb.iam('testbox', ${pane}, 'W9', null)`;          // the dashboard's way
     await wait(400);
     assert.equal(await addedBy(), 'W9');
     cb(base, 'iam', 'W10');                                          // a cb without the relay
@@ -172,14 +197,57 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     assert.equal(await addedBy(), 'W10');
     // the relay's connections cut (Postgres restarted, a network change): a rename meanwhile is not missed
     await sql`select pg_terminate_backend(pid) from pg_stat_activity where application_name like 'cb-relay%'`;
-    await sql`select cb.iam('testbox', 'p8', 'W11', null)`;
+    await sql`select cb.iam('testbox', ${pane}, 'W11', null)`;
     assert.equal(await addedBy(), 'W11', 'no notice could reach the relay: cb must not get the old name');
     await wait(1500);
     assert.equal(await addedBy(), 'W11');
   } finally {
     relay.kill();
     await exited;
+    await closed(box);
+    rmSeat('testbox', pane);
   }
+});
+
+/** cb add in a child process (the bridge lives in this one and must answer cb's hello meanwhile): who it was added as. */
+async function addedVia(sql: any, env: Record<string, string>, title: string) {
+  const child = spawn('node', ['cli/cb.ts', 'add', 'demo', title], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  let err = ''; child.stderr!.on('data', (d) => { err += d; });
+  const code = await Promise.race([new Promise((r) => child.on('exit', r)), wait(20_000).then(() => { child.kill(); return 'timeout'; })]);
+  assert.equal(code, 0, err);
+  return (await sql`select created_by from cb.tasks where title = ${title}`)[0]?.created_by;
+}
+/** cb's env in a seat, with nothing from the session running these tests. */
+function seatEnv(pane: string, extra: Record<string, string> = {}) {
+  const env: Record<string, string> = { ...(process.env as Record<string, string>), CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', PGAPPNAME: '' };
+  delete env.CB_ACTOR; delete env.CLAUDE_CODE_MESSAGING_SOCKET; delete env.CLAUDE_CODE_MESSAGING_TOKEN;
+  return { ...env, ...extra };
+}
+
+test('cb finds bridge by seatKey without CLAUDE_CODE_MESSAGING_SOCKET', { timeout: 30_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-seat-${process.pid}`;
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  const stop = await serveBridge(relaySql, seatKey('testbox', pane), TEST_URL, undefined,
+    { binding: (who: any) => who.machine === 'testbox' && who.pane === pane ? { actor: 'FromTheSeat', project: 'demo' } : undefined });
+  try {
+    assert.equal(await addedVia(sql, seatEnv(pane), 'by seat'), 'FromTheSeat', 'cb went through the seat relay (its hello named it)');
+  } finally { await stop(); }
+});
+
+test('cb falls back to legacy sha1(SOCKET) bridge key during rolling upgrade', { timeout: 30_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-legacy-${process.pid}`, inbox = join(tmpdir(), `cb-legacy-${process.pid}.sock`);
+  // a relay that has not restarted yet: keyed by its Claude's socket, as before Stage B
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  const stop = await serveBridge(relaySql, createHash('sha1').update(inbox).digest('hex').slice(0, 12), TEST_URL, undefined,
+    { binding: (who: any) => who.machine === 'testbox' && who.pane === pane ? { actor: 'FromTheOldRelay', project: 'demo' } : undefined });
+  try {
+    const env = seatEnv(pane, { CLAUDE_CODE_MESSAGING_SOCKET: inbox, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' });
+    assert.equal(await addedVia(sql, env, 'by socket'), 'FromTheOldRelay', 'cb went through the old relay (its hello named it)');
+  } finally { await stop(); }
 });
 
 test('a sql`` fragment passed as a value is refused with a clear error, not "#<Promise> could not be cloned"', async () => {

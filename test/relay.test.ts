@@ -2,16 +2,27 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
+import { bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 async function db() { const s = await freshDb(); clients.push(s); return s; }
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Relay files are keyed per seat (machine + pane): every relay test has its own pane, with this process's pid in it,
+// so back-to-back or parallel runs never share a lock, bridge, endpoint or log file.
+const M = 'testbox';
+const seatFiles = (pane: string) => {
+  const k = seatKey(M, pane);
+  return { lock: join(tmpdir(), `cb-relay-${k}.pid`), log: join(tmpdir(), `cb-relay-${k}.log`), bridge: bridgeFiles(k).info, endpoint: claudeEndpointPath(M, pane) };
+};
+const rmSeat = (pane: string) => { for (const f of Object.values(seatFiles(pane))) fs.rmSync(f, { force: true }); };
 
 test('iam binds a pane to an actor; the CLI acts as it', async () => {
   const sql = await db();
@@ -54,21 +65,24 @@ function fakeInbox(path: string, token: string) {
       if (lines.length && !got.length && JSON.parse(lines[0]).token !== token) return c.destroy();
       for (const l of lines.slice(1)) got.push(JSON.parse(l));
     });
+    c.on('error', () => {});
   });
-  server.listen(path);
-  return { got, close: () => new Promise((r) => server.close(r)) };
+  const ready = new Promise((r) => server.listen(path, () => r(undefined)));
+  return { got, ready, close: () => new Promise((r) => server.close(r)) };
 }
 
 test('relay pushes an answer into its session and marks it delivered', { timeout: 30_000 }, async () => {
   const sql = await db();
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-test-` + process.pid : join(tmpdir(), `cb-relay-${process.pid}.sock`);
   const inbox = fakeInbox(path, 'tok');
-  await sql`select cb.ask(project => 'demo', body => 'Rotate keys?', reply_to => ${sql.json({ machine: 'testbox', pane: 'p9' })}, actor => 'W9')`;
+  const pane = `p-relay-main-${process.pid}`;
+  await sql`select cb.ask(project => 'demo', body => 'Rotate keys?', reply_to => ${sql.json({ machine: 'testbox', pane })}, actor => 'W9')`;
   // a previous relay of this session exited and left an empty lock (pid 0 must not count as running)
-  fs.writeFileSync(join(tmpdir(), `cb-relay-${createHash('sha1').update(path).digest('hex').slice(0, 12)}.pid`), '');
+  rmSeat(pane);
+  fs.writeFileSync(seatFiles(pane).lock, '');
   const relay = spawn('node', ['cli/relay.ts', '--child'], {
     stdio: 'ignore',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p9',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
            CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' },
   });
   const exited = new Promise((r) => relay.on('exit', r));
@@ -92,7 +106,7 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     }
     assert.equal(q.status, 'delivered');
     // a direct message to this session is pushed too, once
-    const [{ me }] = await sql`select actor as me from cb.sessions where machine = 'testbox' and pane = 'p9'`;
+    const [{ me }] = await sql`select actor as me from cb.sessions where machine = 'testbox' and pane = ${pane}`;
     await sql`select cb.tell(${me}, 'take #19 next', 'orch')`;
     for (let i = 0; i < 50 && inbox.got.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(inbox.got.length, 2);
@@ -111,7 +125,7 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     assert.match(inbox.got.at(-1).message.content, /Message from supervisor: sv-B1@macbook waits/);
     assert.doesNotMatch(inbox.got.at(-1).message.content, /cb tell supervisor/);
     // a huddle line from another member is pushed too
-    await sql`select cb.iam('testbox', 'p9', ${me}, 'demo')`;
+    await sql`select cb.iam('testbox', ${pane}, ${me}, 'demo')`;
     await sql`select cb.iam('pc', 'w2:p2', 'orch', 'demo')`;
     await sql`select cb.huddle_open('rollout', ${sql.json([me])}, null, 'orch', 'demo')`;
     await sql`select cb.huddle_say('1', 'ship Monday?', 'orch')`;
@@ -199,6 +213,7 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     await inbox.close(); // session gone → relay exits on its own
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
     assert.notEqual(relay.exitCode, null, 'relay should exit when its session inbox disappears');
+    rmSeat(pane);
   }
 });
 
@@ -206,12 +221,14 @@ test('a changed answer is pushed again as CHANGED, with the old one; the orchest
   const sql = await db();
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-chg-` + process.pid : join(tmpdir(), `cb-relay-chg-${process.pid}.sock`);
   const inbox = fakeInbox(path, 'tok');
-  await sql`select cb.ask(project => 'demo', body => 'Rotate keys?', task_id => null, reply_to => ${sql.json({ machine: 'testbox', pane: 'p8' })}, actor => 'W9')`;
+  const pane = `p-relay-chg-${process.pid}`;
+  rmSeat(pane);
+  await sql`select cb.ask(project => 'demo', body => 'Rotate keys?', task_id => null, reply_to => ${sql.json({ machine: 'testbox', pane })}, actor => 'W9')`;
   await sql`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'demo')`; await sql`select cb.inbox('pc', 'w2:p2', 0)`;
   await sql`select cb.answer('1', 'Rotate now')`;
   await sql`select cb.answer_delivered('1', 'W9')`;
   const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p8', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' } });
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' } });
   const exited = new Promise((r) => relay.on('exit', r));
   try {
     await new Promise((r) => setTimeout(r, 1500));
@@ -227,6 +244,7 @@ test('a changed answer is pushed again as CHANGED, with the old one; the orchest
   } finally {
     await inbox.close();
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
+    rmSeat(pane);
   }
   // the orchestrator's copy
   const [{ i }] = await sql`select cb.inbox('pc', 'w2:p2', 0) as i`;
@@ -541,11 +559,13 @@ test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nob
   const sql = await db(); // the dashboard connection (cb-web)
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-typed-` + process.pid : join(tmpdir(), `cb-relay-typed-${process.pid}.sock`);
   await sql`select cb.ensure_project('demo')`; // cb.iam refuses a project that does not exist
-  await sql`select cb.iam('testbox', 'p7', 'W7@testbox', 'demo')`;
+  const pane = `p-relay-typed-${process.pid}`;
+  rmSeat(pane);
+  await sql`select cb.iam('testbox', ${pane}, 'W7@testbox', 'demo')`;
   const inbox = fakeInbox(path, 'tok'); // after the setup: an open pipe from a failed setup kept the whole suite from ending
   const relay = spawn('node', ['cli/relay.ts', '--child'], {
     stdio: 'ignore',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p7',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
            CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' },
   });
   const exited = new Promise((r) => relay.on('exit', r));
@@ -573,6 +593,238 @@ test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nob
   } finally {
     await inbox.close();
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
+    rmSeat(pane);
+  }
+});
+
+// Stage B (#4002): the relay belongs to the seat, not to Claude's process. Claude hands its inbox over in an endpoint
+// file; the relay stops when the adapter says the agent is gone.
+const sockPath = (name: string) => process.platform === 'win32' ? String.raw`\\.\pipe\cb-` + `${name}-${process.pid}` : join(tmpdir(), `cb-${name}-${process.pid}.sock`);
+/** A relay's env with no trace of the session running these tests (its pane, its inbox and token): only what is given. */
+function seatEnv(pane: string | null, inbox?: string, token = 'tok'): Record<string, string> {
+  const env: Record<string, string> = { ...(process.env as Record<string, string>), CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, CB_AGENT: '', PGAPPNAME: '' };
+  delete env.HERDR_PANE_ID; delete env.CLAUDE_CODE_MESSAGING_SOCKET; delete env.CLAUDE_CODE_MESSAGING_TOKEN; delete env.CB_ACTOR;
+  if (pane) env.HERDR_PANE_ID = pane;
+  if (inbox) { env.CLAUDE_CODE_MESSAGING_SOCKET = inbox; env.CLAUDE_CODE_MESSAGING_TOKEN = token; }
+  return env;
+}
+const until = async (ok: () => boolean, ms: number) => { for (const t = Date.now(); !ok() && Date.now() - t < ms;) await wait(50); return ok(); };
+const exitOf = (p: ReturnType<typeof spawn>) =>
+  new Promise<number | null>((r) => (p.exitCode !== null || p.signalCode !== null ? r(p.exitCode) : p.on('exit', (c) => r(c))));
+const lockHolder = (pane: string) => { try { return Number(fs.readFileSync(seatFiles(pane).lock, 'utf8')) || 0; } catch { return 0; } };
+const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** Stop what a test started: its relay (killed by its handle only), and wait for a relay started for it (the pid in
+ *  this test's own lock file) to leave by itself, its inbox being closed. Never a kill by a pid read from a file: on
+ *  Windows a pid is soon reused (by a Postgres backend, say), and a backend killed from outside restarts the server. */
+async function stopSeat(pane: string, relay?: ReturnType<typeof spawn>) {
+  if (relay && relay.exitCode === null && relay.signalCode === null) {
+    await Promise.race([exitOf(relay), wait(8000)]);
+    if (relay.exitCode === null) relay.kill();
+  }
+  const next = lockHolder(pane);
+  if (next && next !== process.pid && next !== relay?.pid)
+    await until(() => lockHolder(pane) !== next || !running(next), 8000);
+  rmSeat(pane);
+}
+const watchdogFalses = (pane: string) => { try { return (fs.readFileSync(seatFiles(pane).log, 'utf8').match(/watchdog: agent not alive/g) ?? []).length; } catch { return 0; } };
+
+test('external seat relay starts without CLAUDE_CODE_MESSAGING_SOCKET in its own env and delivers via endpoint file', { timeout: 30_000 }, async () => {
+  const sql = await db();
+  const pane = `p-ext-${process.pid}`, path = sockPath('ext'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  await sql`select cb.ask(project => 'demo', body => 'Ship it?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  writeClaudeEndpoint(M, pane, { socket: path, token: 'tok' });
+  // the seat named by --pane; no HERDR_PANE_ID and no Claude inbox in its env
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'the relay serves its bridge under the seat key');
+    assert.equal(lockHolder(pane), relay.pid);
+    await sql`select cb.answer('1', 'Ship now')`;
+    await until(() => inbox.got.length > 0, 5000);
+    assert.equal(inbox.got.length, 1);
+    assert.match(inbox.got[0].message.content, /Q1.*Ship now/s);
+  } finally {
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
+test('dead Claude socket stops heartbeating and exits cleanly on the second isAlive false in a row', { timeout: 30_000 }, async () => {
+  const sql = await db();
+  const pane = `p-dead-${process.pid}`, path = sockPath('dead'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+  const exited = exitOf(relay);
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    await wait(1000); // its new row's cb_bind notice runs one more check: let it finish
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, path, 'the child seeded the endpoint file from its env');
+    const seen = async () => (await sql`select last_seen from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.last_seen?.getTime();
+    const before = await seen();
+    assert.ok(before, 'the relay heartbeats its seat');
+    await inbox.close(); // the session ends
+    await sql`select cb.task_add(project => 'demo', title => 'wake', actor => 'orch')`; // a notice: check() runs on a dead seat
+    const code = await Promise.race([exited, wait(8000).then(() => 'still running')]);
+    assert.equal(code, 0, 'exits 0 within 8 s');
+    assert.equal(fs.readFileSync(f.lock, 'utf8'), '', 'lock released');
+    assert.equal(fs.existsSync(f.endpoint), false, 'endpoint file removed');
+    assert.equal(fs.existsSync(f.bridge), false, 'bridge removed');
+    assert.equal(await seen(), before, 'no cb.inbox heartbeat once the agent read dead');
+    assert.match(fs.readFileSync(f.log, 'utf8'), /check: agent not alive; no heartbeat/);
+  } finally {
+    await inbox.close(); // a second close is harmless; an open one keeps the test process alive
+    await stopSeat(pane, relay);
+  }
+});
+
+test('one transient isAlive false (the endpoint briefly names a missing socket) does not stop the relay', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  const pane = `p-blip-${process.pid}`, path = sockPath('blip'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  await sql`select cb.ask(project => 'demo', body => 'Still there?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    // twice, with a true tick between: a false only counts when the one before it was false too
+    for (let round = 1; round <= 2; round++) {
+      const n = watchdogFalses(pane);
+      writeClaudeEndpoint(M, pane, { socket: sockPath('blip-missing'), token: 'tok' });
+      assert.ok(await until(() => watchdogFalses(pane) > n, 5000), `round ${round}: the watchdog read the seat dead once`);
+      writeClaudeEndpoint(M, pane, { socket: path, token: 'tok' }); // back within one tick
+      await wait(2600); // at least one true tick
+      assert.equal(relay.exitCode, null, `round ${round}: one false must not stop the relay`);
+    }
+    await sql`select cb.answer('1', 'Yes, still here')`;
+    await until(() => inbox.got.length > 0, 5000);
+    assert.match(inbox.got[0]?.message.content ?? '', /Yes, still here/);
+  } finally {
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
+test('two concurrent seat relays on one machine share zero lock, bridge or endpoint files and never cross-deliver', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  const panes = [`p-conc-a-${process.pid}`, `p-conc-b-${process.pid}`], paths = [sockPath('conc-a'), sockPath('conc-b')];
+  panes.forEach(rmSeat);
+  const boxes = paths.map((p) => fakeInbox(p, 'tok'));
+  await Promise.all(boxes.map((b) => b.ready));
+  for (const pane of panes) await sql`select cb.ask(project => 'demo', body => ${`for ${pane}`}, reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  // started the way a Stage A relay hands over at deploy: --child alone, the seat from $HERDR_PANE_ID, the agent by default
+  const relays = panes.map((pane, i) => spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, paths[i]) }));
+  try {
+    const files = panes.map(seatFiles);
+    assert.ok(await until(() => files.every((x) => fs.existsSync(x.bridge)), 10_000), 'both relays up');
+    assert.equal(new Set(files.flatMap((x) => [x.lock, x.bridge, x.endpoint])).size, 6, 'no file shared');
+    assert.deepEqual(panes.map(lockHolder), relays.map((r) => r.pid), 'each seat lock holds its own relay');
+    assert.deepEqual(panes.map((p) => readClaudeEndpoint(M, p)?.socket), paths, 'each endpoint names its own inbox');
+    const bridges = files.map((x) => JSON.parse(fs.readFileSync(x.bridge, 'utf8')));
+    assert.deepEqual(bridges.map((b) => b.pid), relays.map((r) => r.pid));
+    assert.notEqual(bridges[0].socket, bridges[1].socket);
+    await sql`select cb.answer('1', 'answer for A')`;
+    await sql`select cb.answer('2', 'answer for B')`;
+    await until(() => boxes.every((b) => b.got.length > 0), 5000);
+    await wait(800); // nothing more follows
+    assert.deepEqual(boxes.map((b) => b.got.map((m) => m.message.content.match(/answer for [AB]/)?.[0])), [['answer for A'], ['answer for B']]);
+  } finally {
+    await Promise.all(boxes.map((b) => b.close()));
+    await Promise.all(panes.map((p, i) => stopSeat(p, relays[i])));
+  }
+});
+
+test('a --child seeds a stale endpoint file from its env before it exits on a live lock; a live one is never overwritten', { timeout: 30_000 }, async () => {
+  const pane = `p-seed-${process.pid}`, path = sockPath('seed'), other = sockPath('seed-other'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok'), otherBox = fakeInbox(other, 'tok2');
+  await Promise.all([inbox.ready, otherBox.ready]);
+  const child = async () => {
+    const p = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+    return Promise.race([exitOf(p), wait(10_000).then(() => { p.kill(); return 'timeout'; })]);
+  };
+  try {
+    writeClaudeEndpoint(M, pane, { socket: sockPath('seed-gone'), token: 'old' }); // its Claude is gone
+    fs.writeFileSync(f.lock, String(process.pid)); // a live relay holds the seat
+    assert.equal(await child(), 0);
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, path, 'the stale file now names the env inbox');
+    assert.equal(lockHolder(pane), process.pid, 'the live lock is untouched');
+    writeClaudeEndpoint(M, pane, { socket: other, token: 'tok2' }); // a newer Claude's, alive
+    assert.equal(await child(), 0);
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, other, 'a file whose socket exists is never overwritten');
+  } finally {
+    await Promise.all([inbox.close(), otherBox.close()]);
+    rmSeat(pane);
+  }
+});
+
+test('same pane, new Claude: the endpoint rewritten to a second live socket as the first dies leaves a relay serving the second', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  const pane = `p-hand-${process.pid}`, first = sockPath('hand-a'), second = sockPath('hand-b'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2');
+  await Promise.all([boxA.ready, boxB.ready]);
+  await sql`select cb.ask(project => 'demo', body => 'Which one?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, first) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    // the new Claude's SessionStart: the endpoint names its inbox, and the relay child its hook starts exits on the lock
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2' });
+    await boxA.close();
+    const hookChild = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, second, 'tok2') });
+    assert.equal(await Promise.race([exitOf(hookChild), wait(10_000).then(() => { hookChild.kill(); return 'timeout'; })]), 0);
+    await wait(4500); // two watchdog ticks: long enough for the first relay to have left if it was going to
+    const serving = lockHolder(pane);
+    assert.ok(serving && running(serving), 'a relay holds the seat');
+    await sql`select cb.answer('1', 'the second one')`;
+    assert.ok(await until(() => boxB.got.length > 0, 8000), 'the message reached the second inbox');
+    assert.match(boxB.got[0].message.content, /Q1.*the second one/s);
+    assert.equal(boxA.got.length, 0);
+  } finally {
+    await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+test('hooks/claude-endpoint.mjs writes the endpoint file, prints nothing and exits 0; it starts no relay over a live one', { timeout: 20_000 }, () => {
+  const pane = `p-hook-${process.pid}`, path = sockPath('hook'), f = seatFiles(pane);
+  rmSeat(pane);
+  fs.writeFileSync(f.lock, String(process.pid)); // a live relay holds the seat
+  try {
+    const r = spawnSync('node', ['hooks/claude-endpoint.mjs'], { encoding: 'utf8', timeout: 15_000, input: '{"hook_event_name":"SessionStart"}', env: seatEnv(pane, path) });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout, '');
+    assert.equal(r.stderr, '');
+    const ep = readClaudeEndpoint(M, pane);
+    assert.equal(ep?.socket, path);
+    assert.ok(ep?.token === 'tok', 'the token from the env');
+    assert.equal(lockHolder(pane), process.pid, 'no relay started over the live one');
+  } finally { rmSeat(pane); }
+});
+
+test('hooks/claude-endpoint.mjs starts the seat relay when none runs; it serves that seat', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  const pane = `p-hook-up-${process.pid}`, path = sockPath('hook-up'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  await sql`select cb.ask(project => 'demo', body => 'Hooked?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  try {
+    const r = spawnSync('node', ['hooks/claude-endpoint.mjs'], { encoding: 'utf8', timeout: 15_000, input: '{"hook_event_name":"SessionStart"}', env: seatEnv(pane, path) });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout + r.stderr, '');
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'the hook started a relay for the seat');
+    assert.ok(running(lockHolder(pane)));
+    await sql`select cb.answer('1', 'Hooked up')`;
+    assert.ok(await until(() => inbox.got.length > 0, 5000));
+    assert.match(inbox.got[0].message.content, /Q1.*Hooked up/s);
+  } finally {
+    await inbox.close();
+    await stopSeat(pane);
   }
 });
 

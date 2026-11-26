@@ -4,12 +4,13 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
+import { bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath } from '../cli/agents/claude.ts';
 
 const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
@@ -253,13 +254,14 @@ function fakeInbox(path: string, token: string) {
 test('the relay pushes [Ahmed asks] A<n> ending with the reply command, and marks it seen', { timeout: 30_000 }, async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  await sql`select cb.iam('testbox', 'p9', 'orch@testbox', 'demo')`;
+  const pane = `p-asks-${process.pid}`, key = seatKey('testbox', pane);
+  await sql`select cb.iam('testbox', ${pane}, 'orch@testbox', 'demo')`;
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-asks-test-` + process.pid : join(tmpdir(), `cb-asks-${process.pid}.sock`);
   const box = fakeInbox(path, 'tok');
-  fs.writeFileSync(join(tmpdir(), `cb-relay-${createHash('sha1').update(path).digest('hex').slice(0, 12)}.pid`), '');
+  fs.writeFileSync(join(tmpdir(), `cb-relay-${key}.pid`), '');
   const relay = spawn('node', ['cli/relay.ts', '--child'], {
     stdio: 'ignore',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p9',
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
            CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' },
   });
   const exited = new Promise((r) => relay.on('exit', r));
@@ -281,6 +283,7 @@ test('the relay pushes [Ahmed asks] A<n> ending with the reply command, and mark
   } finally {
     await box.close();
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
+    for (const f of [join(tmpdir(), `cb-relay-${key}.pid`), join(tmpdir(), `cb-relay-${key}.log`), bridgeFiles(key).info, claudeEndpointPath('testbox', pane)]) fs.rmSync(f, { force: true });
   }
 });
 

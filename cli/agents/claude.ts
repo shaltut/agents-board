@@ -43,7 +43,8 @@ export function readClaudeEndpoint(machine: string, pane: string): ClaudeEndpoin
  * Remove the file; with `expectedSocket`, only when it still names that socket. The file is claimed by rename first, so a
  * newer Claude's rewrite is not removed by a check-then-remove race. A non-matching file is put back with a hard link,
  * which refuses to overwrite a newer one; while it is claimed the file is briefly absent (only the pane's relay, which
- * holds its lock, calls this). Does not throw; the claim file is removed on every path.
+ * holds its lock, calls this). On a filesystem without hard links the fallback (check, then rename back) can still
+ * overwrite an endpoint written in that instant. Does not throw; removing the claim file is best effort.
  */
 export function clearClaudeEndpoint(machine: string, pane: string, expectedSocket?: string): void {
   const file = claudeEndpointPath(machine, pane);
@@ -75,11 +76,12 @@ function post(ep: ClaudeEndpoint, text: string): Promise<void> {
 }
 
 /** existsSync reads EBUSY on a busy named pipe as "missing" (the stat connects to it); only ENOENT means gone. */
-function socketExists(path: string): boolean {
+export function socketExists(path: string): boolean {
   try { statSync(path); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
-/** Connect and hang up without sending a byte. False only when nothing listens (ECONNREFUSED / ENOENT). */
+/** Connect and hang up without sending a byte. False only when nothing listens (or, on macOS, its accept queue is full):
+ *  ECONNREFUSED / ENOENT. */
 function probeSocket(path: string): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false;

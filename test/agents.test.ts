@@ -265,6 +265,22 @@ test('isAlive: true while the socket exists, false when it is gone or there is n
   } finally { await srv?.close(); cleanup(pane); }
 });
 
+// The relay's own sequence: isAlive, then deliver at once. On Windows the existence check opens the pipe, so the
+// connect right after it must still find a free pipe instance.
+test('isAlive immediately followed by deliver on the same pipe delivers, every time', async () => {
+  const pane = fresh(), sock = sockName(pane); cleanup(pane);
+  const srv = await listen(sock);
+  try {
+    writeClaudeEndpoint(M, pane, { socket: sock, token: 'TOK' });
+    for (let i = 0; i < 5; i++) {
+      assert.equal(await claudeAdapter.isAlive(seatOf(pane)), true, `isAlive ${i}`);
+      await claudeAdapter.deliver(seatOf(pane), `m${i}`);
+    }
+    await settle();
+    assert.deepEqual(srv.lines.filter((l) => JSON.parse(l).type === 'user').map((l) => JSON.parse(l).message.content), ['m0', 'm1', 'm2', 'm3', 'm4']);
+  } finally { await srv.close(); cleanup(pane); }
+});
+
 test('readStatus: idle and done are safe to close; the rest are not', async () => {
   const s = seatOf('p1');
   assert.deepEqual(await claudeAdapter.readStatus(s, { agent_status: 'idle' }), { state: 'idle', safeToClose: true });
