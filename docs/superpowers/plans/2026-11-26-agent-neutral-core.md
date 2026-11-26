@@ -30,7 +30,7 @@
   - Pure (no-DB) test: `NODE_OPTIONS=--max-old-space-size=4096 timeout 300 node --test test/<file>.test.ts`
   - DB test: hold `cb lock take db2` (exit 2 = queued: wait) before, `cb lock release db2` after (even on failure):
     `CB_TEST_DB=claude_board_test_anc NODE_OPTIONS=--max-old-space-size=4096 timeout 600 node --test --test-concurrency=1 test/<file>.test.ts`
-  - Full suite (before each stage merge): hold `cb lock take db` / `cb lock release db`, run `CB_TEST_DB=claude_board_test_anc NODE_OPTIONS=--max-old-space-size=4096 timeout 600 pnpm -s test`.
+  - Full suite (before each release): hold `cb lock take db` / `cb lock release db`, run on its own database with `web/` deps installed: `CB_TEST_DB=claude_board_test_anc_full NODE_OPTIONS=--max-old-space-size=4096 timeout 1800 pnpm -s test` (about 18 minutes).
 - **Commits:** conventional commits ending `(#4002)` on a worktree branch, never bypass hooks, never push or touch `~/.claude` without Ahmed's explicit OK.
 
 ## Review Focus
@@ -212,7 +212,7 @@
   git commit -m "feat(squad): wire AgentAdapter into squad-up, supervisor and cb CLI (#4002)"
   ```
 
-- [ ] **Stage A Release Gate (separately releasable & reversible — after Ahmed's go):**
+- [ ] **Stage A Release Gate (Ahmed, 26 Nov: Stage A ships together with Stage B, so every step below runs once, at the combined A+B gate after Task 4):**
   - Full suite under `cb lock take db`, on its own database (needs `web/` deps installed): `CB_TEST_DB=claude_board_test_anc_full NODE_OPTIONS=--max-old-space-size=4096 timeout 1800 pnpm -s test` (the suite takes about 18 minutes; release `db` lock).
   - Before deploy, capture: `cb squad up ihop --dry-run`, `cb squad up qhs --dry-run`, `cb digest ihop --all`, `cb digest qhs --all` (the success checks below compare against these).
   - Deploy: vps2 schema (`git merge --ff-only origin/main && cd deploy && dc up -d --build board`, check `/healthz`) → PC `git pull --ff-only` → Mac verified `tar` → stop `cb supervise`, run `cb supervise --dry-run` (must show zero surprise actions on `ihop`/`qhs`), start `cb supervise`.
@@ -225,6 +225,14 @@
 ---
 
 ## Stage B: Seat Relay Outside the CLI
+
+Built before Task 4 (26 Nov), from the Stage A review and Ahmed's Q2864 ("fix in Stage B"):
+- **B0:** `writeClaudeEndpoint` always creates its temp file fresh (`flag: 'wx'`, so `0o600` applies);
+  `clearClaudeEndpoint(..., expectedSocket)` claims the file by rename and never deletes a newer Claude's endpoint.
+- **B0b:** a Claude that crashed on the Mac reads as dead: `claudeAdapter.isAlive` also probes the socket on POSIX (an
+  empty connect; refused = dead; unknown = alive). The claim restore is no-clobber (`linkSync`). On Windows a Claude
+  pipe answers a back-to-back existence check with `EBUSY` (measured: `existsSync` true 1 of 20), so socket existence
+  is `statSync` with only `ENOENT` meaning gone, never `existsSync`.
 
 ### Task 4: Seat relay outside the CLI, bridge fallback, and test isolation (`cli/relay.ts`, `cli/cb.ts`, `hooks/claude-endpoint.mjs`)
 
@@ -274,11 +282,12 @@
   git commit -m "feat(relay): decouple seat relay via seatKey, endpoint file and per-pid test isolation (#4002)"
   ```
 
-- [ ] **Stage B Release Gate (separately releasable & reversible — after Ahmed's go):**
-  - Full suite under `cb lock take db`: `CB_TEST_DB=claude_board_test_anc NODE_OPTIONS=--max-old-space-size=4096 timeout 600 pnpm -s test` (release `db` lock).
-  - Deploy: PC `git pull --ff-only` + Mac verified `tar` (zero VPS/schema change, zero supervisor restart).
-  - Success check: `select application_name, count(*) from pg_stat_activity where application_name like 'cb-relay%' group by 1` shows all relays rolled over to the new version; `cb` calls ride bridge; tell/answer/type_to deliver; closing a test session stops its relay and removes `cb-seat-<key>.claude.json`.
-  - Rollback (< 2 min, PC/Mac only): `git checkout <stage-A-sha>` on PC + `tar` to Mac; relays auto-restart back to Stage A within ~5 s.
+- [ ] **Combined Stage A + B Release Gate (one release, after Ahmed's go):**
+  - Full suite at the Stage B head, under `cb lock take db`, one fully green run: `CB_TEST_DB=claude_board_test_anc_full NODE_OPTIONS=--max-old-space-size=4096 timeout 1800 pnpm -s test` (release `db` lock).
+  - Every Stage A gate step above (captures before deploy, vps2 schema → PC → Mac → `cb supervise` restart, its success checks).
+  - Relays restart once for A and B together (zero extra supervisor restart for B).
+  - Success check (B): `select application_name, count(*) from pg_stat_activity where application_name like 'cb-relay%' group by 1` shows all relays rolled over to the new version; `cb` calls ride bridge; tell/answer/type_to deliver; closing a test session stops its relay and removes `cb-seat-<key>.claude.json`; on the Mac, a test Claude killed with `kill -9` stops its relay within a few seconds and its seat ages out.
+  - Rollback: Stage A's order (PC/Mac FIRST to the pre-release sha, vps2 LAST). B alone can roll back to `stage-a-4002` on PC + Mac in < 2 min; relays restart back within ~5 s.
 
 ---
 
@@ -382,7 +391,7 @@ Algorithm details in `kit/guard/core.mjs`:
 
 - [ ] **Step 4: Full-suite verification and fresh whole-branch review (controller)**
   - Check Windows `% Committed Bytes In Use` (<85%), take `cb lock take db`, run:
-    `CB_TEST_DB=claude_board_test_anc NODE_OPTIONS=--max-old-space-size=4096 timeout 600 pnpm -s test`
+    `CB_TEST_DB=claude_board_test_anc_full NODE_OPTIONS=--max-old-space-size=4096 timeout 1800 pnpm -s test`
     Release `cb lock release db`. Compare any pre-existing failures against base `46de6b7`; zero regressions allowed.
   - Dispatch one fresh reviewer on the whole branch diff; fix any findings test-first; re-verify touched files.
 
