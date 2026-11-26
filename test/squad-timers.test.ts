@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { wantList } from '../cli/squad-up.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -318,4 +319,70 @@ test('cb digest with no project and no bound session says which project', () => 
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: '', HERDR_PANE_ID: '', CB_MACHINE: 'pc', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
   assert.notEqual(r.status, 0);
   assert.ok((r.stderr + r.stdout).includes("no project: say which (cb digest ihop)"));
+});
+
+// #4002: the model a session should run is its squad seat's, else its role's, else the role default; the seat key is the
+// one wantList names it by (lead 1, owner its area, B2 2, with repos <repo>:2)
+test('digest group 10 uses cb._expected_model and matches wantList seat keys (#4002)', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo'), cb.ensure_project('plain')`;
+  await sql`select cb.project_pipeline('demo', true, 'ahmed'), cb.project_pipeline('plain', true, 'ahmed')`;
+  const wrong = async (p: string) => ((await sql`select cb.digest(${p}) as d`)[0].d as string[]).filter((l) => / the role runs /.test(l)).sort();
+  const expected = (p: string, actor: string, role: string, area: string | null, repo: string | null, agent = 'claude') =>
+    sql`select cb._expected_model(${p}, ${actor}, ${role}, ${area}, ${repo}, ${agent}) as m`.then((r: any) => r[0].m);
+  // every session below is one the squad would start: same name, role, area and repo as wantList
+  const named = (squad: any, rows: [string, string, string | null, string | null][]) => {
+    const want = wantList('demo', squad);
+    for (const [actor, role, area, repo] of rows)
+      assert.ok(want.some((w) => w.name === actor && w.role === role && (w.area ?? null) === area && (repo === null || w.repo === repo)), `${actor} is not in wantList`);
+  };
+  const live = (rows: [string, string, string | null, string | null, string][]) => sql`insert into cb.sessions ${sql(
+    rows.map(([actor, role, area, repo, model], i) => ({ machine: 'macbook', pane: `p${i}`, actor, project: 'demo', role, area, repo, model })))}`;
+
+  // one repo: the builder role runs opus (not the default sonnet); the claims owner's seat runs sonnet
+  const one = (await sql`select cb.squad_set('demo', ${sql.json({
+    machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' } },
+    areas: ['claims'],
+    roles: { lead: { count: 1, machine: 'macbook' }, owner: { machine: 'macbook', seats: { claims: { model: 'sonnet' } } },
+             builder: { count: 2, model: 'opus', machine: 'macbook' } },
+  })}, 'ahmed') as s`)[0].s;
+  named(one, [['demo-B1@macbook', 'builder', null, null], ['demo-B2@macbook', 'builder', null, null], ['demo-O-claims@macbook', 'owner', 'claims', null], ['orch@macbook', 'lead', null, null]]);
+  await live([['demo-B1@macbook', 'builder', null, null, 'opus'], ['demo-B2@macbook', 'builder', null, null, 'claude-sonnet-4-6'],
+              ['demo-O-claims@macbook', 'owner', 'claims', null, 'sonnet'], ['orch@macbook', 'lead', null, null, 'opus']]);
+  assert.deepEqual(await wrong('demo'), ['demo-B2@macbook is a builder on claude-sonnet-4-6; the role runs opus: restart it with --model opus']);
+  assert.equal(await expected('demo', 'demo-O-claims@macbook', 'owner', 'claims', null), 'sonnet');
+  assert.equal(await expected('demo', 'demo-O-other@macbook', 'owner', 'other', null), 'opus', 'an area with no seat: the role model');
+  // a session bound as codex in a claude seat (cb iam --agent codex) runs another agent's model: not judged; a claude
+  // session on the wrong model still is (demo-B2 above)
+  assert.equal(await expected('demo', 'demo-B1@macbook', 'builder', null, null, 'codex'), null);
+  assert.equal(await expected('demo', 'orch@macbook', 'lead', null, null, 'opencode'), null);
+  await sql`update cb.sessions set agent = 'codex', model = 'gpt-6.1-sol' where actor = 'demo-B1@macbook'`;
+  assert.deepEqual(await wrong('demo'), ['demo-B2@macbook is a builder on claude-sonnet-4-6; the role runs opus: restart it with --model opus']);
+
+  // several repos, web home: api's second builder's seat (api:2) runs opus; the home repo's seat web:1 too, found when
+  // the session names no repo
+  await sql`delete from cb.sessions`;
+  const multi = (await sql`select cb.squad_set('demo', ${sql.json({
+    machines: { macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
+    repos: { web: { home: true, paths: { macbook: '/Users/me/Work/web' } }, api: { paths: { macbook: '/Users/me/Work/api' } } },
+    areas: [],
+    roles: { lead: { count: 1, machine: 'macbook' },
+             builder: { count: { web: 1, api: 2 }, machine: 'macbook', seats: { 'api:2': { model: 'opus' }, 'web:1': { model: 'opus' } } },
+             reviewer: { count: { web: 1, api: 1 }, machine: 'macbook' } },
+  })}, 'ahmed') as s`)[0].s;
+  named(multi, [['demo-api-B2@macbook', 'builder', null, 'api'], ['demo-api-B1@macbook', 'builder', null, 'api'], ['demo-B1@macbook', 'builder', null, 'web']]);
+  await live([['demo-api-B2@macbook', 'builder', null, 'api', 'opus'], ['demo-api-B1@macbook', 'builder', null, 'api', 'opus'],
+              ['demo-B1@macbook', 'builder', null, null, 'opus']]);
+  assert.deepEqual(await wrong('demo'), ['demo-api-B1@macbook is a builder on opus; the role runs sonnet: restart it with --model sonnet']);
+  assert.equal(await expected('demo', 'demo-api-B2@macbook', 'builder', null, 'api'), 'opus');
+  assert.equal(await expected('demo', 'demo-B1@macbook', 'builder', null, null), 'opus', 'no repo named: the home repo, web:1');
+  assert.equal(await expected('demo', 'demo-B1@macbook', 'builder', null, 'web'), 'opus');
+  assert.equal(await expected('demo', 'demo-R1@macbook', 'reviewer', null, 'api'), 'opus', 'no seat: the role model');
+
+  // no squad: the role default (as the digest test above, B1@mac on opus); an agent with no default model is not judged
+  assert.equal(await expected('plain', 'B1@mac', 'builder', null, null), 'sonnet');
+  assert.equal(await expected('plain', 'B1@mac', 'builder', null, null, 'codex'), null);
+  await sql`insert into cb.sessions (machine, pane, actor, project, role, model, agent) values
+    ('mac','q1','W1@mac','plain','builder','gpt-6.1-sol','codex'), ('mac','q2','W2@mac','plain','builder','opus','claude')`;
+  assert.deepEqual(await wrong('plain'), ['W2@mac is a builder on opus; the role runs sonnet: restart it with --model sonnet']);
 });

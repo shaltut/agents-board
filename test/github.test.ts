@@ -3,9 +3,12 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
+import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
+import { bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath } from '../cli/agents/claude.ts';
 
 const gh = await import('../server/github.ts');
 const { sql: serverSql } = await import('../server/db.ts');
@@ -663,11 +666,12 @@ function fakeInbox(path: string, token: string) {
 
 test("what orch's terminal gets for one poll: the grouped message once, framed as untrusted, no card echoes", { timeout: 30_000 }, async () => {
   const { sql, watch } = await board();
-  await sql`select cb.iam('testbox', 'p8', 'orch@shaltoot', 'ihop')`;
+  const pane = `p-gh-${process.pid}`, key = seatKey('testbox', pane);
+  await sql`select cb.iam('testbox', ${pane}, 'orch@shaltoot', 'ihop')`;
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-gh-relay-test-` + process.pid : join(tmpdir(), `cb-gh-relay-${process.pid}.sock`);
   const inbox = fakeInbox(path, 'tok');
   const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore',
-    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: 'p8', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' } });
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' } });
   const exited = new Promise((r) => relay.on('exit', r));
   try {
     await new Promise((r) => setTimeout(r, 1500)); // relay is listening
@@ -697,5 +701,6 @@ test("what orch's terminal gets for one poll: the grouped message once, framed a
     relay.kill();
     await exited;
     await inbox.close();
+    for (const f of [join(tmpdir(), `cb-relay-${key}.pid`), join(tmpdir(), `cb-relay-${key}.log`), bridgeFiles(key).info, claudeEndpointPath('testbox', pane)]) fs.rmSync(f, { force: true });
   }
 });

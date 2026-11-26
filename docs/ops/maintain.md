@@ -26,6 +26,9 @@ Never `dc down -v`: `-v` deletes the database volume (and gh's login).
 
 ## Upgrade
 
+The agent-neutral core (#4002: the per-seat relay, Stage A+B, and the unified command guard, Stage C) ships as ONE
+release. Order: vps2 (the board and its schema) first, then the PC, then the Mac, then restart `cb supervise`.
+
 A release is: the change merged to `main` (reviewed, the suite green on the PC or Mac), then:
 
 ```bash
@@ -56,48 +59,78 @@ Then the workers, right away, because their `cb` must match the schema:
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
   broke every `cb` on the Mac for 15 minutes.
+- **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
+  own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
+  Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac
+  rollout and roll the Mac back. Pair it with the first live `herdr --env` start.
 - Relays restart themselves when their code changes. Their connections are named `cb-relay/<version>` (a hash of
   the relay's code), so one query shows which sessions run what:
   `dc exec db psql -U cb -d claude_board -c "select application_name, count(*) from pg_stat_activity group by 1"`.
   Each session holds two (its LISTEN and its queries); `cb` calls ride on them (cli/bridge.ts).
-- **The dangerous-commands hook**, when the release changed `kit/hooks/block-dangerous.mjs`: each machine runs its
-  own installed copy, not the checkout's. With Ahmed's yes, copy `kit/hooks/block-dangerous.mjs` to
-  `~/.claude/hooks/block-dangerous.mjs` on the PC and on the Mac (from `~/Work/claude-board`, after the tar step), then
-  run the four checks in [Installing the dangerous-commands hook](#installing-the-dangerous-commands-hook-on-a-machine).
+- **The guard**, when the release changed `kit/guard/` (this one does): each machine runs its own installed copy in
+  `~/.claude-board/guard`, not the checkout's. With Ahmed's yes, on the PC and then on the Mac (from
+  `~/Work/claude-board`, after the tar step), run `node kit/guard/install.mjs` and then
+  `node kit/guard/install.mjs --check`, and point the hook at it:
+  [Installing the guard](#installing-the-guard-on-a-machine).
+  **Never copy `kit/hooks/block-dangerous.mjs` into `~/.claude/hooks/`.** It is now a thin wrapper that imports
+  `../guard/core.mjs`; copied alone it cannot find it, and it blocks EVERY shell command on that machine.
+- **Restart the supervisor** (`cb supervise`, see [Supervisor](#supervisor)) after the PC has the new code.
+  After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise` (rule 3 under
+  [PC job runner](#pc-job-runner)).
+  Relays restart themselves once when their code changes.
+- **Claude seats need no `~/.claude` change for the relay.** The live SessionStart hook already runs
+  `node <checkout>/cli/relay.ts` (the launcher). It now hands Claude's messaging socket and token to the seat relay
+  through the endpoint file `cb-seat-<seatKey>.claude.json` in the OS temp folder. That file holds the messaging
+  token: never print or copy it. `hooks/claude-endpoint.mjs` is an alternative hook entry, not required.
 
 If the schema change drops or renames a function the old CLI calls, a worker's `cb` fails until it is updated: that
 is the window to keep short.
 
 **Rolling back** code: `git checkout <previous sha> && dc up -d --build board`. The schema is applied forward only:
-new columns and functions stay, which older code ignores. If an upgrade damaged data, restore the last backup (below).
+new columns stay (older code ignores them), and functions revert, because `db/setup.ts` re-applies `db/schema.sql`
+(line 25) and the old file redefines them. If an upgrade damaged data, restore the last backup (below).
 On vps2 the checkout is now detached from `vps`: the next release must first run `git checkout vps`, before its merge.
 
-## Installing the dangerous-commands hook on a machine
+For the agent-neutral release the order runs the other way: the PC and the Mac FIRST (check out the previous sha, tar
+step on the Mac, restart `cb supervise`), vps2 LAST. A new `cb` against old functions fails; an old `cb` against the
+new columns works. The guard's own way back is one line, see below.
+
+## Installing the guard on a machine
 
 Run only with Ahmed's yes: it changes `~/.claude`, which every Claude session on the machine reads.
 
-1. Copy the file: `kit/hooks/block-dangerous.mjs` to `~/.claude/hooks/block-dangerous.mjs`.
-2. In `~/.claude/settings.json`, change the PreToolUse Bash hook command from
-   `bash ~/.claude/hooks/block-dangerous-commands.sh` to `node ~/.claude/hooks/block-dangerous.mjs`. On Windows, set
-   that entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
-3. Keep the old `.sh` file in place; it is the way back.
-4. Check it:
-   `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints `{}`, and
-   `echo '{"tool_input":{"command":"git reset --hard"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints the block JSON
+The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The old single-file
+`kit/hooks/block-dangerous.mjs` is retired as an install: it is a thin wrapper that imports `../guard/core.mjs`, so
+**never copy it into `~/.claude/hooks/`**. Alone it blocks EVERY shell command on that machine.
+
+1. From the checkout, install: `node kit/guard/install.mjs`. It defaults to `~/.claude-board/guard` (`--target <dir>`
+   changes that). Then verify: `node kit/guard/install.mjs --check` exits 0 when the installed files match the checkout.
+2. In `~/.claude/settings.json`, point the PreToolUse hook command at
+   `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`: the full home path, e.g. `C:/Users/<you>` on Windows, `/Users/<you>` on the Mac). On Windows, set that
+   entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
+   On the Mac the matcher is `Bash`.
+3. Leave the pre-release `~/.claude/hooks/block-dangerous.mjs` (the standalone copy) in place, untouched. The way
+   back is one line: set the hook command back to `node ~/.claude/hooks/block-dangerous.mjs`.
+4. Check it, with the shim: `echo '{"tool_input":{"command":"ls"}}' | node ~/.claude-board/guard/shim-claude.mjs`
+   prints `{}`, and
+   `echo '{"tool_input":{"command":"git reset --hard"}}' | node ~/.claude-board/guard/shim-claude.mjs` prints the block JSON
    (`{"decision":"block","reason":"Blocked dangerous command: git reset --hard"}`), and, the protected-branch fence,
-   `echo '{"tool_input":{"command":"git push origin development"}}' | CB_PROTECTED_BRANCHES=development node ~/.claude/hooks/block-dangerous.mjs`
+   `echo '{"tool_input":{"command":"git push origin development"}}' | CB_PROTECTED_BRANCHES=development node ~/.claude-board/guard/shim-claude.mjs`
    prints the block JSON
    (`{"decision":"block","reason":"Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it"}`).
-   An old copy prints `{}` there: the fence is missing. And, the kill-by-name rule (#3809),
-   `echo '{"tool_input":{"command":"taskkill /F /IM node.exe"}}' | node ~/.claude/hooks/block-dangerous.mjs` prints
-   the block JSON with a reason starting `Blocked dangerous command: kill by process name`; an old copy prints `{}`.
-   The installed hook blocks the reset line when a Claude session runs it, so a session runs the checks from a small
-   script that builds the command strings.
+   And, the kill-by-name rule (#3809),
+   `echo '{"tool_input":{"command":"taskkill /F /IM node.exe"}}' | node ~/.claude-board/guard/shim-claude.mjs` prints
+   the block JSON with a reason starting `Blocked dangerous command: kill by process name`. And, malformed stdin
+   (`echo 'not json' | node ~/.claude-board/guard/shim-claude.mjs`) must block, not allow: the reason starts
+   `Blocked: guard could not read hook input (invalid JSON`. And, a builder's push to main:
+   `echo '{"tool_input":{"command":"git push origin main"}}' | CB_ROLE=builder node ~/.claude-board/guard/shim-claude.mjs`
+   must block, with a reason starting `Blocked by role (builder): git push to protected branch main`. The installed hook blocks these command lines when a Claude session runs them, so a session runs the
+   checks from a small script that builds the command strings.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
    treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
    command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
 
-On the Mac, the same, copying from `kit/hooks/` in its board checkout (`~/Work/claude-board`, after the tar step above).
+On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 
 ## Backups
 
@@ -219,7 +252,9 @@ Set up, once, on the PC:
      runner refuses to start otherwise.
    - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
      then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
-3. Restarting it is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
+3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
+   validates runner.json with the code it loaded at start.
+   Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
 4. runner.json must follow a project merge (`cb.project_alias`): rename that project's key to the target and restart
    `cb runner` straight after. The merge moves the jobs and the published recipes on the board, but until then the
    runner has no config for the new name (a claimed job ends `error: bad job row`), and a restart under the old name
@@ -258,7 +293,9 @@ What each result means:
 `cb supervise` keeps each supervised project's squad sessions in line with its queues, and restarts the PC runner
 when it stops. Card #3601; design: `docs/superpowers/specs/2026-11-23-supervisor-design.md`.
 
-Start it by hand on the PC, in a herdr tab named `supervisor`, and leave it: `cb supervise`. Only one runs at a time,
+Start it by hand on the PC, in a herdr tab named `supervisor`, and leave it: `cb supervise`. After any change to
+`cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise` (it validates runner.json with the code
+it loaded at start). Only one runs at a time,
 on any machine (a Postgres advisory lock); a second says `another supervisor is running` and exits. Check the plan
 first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing); `cb supervise
 --once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
@@ -307,7 +344,7 @@ A squad may list the branches its sessions must never push to: `"protected": ["d
 30, each 1 to 100 characters of letters, digits and `. _ / * -`, not starting with `-`). Give each branch as git shows
 it: `cb squad set` refuses an entry starting with `refs/`, `heads/` or `origin/`, or ending with `/`, since the hook
 could never match it. `cb squad up` and the supervisor then create each new session's pane with
-`CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`), and the dangerous-commands hook blocks a `git push`
+`CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`), and the guard blocks a `git push`
 whose destination is on it: `git push origin development`, `x:development`, `HEAD:refs/heads/development`,
 `x:heads/development`, `+x:development`, `--delete origin development`. Plain `git push` and `git push origin` stay
 denied by the role permission files. Card #3746.

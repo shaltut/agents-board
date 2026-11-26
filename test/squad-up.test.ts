@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, startOne, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
+import { squadShow } from '../cli/squad-show.ts';
 
 const mach = (herdr: string | null, board: string) => ({ herdr, repo: '/Users/me/Work/demo', board });
 const squad = {
@@ -85,9 +86,11 @@ test('orch@<machine> leading another project: this project\'s lead starts as <pr
   assert.deepEqual(p.skip, []);
   assert.ok(!names(p).includes('orch@shaltoot'));
   const lead = p.start.find((l) => l.role === 'lead')!;
-  assert.deepEqual({ ...lead }, { name: 'demo-orch@shaltoot', role: 'lead', repo: 'main', model: 'opus', machine: 'shaltoot', herdr: null,
+  const { seatKey, agent, board, env, ...was } = lead; // the agent-neutral fields (#4002); the rest as before
+  assert.deepEqual(was, { name: 'demo-orch@shaltoot', role: 'lead', repo: 'main', model: 'opus', machine: 'shaltoot', herdr: null,
     cwd: '/Users/me/Work/demo', settings: 'C:/b/kit/permissions/lead.json',
     prompt: 'cb iam demo-orch@shaltoot demo --role lead --model opus, then cb role lead, then cb next' });
+  assert.deepEqual({ seatKey, agent, board, env }, { seatKey: '1', agent: 'claude', board: 'C:/b', env: { CB_ROLE: 'lead', CB_AGENT: 'claude' } });
   // the next run: the alternate lead is live in demo, skipped as live like any squad name
   const again = planSquad('demo', squad, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'other', role: 'lead' },
     { actor: 'demo-orch@shaltoot', machine: 'shaltoot', project: 'demo', role: 'lead' }], {});
@@ -255,12 +258,12 @@ test('squad up: a quiet lead: no lead started, one line names it and how to fix 
   const quietRow = (min: number) => ({ actor: 'QO@shaltoot', project: 'demo', live: false, machine: 'shaltoot', role: 'lead', last_seen: ago(min) });
   const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
   const out = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(10)]), f.run);
-  assert.match(out, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a new herdr tab, or cb iam <name> demo --role lead$/m);
+  assert.match(out, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude', or cb iam <name> demo --role lead$/m);
   assert.doesNotMatch(out, /start \S*orch/);
   assert.ok(!f.calls.some((c) => c.args[1] === 'get' && /orch/.test(c.args[2]!)));
   // squad up never starts it, so never gives it the protected list: the line says how (#3746)
   const prot = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'releases/*'] } : [quietRow(10)]), fake(() => GONE).run);
-  assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
+  assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude' --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
   assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
   const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
   assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
@@ -340,17 +343,18 @@ const QHS: any = {
 
 test('repos: one name per repo, folders from the repo paths', () => {
   const w = wantList('qhs', QHS);
+  // seatKey (#4002): the key a squad seat override is saved under, as cb.squad_set and cb._expected_model read it
   assert.deepEqual(w, [
-    { name: 'orch@shaltoot', role: 'lead', repo: 'api' },
-    { name: 'qhs-A1@shaltoot', role: 'architect', repo: 'api' },
-    { name: 'qhs-O-api@shaltoot', role: 'owner', area: 'api', repo: 'api' },
-    { name: 'qhs-O-dashboard@shaltoot', role: 'owner', area: 'dashboard', repo: 'dashboard' },
-    { name: 'qhs-B1@macbook', role: 'builder', repo: 'api' },
-    { name: 'qhs-B2@macbook', role: 'builder', repo: 'api' },
-    { name: 'qhs-dashboard-B1@macbook', role: 'builder', repo: 'dashboard' },
-    { name: 'qhs-R1@macbook', role: 'reviewer', repo: 'api' },
-    { name: 'qhs-dashboard-R1@macbook', role: 'reviewer', repo: 'dashboard' },
-    { name: 'qhs-Q1@macbook', role: 'qa', repo: 'api' },
+    { name: 'orch@shaltoot', role: 'lead', repo: 'api', seatKey: '1' },
+    { name: 'qhs-A1@shaltoot', role: 'architect', repo: 'api', seatKey: '1' },
+    { name: 'qhs-O-api@shaltoot', role: 'owner', area: 'api', repo: 'api', seatKey: 'api' },
+    { name: 'qhs-O-dashboard@shaltoot', role: 'owner', area: 'dashboard', repo: 'dashboard', seatKey: 'dashboard' },
+    { name: 'qhs-B1@macbook', role: 'builder', repo: 'api', seatKey: 'api:1' },
+    { name: 'qhs-B2@macbook', role: 'builder', repo: 'api', seatKey: 'api:2' },
+    { name: 'qhs-dashboard-B1@macbook', role: 'builder', repo: 'dashboard', seatKey: 'dashboard:1' },
+    { name: 'qhs-R1@macbook', role: 'reviewer', repo: 'api', seatKey: 'api:1' },
+    { name: 'qhs-dashboard-R1@macbook', role: 'reviewer', repo: 'dashboard', seatKey: 'dashboard:1' },
+    { name: 'qhs-Q1@macbook', role: 'qa', repo: 'api', seatKey: '1' },
   ]);
   const l = (n: string, first: 'next' | 'resume' = 'next') => launchFor('qhs', QHS, w.find((x) => x.name === n)!, first);
   const b = l('qhs-dashboard-B1@macbook');
@@ -383,11 +387,30 @@ test('no repos: names, folders and prompts exactly as before', () => {
   const w = wantList('ihop', IHOP);
   // the one new field is repo, main on every item
   assert.ok(w.every((x) => x.repo === 'main'));
-  assert.deepEqual(w.map(({ repo, ...x }) => x), IHOP_WANT);
+  assert.deepEqual(w.map(({ repo, seatKey, ...x }) => x), IHOP_WANT);
+  // seat keys (#4002): no repos, so the bare number (never main:2); an owner its area; the lead 1
+  assert.deepEqual(w.map((x) => x.seatKey), ['1', '1', 'claims', 'preauth', 'fwa', 'kb', 'platform', '1', '2', '3', '1', '2', '1', '1']);
   const ls = w.map((x) => launchFor('ihop', IHOP, x));
   assert.ok(ls.every((x) => x.repo === 'main'));
-  assert.deepEqual(ls.map(({ repo, ...x }) => x), IHOP_LAUNCH);
+  // the snapshot stays byte for byte; the agent-neutral fields (#4002) are checked on their own
+  assert.deepEqual(ls.map(({ repo, seatKey, agent, board, env, ...x }) => x), IHOP_LAUNCH);
+  for (const l of ls) {
+    assert.equal(l.agent, 'claude', l.name);
+    assert.equal(l.board, IHOP.machines[l.machine].board, l.name);
+    assert.deepEqual(l.env, { CB_ROLE: l.role, CB_AGENT: 'claude' }, l.name);
+  }
   assert.deepEqual(w.map((x) => launchFor('ihop', IHOP, x, 'resume').prompt), IHOP_RESUME);
+});
+
+// #4002: the whole herdr call that starts a Claude seat, byte for byte as before the adapter (pinned on the code before it)
+test('startOne: a Claude seat starts with exactly today\'s herdr argv', () => {
+  const b1 = launchFor('ihop', IHOP, wantList('ihop', IHOP).find((w) => w.name === 'ihop-B1@macbook')!);
+  const f = fake((c) => { if (c.args[0] === 'tab') return paneOut('w2:p5'); });
+  assert.ok(startOne(b1, f.run, {}).ok);
+  const start = f.calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'start');
+  assert.deepEqual(start.map((c) => [c.m, ...c.args]), [['macbook', 'agent', 'start', 'ihop-b1-macbook', '--kind', 'claude', '--pane', 'w2:p5',
+    '--timeout', '120000', '--', '--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings',
+    '/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json']]);
 });
 
 test('the ihop squad with orch@shaltoot live in ihop: the lead is skipped, nothing renamed (#3746)', () => {
@@ -561,18 +584,23 @@ function launchFour(s: any) {
   return { f, launch };
 }
 
+// every pane also gets its session's role and agent (#4002), in launchFour's order: B1, B2, R1, the lead
+const ROLE_ENV = ['builder', 'builder', 'reviewer', 'lead'].map((r) => ['--env', `CB_ROLE=${r}`, '--env', 'CB_AGENT=claude']);
+
 test('protected branches: tab create, pane split and workspace create each carry --env CB_PROTECTED_BRANCHES (#3746)', () => {
   const { f, launch } = launchFour({ ...wsSquad, protected: ['development', 'releases/*'] });
-  assert.deepEqual(launch('demo-B1@macbook').env, { CB_PROTECTED_BRANCHES: 'development,releases/*' });
-  for (const c of f.calls.filter(paneMaker)) assert.deepEqual(c.args.slice(-2), ENV, c.args.join(' '));
+  assert.deepEqual(launch('demo-B1@macbook').env, { CB_ROLE: 'builder', CB_AGENT: 'claude', CB_PROTECTED_BRANCHES: 'development,releases/*' });
+  f.calls.filter(paneMaker).forEach((c, i) => assert.deepEqual(c.args.slice(-6), [...ROLE_ENV[i]!, ...ENV], c.args.join(' ')));
   assert.ok(f.calls.filter((c) => !paneMaker(c)).every((c) => !c.args.includes('--env')), 'only the calls that make a pane');
 });
 
-test('protected branches: a squad without them, or with an empty list, passes no --env (#3746)', () => {
+test('protected branches: a squad without them, or with an empty list, passes no CB_PROTECTED_BRANCHES; CB_ROLE and CB_AGENT always (#3746, #4002)', () => {
   for (const s of [wsSquad, { ...wsSquad, protected: [] }]) {
     const { f, launch } = launchFour(s);
-    assert.ok(!('env' in launch('demo-B1@macbook')));
-    assert.ok(f.calls.every((c) => !c.args.includes('--env')));
+    assert.deepEqual(launch('demo-B1@macbook').env, { CB_ROLE: 'builder', CB_AGENT: 'claude' });
+    f.calls.filter(paneMaker).forEach((c, i) => assert.deepEqual(c.args.slice(-4), ROLE_ENV[i], c.args.join(' ')));
+    assert.ok(f.calls.every((c) => !c.args.some((a) => a.startsWith('CB_PROTECTED_BRANCHES'))));
+    assert.ok(f.calls.filter((c) => !paneMaker(c)).every((c) => !c.args.includes('--env')), 'only the calls that make a pane');
   }
 });
 
@@ -586,4 +614,104 @@ test('squad up: the saved squad\'s protected list reaches every pane it makes (#
   const made = f.calls.filter(paneMaker);
   assert.ok(made.length >= 2 && made.some((c) => c.args[1] === 'split'), out);
   for (const c of made) assert.deepEqual(c.args.slice(-2), ENV, c.args.join(' '));
+});
+
+// ---- the agent-neutral core (#4002): a squad seat names its agent; only agents with an adapter start ----
+test('launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude', () => {
+  for (const w of wantList('demo', squad)) {
+    const l = launchFor('demo', squad, w);
+    assert.equal(l.agent, 'claude', w.name);
+    assert.deepEqual(l.env, { CB_ROLE: w.role, CB_AGENT: 'claude' }, w.name);
+    assert.equal(l.board, squad.machines[l.machine as 'shaltoot' | 'macbook'].board, w.name);
+    assert.ok(!l.prompt.includes('--agent'), l.prompt);
+    assert.ok(!('fallback' in l), w.name);
+  }
+});
+
+// synthetic: cb.squad_set refuses a non-Claude primary seat in phase 1, so this squad never comes from the board
+const MIXED: any = { ...squad, roles: { ...squad.roles,
+  builder: { count: 3, model: 'sonnet', machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }],
+    seats: { '2': { model: 'opus' }, '3': { agent: 'codex', model: 'gpt-6.1-sol', fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] } } },
+  owner: { model: 'sonnet', machine: 'macbook', seats: { claims: { agent: 'agy', model: 'gemini-4-neon-xhigh' } } } } };
+const mixedWant = (n: string) => wantList('demo', MIXED).find((w) => w.name === n)!;
+
+test('seatSpec resolves per-seat overrides and non-Claude prompt includes --agent', () => {
+  const codexFb = [{ agent: 'codex', model: 'gpt-6.1-sol' }];
+  // no seat: the role's agent, model and fallback
+  assert.deepEqual(seatSpec(MIXED, mixedWant('demo-B1@macbook')), { agent: 'claude', model: 'sonnet', fallback: codexFb });
+  // a seat's model overrides; with no fallback of its own it keeps the role's
+  assert.deepEqual(seatSpec(MIXED, mixedWant('demo-B2@macbook')), { agent: 'claude', model: 'opus', fallback: codexFb });
+  // a seat's agent and model override; its own fallback replaces the role's
+  assert.deepEqual(seatSpec(MIXED, mixedWant('demo-B3@macbook')), { agent: 'codex', model: 'gpt-6.1-sol', fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] });
+  // a role with no fallback gives none; an owner's seat is its area
+  assert.deepEqual(seatSpec(MIXED, mixedWant('demo-R1@macbook')), { agent: 'claude', model: 'opus' });
+  assert.deepEqual(seatSpec(MIXED, mixedWant('demo-O-claims@macbook')), { agent: 'agy', model: 'gemini-4-neon-xhigh' });
+
+  const b3 = launchFor('demo', MIXED, mixedWant('demo-B3@macbook'));
+  assert.equal(b3.agent, 'codex');
+  assert.equal(b3.model, 'gpt-6.1-sol');
+  assert.deepEqual(b3.fallback, [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }]);
+  assert.deepEqual(b3.env, { CB_ROLE: 'builder', CB_AGENT: 'codex' });
+  assert.equal(b3.prompt, 'cb iam demo-B3@macbook demo --role builder --model gpt-6.1-sol --agent codex, then cb role builder, then cb next');
+  // a Claude seat's override changes its model only: the prompt has no --agent
+  assert.equal(launchFor('demo', MIXED, mixedWant('demo-B2@macbook'), 'resume').prompt, 'cb iam demo-B2@macbook demo --role builder --model opus, then cb role builder, then cb resume');
+  assert.equal(launchFor('demo', MIXED, mixedWant('demo-O-claims@macbook')).prompt,
+    'cb iam demo-O-claims@macbook demo --role owner --area claims --model gemini-4-neon-xhigh --agent agy, then cb role owner, then cb next');
+
+  // with repos, a builder's seat is <repo>:<n>, the home repo's too: a bare number names no seat there
+  const q = structuredClone(QHS);
+  q.roles.builder.seats = { 'api:2': { model: 'opus' }, 'dashboard:1': { model: 'haiku' }, '1': { model: 'fable' } };
+  const qw = (n: string) => wantList('qhs', q).find((w) => w.name === n)!;
+  assert.equal(seatSpec(q, qw('qhs-B1@macbook')).model, 'sonnet');
+  assert.equal(seatSpec(q, qw('qhs-B2@macbook')).model, 'opus');
+  assert.equal(seatSpec(q, qw('qhs-dashboard-B1@macbook')).model, 'haiku');
+});
+
+test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as before', async () => {
+  const out = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? MIXED : []), fake((c) => (c.args[1] === 'get' ? GONE : undefined)).run);
+  assert.match(out, /^start demo-B3@macbook \(builder, codex\/gpt-6\.1-sol\) on macbook$/m);
+  assert.match(out, /^start demo-B2@macbook \(builder, opus\) on macbook$/m);
+  assert.match(out, /^start demo-B1@macbook \(builder, sonnet\) on macbook$/m);
+});
+
+test('startOne refuses an unimplemented agent before creating a pane', () => {
+  const b3 = launchFor('demo', MIXED, mixedWant('demo-B3@macbook'));
+  const each: Record<string, { pane: string; panes: number }>[] = [{}, { macbook: { pane: 'w4:p1', panes: 1 } }];
+  for (const tabs of each) { // a new tab, or a split of this run's tab
+    const f = fake((c) => (c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
+    const r = startOne(b3, f.run, tabs);
+    assert.equal(r.ok, false);
+    assert.equal(r.line, 'failed demo-B3@macbook: agent "codex" is not installed yet (phase 1 supports claude only)');
+    assert.equal(r.pane, undefined);
+    assert.deepEqual(f.calls, [], 'no herdr call: no pane, never a Claude start in its place');
+  }
+  const f = fake(() => undefined);
+  assert.match(startOne({ ...b3, agent: 'grok' as any }, f.run, {}).line, /^failed demo-B3@macbook: unknown agent "grok"$/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('squad up starts the Claude seats and refuses the codex one without touching a pane for it', async () => {
+  const f = fake((c) => (c.args[1] === 'get' ? GONE : c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
+  const out = await squadUp('demo', false, async (fn: string) => (fn === 'squad_get' ? MIXED : []), f.run);
+  assert.match(out, /^failed demo-B3@macbook: agent "codex" is not installed yet/m);
+  assert.match(out, /^started demo-B2@macbook$/m);
+  assert.ok(f.calls.filter((c) => c.args.includes('demo-b3-macbook')).every((c) => c.args[1] === 'get'), 'only herdr agent get for the codex seat');
+  assert.ok(!f.calls.some((c) => c.args.includes('demo-B3@macbook')), 'no tab labelled for it');
+  const b2 = f.calls.find((c) => c.args[1] === 'start' && c.args[2] === 'demo-b2-macbook')!;
+  assert.deepEqual(b2.args.slice(b2.args.indexOf('--')), ['--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json']);
+});
+
+test('squadShow: Claude roles exactly as before; another agent in brackets, a fallback and seat overrides when there', () => {
+  const plain = { roles: { lead: { count: 1, model: 'opus', machine: 'shaltoot' }, builder: { count: 2, model: 'sonnet', machine: 'macbook' } }, areas: [] };
+  assert.equal(squadShow(plain), 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nareas: none');
+  const odd = { roles: {
+    builder: { count: 2, model: 'gpt-6.1-sol', machine: 'macbook', agent: 'codex', fallback: [{ agent: 'claude', model: 'sonnet' }, { agent: 'opencode', model: 'anthropic/claude-opus-5-5' }],
+      seats: { '2': { agent: 'claude', model: 'opus' } } },
+    reviewer: { count: 1, model: 'opus', machine: 'macbook', seats: { '1': { fallback: [{ agent: 'agy', model: 'gemini-4-neon-xhigh' }] } } } }, areas: ['claims'] };
+  assert.equal(squadShow(odd), [
+    'builder  2 × gpt-6.1-sol (codex) on macbook; fallback sonnet (claude), anthropic/claude-opus-5-5 (opencode)',
+    '  seat 2: opus (claude)',
+    'reviewer  1 × opus on macbook',
+    '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
+    'areas: claims'].join('\n'));
 });
