@@ -536,9 +536,13 @@ test('checkWiring: the hook entry runs the installed shim, with an absolute node
     assert.equal(hookPath('${HOME}/x', false, '/home/u'), '/home/u/x');
     assert.equal(hookPath('~/x', false, '/home/u'), '/home/u/x');
     assert.equal(hookPath('/c/x', false, '/home/u'), '/c/x', 'only Windows maps a drive');
+    // #4403: on Windows a $HOME or ~ form expands to a backslash home followed by forward slashes; it is the same path
+    for (const form of ['$HOME/guard/shim-claude.mjs', '~/guard/shim-claude.mjs', '${HOME}\\guard\\shim-claude.mjs'])
+      assert.equal(hookPath(form, true, 'C:\\Users\\Me\\AppData\\Local\\Temp\\cb-x'), hookPath('C:\\Users\\Me\\AppData\\Local\\Temp\\cb-x\\guard\\shim-claude.mjs', true), form);
     const rel = target.slice(tmp.length + 1);
     for (const form of [`"$HOME/${rel}/shim-claude.mjs"`, `~/${rel}/shim-claude.mjs`]) {
-      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: 'linux', probes: false, home: tmp });
+      // this machine's platform: on Windows the paths here have backslashes, and only the Windows rules fold them (#4403)
+      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: process.platform, probes: false, home: tmp });
       assert.deepEqual(w.problems, [], form);
     }
 
