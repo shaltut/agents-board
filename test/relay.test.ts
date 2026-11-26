@@ -305,9 +305,11 @@ test('broadcasts older than 24 h are never pushed, so a reused pane gets no days
   await sql`select cb.broadcast('yesterday morning, 25 h ago', 'ihop', 'orch')`;
   await sql`update cb.events set at = now() - interval '4 days' where kind = 'broadcast' and summary like 'four days%'`;
   await sql`update cb.events set at = now() - interval '25 hours' where kind = 'broadcast' and summary like 'yesterday%'`;
+  await sql`select cb.broadcast('23 h ago, still in the window', 'ihop', 'orch')`;
+  await sql`update cb.events set at = now() - interval '23 hours' where kind = 'broadcast' and summary like '23 h%'`;
   await sql`select cb.broadcast('fresh: relay is live', 'ihop', 'orch')`;
   const [{ i }] = await sql`select cb.inbox('pc', 'w8:p1', 0) as i`;
-  assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['fresh: relay is live']);
+  assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['23 h ago, still in the window', 'fresh: relay is live']);
 });
 
 test('inbox: a task created for me, and new Next work when I am idle', async () => {
