@@ -28,6 +28,12 @@ test('the iHop example loads and publishes names only', () => {
   for (const bad of ['pnpm', 'node', 'pattern', 'TEST_STACK']) assert.ok(!s.includes(bad), bad);
 });
 
+// #4014 (Q2790, every pull request): guards runs the repo's script tests as its pre-push hook does
+test('the iHop guards recipe runs the hook script tests on every job', () => {
+  const guards = example().projects.ihop!.repos.main!.recipes.guards!;
+  assert.deepEqual(guards.steps.at(-1), ['pnpm', 'exec', 'lefthook', 'run', 'pre-push', '--commands', 'program-script-tests', '--no-tty']);
+});
+
 test('loadConfig names the bad field', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{nope}']] })), /steps\[0\].*nope/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{x}{y}']], params: { x: { pattern: '.' }, y: { pattern: '.' } } })), /one slot/);
