@@ -82,31 +82,41 @@ function real(p) {
   }
   try { return resolve(realpathSync(head), ...tail); } catch { return p; }
 }
-const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+// A path segment as the guard compares it: folded to lower case on every platform; on Windows also without trailing dots
+// and spaces (NTFS drops them: ".git." is ".git") and without anything from ":" on (an NTFS stream: ".git::$INDEX_ALLOCATION").
+export function normSegment(seg, platform = process.platform) {
+  let s = seg.toLowerCase();
+  if (platform === 'win32') s = s.replace(/:.*$/, '').replace(/[. ]+$/, '');
+  return s;
+}
 
-// null when the edit may go ahead, else the reason. Resolved against the seat's cwd; only PATH_ARGS names are read.
-export function checkEditPath(call, input) {
+// null when the access may go ahead, else the reason. Resolved against the seat's cwd; only PATH_ARGS names are read.
+// mode 'edit': denied inside .git, .agents, .gemini and kit/guard. mode 'read': .git stays readable, the rest follows the edit rule.
+export function checkPath(call, input, mode = 'edit', platform = process.platform) {
+  const verb = mode === 'read' ? 'reading' : 'editing';
+  const denySegs = mode === 'read' ? WRITE_DENY_SEGMENTS.filter((s) => s !== '.git') : WRITE_DENY_SEGMENTS;
   const args = isObject(call.args) ? call.args : {};
   const given = PATH_ARGS.filter((k) => args[k] !== undefined);
-  if (given.length === 0) return `the edit's target path is missing (read: ${PATH_ARGS.join(', ')})`;
+  if (given.length === 0) return `the ${mode}'s target path is missing (read: ${PATH_ARGS.join(', ')})`;
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
   const ws = Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' && input.workspacePaths[0] ? input.workspacePaths[0] : null;
   const root0 = ws ?? cwd;
-  if (!root0) return 'the hook input names no cwd or workspace to confine edits to';
+  if (!root0) return `the hook input names no cwd or workspace to confine ${mode}s to`;
   const root = real(resolve(root0));
   const base = resolve(cwd ?? root0);
   for (const k of given) {
     const v = args[k];
-    if (typeof v !== 'string' || !v.trim()) return `the edit's target path (${k}) is not a non-empty string`;
+    if (typeof v !== 'string' || !v.trim()) return `the ${mode}'s target path (${k}) is not a non-empty string`;
     const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
     const rel = relative(root, abs);
-    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `editing outside the workspace (${k})`;
-    const segs = rel.split(sep).filter(Boolean).map(fold);
-    if (segs.some((s) => WRITE_DENY_SEGMENTS.includes(s))) return `editing inside ${WRITE_DENY_SEGMENTS.join(', ')} is not allowed (${k})`;
-    for (const pre of WRITE_DENY_PREFIXES) if (pre.every((s, i) => segs[i] === s)) return `editing inside ${pre.join('/')} is not allowed (${k})`;
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `${verb} outside the workspace (${k})`;
+    const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
+    if (segs.some((s) => denySegs.includes(s))) return `${verb} inside ${denySegs.join(', ')} is not allowed (${k})`;
+    for (const pre of WRITE_DENY_PREFIXES) if (pre.every((s, i) => segs[i] === s)) return `${verb} inside ${pre.join('/')} is not allowed (${k})`;
   }
   return null;
 }
+export const checkEditPath = (call, input, platform = process.platform) => checkPath(call, input, 'edit', platform);
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
@@ -118,7 +128,10 @@ export function runAgyShim(raw, env = process.env) {
     if (!role && !String(env.CB_AGENT ?? '').trim()) {
       return deny('Blocked: this pane is not a board seat (neither CB_ROLE nor CB_AGENT is set), and the board guard is deployed per seat: start the session with cb squad up, or run agy without this hook file');
     }
-    if (p.tool === 'read') return { decision: 'allow' }; // a listed read tool: core has no rule for it
+    if (p.tool === 'read') { // a listed read tool: core has no rule for it, so the path confinement is the whole check
+      const why = checkPath(p.call, p.input, 'read');
+      return why ? deny(`Blocked: ${why}`) : { decision: 'allow' };
+    }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
     if (v?.allow === true) {

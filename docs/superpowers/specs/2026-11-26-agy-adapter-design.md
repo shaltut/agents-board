@@ -30,14 +30,16 @@ Input `toolCall {name, args}` plus `cwd` and `workspacePaths` (hooks.md common f
 The hook is installed with a catch-all matcher, so **every tool reaches the shim**, which judges only listed names (the sets are exported; `test/guard-agy.test.ts` checks them against `guardInstallSpec`):
 - shell `run_command` (`args.CommandLine`) goes through `core.evaluate`.
 - edit `write_file`, `edit_file`, `write_to_file`, plus `replace_file_content`, `multi_replace_file_content` (strings in `agy.exe`, U): role rule from core, then confinement.
-- read `read_file`, `view_file` (names from agy's builtin skills and hooks.md examples): allowed for any seat. Reads are not confined (their path arg is unconfirmed).
+- read `read_file`, `view_file` (names from agy's builtin skills and hooks.md examples): allowed for any seat when the path passes the confinement below.
 - `ask_question`: denied unless `CB_ALLOW_ASK=1`.
 - `send_command_input`: **denied for every role** until a hook log confirms its text field, then it can be judged as shell (stdin into a running interpreter would bypass `core.check`).
 - anything else (`list_dir`, `grep_search`, `search_web`, subagents, MCP, case variants): deny.
 
 **The first live check must capture the real tool names from a hook log and fill these sets; until then an agy seat will be refused tools it needs, on purpose.**
 
-Edit confinement: the target comes from a `TargetFile`, `AbsolutePath`, `FilePath`, `path` or `file_path` arg (all five unconfirmed; any other name, or a missing, empty or non-string value, denies; every given arg must pass). It is resolved against the hook's `cwd`, realpath'd (a symlink out of the workspace is caught), and denied outside the workspace (`workspacePaths[0]`, else `cwd`) or inside `.git`, `.agents`, `.gemini` (any depth) or `kit/guard`. A pane with neither `CB_ROLE` nor `CB_AGENT` is denied with a reason naming the board guard, because the hook file is per seat. Shell commands that write files are core's job, not confined here.
+Edit confinement: the target comes from a `TargetFile`, `AbsolutePath`, `FilePath`, `path` or `file_path` arg (all five unconfirmed; any other name, or a missing, empty or non-string value, denies; every given arg must pass). It is resolved against the hook's `cwd`, realpath'd (a symlink out of the workspace is caught), and denied outside the workspace (`workspacePaths[0]`, else `cwd`) or inside `.git`, `.agents`, `.gemini` (any depth) or `kit/guard`. A pane with neither `CB_ROLE` nor `CB_AGENT` is denied with a reason naming the board guard, because the hook file is per seat. Reads get the same confinement (same path args, cwd, realpath, outside-the-workspace deny, missing or non-string path or no cwd denies): inside `.git` stays readable, inside `.gemini`, `.agents` and `kit/guard` is denied. Deny segments are compared folded to lower case on every platform; on Windows also without trailing dots and spaces and without anything from `:` on (NTFS streams). Secret files inside the workspace (`.env` and the like) are card #4347's scope, not this adapter's.
+
+Known limits: shell commands that write or read files are unconfined here (the shell rules in core are the fence); a dangling symlink as the leaf of a path is judged by its literal path; the `cwd` and `workspacePaths` fields are assumed from hooks.md until a hook log shows them (a missing one denies).
 
 ## What this means for squads (sandbox)
 

@@ -6,7 +6,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASK_TOOLS, DENIED_TOOLS, EDIT_TOOLS, PATH_ARGS, READ_TOOLS, SHELL_TOOLS, parseAgyInput, runAgyShim } from '../kit/guard/shim-agy.mjs';
+import { ASK_TOOLS, DENIED_TOOLS, EDIT_TOOLS, PATH_ARGS, READ_TOOLS, SHELL_TOOLS, checkEditPath, normSegment, parseAgyInput, runAgyShim } from '../kit/guard/shim-agy.mjs';
 import { agyAdapter } from '../cli/agents/agy.ts';
 
 const SHIM = fileURLToPath(new URL('../kit/guard/shim-agy.mjs', import.meta.url));
@@ -73,7 +73,7 @@ test('read-only roles are denied every edit tool; a read tool is allowed to any 
       assert.match(r.reason ?? '', /^Blocked by role \(/);
     }
   }
-  for (const name of READ_TOOLS) for (const role of ['reviewer', 'builder', 'lead']) assert.deepEqual(runAgyShim(tool(name, {}), seat({ CB_ROLE: role })), { decision: 'allow' }, name);
+  for (const name of READ_TOOLS) for (const role of ['reviewer', 'builder', 'lead']) assert.deepEqual(runAgyShim(tool(name, { TargetFile: 'src/a.ts' }, { cwd: ws, workspacePaths: [ws] }), seat({ CB_ROLE: role })), { decision: 'allow' }, name);
 });
 
 test('ask_question is denied unless CB_ALLOW_ASK=1', () => {
@@ -173,6 +173,65 @@ test('edit confinement: a symlink inside the workspace that leads out is denied'
   const r = edit({ TargetFile: 'link/x.txt' });
   assert.equal(r.decision, 'deny');
   assert.match(r.reason ?? '', /outside the workspace/);
+});
+
+const read = (args: unknown, extra: Record<string, unknown> = { cwd: ws, workspacePaths: [ws] }, name = 'read_file', role = 'reviewer') => runAgyShim(tool(name, args, extra), seat({ CB_ROLE: role }));
+
+test('read confinement: inside the workspace is allowed (.git too), outside is denied, for every read tool and path arg', () => {
+  for (const name of READ_TOOLS) for (const k of PATH_ARGS) {
+    assert.deepEqual(read({ [k]: join(ws, 'src', 'a.ts') }, undefined, name), { decision: 'allow' }, `${name} ${k}`);
+  }
+  assert.deepEqual(read({ TargetFile: 'src/a.ts' }), { decision: 'allow' });
+  assert.deepEqual(read({ TargetFile: '.git/config' }), { decision: 'allow' }); // reading .git stays allowed
+  assert.deepEqual(read({ TargetFile: join(ws, '.git', 'HEAD') }, undefined, 'view_file', 'builder'), { decision: 'allow' });
+  for (const t of [join(outside, 'x'), '../x', '../../etc/passwd', join(ws + '-sibling', 'x'), ws]) {
+    const r = read({ TargetFile: t });
+    assert.equal(r.decision, 'deny', t);
+    assert.match(r.reason ?? '', /reading outside the workspace/);
+  }
+});
+
+test('read confinement: .gemini, .agents and kit/guard are denied like edits; a missing path or cwd denies', () => {
+  for (const t of ['.gemini/config/hooks.json', '.agents/hooks.json', 'kit/guard/core.mjs', 'src/.agents/x', '.GEMINI/x']) {
+    const r = read({ TargetFile: t });
+    assert.equal(r.decision, 'deny', t);
+    assert.match(r.reason ?? '', /reading inside .* is not allowed/);
+  }
+  for (const args of [{}, { TargetFile: 5 }, { TargetFile: '' }, { File: 'a' }, null, []]) {
+    const r = read(args);
+    assert.equal(r.decision, 'deny', JSON.stringify(args));
+    assert.match(r.reason ?? '', /target path/);
+  }
+  assert.match(read({ TargetFile: 'a.ts' }, {}).reason ?? '', /names no cwd or workspace/);
+});
+
+test('read confinement: a symlink inside the workspace that points out is denied', (t) => {
+  try { symlinkSync(outside, join(ws, 'rlink'), 'junction'); } catch { t.skip('no symlink right on this machine'); return; }
+  const r = read({ TargetFile: 'rlink/secret.txt' });
+  assert.equal(r.decision, 'deny');
+  assert.match(r.reason ?? '', /reading outside the workspace/);
+});
+
+test('deny segments fold case on every platform: .GIT and .Agents', () => {
+  assert.equal(normSegment('.GIT', 'linux'), '.git');
+  assert.equal(normSegment('.Agents', 'darwin'), '.agents');
+  for (const t of ['.GIT/config', '.Agents/hooks.json', '.GeMiNi/x', 'KIT/Guard/core.mjs']) assert.equal(edit({ TargetFile: t }).decision, 'deny', t);
+  for (const t of ['.Agents/hooks.json', '.GEMINI/x']) assert.equal(read({ TargetFile: t }).decision, 'deny', t);
+});
+
+test('deny segments on Windows: trailing dots and spaces, and NTFS streams, are stripped before comparing', () => {
+  assert.equal(normSegment('.git.', 'win32'), '.git');
+  assert.equal(normSegment('.GIT. . ', 'win32'), '.git');
+  assert.equal(normSegment('.agents::$INDEX_ALLOCATION', 'win32'), '.agents');
+  assert.equal(normSegment('file.txt:stream', 'win32'), 'file.txt');
+  assert.equal(normSegment('.git.', 'linux'), '.git.'); // a real name on POSIX
+  // the platform parameter reaches the path check on any host
+  const input = { cwd: ws, workspacePaths: [ws] };
+  assert.match(checkEditPath({ args: { TargetFile: '.git./config' } }, input, 'win32') ?? '', /not allowed/);
+  assert.equal(checkEditPath({ args: { TargetFile: '.git./config' } }, input, 'linux'), null);
+  assert.match(checkEditPath({ args: { TargetFile: '.agents:s/x' } }, input, 'win32') ?? '', /not allowed/);
+  assert.equal(checkEditPath({ args: { TargetFile: 'src/file.txt:stream' } }, input, 'win32'), null);
+  if (process.platform === 'win32') for (const t of ['.agents /x', '.gemini:stream\\x', '.GIT::$INDEX_ALLOCATION\\config']) assert.match(edit({ TargetFile: t }).reason ?? '', /not allowed/, t);
 });
 
 test('an unknown CB_ROLE denies, shell and edit alike', () => {
