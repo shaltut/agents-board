@@ -1,4 +1,5 @@
 // The adapter registry. An agent that has no adapter yet throws: never a silent fall back to Claude.
+import { agyAdapter } from './agy.ts';
 import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { opencodeAdapter } from './opencode.ts';
@@ -12,6 +13,7 @@ export function getAdapter(kind: string): AgentAdapter {
   if (kind === 'claude') return claudeAdapter;
   if (kind === 'codex') return codexAdapter;
   if (kind === 'opencode') return opencodeAdapter;
+  if (kind === 'agy') return agyAdapter;
   if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (phase 1 supports claude only)`);
   throw new Error(`unknown agent "${kind}"`);
 }

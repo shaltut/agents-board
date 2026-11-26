@@ -38,11 +38,10 @@ test('seatKey: sha1 of lowercased machine and trimmed pane, 12 hex', () => {
   assert.notEqual(seatKey('testbox', 'p1'), seatKey('testbox', 'p2'));
 });
 
-test('registry: claude, codex and opencode are registered; agy is not installed yet; anything else is unknown', () => {
+test('registry: every agent kind has its adapter; anything else is unknown', () => {
   assert.deepEqual([...AGENT_KINDS], ['claude', 'codex', 'opencode', 'agy']);
   assert.equal(getAdapter('claude'), claudeAdapter);
-  for (const k of ['codex', 'opencode'] as const) assert.equal(getAdapter(k).kind, k);
-  for (const k of ['agy'] as const) assert.throws(() => getAdapter(k), new RegExp(`agent "${k}" is not installed yet \\(phase 1 supports claude only\\)`));
+  for (const k of AGENT_KINDS) assert.equal(getAdapter(k).kind, k);
   assert.throws(() => getAdapter('grok' as any), /unknown agent "grok"/);
   assert.equal(isAgentKind('agy'), true);
   assert.equal(isAgentKind('grok'), false);
