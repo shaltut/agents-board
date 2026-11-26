@@ -2,7 +2,7 @@
 // endpoint file in the temp dir (written by the relay launcher); delivery is today's socket protocol (cli/relay.ts).
 // The token lives only in that file and the auth line: it is never logged or put in an error message.
 import net from 'node:net';
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seatKey } from '../bridge.ts';
@@ -41,7 +41,9 @@ export function readClaudeEndpoint(machine: string, pane: string): ClaudeEndpoin
 
 /**
  * Remove the file; with `expectedSocket`, only when it still names that socket. The file is claimed by rename first, so a
- * newer Claude's rewrite can never be deleted by a check-then-remove race. Never throws, never leaves the claim file.
+ * newer Claude's rewrite is not removed by a check-then-remove race. A non-matching file is put back with a hard link,
+ * which refuses to overwrite a newer one; while it is claimed the file is briefly absent (only the pane's relay, which
+ * holds its lock, calls this). Does not throw; the claim file is removed on every path.
  */
 export function clearClaudeEndpoint(machine: string, pane: string, expectedSocket?: string): void {
   const file = claudeEndpointPath(machine, pane);
@@ -51,7 +53,10 @@ export function clearClaudeEndpoint(machine: string, pane: string, expectedSocke
   try {
     if (parseEndpoint(claimed)?.socket !== expectedSocket) {
       // A newer Claude's endpoint: put it back unless an even newer one landed meanwhile.
-      if (!existsSync(file)) { try { renameSync(claimed, file); } catch {} }
+      try { linkSync(claimed, file); } // EEXIST: an even newer endpoint landed, so drop the claim
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST' && !existsSync(file)) { try { renameSync(claimed, file); } catch {} } // no hard links here
+      }
     }
   } finally { try { rmSync(claimed, { force: true }); } catch {} }
 }
@@ -66,6 +71,23 @@ function post(ep: ClaudeEndpoint, text: string): Promise<void> {
     c.setTimeout(5000, () => c.destroy(new Error('inbox timeout')));
     c.on('error', reject);
     c.on('close', (hadError) => (hadError ? null : resolve()));
+  });
+}
+
+/** existsSync reads EBUSY on a busy named pipe as "missing" (the stat connects to it); only ENOENT means gone. */
+function socketExists(path: string): boolean {
+  try { statSync(path); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ENOENT'; }
+}
+
+/** Connect and hang up without sending a byte. False only when nothing listens (ECONNREFUSED / ENOENT). */
+function probeSocket(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const c = net.connect(path);
+    const finish = (alive: boolean) => { if (done) return; done = true; clearTimeout(timer); c.destroy(); resolve(alive); };
+    const timer = setTimeout(() => finish(true), 1000);
+    c.on('connect', () => finish(true));
+    c.on('error', (e: NodeJS.ErrnoException) => finish(e.code !== 'ECONNREFUSED' && e.code !== 'ENOENT'));
   });
 }
 
@@ -100,9 +122,14 @@ export const claudeAdapter: AgentAdapter = {
     }
   },
 
+  // A dead owner on macOS can leave its unix socket file behind, so on POSIX a file is not enough: connect and send
+  // nothing. Unknown outcomes count as alive, so a slow machine never kills a healthy relay. A Windows pipe vanishes
+  // with its owner.
   async isAlive(seat) {
     const ep = readClaudeEndpoint(seat.machine, seat.pane);
-    return Boolean(ep && existsSync(ep.socket));
+    if (!ep || !socketExists(ep.socket)) return false;
+    if (process.platform === 'win32') return true;
+    return probeSocket(ep.socket);
   },
 
   async readStatus(_seat, herdrAgent) {

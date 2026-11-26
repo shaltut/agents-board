@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -94,6 +94,8 @@ test('clearClaudeEndpoint: only when the socket matches, if one is given', () =>
     assert.ok(readClaudeEndpoint(M, pane));
     clearClaudeEndpoint(M, pane, 'S1');
     assert.equal(readClaudeEndpoint(M, pane), null);
+    const file = claudeEndpointPath(M, pane);
+    assert.deepEqual(readdirSync(dirname(file)).filter((f) => f.startsWith(basename(file)) && f.includes('.clear.')), []);
     writeClaudeEndpoint(M, pane, { socket: 'S1', token: 'T' });
     clearClaudeEndpoint(M, pane);
     assert.equal(readClaudeEndpoint(M, pane), null);
@@ -179,43 +181,74 @@ test('deliver: retries once when the endpoint file rotated to a live socket', as
 test('deliver: an inbox that never closes times out after 5 s, token not in the error', { timeout: 15_000, skip: process.platform === 'win32' ? 'a named-pipe client closes on its own end(); the half-open hang only reproduces on unix sockets' : false }, async () => {
   const pane = fresh(), sock = sockName(pane), conns = new Set<net.Socket>(); cleanup(pane);
   const srv = net.createServer({ allowHalfOpen: true }, (c) => { conns.add(c); c.on('error', () => {}); });
-  await new Promise<void>((r) => srv.listen(sock, () => r()));
   try {
+    await new Promise<void>((res, rej) => { srv.once('error', rej); srv.listen(sock, () => res()); });
     writeClaudeEndpoint(M, pane, { socket: sock, token: 'SECRET-TOKEN' });
     await assert.rejects(claudeAdapter.deliver(seatOf(pane), 'x'), (e: Error) =>
       /inbox timeout/.test(e.message) && !e.message.includes('SECRET-TOKEN') && !String(e.stack).includes('SECRET-TOKEN'));
   } finally {
     for (const c of conns) c.destroy();
-    await new Promise<void>((r) => srv.close(() => r()));
+    if (srv.listening) await new Promise<void>((r) => srv.close(() => r()));
     cleanup(pane);
   }
 });
 
-test('deliver: a refused socket retries once on the rotated endpoint', { skip: process.platform === 'win32' }, async () => {
-  const pane = fresh(), stale = sockName(`${pane}-stale`), live = sockName(pane); cleanup(pane);
-  rmSync(stale, { force: true });
-  const child = spawn(process.execPath, ['-e',
-    "require('net').createServer().listen(process.argv[1], () => console.log('up'))", stale], { stdio: ['ignore', 'pipe', 'inherit'] });
+/** Spawn a process that listens on `path`, wait for it to be up, SIGKILL it and wait for the exit. The socket file stays. */
+async function spawnKilledOwner(path: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, ['-e', "require('net').createServer().listen(process.argv[1], () => console.log('up'))", path], { stdio: ['ignore', 'pipe', 'inherit'] });
   const exited = new Promise((r) => child.on('exit', r));
-  const srv = await listen(live);
   try {
     await new Promise<void>((res, rej) => {
       child.on('error', rej);
       void exited.then(() => rej(new Error('listener exited before it was up')));
       child.stdout!.on('data', (d) => { if (String(d).includes('up')) res(); });
     });
-    child.kill('SIGKILL');
-    await exited;
-    assert.equal(existsSync(stale), true, 'killed owner should leave its socket file');
+  } catch (e) { child.kill('SIGKILL'); throw e; }
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(existsSync(path), true, 'killed owner should leave its socket file');
+  return child;
+}
+
+test('deliver: a refused socket retries once on the rotated endpoint', { skip: process.platform === 'win32', timeout: 15_000 }, async () => {
+  const pane = fresh(), stale = sockName(`${pane}-stale`), live = sockName(pane); cleanup(pane);
+  rmSync(stale, { force: true });
+  const srv = await listen(live);
+  let child: ChildProcess | undefined;
+  try {
+    child = await spawnKilledOwner(stale);
     writeClaudeEndpoint(M, pane, { socket: stale, token: 'OLD' });
-    assert.equal(await claudeAdapter.isAlive(seatOf(pane)), true, "known gap R4 (parked): a killed owner's socket file still reads alive");
+    assert.equal(await claudeAdapter.isAlive(seatOf(pane)), false, "a killed owner's leftover socket file reads dead");
     const p = claudeAdapter.deliver(seatOf(pane), 'after refusal'); // has read the stale endpoint by now
     writeClaudeEndpoint(M, pane, { socket: live, token: 'NEW' });
     await p;
     await settle();
     assert.deepEqual(JSON.parse(srv.lines[0]!), { type: 'auth', token: 'NEW' });
     assert.equal(JSON.parse(srv.lines[1]!).message.content, 'after refusal');
-  } finally { child.kill('SIGKILL'); await srv.close(); rmSync(stale, { force: true }); cleanup(pane); }
+  } finally { child?.kill('SIGKILL'); await srv.close(); rmSync(stale, { force: true }); cleanup(pane); }
+});
+
+test('isAlive: a probe sends no bytes', async () => {
+  const pane = fresh(), sock = sockName(pane); cleanup(pane);
+  const srv = await listen(sock);
+  try {
+    writeClaudeEndpoint(M, pane, { socket: sock, token: 'T' });
+    for (let i = 0; i < 3; i++) assert.equal(await claudeAdapter.isAlive(seatOf(pane)), true);
+    await settle();
+    assert.equal(srv.lines.length, 0);
+  } finally { await srv.close(); cleanup(pane); }
+});
+
+test('isAlive: a leftover socket file whose owner was killed reads dead', { skip: process.platform === 'win32', timeout: 15_000 }, async () => {
+  const pane = fresh(), stale = sockName(`${pane}-stale`); cleanup(pane);
+  rmSync(stale, { force: true });
+  let child: ChildProcess | undefined;
+  try {
+    child = await spawnKilledOwner(stale);
+    writeClaudeEndpoint(M, pane, { socket: stale, token: 'T' });
+    assert.equal(existsSync(stale), true);
+    assert.equal(await claudeAdapter.isAlive(seatOf(pane)), false);
+  } finally { child?.kill('SIGKILL'); rmSync(stale, { force: true }); cleanup(pane); }
 });
 
 test('isAlive: true while the socket exists, false when it is gone or there is no endpoint', async () => {
