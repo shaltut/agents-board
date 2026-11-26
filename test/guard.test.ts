@@ -404,7 +404,24 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
+// #4402: the budget is this machine's. A fixed piece of plain JS work (no guard code: a guard regression must not raise
+// its own budget) sets the pace: 25 times its best of 5, never under 1 s. A machine that runs it in under 40 ms (the PC)
+// keeps the 1 s budget; the VPS's slower cores (about 70 ms) get about 1.7 s. A quadratic case is still seconds to
+// minutes past it (an unbounded open( scan took 11 s on 200 KB), so the test still catches what it is for.
+function machineBudget() {
+  const s = 'a line of notes\n'.repeat(37500);
+  let best = Infinity, n = 0;
+  for (let i = 0; i < 6; i++) {
+    const t = performance.now();
+    for (let k = 0; k < 5; k++) n += s.split('\n').map((l) => l.trim()).join(' ').replace(/\s+/g, ' ').length + (s.match(/notes/g)?.length ?? 0);
+    if (i > 0) best = Math.min(best, performance.now() - t); // the first round warms up
+  }
+  assert.ok(n > 0);
+  return Math.max(1000, Math.round(best * 25));
+}
+
 test('long commands stay fast', () => {
+  const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
   const heredocThen600KB = "cat > notes.txt <<'EOF'\n" + 'a line of notes\n'.repeat(37500); // no end line
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
@@ -464,7 +481,7 @@ test('long commands stay fast', () => {
     const t = performance.now();
     run();
     const ms = performance.now() - t;
-    assert.ok(ms < 1000, `${name} took ${Math.round(ms)} ms`);
+    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms (this machine's budget: ${budget} ms)`);
   }
   // reading every git/gh/az word's arguments to the segment's end is (count x length): past 16 in one segment, block
   passes('builder', ['echo ' + 'git '.repeat(16)]);
