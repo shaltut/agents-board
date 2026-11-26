@@ -149,6 +149,25 @@ test('push options that name no branch are denied, with twins; the git -* twins 
   }
 });
 
+// #4347: //** is "anywhere on the filesystem" (a cwd-relative **/ would miss the board checkout's deploy/.env or
+// ~/.pgpass). A Read deny also covers Grep/Glob (best effort), the Bash commands Claude can parse (cat, sed, a redirect
+// target) and Edit/Write of the same path. ! carve-outs cannot reopen // rules, so the real .env variants are listed
+// and .env.example/sample/template stay readable.
+const SECRETS = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.prod', '.env.development', '.env.dev',
+  '.env.staging', '.env.test', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.pgpass',
+  '.netrc', '.git-credentials', '.npmrc', '.pypirc', 'cb-seat-*.claude.json',
+  // review #6 I2: the closed list, widened (the guard's shell rule is a pattern; this list can only name files)
+  '.env.ci', '.env.uat', '.env.sit', '.env.qa', '.env.bak', '.env.old', '.env.backup', '.env.save', '.env.prod.local',
+  '.aws/credentials', '.kube/config', '.docker/config.json', '*.jks', '*.keystore', '*.tfvars', '.htpasswd',
+  'service-account*.json', '.claude/.credentials.json'];
+test('every role denies reading secret files anywhere, and keeps .env.example readable', () => {
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const s of SECRETS) assert.ok(deny.includes(`Read(//**/${s})`), `${r}: Read(//**/${s})`);
+    assert.equal(deny.some((d: string) => /^Read\(.*\.env\.(?:example|sample|template)\)$/.test(d) || d === 'Read(//**/.env.*)'), false, r);
+  }
+});
+
 // #4345: the seat's own fence. Edit rules cover every built-in file-editing tool; Write is listed too in case a
 // release narrows that. ~ is the home folder; //**/ is any absolute path, so a repo's .claude/settings*.json in a
 // worktree beside the session's folder is covered too (review #5 I4: **/ alone is relative to the session's folder).
