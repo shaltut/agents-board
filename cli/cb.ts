@@ -8,8 +8,12 @@ import { createHash } from 'node:crypto';
 import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
-import { openBridge } from './bridge.ts';
+import { openBridge, seatKey } from './bridge.ts';
+import { getAdapter } from './agents/index.ts';
+import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
+import { squadShow } from './squad-show.ts';
+import { iamArgs } from './iam-args.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
 
@@ -26,7 +30,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
-  repo: { type: 'string' },
+  repo: { type: 'string' }, agent: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -62,12 +66,18 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
   process.exit(1);
 }
 
-// Through this session's relay when it has one (bridge.ts): its connection is already open. Not as cb-web: the
+// Through this seat's relay when it has one (bridge.ts): its connection is already open. Not as cb-web: the
 // relay's connection is named cb-relay, so a PGAPPNAME run connects itself.
-const relayKey = process.env.CLAUDE_CODE_MESSAGING_SOCKET && !process.env.PGAPPNAME && cmd !== 'help' && !o.help
-  ? createHash('sha1').update(process.env.CLAUDE_CODE_MESSAGING_SOCKET).digest('hex').slice(0, 12) : null;
-const sql: any = (relayKey && await openBridge(relayKey, databaseUrl(), () => direct, pane ? { machine: machine(), pane } : undefined)
-  .catch(() => null)) || direct;
+// The relay is keyed per seat (machine + pane); one that has not restarted since Stage B is still keyed by its
+// Claude's socket, so that key is tried once after the seat's.
+const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
+const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
+let sql: any = direct;
+if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
+  for (const k of relayKeys()) {
+    const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
+    if (bridged) { sql = bridged; break; }
+  }
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -220,14 +230,22 @@ async function guard(id: string | undefined) {
     throw new Error(`#${n} is in ${t.project}; this session works in ${sessionProject}. Check the id: cb mine lists yours, cb brief your project's. Only ${t.project}'s own sessions change it.`);
 }
 
-/** Is this session's relay running? Same lock file as cli/relay.ts LOCK. null = it cannot run here. */
+/** Claude can hand its inbox to a relay here: in this env, or in a live endpoint file (never existsSync on a pipe). */
+function claudeInbox(): boolean {
+  if (process.env.CLAUDE_CODE_MESSAGING_SOCKET) return true;
+  const ep = readClaudeEndpoint(machine(), pane);
+  return !!ep && socketExists(ep.socket);
+}
+
+/** Is this seat's relay running? Same lock file as cli/relay.ts LOCK (or a pre-Stage B relay's). null = it cannot run here. */
 function relayOn(): boolean | null {
-  const sock = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
-  if (!sock || !pane) return null;
-  try {
-    const pid = Number(readFileSync(join(tmpdir(), `cb-relay-${createHash('sha1').update(sock).digest('hex').slice(0, 12)}.pid`), 'utf8'));
-    if (pid > 0) { process.kill(pid, 0); return true; }
-  } catch {}
+  if (!pane) return null;
+  for (const k of relayKeys())
+    try {
+      const pid = Number(readFileSync(join(tmpdir(), `cb-relay-${k}.pid`), 'utf8'));
+      if (pid > 0) { process.kill(pid, 0); return true; }
+    } catch {}
+  if ((process.env.CB_AGENT || 'claude') === 'claude' && !claudeInbox()) return null;
   return false;
 }
 
@@ -568,16 +586,21 @@ async function run(): Promise<unknown> {
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: id };
     }
     case 'relay': {
-      if (!process.env.CLAUDE_CODE_MESSAGING_SOCKET) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
       if (!pane) throw new Error('cb relay needs a herdr pane ($HERDR_PANE_ID). Without a relay, run cb mine and cb pending between steps');
-      spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
+      // --agent, then $CB_AGENT, then the agent this pane is bound with, else claude
+      const agent: string = o.agent || process.env.CB_AGENT ||
+        (await sql`select agent from cb.sessions where machine = ${machine()} and pane = ${pane}`.catch(() => []))[0]?.agent || 'claude';
+      getAdapter(agent); // an agent cb cannot serve yet fails here, by name
+      if (agent === 'claude' && !claudeInbox()) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
+      spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {
-      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>]   e.g. cb iam W1@macbook ihop --role builder');
+      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook ihop --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
-      const p = await callFn('iam', { machine: machine(), pane, actor: args[0], project: args[1] ?? null,
-        role: o.role ?? null, area: o.area ?? null, model: o.model ?? null, repo: o.repo ?? null });
+      // a Claude cb iam sends no agent: the 8 arguments a rolled-back cb.iam still takes (cli/iam-args.ts)
+      const p = await callFn('iam', iamArgs({ machine: machine(), pane, actor: args[0]!, project: args[1], role: o.role, area: o.area,
+        model: o.model, repo: o.repo, agent: o.agent }, process.env.CB_AGENT));
       const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
       const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
       const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
@@ -741,13 +764,7 @@ ${body}`, json: pg };
       }
       const sq = await callFn('squad_get', { project: args[1] }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
-      // with repos, builder and reviewer counts are per repo ({"api": 2}) and areas are {name, repo}
-      const count = (c: any) => typeof c === 'object' ? Object.entries(c).map(([k, n]) => `${k} ${n}`).join(', ') : c;
-      const lines = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'].filter((r) => sq.roles[r]).map((r) =>
-        `${r}  ${r === 'owner' ? sq.areas.length : count(sq.roles[r].count)} × ${sq.roles[r].model} on ${sq.roles[r].machine}`);
-      const repos = sq.repos ? [`repos: ${Object.entries(sq.repos).sort(([a, x]: any, [b, y]: any) => (y.home - x.home) || a.localeCompare(b))
-        .map(([k, v]: any) => v.home ? `${k} (home)` : k).join(', ')}`] : [];
-      return { out: [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`].join('\n'), json: sq };
+      return { out: squadShow(sq), json: sq };
     }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });

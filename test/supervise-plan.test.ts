@@ -131,6 +131,23 @@ test('close only when herdr reports the agent ready for input (idle, or done: un
   assert.deepEqual(tick(quiet).close, [], 'not in herdr: no close');
 });
 
+// #4002: the supervisor asks each session's agent adapter whether it may close, and hands the answers in per session
+test('planTick respects precomputed safeToClose per session', () => {
+  const quiet = state({ sessions: [sess('sv-B1@macbook', 'builder', { last_event: ago(21), agent: 'claude' }), sess('sv-B2@macbook', 'builder', { last_event: ago(21), agent: 'codex' })] });
+  const idle = { 'sv-b1-macbook': 'idle', 'sv-b2-macbook': 'idle' };
+  // the adapter's answer decides, not herdr's status: B2's agent has no adapter (false), B1's says yes
+  assert.deepEqual(tick(quiet, { herdrStatus: idle, safeToClose: { 'sv-B1@macbook': true, 'sv-B2@macbook': false } }).close, ['sv-B1@macbook']);
+  // an adapter may call a session safe that herdr shows working (one whose own status reader knows better)
+  assert.deepEqual(tick(quiet, { herdrStatus: { 'sv-b1-macbook': 'working' }, safeToClose: { 'sv-B1@macbook': true } }).close, ['sv-B1@macbook']);
+  // given, a session it does not name is never closed
+  assert.deepEqual(tick(quiet, { herdrStatus: idle, safeToClose: {} }).close, []);
+  // omitted: herdr's ready statuses, as before
+  assert.deepEqual(tick(quiet, { herdrStatus: idle }).close, ['sv-B1@macbook', 'sv-B2@macbook']);
+  // safe to close never overrides the rest of the close rules (held work, a closing mark, under 20 minutes)
+  const busy = state({ sessions: [sess('sv-B1@macbook', 'builder', { last_event: ago(21), holds: 1 }), sess('sv-B2@macbook', 'builder', { last_event: ago(5) })] });
+  assert.deepEqual(tick(busy, { herdrStatus: idle, safeToClose: { 'sv-B1@macbook': true, 'sv-B2@macbook': true } }).close, []);
+});
+
 test('a session with an open ask is not idle: it cancels no waiting work', () => {
   const asked = sess('sv-B1@macbook', 'builder', { asks: 1 });
   assert.deepEqual(names(tick(state({ waiting: { builder: { main: 1 } }, sessions: [asked] })).start), ['sv-B2@macbook']);

@@ -32,9 +32,10 @@ async function card(sql: any, o: { stage?: string; assignee?: string | null; sta
   await sql`update cb.tasks set stage = ${o.stage ?? 'build'}, stage_since = now(), assignee = ${o.assignee ?? null}, status = ${o.status ?? 'next'} where id = ${id}`;
   return Number(id);
 }
-const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number } = {}) =>
-  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen)
-      values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}))`;
+const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number; agent?: string } = {}) =>
+  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent)
+      values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}),
+              ${o.agent ?? 'claude'})`;
 const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what}`) as any[];
 
 // ---- a fake herdr: nothing real is started; `live` holds the herdr names it reports ----
@@ -42,14 +43,14 @@ type Call = { m: string | null; args: string[] };
 const OK = { status: 0, stdout: '{}', stderr: '' };
 const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
 const json = (o: unknown) => ({ status: 0, stdout: JSON.stringify(o), stderr: '' });
-function fakeHerdr(o: { down?: string[]; start?: (c: Call) => any; prompt?: (c: Call) => any } = {}) {
+function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => any; prompt?: (c: Call) => any } = {}) {
   const calls: Call[] = [], live = new Map<string, string>(); // herdr name → pane
   let panes = 0;
   const run: Runner = (m, args) => {
     const c = { m, args }; calls.push(c);
     const [a, b, x] = args;
     if (a === 'agent' && b === 'list') return o.down?.includes(m ?? 'local') ? { status: 1, stdout: '', stderr: 'machine unreachable' }
-      : json({ id: 'cli:agent:list', result: { agents: [...live].map(([name, pane_id]) => ({ name, pane_id, agent: 'claude', agent_status: 'idle' })), type: 'agent_list' } });
+      : json({ id: 'cli:agent:list', result: { agents: [...live].map(([name, pane_id]) => ({ name, pane_id, agent: 'claude', agent_status: o.status ?? 'idle' })), type: 'agent_list' } });
     if (a === 'agent' && b === 'get') return live.has(x!) ? json({ result: { agent: { name: x, pane_id: live.get(x!) } } }) : GONE;
     if (a === 'tab' || (a === 'pane' && b === 'split')) return json({ result: { pane: { pane_id: `p${++panes}` } } });
     if (a === 'agent' && b === 'start') { const r = o.start?.(c); live.set(x!, args[args.indexOf('--pane') + 1]!); return r ?? OK; }
@@ -81,7 +82,9 @@ test('a waiting build card starts a builder', async () => {
   assert.equal(start.m, 'macbook');
   assert.equal(start.args[2], 'sv-b1-macbook');
   const native = start.args.slice(start.args.indexOf('--') + 1);
-  assert.deepEqual(native, ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json']);
+  // #4346: no MCP server is loaded in a seat (--strict-mcp-config with an empty config)
+  assert.deepEqual(native, ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json',
+    '--strict-mcp-config', '--mcp-config', '/Users/me/board/kit/mcp/none.json']);
   assert.ok(h.calls.some((c) => c.args[1] === 'prompt' && c.args[2] === 'sv-b1-macbook' && c.args[3]!.startsWith('cb iam sv-B1@macbook sv --role builder')));
   assert.ok(!h.calls.some((c) => c.args[1] === 'start' && c.args[2] === 'sv-b2-macbook')); // one card, one builder
   const ev = await events(sql, 'start');
@@ -134,6 +137,68 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   assert.equal((await events(sql, 'close')).length, 1);
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
+});
+
+// #4002: the agent running in the seat judges and closes it; one with no adapter yet is never closed
+test('closeOne delegates through Claude adapter and safely skips unregistered agent', async () => {
+  const closingAt = async (sql: any) => (await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at;
+  { // claude: its adapter's /exit, then the pane closed
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const out = await tick(deps(sup, h.run));
+    assert.ok(has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.equal(h.calls.find((c) => c.args[3] === '/exit')!.m, 'macbook');
+    assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
+  }
+  { // a seat bound as codex (no adapter in phase 1): never planned for a close, never marked
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'codex' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const out = await tick(deps(sup, h.run));
+    assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
+    assert.equal(await closingAt(sql), null);
+    assert.equal((await events(sql, 'close')).length, 0);
+    const dry = await tick(deps(sup, h.run, { dryRun: true }));
+    assert.ok(!dry.some((l) => /close/.test(l)), dry.join('\n'));
+  }
+  { // planned as claude, but the seat runs codex by the time it is closed (bound again between): the fresh row decides
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const hooked = new Proxy(sup, {
+      apply(t, self, args: any[]) {
+        const q = Reflect.apply(t, self, args);
+        if (!/supervise_mark\(.*, true\)/.test(String(args[0]?.join?.('?')))) return q;
+        return q.then(async (r: any) => { await sql`update cb.sessions set agent = 'codex' where actor = 'sv-B1@macbook'`; return r; });
+      },
+    });
+    const out = await tick(deps(hooked, h.run));
+    assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
+    assert.ok(out.includes('skip closing sv-B1@macbook: agent "codex" is not installed yet (phase 1 supports claude only)'), out.join('\n'));
+    assert.equal(await closingAt(sql), null, 'the mark is cleared');
+    assert.equal((await events(sql, 'close')).length, 0);
+  }
+});
+
+test('a working seat is never marked closing: the tick reads its herdr status', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' }); // idle on the board long enough to be a close candidate
+  const h = fakeHerdr({ status: 'working' });
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const marks: string[] = [];
+  const spy = new Proxy(sup, {
+    apply(t, self, args: any[]) { marks.push(String(args[0]?.join?.('?'))); return Reflect.apply(t, self, args); },
+  });
+  const out = await tick(deps(spy, h.run));
+  assert.ok(!marks.some((q) => /supervise_mark\(.*, true\)/.test(q)), 'never marked closing');
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
 });
 
 test('a claim between mark and re-check stops the close', async () => {
@@ -281,6 +346,35 @@ test('runner: no beat and its port free, it is started in a herdr tab', async ()
   assert.equal(ev.length, 1);
   assert.equal(ev[0].project, null);
   assert.equal(ev[0].data.note, 'started');
+});
+
+// #3902: the supervisor validates runner.json with the recipes.ts it loaded at start. After the slots cap went to 10 it
+// refused the new config ("slots: must be an integer 1-4") and so could not restart a dead runner. A config it refuses
+// still names the runner and its port; the runner, started fresh, checks the file with current code itself.
+test('runner: a runner.json this supervisor refuses still gets a dead runner restarted, and says why it was refused', async () => {
+  const { sup } = await setup();
+  const file = runnerJson();
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), slots: 999, futureKey: { x: 1 } }));
+  const h = fakeHerdr();
+  const out = await tick(deps(sup, h.run, { runnerConfig: file, probe: async () => false }));
+  assert.ok(out.some((l) => /^runner config: .*(?:slots|futureKey).*the runner checks it again with current code/.test(l)), out.join('\n'));
+  assert.ok(has(h.calls, 'pane', 'run', 'p1', 'cb runner'), out.join('\n'));
+  // not JSON at all: nothing to go on, nothing started
+  writeFileSync(file, '{ nope');
+  const h2 = fakeHerdr();
+  const out2 = await tick(deps(sup, h2.run, { runnerConfig: file, probe: async () => false }));
+  assert.ok(out2.some((l) => l.startsWith('runner config: ')), out2.join('\n'));
+  assert.ok(!h2.calls.some((c) => c.args[0] === 'tab'));
+});
+
+// #4261 review I1: a tick abandoned at its deadline must not keep acting (start or close seats with its log writes
+// failing). An aborted tick stops at its next step: no herdr call, no board write.
+test('a tick whose signal is aborted acts on nothing: no herdr call, no supervise_log row', async () => {
+  const { sql, sup } = await setup();
+  const h = fakeHerdr();
+  await assert.rejects(tick(deps(sup, h.run, { runnerConfig: runnerJson(), probe: async () => false, signal: AbortSignal.abort() })), /abort/i);
+  assert.deepEqual(h.calls.filter((c) => c.args[0] !== 'agent' || c.args[1] !== 'list'), []);
+  assert.equal((await sql`select count(*)::int n from cb.events where kind in ('supervisor', 'runner')`)[0].n, 0);
 });
 
 test('runner: a beating runner is left alone; a held port is reported at most hourly', async () => {

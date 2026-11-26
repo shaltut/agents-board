@@ -3,14 +3,18 @@ import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad
 
 export type Session = { actor: string; role: string; area: string | null; repo: string; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
-  last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean };
+  last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean;
+  agent?: string | null }; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
 export type State = { project: string; squad: Squad; supervised: boolean;
   // builder and reviewer: per repo (#3703); owner: per area
   waiting: { builder: Record<string, number>; reviewer: Record<string, number>; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   sessions: Session[] };
 // launched: names this supervisor run started or restored that the board has not yet seen live
-// herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only 'idle' may be closed
-export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number };
+// herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only READY may be closed
+// safeToClose (#4002): per session (actor), its agent adapter's answer, which then decides instead of herdrStatus; a
+// session it does not name is not closed. Omitted: herdrStatus and READY, as before
+export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number;
+  safeToClose?: Record<string, boolean> };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[] };
 
 /** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
@@ -28,6 +32,7 @@ export function planTick(i: TickInput): TickPlan {
   const isLive = (n: string) => !!by.get(n)?.live || herdrLive.has(herdrName(n));
   const failed = (n: string) => now - (i.failedAt.get(n) ?? -Infinity) < RETRY_AFTER;
   const ok = (n: string) => !herdrDown.has(machineOf(n)) && !failed(n);
+  const safe = (n: string) => (i.safeToClose ? i.safeToClose[n] === true : READY.has(i.herdrStatus[herdrName(n)] ?? ''));
   let startsLeft = i.startsLeft, macRoom = MAC_CAP - i.macLive;
   const take = (n: string) => { startsLeft--; if (isMac(n)) macRoom--; };
   const room = (n: string) => startsLeft > 0 && (!isMac(n) || macRoom > 0);
@@ -80,7 +85,7 @@ export function planTick(i: TickInput): TickPlan {
     if (g.waiting > 0) continue;
     for (const w of g.names) {
       const s = by.get(w.name);
-      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && READY.has(i.herdrStatus[herdrName(w.name)] ?? '')
+      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && safe(w.name)
         && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }

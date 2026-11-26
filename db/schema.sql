@@ -93,6 +93,9 @@ create table if not exists cb.events (
   data        jsonb not null default '{}'
 );
 create index if not exists events_actor_at on cb.events (actor, at desc);
+-- "An actor's latest event" (sessions_overview's `last`, order by id desc limit 1): without it the planner walks events_pkey
+-- backwards and, for an actor with no events (a fresh squad session), reads the whole table: 25 s per call, 504s on every page (2026-11-26).
+create index if not exists events_actor_id on cb.events (actor, id desc);
 alter table cb.events drop constraint if exists events_kind_check;
 alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor'));
 
@@ -207,6 +210,10 @@ alter table cb.sessions add column if not exists broadcast_seen bigint not null 
 -- the session's squad role (its check is with the squad pipeline below); here because cb.triagers, a sql function whose
 -- body is checked when created, reads it (#3746)
 alter table cb.sessions add column if not exists role text;
+-- the agent CLI the session runs (#4002); every session before it was claude
+alter table cb.sessions add column if not exists agent text not null default 'claude';
+alter table cb.sessions drop constraint if exists sessions_agent_check;
+alter table cb.sessions add constraint sessions_agent_check check (agent in ('claude','codex','opencode','agy'));
 
 create table if not exists cb.settings (
   key   text primary key,
@@ -253,6 +260,7 @@ drop function if exists cb.task_move cascade;
 drop function if exists cb.task_update cascade;
 drop function if exists cb.task_done cascade;
 drop function if exists cb.log cascade;
+drop function if exists cb.guest_text cascade;
 drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb.iam cascade;
@@ -317,6 +325,20 @@ drop function if exists cb.goals_list cascade;
 -- ponytail: a deterrent, not auth. Known bypasses: PGAPPNAME=cb-web (or set application_name) on any
 -- psql/postgres connection, and a local POST to /api/rpc with a forged same-host Origin header. It stops
 -- accidents and prompt-injected sessions, not a determined local process. Real auth = a Postgres role per client.
+-- #4356: what a guest (a member) writes reaches sessions, so the invisible format characters (Unicode Cf: zero-width,
+-- bidi overrides, tag characters) come out where it is written: answers, send-back notes, log lines. The class is every
+-- Cf code point of Unicode 17, written as \u escapes so it can be read and diffed (Postgres regexes have no \p{};
+-- test/guest-text.test.ts pins it and checks it against Node's). Cf only, by design: other invisible or confusable
+-- letters and marks (Hangul fillers, U+034F, variation selectors, braille blank) are ordinary text and stay.
+-- Control characters go too (review I2: a terminal acts on an ESC sequence, \r, a backspace): a line break of any
+-- kind (\r\n, \r, U+0085) becomes \n, which the relay indents; the other C0 and C1 controls but \n and \t are removed.
+-- The owner's and admins' text stays as typed (a right-to-left mark, an emoji joiner).
+create function cb.guest_text(actor text, t text) returns text language sql stable as $$
+  select case when t is not null and exists (select 1 from cb.users u where lower(u.name) = lower(trim(coalesce(actor, ''))) and u.role = 'member')
+    then regexp_replace(regexp_replace(regexp_replace(t, '\r\n?|\u0085', E'\n', 'g'),
+           '[\u0001-\u0008\u000b-\u001f\u007f-\u009f]', '', 'g'),
+           '[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g')
+    else t end $$;
 create function cb.ahmed_like(a text) returns boolean language sql immutable as $$ select coalesce(a, '') ~* '\mahmed\M' $$;
 create function cb.not_ahmed(a text) returns void language plpgsql as $$
 begin
@@ -648,7 +670,8 @@ create or replace trigger sessions_bind_notify after insert or delete on cb.sess
   for each row execute function cb.sessions_bind_notify();
 create or replace trigger sessions_bind_changed after update on cb.sessions
   for each row when (old.actor is distinct from new.actor or old.project is distinct from new.project
-                     or old.machine is distinct from new.machine or old.pane is distinct from new.pane)
+                     or old.machine is distinct from new.machine or old.pane is distinct from new.pane
+                     or old.agent is distinct from new.agent)  -- #4002: the relay delivers by the session's agent
   execute function cb.sessions_bind_notify();
 
 -- The open blockers a task waits on (not done or cancelled), lowest id first: "waits on #12".
@@ -814,6 +837,7 @@ returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
 begin
+  summary := cb.guest_text(a, summary);
   if coalesce(trim(summary), '') = '' then raise exception 'summary is required'; end if;
   insert into cb.events (actor, project, task_id, kind, summary, data)
   values (a, p, case when task_id is null then null else cb.norm_id(task_id) end, 'note', trim(summary), coalesce(data, '{}'))
@@ -1099,6 +1123,7 @@ begin
     if stale then raise exception 'M% is past its review date: renew it on the Memory page first', rid; end if;
     if rp is not null and rp <> qp then raise exception 'M% is in %, not %: only a global entry or one in Q%''s project', rid, rp, qp, qid; end if;
   end if;
+  answer := cb.guest_text(a, answer);
   if coalesce(trim(answer), '') = '' then raise exception 'answer is required'; end if;
   if cur = 'withdrawn' then raise exception 'question Q% is already withdrawn', qid; end if;
   if cur = 'delivered' then
@@ -1299,7 +1324,7 @@ returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
         r text := lower(trim(coalesce(reason, '')));
-        n text := nullif(trim(regexp_replace(coalesce(note, ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
+        n text := nullif(trim(regexp_replace(coalesce(cb.guest_text(a, note), ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
 begin
   perform cb.dashboard_only('Today');
   perform cb._approval_guard(qid);
@@ -1487,14 +1512,18 @@ begin
 end $$;
 
 -- Bind a session (machine + herdr pane) to an actor. Machine names compare case-insensitively.
-create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null, repo text default null) returns text language plpgsql as $$
+create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null, repo text default null, agent text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);  -- unknown project raises; null keeps the session's current one
         ar text := nullif(cb.norm_tag(area), '');
         mo text := nullif(trim(model), '');
         rp text := nullif(trim(repo), '');
+        ag text := nullif(trim(agent), '');  -- the CLI the session runs (#4002); null: claude, or what it said before
         pp text;
 begin
+  if ag is not null and ag not in ('claude', 'codex', 'opencode', 'agy') then
+    raise exception 'agent must be one of claude, codex, opencode, agy (got %)', ag;
+  end if;
   -- the repo is one of the project's (a one-repo project: main)
   if rp is not null then
     pp := coalesce(p, (select s.project from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane)));
@@ -1507,14 +1536,16 @@ begin
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
-  insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo)
-  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo, rp)
+  insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo, agent)
+  values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo, rp, coalesce(ag, 'claude'))
   on conflict on constraint sessions_pkey do update
     set actor = excluded.actor, project = coalesce(excluded.project, cb.sessions.project), started_at = now(), last_seen = now(),
         -- the same name re-binding keeps what it said before; a pane taken over by another actor starts clean
         role = case when excluded.actor = cb.sessions.actor then coalesce(excluded.role, cb.sessions.role) else excluded.role end,
         area = case when excluded.actor = cb.sessions.actor then coalesce(excluded.area, cb.sessions.area) else excluded.area end,
         model = case when excluded.actor = cb.sessions.actor then coalesce(excluded.model, cb.sessions.model) else excluded.model end,
+        -- ag, not excluded.agent: the insert filled claude in, so excluded cannot say "not given"
+        agent = case when excluded.actor = cb.sessions.actor then coalesce(ag, cb.sessions.agent) else coalesce(ag, 'claude') end,
         -- a repo belongs to its project: moving to another project drops it
         repo = case when excluded.actor = cb.sessions.actor and coalesce(excluded.project, cb.sessions.project) is not distinct from cb.sessions.project
                     then coalesce(excluded.repo, cb.sessions.repo) else excluded.repo end;
@@ -1527,7 +1558,7 @@ end $$;
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
 create function cb.inbox(machine text, pane text, after_event bigint default 0) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
-declare m text := lower(trim(machine)); me text; proj text; seen bigint; myrepo text; am_lead boolean;
+declare m text := lower(trim(machine)); me text; proj text; seen bigint; myrepo text; am_lead boolean; ag text;
 begin
   -- a new session (relay before cb iam) starts from now; until it joins a project it hears no broadcasts
   insert into cb.sessions (machine, pane, actor, broadcast_seen)
@@ -1535,15 +1566,18 @@ begin
   values (m, pane, case when cb.ahmed_like(pane || '@' || m) then 'session-' || left(md5(pane || '@' || m), 8) else pane || '@' || m end,
           coalesce((select max(e.id) from cb.events e), 0))
   on conflict on constraint sessions_pkey do update set last_seen = now()
-  returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen into me, proj, seen;
+  returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen, cb.sessions.agent into me, proj, seen, ag;
   myrepo := cb._repo(me);  -- once, not per event row (next_work)
   am_lead := cb._is_lead(me, proj);  -- once too (answer_copies)
   return jsonb_build_object(
     'actor', me,
     'project', proj, -- with actor: the binding the relay hands to cb (#3256)
+    'agent', ag, -- the session's agent (#4002)
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
+                               -- 24 h, as messages and huddles: a reused pane id keeps the old row's broadcast_seen (#4343)
+                               and e.at > now() - interval '24 hours'
                                and e.actor is distinct from me), '[]'),
     -- raw: Ahmed typing from the dashboard (cb.type_to); the relay hands it over as a plain prompt, no board wrapper
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
@@ -1599,19 +1633,15 @@ begin
     'next_work', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority)
                                             order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id)
                              from cb.tasks t
-                            where me is not null and proj is not null and t.project = proj and t.status = 'next'
-                              and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
-                              and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+                            where me is not null and proj is not null and t.project = proj and cb._offerable(t, me)
+                              and not (select cb._busy(me))  -- once per call, not per card
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')
                                                  -- a parts card (#3703) stays in Next while its parts move: its stage
                                                  -- changes, and changes to a part of my repo (sent back, freed), count
                                                  or (e.kind in ('updated', 'note') and exists (select 1 from cb.task_parts p where p.task_id = t.id)
-                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))
-                              and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
-                              -- a part in work (#3703) is work in progress too
-                              and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
+                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))), '[]'),
     -- Shared memory changes (#553), same audience as broadcasts: bound sessions on the entry's project, every bound
     -- session for a global one, only that machine's for a machine-scoped one. Live on add, Ahmed's confirm, a
     -- supersede (one line naming the replacement: its add is skipped), a retire with its why. Never a proposal, a
@@ -1680,7 +1710,9 @@ end $$;
 
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
-create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable as $$
+-- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
+-- every call's 2.3 s (2026-11-26; ~100 ms without). On tables this small JIT never pays back.
+create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable set jit = off as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);
 begin
@@ -1689,6 +1721,7 @@ begin
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
+      'agent', s.agent,  -- #4002; null for a worker with no session row
       'doing', coalesce((select jsonb_agg(d.j order by d.at desc) from (
                            select jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) as j, t.updated_at as at
                              from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)
@@ -3453,10 +3486,14 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb.work_still_open cascade;
+drop function if exists cb._offerable cascade;
+drop function if exists cb._busy cascade;
 drop function if exists cb._repo_fits cascade;
 drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
 drop function if exists cb._role_model cascade;
+drop function if exists cb._expected_model cascade;
 drop function if exists cb.digest cascade;
 drop function if exists cb.digests_due cascade;
 drop function if exists cb._stage_words cascade;
@@ -3470,6 +3507,8 @@ drop function if exists cb.resume cascade;
 drop function if exists cb.task_queue cascade;
 
 alter table cb.projects add column if not exists pipeline boolean not null default false;
+-- the squad file (its section below adds it too): cb._expected_model, created above it, reads it (#4002)
+alter table cb.projects add column if not exists squad jsonb;
 
 alter table cb.tasks add column if not exists stage text;
 alter table cb.tasks drop constraint if exists tasks_stage_check;
@@ -4004,6 +4043,7 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
     end
 $$;
 
+
 -- Quiet staged cards (never approval, never unstaged ones such as investigations): a live holder is nudged after 30 minutes
 -- and loses the card after 90 if the nudge went unanswered; a hold (status next) whose live holder has gone 90 minutes
 -- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
@@ -4106,10 +4146,34 @@ end $$;
 
 -- ---------------------------------------------------------------- The lead's digest (Task 9)
 -- One message to the lead every 15 minutes (at once on a new P0) replaces the per-event copies in pipeline projects.
--- ponytail: fixed defaults until the per-project model map lands (piece 2).
-create function cb._role_model(role text) returns text language sql immutable as $$
-  select case when role in ('builder', 'qa') then 'sonnet' else 'opus' end
+-- ponytail: fixed defaults until the per-project model map lands (piece 2). Claude's only (#4002): another agent has
+-- no default model (its squad seat names one), so null. A null agent is claude.
+create function cb._role_model(role text, agent text default 'claude') returns text language sql immutable as $$
+  select case when coalesce(agent, 'claude') <> 'claude' then null when role in ('builder', 'qa') then 'sonnet' else 'opus' end
 $$;
+
+-- The model a session should run (#4002): its squad seat's, else its squad role's, else the role default. The seat key is
+-- the one wantList (cli/squad-up.ts) names the session by: the lead 1, an owner its area, else the number in its name
+-- (demo-B2@m: 2), with repos <repo>:2 for builders and reviewers (no repo named: the home repo). The home repo is read
+-- from the squad here, not cb._home_repo, which is created further down. A session running another agent than its seat's
+-- (bound with --agent codex in a claude seat, say) runs that agent's model: null, not judged.
+create function cb._expected_model(project text, actor text, role text, area text, repo text, agent text) returns text language plpgsql stable as $$
+#variable_conflict use_variable
+declare sq jsonb := (select pr.squad from cb.projects pr where pr.slug = project); k text;
+begin
+  if role = 'lead' then k := '1';
+  elsif role = 'owner' then k := area;
+  else
+    k := (regexp_match(actor, '[ABRQI]([0-9]+)@'))[1];
+    if sq->'repos' is not null and role in ('builder', 'reviewer') then
+      k := coalesce(nullif(repo, ''), (select h.key from jsonb_each(sq->'repos') h where h.value->>'home' = 'true' limit 1)) || ':' || k;
+    end if;
+  end if;
+  if coalesce(agent, 'claude') <> coalesce(sq->'roles'->role->'seats'->k->>'agent', sq->'roles'->role->>'agent', 'claude') then
+    return null;
+  end if;
+  return coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, agent));
+end $$;
 
 -- What needs the lead in a pipeline project: plain lines, the stage count first, P0 cards next, at most 20. Reads only:
 -- it frees nothing and writes nothing on any card.
@@ -4194,13 +4258,15 @@ begin
        and (x.holder like '%@%' or exists (select 1 from cb.sessions s where s.actor = x.holder))
      group by x.holder
     union all
-    -- 10: a live session on the wrong model for its role
+    -- 10: a live session on the wrong model for its seat (#4002: the squad's seat or role model, else the role's
+    -- default); a session with no model to expect (an agent without a default) is not judged
     select 10, false, null::bigint, format('%s is a %s on %s; the role runs %s: restart it with --model %s',
-                                           s.actor, s.role, s.model, cb._role_model(s.role), cb._role_model(s.role))
-      from (select distinct on (s2.actor) s2.actor, s2.role, s2.model from cb.sessions s2
+                                           s.actor, s.role, s.model, w.want, w.want)
+      from (select distinct on (s2.actor) s2.actor, s2.role, s2.model, s2.area, s2.repo, s2.agent from cb.sessions s2
              where s2.project = p and s2.role is not null and s2.model is not null and s2.last_seen > now() - interval '10 minutes'
              order by s2.actor, s2.last_seen desc) s
-     where s.model not ilike '%' || cb._role_model(s.role) || '%'
+      cross join lateral (select cb._expected_model(p, s.actor, s.role, s.area, s.repo, s.agent) as want) w
+     where w.want is not null and s.model not ilike '%' || w.want || '%'
     union all
     -- 11: cards no session can ever take, named instead of left silent
     select 11, bool_or(n.p0), min(n.id), 'nobody can take: ' || string_agg(n.what, ', ' order by n.id)
@@ -4317,6 +4383,28 @@ create function cb._held_parts() returns setof cb.task_parts language sql stable
    where nullif(trim(p.assignee), '') is not null and p.stage <> 'merged' and t.status not in ('done', 'cancelled') and t.stage is not null
 $$;
 
+-- #4336: may this card be offered to me as new Next work? Shared by the inbox's next_work and the relay's re-check
+-- (cb.work_still_open) so the two cannot drift (review I1): in Next, unassigned or mine, mine to claim, and not an
+-- unassigned bug outside a pipeline stage (triage gets those). Whether I am busy is cb._busy, kept apart on purpose:
+-- it does not depend on the card, and callers evaluate it once (an uncorrelated subquery), not once per card.
+create function cb._offerable(t cb.tasks, me text) returns boolean language sql stable as $$
+  select t.status = 'next' and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
+     and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+$$;
+
+-- I have something in progress: a card, or a part (#3703). New Next work is offered only while I have neither.
+create function cb._busy(me text) returns boolean language sql stable as $$
+  select exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
+      or exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')
+$$;
+
+-- #4336: the relay holds a "new work in Next" offer a few seconds (the lead creates a card in Next, then assigns it),
+-- then pushes only the cards this returns: those still offerable to me.
+create function cb.work_still_open(ids bigint[], actor text) returns bigint[] language sql stable as $$
+  select coalesce(array_agg(t.id order by t.id), '{}') from cb.tasks t
+   where t.id = any(ids) and cb._offerable(t, actor) and not (select cb._busy(actor))
+$$;
+
 -- A parts card in plain words (#3703): its stage, then each part in the design's repo order, e.g.
 -- "build: api done (PR #12), dashboard building (qhs-dashboard-B1@mac)". null: no parts, or the card is not past approval
 -- (parts sent back to design wait for re-approval).
@@ -4400,7 +4488,7 @@ create function cb.resume(actor text default null) returns jsonb language plpgsq
 declare a text := coalesce(nullif(trim(actor), ''), nullif(current_setting('cb.actor', true), ''), 'unknown'); s cb.sessions%rowtype;
 begin
   select * into s from cb.sessions x where x.actor = a order by x.last_seen desc limit 1;
-  return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'project', s.project,
+  return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'agent', s.agent, 'project', s.project,
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
         'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then (w.v).stage end,
         'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', (w.v).status,
@@ -4464,6 +4552,8 @@ drop function if exists cb._multi_repo cascade;
 drop function if exists cb._repo cascade;
 drop function if exists cb._check_repos cascade;
 drop function if exists cb._repo_list cascade;
+drop function if exists cb._check_model cascade;
+drop function if exists cb._check_seat cascade;
 alter table cb.projects add column if not exists squad jsonb;
 
 create function cb.squad_get(project text) returns jsonb language sql stable as $$
@@ -4508,6 +4598,87 @@ begin
   return array(select jsonb_array_elements_text(j));
 end $$;
 
+-- A model for an agent (#4002), refused naming the field (label) and the shape to give. Claude takes its four names;
+-- codex and agy a model name, never a Claude one (the slip when only the agent was changed); opencode provider/model.
+-- A null model is refused like a wrong one (it would pass not in and !~ silently); a null agent is claude.
+create function cb._check_model(agent text, model text, label text) returns void language plpgsql immutable as $$
+#variable_conflict use_variable
+begin
+  case coalesce(agent, 'claude')
+    when 'claude' then
+      if model is null or model not in ('opus', 'sonnet', 'haiku', 'fable') then
+        raise exception '% model must be opus, sonnet, haiku or fable', label;
+      end if;
+    when 'codex' then
+      if model is null or model !~ '^[a-z0-9][a-z0-9._-]{0,63}$' or model in ('opus', 'sonnet', 'haiku', 'fable') then
+        raise exception '% model for codex must be a Codex model name like gpt-6.1-sol: lower-case letters, digits, . _ -, at most 64 characters, not opus, sonnet, haiku or fable', label;
+      end if;
+    when 'opencode' then
+      if model is null or model !~ '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$' then
+        raise exception '% model for opencode must be provider/model, like anthropic/claude-opus-5-5', label;
+      end if;
+    when 'agy' then
+      if model is null or model !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' or model in ('opus', 'sonnet', 'haiku', 'fable') then
+        raise exception '% model for agy must be an Antigravity model name like gemini-4-neon-xhigh: letters, digits, . _ -, at most 64 characters, not opus, sonnet, haiku or fable', label;
+      end if;
+    else
+      raise exception '% agent must be one of claude, codex, opencode, agy (got %)', label, to_jsonb(agent);
+  end case;
+end $$;
+
+-- One seat's agent, model and fallback (#4002): a role's own, or a seat's override of its role. ag and mo are what it
+-- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
+-- the inherited one (so claude, the default, is never written), the model only when given, the fallback only when it
+-- lists some, as {agent, model} pairs.
+create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql immutable as $$
+#variable_conflict use_variable
+declare a text := ag; m text := mo; fb jsonb := '[]'; cnt int; x record; k text; pair text; pairs text[] := '{}';
+begin
+  if spec ? 'agent' then
+    if jsonb_typeof(spec->'agent') is distinct from 'string' or spec->>'agent' not in ('claude', 'codex', 'opencode', 'agy') then
+      raise exception '% agent must be one of claude, codex, opencode, agy (got %)', label, spec->'agent';
+    end if;
+    a := spec->>'agent';
+    -- phase 1 starts claude only: a saved codex seat would be started as claude by a cb without its adapter (or a
+    -- rolled-back one), and retried by the supervisor every 10 minutes. A fallback may name any agent: nothing
+    -- switches to it yet. Phase 2 adds its agent here.
+    if a not in ('claude') then
+      raise exception '% agent "%" cannot be assigned as a primary seat yet (phase 1 supports claude only; non-Claude agents are allowed in fallback)', label, a;
+    end if;
+  end if;
+  if spec ? 'model' then
+    m := case when jsonb_typeof(spec->'model') = 'string' then spec->>'model' end;
+    perform cb._check_model(a, m, label);
+  end if;
+  if spec ? 'fallback' then
+    -- an if, not OR: jsonb_array_length errors on a non-array, and SQL does not promise OR's order
+    if jsonb_typeof(spec->'fallback') is distinct from 'array' then cnt := 6; else cnt := jsonb_array_length(spec->'fallback'); end if;
+    if cnt > 5 then
+      raise exception '% fallback must be a list of at most 5 {"agent", "model"} entries, like [{"agent": "codex", "model": "gpt-6.1-sol"}]', label;
+    end if;
+    for x in select e.v, e.n from jsonb_array_elements(spec->'fallback') with ordinality e(v, n) loop
+      k := label || ' fallback ' || x.n;
+      if jsonb_typeof(x.v) is distinct from 'object' then raise exception '% must be {"agent": "<agent>", "model": "<model>"}', k; end if;
+      if exists (select 1 from jsonb_object_keys(x.v) j where j not in ('agent', 'model')) then
+        raise exception '% has an unknown key: only agent and model', k;
+      end if;
+      if jsonb_typeof(x.v->'agent') is distinct from 'string' or x.v->>'agent' not in ('claude', 'codex', 'opencode', 'agy') then
+        raise exception '% agent must be one of claude, codex, opencode, agy (got %)', k, coalesce(x.v->'agent', 'null');
+      end if;
+      perform cb._check_model(x.v->>'agent', case when jsonb_typeof(x.v->'model') = 'string' then x.v->>'model' end, k);
+      pair := (x.v->>'agent') || ' ' || (x.v->>'model');
+      if x.v->>'agent' = a and x.v->>'model' = m then
+        raise exception '% (%) is the same as its own agent and model: a fallback must be another', k, pair;
+      end if;
+      if pair = any(pairs) then raise exception '% (%) is listed twice', k, pair; end if;
+      pairs := pairs || pair;
+      fb := fb || jsonb_build_array(jsonb_build_object('agent', x.v->>'agent', 'model', x.v->>'model'));
+    end loop;
+  end if;
+  return jsonb_strip_nulls(jsonb_build_object('agent', nullif(a, ag), 'model', case when spec ? 'model' then m end,
+                                              'fallback', nullif(fb, '[]')));
+end $$;
+
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
 -- Every refusal names the field.
 create function cb.squad_set(project text, squad jsonb, actor text default null) returns jsonb language plpgsql as $$
@@ -4519,6 +4690,8 @@ declare
   -- repos (#3703): rp as given, rs as saved (home on every repo), hm the home repo, area_repos the areas' repos
   rp jsonb := squad->'repos'; rs jsonb := '{}'; x record; hm text; nm text; need text[]; area_repos text[] := '{}';
   busy text;  -- the open cards that hold a repo the new squad drops
+  -- #4002: rv a role's agent, model and fallback as saved; st its seats as saved, sk the seat keys it has; se, sv a seat
+  rv jsonb; st jsonb; sk text[]; se record; sv jsonb;
 begin
   if not cb._is_dashboard() and cb._role(a) is distinct from 'lead' then raise exception 'only Ahmed or the lead sets the squad'; end if;
   if p is null then raise exception 'project is required'; end if;
@@ -4633,12 +4806,11 @@ begin
       raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', r.key;
     end if;
     if jsonb_typeof(r.value) is distinct from 'object' then raise exception 'role % must be an object', r.key; end if;
-    if exists (select 1 from jsonb_object_keys(r.value) k where k not in ('count','model','machine')) then
-      raise exception 'role % has an unknown key: only count, model and machine', r.key;
+    if exists (select 1 from jsonb_object_keys(r.value) k where k not in ('count','model','machine','agent','fallback','seats')) then
+      raise exception 'role % has an unknown key: only count, model, machine, agent, fallback and seats', r.key;
     end if;
-    if r.value ? 'model' and (jsonb_typeof(r.value->'model') is distinct from 'string' or r.value->>'model' not in ('opus','sonnet','haiku','fable')) then
-      raise exception '% model must be opus, sonnet, haiku or fable', r.key;
-    end if;
+    -- the role's agent, model and fallback (#4002); its seats once its count is known
+    rv := cb._check_seat(r.value, 'claude', cb._role_model(r.key), r.key);
     if jsonb_typeof(r.value->'machine') is distinct from 'string' or not (squad->'machines' ? (r.value->>'machine')) then
       raise exception '% machine is not in machines', r.key;
     end if;
@@ -4674,9 +4846,33 @@ begin
         if not (rp->nm->'paths' ? (r.value->>'machine')) then raise exception 'repo % has no path on %', nm, r.value->>'machine'; end if;
       end loop;
     end if;
+    -- seats (#4002), each overriding the role's agent, model or fallback, keyed as wantList (cli/squad-up.ts) names its
+    -- sessions: the lead 1, an owner its area, a builder or reviewer with repos <repo>:<n> (the home repo's too), any
+    -- other 1..count. A seat left with nothing of its own is not saved, nor is an empty seats map.
+    st := '{}';
+    if r.value ? 'seats' then
+      if jsonb_typeof(r.value->'seats') is distinct from 'object' then
+        raise exception '% seats must be an object of seats: {"<seat>": {"agent", "model", "fallback"}}, a seat named 1, 2 ... (with repos <repo>:1, for an owner its area)', r.key;
+      end if;
+      if r.key = 'owner' then sk := seen;
+      elsif rp is not null and r.key in ('builder', 'reviewer') then
+        sk := array(select cn.key || ':' || g from jsonb_each(r.value->'count') cn cross join generate_series(1, (cn.value #>> '{}')::int) g order by cn.key, g);
+      else sk := array(select g::text from generate_series(1, c) g); end if;
+      for se in select * from jsonb_each(r.value->'seats') loop
+        if se.key <> all(sk) then raise exception '% seat % is not one of its seats: %', r.key, se.key, array_to_string(sk, ', '); end if;
+        if jsonb_typeof(se.value) is distinct from 'object' then raise exception '% seat % must be an object: {"agent", "model", "fallback"}', r.key, se.key; end if;
+        if se.value = '{}' then raise exception '% seat % is empty: give agent, model or fallback', r.key, se.key; end if;
+        if exists (select 1 from jsonb_object_keys(se.value) k where k not in ('agent', 'model', 'fallback')) then
+          raise exception '% seat % has an unknown key: only agent, model and fallback', r.key, se.key;
+        end if;
+        sv := cb._check_seat(se.value, coalesce(rv->>'agent', 'claude'), coalesce(r.value->>'model', cb._role_model(r.key)), r.key || ' seat ' || se.key);
+        if sv <> '{}' then st := st || jsonb_build_object(se.key, sv); end if;
+      end loop;
+    end if;
     if squad->'machines'->(r.value->>'machine')->>'herdr' = 'macbook' then mac := mac + c; end if; -- the Mac cap counts by herdr label, whatever the key
     roles := roles || jsonb_build_object(r.key,
-      jsonb_strip_nulls(jsonb_build_object('count', r.value->'count', 'model', coalesce(r.value->>'model', cb._role_model(r.key)), 'machine', r.value->>'machine')));
+      jsonb_strip_nulls(jsonb_build_object('count', r.value->'count', 'model', coalesce(r.value->>'model', cb._role_model(r.key)), 'machine', r.value->>'machine'))
+      || rv || case when st <> '{}' then jsonb_build_object('seats', st) else '{}'::jsonb end);
   end loop;
   if (roles ? 'owner') and n_areas = 0 then raise exception 'owner needs areas: list the areas the owners hold'; end if;
   if n_areas > 0 and not (roles ? 'owner') then raise exception 'areas need an owner role: one owner per area'; end if;
@@ -4849,6 +5045,7 @@ drop function if exists cb.job_get cascade;
 drop function if exists cb.jobs_list cascade;
 drop function if exists cb.job_cancel cascade;
 drop function if exists cb.runner_hello cascade;
+drop function if exists cb.runner_reconcile cascade;
 drop function if exists cb.runner_beat cascade;
 drop function if exists cb.job_claim cascade;
 drop function if exists cb.job_finish cascade;
@@ -4976,6 +5173,22 @@ begin
   return n;
 end $$;
 
+-- #3902 review I1: a claim whose reply was lost (the connection died after job_claim committed) leaves a job running
+-- that no slot of this runner holds. A restart used to end it (runner_hello); a runner that survives the drop calls this
+-- with the jobs its slots hold, from inside its one claim loop (so no claim is in flight), and the rest end.
+create function cb.runner_reconcile(runner text, running bigint[]) returns int language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; n int := 0;
+begin
+  perform cb._runner_only();
+  for j in update cb.jobs x set state = 'error', summary = 'error: the runner lost the board connection while claiming it', finished_at = now()
+           where x.runner = runner_reconcile.runner and x.state = 'running' and not (x.id = any(coalesce(running, '{}'))) returning x.* loop
+    n := n + 1;
+    perform cb._job_tell(j);
+  end loop;
+  return n;
+end $$;
+
 create function cb.runner_beat(runner text) returns void language plpgsql as $$
 begin
   perform cb._runner_only();
@@ -5061,6 +5274,8 @@ begin
       'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes')) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
+        -- the session's agent (#4002); null for a holder with no session row
+        'agent', s.agent,
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))
                  + (select count(*) from cb._held_parts() h where h.assignee = a.actor),

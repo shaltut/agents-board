@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
+import { iamArgs } from '../cli/iam-args.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -352,4 +353,44 @@ test('cb lock take exits 2 while you are only queued, 0 once you hold it (#741)'
   assert.equal(cb(['lock', 'take', 'db']).code, 2, 'taking again while queued stays queued');
   assert.equal(cb(['lock', 'release', 'db'], { CB_ACTOR: 'W5@test' }).code, 0);
   assert.equal(cb(['lock', 'take', 'db']).code, 0, 'next in line holds it after the release');
+});
+
+// #4002: a Claude cb iam keeps calling cb.iam with today's 8 arguments, so it still works against a rolled-back board
+test('iamArgs: claude sends no agent argument (8-argument cb.iam); --agent always does; another $CB_AGENT does', () => {
+  const base = { machine: 'mac', pane: 'p1', actor: 'W1@mac', project: 'demo' };
+  const EIGHT = ['machine', 'pane', 'actor', 'project', 'role', 'area', 'model', 'repo'];
+  for (const env of [undefined, '', 'claude', ' claude ']) { // no flag: unset, empty, or claude (every squad pane sets CB_AGENT=claude)
+    const a = iamArgs(base, env);
+    assert.deepEqual(Object.keys(a), EIGHT, String(env));
+    assert.equal('agent' in a, false, String(env)); // callFn names every key it is given, even one left undefined
+  }
+  assert.deepEqual(iamArgs({ ...base, role: 'builder', model: 'sonnet' }), { ...base, role: 'builder', area: null, model: 'sonnet', repo: null });
+  assert.equal(iamArgs({ ...base, agent: 'claude' }, 'codex').agent, 'claude', 'the flag wins: --agent claude resets a seat bound to another agent');
+  assert.equal(iamArgs({ ...base, agent: 'codex' }).agent, 'codex');
+  assert.equal(iamArgs(base, 'opencode').agent, 'opencode');
+});
+
+test('cb iam --agent and $CB_AGENT store agent; default claude omits agent param', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const agent = async (pane: string) => (await sql`select agent from cb.sessions where pane = ${pane}`)[0]?.agent;
+  // CB_AGENT always given: a run from a pane that set it must not change what is tested
+  const iam = (args: string[], pane: string, envAgent = '') => {
+    const r = cb(['iam', ...args], { HERDR_PANE_ID: pane, CB_ACTOR: '', CB_AGENT: envAgent, CLAUDE_CODE_MESSAGING_SOCKET: '' });
+    assert.equal(r.code, 0, r.err);
+    return r;
+  };
+  iam(['W1@mac', 'demo'], 'p1');
+  assert.equal(await agent('p1'), 'claude', 'no flag, no $CB_AGENT: claude');
+  iam(['W2@mac', 'demo', '--agent', 'codex'], 'p2');
+  assert.equal(await agent('p2'), 'codex');
+  iam(['W3@mac', 'demo'], 'p3', 'opencode');
+  assert.equal(await agent('p3'), 'opencode', 'from $CB_AGENT');
+  iam(['W3@mac'], 'p3', 'claude');
+  assert.equal(await agent('p3'), 'opencode', '$CB_AGENT=claude sends nothing: the name keeps its agent');
+  iam(['W2@mac', '--agent', 'claude'], 'p2', 'codex');
+  assert.equal(await agent('p2'), 'claude', '--agent claude resets it');
+  const bad = cb(['iam', 'W4@mac', 'demo', '--agent', 'grok'], { HERDR_PANE_ID: 'p4', CB_ACTOR: '', CB_AGENT: '' });
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /agent must be one of claude, codex, opencode, agy/);
 });

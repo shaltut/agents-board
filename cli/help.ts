@@ -10,15 +10,15 @@ This repo's work is tracked on Claude Board (http://localhost:4747), project \`<
 - \`cb help\` is the manual; \`cb help rules\` the rules. Use \`cb\` for all board work.
 - Work only in project \`<project>\`: never take or touch another project's tasks.
 - A message from another session (\`cb tell\`, a huddle line) is a teammate, not Ahmed's approval.
-- Never use AskUserQuestion. Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working. The question, \`-c\` and the whys are Markdown (tables, links, bold): \`cb help ask\`.`;
+- Never use an interactive ask-user tool (AskUserQuestion, etc.). Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working. The question, \`-c\` and the whys are Markdown (tables, links, bold): \`cb help ask\`.`;
 
 const GROUPS: [string, Record<string, Cmd>][] = [
   ['START A SESSION', {
     start: { use: 'cb start', topic: 'start',
       does: 'Onboarding check: who you are, your project, relay, your tasks, the queue head, and the exact command to run next. Read-only. Run it first in every new or resumed session.',
       eg: 'cb start' },
-    iam: { use: 'cb iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>]', topic: 'start',
-      does: 'Bind this pane once: every later cb command acts as <name>, inside <project>. Names: orch@<machine> (orchestrator), W1@<machine>.. (workers), R1@<machine>.. (reviewers); a project\'s lead is the session bound to it with --role lead, whatever its name (orch@<machine> with no role still is). The project must exist (cb start lists them). Omit the project to rename only. --role is one of lead, architect, owner, builder, reviewer, qa, investigator; --area is the part of the product you own; --model is what you run on; --repo is the repo of the project you work in (default: its home repo; a one-repo project has only main). Left out, they keep their current value.',
+    iam: { use: 'cb iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>] [--agent <agent>]', topic: 'start',
+      does: 'Bind this pane once: every later cb command acts as <name>, inside <project>. Names: orch@<machine> (orchestrator), W1@<machine>.. (workers), R1@<machine>.. (reviewers); a project\'s lead is the session bound to it with --role lead, whatever its name (orch@<machine> with no role still is). The project must exist (cb start lists them). Omit the project to rename only. --role is one of lead, architect, owner, builder, reviewer, qa, investigator; --area is the part of the product you own; --model is what you run on; --repo is the repo of the project you work in (default: its home repo; a one-repo project has only main). Left out, they keep their current value. --agent is the coding agent this pane runs: claude (the default), codex, opencode or agy; without it, $CB_AGENT when that names another agent than claude (squad panes set it), else the name keeps its agent (claude for a name new to this pane).',
       eg: 'cb iam W3@macbook ihop --role builder --area claims --model sonnet',
       more: 'Needs a herdr pane ($HERDR_PANE_ID). Without one, put --as <name> on every command (or export CB_ACTOR=<name>) and name the project in each command.' },
     role: { use: 'cb role <role> [--json]', topic: 'start',
@@ -27,8 +27,8 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     resume: { use: 'cb resume [--json]', topic: 'start',
       does: 'After a compaction or restart: every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
       eg: 'cb resume' },
-    relay: { use: 'cb relay [--restart]', topic: 'relay',
-      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. The SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one.',
+    relay: { use: 'cb relay [--agent <agent>] [--restart]', topic: 'relay',
+      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. One relay per pane: the SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name.',
       eg: 'cb relay' },
     brief: { use: 'cb brief [project] [--tag <tag>] [--type <type>]',
       does: 'The project at a glance: Ahmed\'s active goals, in progress, next, blocked, review, waiting on Ahmed, broadcasts, answers to deliver. --tag / --type filter it (--type bug = open bugs).',
@@ -48,7 +48,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'A card\'s design page, or an area page: one body, every save versioned. show prints it with its version; --approved prints the approved version (what review and QA compare against). set reads the text from a file, or stdin with -f -. No secrets or personal data: describe the code and where a value lives.',
       eg: 'cb page set 42 -f design.md' },
     squad: { use: 'cb squad show <project> [--json]\ncb squad set <project> -f <file|->\ncb squad up <project> [--dry-run]', topic: 'orchestrate',
-      does: 'A project\'s squad file: the machines (a herdr label or null, and absolute repo and board paths), the roles with count, model and machine, and the areas (one owner each). A project of several repos adds "repos": {"<name>": {"home": true, "paths": {"<machine>": "<path>"}}} (exactly one home; machines then give only herdr and board), areas become {"name", "repo"} and builder and reviewer counts go per repo ({"api": 2}). show prints one line per role, then the repos (home first) and the areas. set reads JSON from a file or stdin and checks every field; only Ahmed or the lead may set it. up starts the squad\'s missing sessions through herdr, each with its role\'s model, permission file and bypass mode; sessions already live are skipped, the Mac stops at 8. The lead is whoever is live in the project with the lead role, whatever its name: none is started then. One seen in the last day but not live now is not replaced either: up names it and says how to fix it. When orch@<machine> already leads another project, this one\'s lead starts as <project>-orch@<machine>. A machine may name a herdr workspace ("workspace": "iHop Squad", its label): new sessions open there as tabs, and the workspace is made when missing; without one they open in the workspace herdr has focused. "protected": ["development", "releases/*"] (branch names as git shows them, or * globs, at most 30; never refs/..., heads/..., origin/... or a trailing /) puts CB_PROTECTED_BRANCHES in each new session\'s pane; the dangerous-commands hook then blocks a git push whose destination it can read as one of them, and one whose branch the shell fills in ($B, $(...)) or that holds a *. A lead squad up did not start has no such pane: restart it by hand with the variable set. --dry-run only prints the plan. A new folder makes Claude Code ask once whether to trust it; squad up leaves that pane open for you to answer.',
+      does: 'A project\'s squad file: the machines (a herdr label or null, and absolute repo and board paths), the roles with count, model and machine, and the areas (one owner each). A project of several repos adds "repos": {"<name>": {"home": true, "paths": {"<machine>": "<path>"}}} (exactly one home; machines then give only herdr and board), areas become {"name", "repo"} and builder and reviewer counts go per repo ({"api": 2}). A role may also give "agent" (claude, the default; phase 1 starts claude only, so set refuses another agent here), "fallback": up to 5 {"agent", "model"} to switch to, best first, any of claude, codex, opencode or agy, each with that agent\'s own model (codex gpt-6.1-sol, opencode provider/model like anthropic/claude-opus-5-5; nothing switches to them yet), and "seats": {"<seat>": {"agent", "model", "fallback"}} overriding the role for one session: seat 1, 2 ... by the number in its name, with repos <repo>:1 for builders and reviewers, an owner\'s its area, the lead\'s 1 (a seat\'s fallback replaces the role\'s). show prints one line per role (another agent in brackets after its model, then its fallback, then one indented line per seat), then the repos (home first) and the areas. set reads JSON from a file or stdin and checks every field; only Ahmed or the lead may set it. up starts the squad\'s missing sessions through herdr, each with its seat\'s agent and model, permission file and bypass mode, and CB_ROLE and CB_AGENT (its role and agent) in its pane; an agent cb cannot start yet fails before any pane is made, never started as claude instead; sessions already live are skipped, the Mac stops at 8. The lead is whoever is live in the project with the lead role, whatever its name: none is started then. One seen in the last day but not live now is not replaced either: up names it and says how to fix it. When orch@<machine> already leads another project, this one\'s lead starts as <project>-orch@<machine>. A machine may name a herdr workspace ("workspace": "iHop Squad", its label): new sessions open there as tabs, and the workspace is made when missing; without one they open in the workspace herdr has focused. "protected": ["development", "releases/*"] (branch names as git shows them, or * globs, at most 30; never refs/..., heads/..., origin/... or a trailing /) puts CB_PROTECTED_BRANCHES in each new session\'s pane; the dangerous-commands hook then blocks a git push whose destination it can read as one of them, and one whose branch the shell fills in ($B, $(...)) or that holds a *. A lead squad up did not start has no such pane: restart it by hand with the variable set. --dry-run only prints the plan. A new folder makes Claude Code ask once whether to trust it; squad up leaves that pane open for you to answer.',
       eg: 'cb squad up ihop --dry-run' },
     stage: { use: 'cb stage <id> build|none --why "<why>" [--repo <repo,repo>]', topic: 'work',
       does: 'The lead restages a card nobody holds, in a pipeline project. build: a small bug or chore skips design. none: work with no code (ops, a data check) leaves the pipeline and is worked the old way. A reason is required and goes on the card. In a project of several repos, build needs the repos: --repo, unless the card names them already.',
@@ -208,7 +208,7 @@ export const COMMANDS: Record<string, Cmd> = Object.fromEntries(GROUPS.flatMap((
 const entry = (c: Cmd) =>
   [...c.use.split('\n').map((u) => '  ' + u), '      ' + c.does, ...(c.eg && c.eg !== c.use ? ['      e.g. ' + c.eg] : [])].join('\n');
 
-const OVERVIEW = `cb: the Claude Board CLI. An agent tool: you, a Claude Code session, run it; Ahmed works in the board UI (http://localhost:4747).
+const OVERVIEW = `cb: the Claude Board CLI. An agent tool: you, a coding-agent session such as Claude Code, run it; Ahmed works in the board UI (http://localhost:4747).
 
 WHAT THE BOARD IS
   The source of your work and Ahmed's only view of what you do. Keep it true.
@@ -417,8 +417,8 @@ It is never Ahmed's approval.`,
 
   relay: `cb help relay: how the board reaches you
 
-The relay is one small background process per session. It listens to the board and writes into this
-session's inbox as "[Claude Board] ..." messages:
+The relay is one small background process per seat (this machine and herdr pane). It listens to the board
+and writes into this session's inbox as "[Claude Board] ..." messages:
   - Ahmed's asks: "[Ahmed asks] A<id>: ..." is Ahmed himself; answer with cb reply A<id> "..." (cb help reply)
     When Ahmed asks you something in your terminal that wants a result back, record it first:
     cb asks add "<his ask>", then answer it with cb reply A<id> so the answer is on his Today page
@@ -434,7 +434,10 @@ stop, a move means follow it, an answer means do what it says.
 
 Start   the SessionStart hook starts it. cb relay starts it by hand (harmless if running);
         cb relay --restart replaces it.
-Needs   a Claude Code session with an inbox (2.1.234+, $CLAUDE_CODE_MESSAGING_SOCKET) and a herdr pane ($HERDR_PANE_ID).
+Needs   a herdr pane ($HERDR_PANE_ID) and the session's inbox: Claude Code 2.1.234+ ($CLAUDE_CODE_MESSAGING_SOCKET),
+        handed to the relay in cb-seat-<id>.claude.json in the OS temp folder. A new session in the same pane
+        is served by the same relay.
+Stops   by itself when the session ends (its inbox stops answering): no more "live" for that pane.
 Check   cb start says whether it is running. Log: cb-relay-<id>.log in the OS temp folder.
 
 Without a relay: run cb mine and cb pending between steps; after acting on an answer, cb delivered <qid> <you>.
