@@ -17,13 +17,16 @@ export function checkAgyModel(model: string): void {
   if (!AGY_MODEL.test(model)) throw new Error(`agy model "${model}" is not an id: letters, digits, . _ - only (agy models lists them)`);
 }
 
-// Claude-only secrets a non-Claude seat must not inherit (the owner's standing rule), and every CLAUDE_CODE_* variable.
-const isClaudeOnly = (k: string) => /^CLAUDE_CODE_/i.test(k) || k.toUpperCase() === 'GITHUB_PERSONAL_ACCESS_TOKEN';
+// Claude-only secrets and markers a non-Claude seat must not inherit (the owner's standing rule): CLAUDE_CODE_*, ANTHROPIC_*, CLAUDECODE.
+const isClaudeOnly = (k: string) => /^(?:CLAUDE_CODE_|ANTHROPIC_)/i.test(k) || ['CLAUDECODE', 'GITHUB_PERSONAL_ACCESS_TOKEN'].includes(k.toUpperCase());
 
 // Stops, from agy's own strings (agy.exe 1.5.17) and the changelog: a spent quota stops the turn at once; a per-minute
 // 429 is retried by agy for up to 4 minutes, so it is a rate limit, not a stop.
-const QUOTA = /exhausted your quota on this model|out of credits|prepaid balance is insufficient|spend(?:ing)? cap/i;
-const RATE = /rate limit active for|rate[ _-]?limit|RESOURCE_EXHAUSTED|\b429\b/i;
+// Only the last lines are read (the agent's own output sits above them), and only banner wording: a bare "429" or
+// "rate limit" in code or prose is not a stop. Line-start anchors for the status-code forms.
+const TAIL_LINES = 6;
+const QUOTA = /exhausted your quota on this model|^\W*(?:AI:\s*)?out of credits\b|prepaid balance is insufficient|spend(?:ing)? cap (?:reached|exceeded|hit)/im;
+const RATE = /rate limit active for [^\s;.,]+|^\W*(?:error:?\s*)?(?:429\b|RESOURCE_EXHAUSTED\b)/im;
 const RETRY = /retry in (\d+)\s*s/i;
 
 const trimSlash = (s: string) => s.replace(/[\/\\]+$/, '');
@@ -50,13 +53,14 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       };
     },
 
-    // Bracketed paste plus Enter; agy queues it while a turn runs (queuedMessages "queue", the default). herdr refuses a
-    // blocked agent (agent_blocked) before sending a byte: that throws, so the relay keeps the message and retries.
+    // Bracketed paste plus Enter, the text as given (opts.raw changes nothing here). agy queues it while busy
+    // (queuedMessages "queue"). herdr refuses a blocked agent (agent_blocked) before sending a byte: that throws, so the
+    // relay keeps the message. A leading "-" is safe: herdr takes it as the text (run against a missing agent, which
+    // answered agent_not_found, not a usage error). A leading "/" opening slash autocomplete was fixed in agy 1.1.9
+    // (report E); not re-checked on a live 1.5.17.
     async deliver(seat, text) {
       if (!seat.herdrName) throw new Error('no herdr agent name for this seat');
-      // clap reads a leading "-" as a flag, and a leading "/" opens agy's slash autocomplete: a space first, same text.
-      const body = /^[-/]/.test(text) ? ` ${text}` : text;
-      const r = run(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, body], 30_000);
+      const r = run(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, text], 30_000);
       if (!ok(r)) throw new Error(`herdr agent prompt failed: ${String(r.error?.message ?? r.stderr ?? r.stdout ?? '').trim().slice(0, 200)}`);
     },
 
@@ -73,14 +77,16 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       return { state, safeToClose: state === 'idle' || state === 'done', detail: state === 'idle' ? 'idle: background subagents may still run' : undefined };
     },
 
-    // `/exit` is documented (agy's CLI reference: "Ctrl+D Ctrl+D (or /exit or /quit)").
+    // `/exit` is documented (agy builtin cli.md: "Ctrl+D Ctrl+D (or /exit or /quit)") but UNVERIFIED through herdr on a live
+    // agy: 'sent' means the text was submitted, not that agy exited. The supervisor must confirm closure through isAlive.
     async close(seat: SeatHandle, r) {
       if (!seat.herdrName) return 'failed';
       return ok(r(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, '/exit'], 30_000)) ? 'sent' : 'failed';
     },
 
-    detectQuotaStop(_seat, _herdrAgent, paneTail): QuotaSignal | null {
+    detectQuotaStop(_seat, _herdrAgent, paneTail?: string): QuotaSignal | null {
       if (!paneTail) return null;
+      paneTail = paneTail.split(/\r?\n/).filter((l) => l.trim()).slice(-TAIL_LINES).join('\n');
       const q = QUOTA.exec(paneTail);
       if (q) return { kind: 'quota', raw: q[0] };
       const m = RATE.exec(paneTail);
@@ -89,14 +95,17 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       return { kind: 'rate_limit', raw: m[0], ...(retry ? { retryAfterSec: Number(retry[1]) } : {}) };
     },
 
-    // The global hooks file: workspace .agents/hooks.json loads only after trust and per repo. The shim fails closed.
+    // Per seat, never the global ~/.gemini/config/hooks.json (that applies to every agy session on the machine, the owner's
+    // hand-started ones included). The target is the seat's workspace file, relative to the seat's cwd; the installer keeps
+    // it out of git (.git/info/exclude). Hooks in the per-session --settings file are not loaded (report E 4.3: "Hooks in
+    // settings.json are not loaded"), so that route is out. The matcher is a catch-all: the shim sees every tool and
+    // denies the ones it cannot judge. Workspace hooks load only after trust (report E; not verified live).
     guardInstallSpec(boardDir) {
-      const matcher = 'run_command|write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|ask_question';
       return {
-        targetPath: '~/.gemini/config/hooks.json',
+        targetPath: '.agents/hooks.json',
         shimFile: `${trimSlash(boardDir)}/kit/guard/shim-agy.mjs`,
-        matchers: { win32: matcher, darwin: matcher, linux: matcher },
-        notes: 'group cb-guard, event PreToolUse, type command, forward slashes and no quotes (Windows runs hooks through cmd /c); a hook MUST print {"decision":"allow"} to allow, {} counts as deny',
+        matchers: { win32: '.*', darwin: '.*', linux: '.*' },
+        notes: 'per-seat workspace file under the seat cwd, excluded from git; group cb-guard, event PreToolUse, type command, forward slashes and no quotes (Windows runs hooks through cmd /c); a hook MUST print {"decision":"allow"} to allow, {} counts as deny; the shim denies a pane with no CB_ROLE or CB_AGENT',
       };
     },
 

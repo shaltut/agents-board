@@ -1,6 +1,8 @@
 // The agy adapter (#4002 phase 5): launch argv and env, model checks, delivery and close through a fake herdr Runner,
 // status, liveness, quota stops, and every spec method. Pure: no DB, no herdr, no agy.
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import { AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import { agyAdapter, checkAgyModel, createAgyAdapter } from '../cli/agents/agy.ts';
@@ -33,13 +35,14 @@ test('buildLaunch: --mode auto, this session only settings, the model; never --d
   assert.deepEqual(l.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 
-test('buildLaunch: env keeps the squad env, adds the auto-update pin, strips Claude-only secrets (any case)', () => {
+test('buildLaunch: env keeps the squad env, adds the auto-update pin, strips Claude-only secrets and markers (any case)', () => {
   const l = agyAdapter.buildLaunch(input({ env: {
     CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*',
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x',
-    CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't', claude_code_entrypoint: 'e', CLAUDECODE: 'keep-not-prefix',
+    CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't', claude_code_entrypoint: 'e', CLAUDECODE: '1', claudecode: '1',
+    ANTHROPIC_API_KEY: 'k', anthropic_base_url: 'u', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPICAL: 'keep-not-prefix',
   } }));
-  assert.deepEqual(l.env, { CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*', CLAUDECODE: 'keep-not-prefix', AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
+  assert.deepEqual(l.env, { CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*', ANTHROPICAL: 'keep-not-prefix', AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 
 test('buildLaunch: an empty model passes no --model; a Claude alias or a bad id throws', () => {
@@ -55,11 +58,19 @@ test('deliver: herdr agent prompt on the seat\'s machine, text verbatim', async 
   assert.deepEqual(f.calls, [{ m: 'macbook', args: ['agent', 'prompt', 'demo-B1@m', 'line one\nline two'], timeout: 30_000 }]);
 });
 
-test('deliver: a text starting with - or / gets one leading space; no herdr name or a failure throws', async () => {
+test('deliver: the text goes verbatim, a leading - or / included; opts.raw changes nothing', async () => {
   const f = fake();
   await f.adapter.deliver(seat(), '--flag-like');
   await f.adapter.deliver(seat(), '/exit now');
-  assert.deepEqual(f.calls.map((c) => c.args[3]), [' --flag-like', ' /exit now']);
+  await f.adapter.deliver(seat(), 'plain', { raw: true });
+  await f.adapter.deliver(seat(), 'plain', { raw: false });
+  assert.deepEqual(f.calls.map((c) => c.args), [
+    ['agent', 'prompt', 'demo-B1@m', '--flag-like'], ['agent', 'prompt', 'demo-B1@m', '/exit now'],
+    ['agent', 'prompt', 'demo-B1@m', 'plain'], ['agent', 'prompt', 'demo-B1@m', 'plain']]);
+});
+
+test('deliver: no herdr name or a failure throws', async () => {
+  const f = fake();
   await assert.rejects(f.adapter.deliver(seat({ herdrName: undefined }), 'hi'), /no herdr agent name/);
   const blocked = fake({ status: 1, stderr: 'agent_blocked: the agent waits on an approval\n' });
   await assert.rejects(blocked.adapter.deliver(seat(), 'hi'), /herdr agent prompt failed: agent_blocked/);
@@ -97,29 +108,36 @@ test('readStatus: herdr states map through; only idle and done are safe to close
   assert.match((await agyAdapter.readStatus(seat(), { agent_status: 'idle' })).detail ?? '', /background/);
 });
 
-test('detectQuotaStop: real-looking pane text', () => {
+test('detectQuotaStop: real-looking banner text at the tail', () => {
   const q = (t: string) => agyAdapter.detectQuotaStop(seat(), null, t);
   assert.deepEqual(q('  some output\n  You have exhausted your quota on this model.\n  > '), { kind: 'quota', raw: 'exhausted your quota on this model' });
   assert.equal(q('AI: Out of credits')?.kind, 'quota');
   assert.equal(q("Your organization's prepaid balance is insufficient. Contact your administrator to add funds")?.kind, 'quota');
-  assert.deepEqual(q('rate limit active for gemini-4-neon; retry in 42s.'), { kind: 'rate_limit', raw: 'rate limit active for', retryAfterSec: 42 });
+  assert.deepEqual(q('rate limit active for gemini-4-neon; retry in 42s.'), { kind: 'rate_limit', raw: 'rate limit active for gemini-4-neon', retryAfterSec: 42 });
   assert.equal(q('429 Too Many Requests')?.kind, 'rate_limit');
-  assert.equal(q('RESOURCE_EXHAUSTED: try later')?.kind, 'rate_limit');
-  assert.equal(q('quota exhausted? no: all fine, 200 files read'), null);
-  assert.equal(q('Thinking... 12s'), null);
+  assert.equal(q('Error: RESOURCE_EXHAUSTED: try later')?.kind, 'rate_limit');
   assert.equal(agyAdapter.detectQuotaStop(seat(), null, undefined), null);
   assert.equal(agyAdapter.detectQuotaStop(seat(), null, ''), null);
 });
 
-test('guardInstallSpec: the global hooks file, this shim, one matcher for every platform', () => {
+test('detectQuotaStop: the agent\'s own output is not a stop (a 429 or "rate limit" in normal output, banner text far above the tail)', () => {
+  const q = (t: string) => agyAdapter.detectQuotaStop(seat(), null, t);
+  assert.equal(q('quota exhausted? no: all fine, 200 files read'), null);
+  assert.equal(q('Thinking... 12s'), null);
+  assert.equal(q('grep found 429 matches in 12 files\nthe rate limit docs say 60/min\nI am out of credits for jokes\n? for shortcuts'), null);
+  assert.equal(q('const RETRY = 429; // status code for a rate limit\nexpect(res.status).toBe(429)\n> '), null);
+  const old = 'You have exhausted your quota on this model.\n' + Array.from({ length: 8 }, (_, i) => `later output line ${i}`).join('\n');
+  assert.equal(q(old), null);
+});
+
+test('guardInstallSpec: a per-seat workspace file (never the global hooks.json), this shim, a catch-all matcher', () => {
   const g = agyAdapter.guardInstallSpec('C:/w/board/', 'win32');
-  assert.equal(g.targetPath, '~/.gemini/config/hooks.json');
+  assert.equal(g.targetPath, '.agents/hooks.json');
+  assert.ok(!g.targetPath.includes('.gemini'));
   assert.equal(g.shimFile, 'C:/w/board/kit/guard/shim-agy.mjs');
-  assert.equal(g.matchers.win32, g.matchers.darwin);
-  assert.equal(g.matchers.win32, g.matchers.linux);
-  for (const t of ['run_command', 'write_file', 'edit_file', 'ask_question']) assert.match(t, new RegExp(`^(?:${g.matchers.win32})$`));
-  assert.doesNotMatch('view_file', new RegExp(`^(?:${g.matchers.win32})$`));
+  for (const p of ['win32', 'darwin', 'linux'] as const) assert.equal(g.matchers[p], '.*');
   assert.match(g.notes, /\{"decision":"allow"\}/);
+  assert.match(g.notes, /excluded from git/);
 });
 
 test('instructionMapping, trustSpec, disableAskSpec', () => {
@@ -130,4 +148,15 @@ test('instructionMapping, trustSpec, disableAskSpec', () => {
   assert.match(m.note, /does not read CLAUDE\.md/);
   assert.deepEqual(agyAdapter.trustSpec(['C:/w/x'], 'win32'), { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] });
   assert.deepEqual(agyAdapter.disableAskSpec(), { toolName: 'ask_question', mechanism: 'hook', target: 'kit/guard/shim-agy.mjs' });
+});
+
+test('import order: agy.ts loaded first (not through index.ts) and squad-up.ts loaded first both work, in a fresh process', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  for (const [first, then] of [['cli/agents/agy.ts', 'cli/squad-up.ts'], ['cli/squad-up.ts', 'cli/agents/agy.ts'], ['cli/agents/index.ts', 'cli/squad-up.ts']]) {
+    const code = `const a = await import(${JSON.stringify(pathToFileURL(root + first).href)}); const b = await import(${JSON.stringify(pathToFileURL(root + then).href)});` +
+      ` const { getAdapter } = await import(${JSON.stringify(pathToFileURL(root + 'cli/agents/index.ts').href)}); console.log(getAdapter('agy').kind, typeof getAdapter('agy').deliver);`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${first} then ${then}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), 'agy function');
+  }
 });

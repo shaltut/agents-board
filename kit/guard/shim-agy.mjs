@@ -1,14 +1,17 @@
 // Antigravity (agy) PreToolUse hook (#4002 phase 5). Reads the hook input on stdin (camelCase protojson: toolCall {name,
-// args}; a shell command's text is args.CommandLine of tool run_command) and CB_ROLE, CB_PROTECTED_BRANCHES and
-// CB_ALLOW_ASK from its pane's env, asks core.mjs, and prints {"decision":"allow"} or {"decision":"deny","reason":"..."},
-// exit 0. agy treats anything else as a deny, and {} is not an allow, so allow is printed explicitly.
-// Note that agy's "allow" means auto-approve this call (docs/hooks.md in agy's builtin skill), not "no opinion".
-// It fails closed exactly like shim-claude.mjs: empty or unreadable input, a missing toolCall, an unknown tool, a shell
-// call without a string CommandLine, an unknown CB_ROLE, a missing or broken core.mjs, or any error blocks. No static
-// local imports: core.mjs loads dynamically, so a shim copied without it still blocks. The hooks.json matcher should
-// list only the tools below (guardInstallSpec in cli/agents/agy.ts); a tool outside it that reaches here is blocked.
-import { readFileSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+// args}, cwd, workspacePaths; a shell command's text is args.CommandLine of tool run_command) and CB_ROLE, CB_AGENT,
+// CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env, asks core.mjs, and prints {"decision":"allow"} or
+// {"decision":"deny","reason":"..."}, exit 0. agy treats anything else as a deny, and {} is not an allow, so allow is
+// printed explicitly. agy's "allow" means auto-approve this call (docs/hooks.md in agy's builtin skill), not Claude's
+// "no opinion": so every allow here is a decision, and a tool this shim cannot judge is a deny, never an allow.
+// The hook is installed per seat with a catch-all matcher (guardInstallSpec in cli/agents/agy.ts), so EVERY tool reaches
+// this file. It fails closed like shim-claude.mjs: empty or unreadable input, a missing toolCall, an unlisted tool, a
+// shell call without a string CommandLine, an unknown CB_ROLE, a missing or broken core.mjs, or any error denies. No
+// static local imports: core.mjs loads dynamically, so a shim copied without it still denies.
+// A pane with neither CB_ROLE nor CB_AGENT is not a board seat: this hook is deployed per seat, so it denies and names
+// the board guard rather than auto-approving a hand-started session.
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 let core = null;
@@ -19,15 +22,29 @@ try {
   loadErr = e;
 }
 
-const SHELL_TOOLS = new Set(['run_command']);
-const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content']);
-const ASK_TOOLS = new Set(['ask_question']);
+// Evidence per name: run_command (agy hooks.md); write_file, edit_file, read_file (agy builtin skills: native tool names);
+// write_to_file, view_file (agy builtin skills and hooks.md examples). replace_file_content and multi_replace_file_content
+// are strings in agy.exe, not confirmed as tools. The FIRST LIVE CHECK must capture the real tool names from a hook log and
+// fill these sets; until then a seat is refused tools it needs, on purpose.
+export const SHELL_TOOLS = Object.freeze(['run_command']);
+export const EDIT_TOOLS = Object.freeze(['write_file', 'edit_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content']);
+export const READ_TOOLS = Object.freeze(['read_file', 'view_file']);
+export const ASK_TOOLS = Object.freeze(['ask_question']);
+// Known and denied for every role: send_command_input writes stdin into a running command (an interpreter or ssh started
+// by an allowed run_command would take git push or a kill from it, past core.check). It can be evaluated as shell once a
+// hook log confirms its text field.
+export const DENIED_TOOLS = Object.freeze(['send_command_input']);
+// The edit target's argument name is unconfirmed too: only these are read; none present or a non-string denies.
+export const PATH_ARGS = Object.freeze(['TargetFile', 'AbsolutePath', 'FilePath', 'path', 'file_path']);
+const WRITE_DENY_SEGMENTS = ['.git', '.agents', '.gemini'];
+const WRITE_DENY_PREFIXES = [['kit', 'guard']];
+
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const detail = (e) => String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 200);
 const unreadable = (why) => ({ ok: false, reason: `guard could not read hook input (${why})` });
 const deny = (reason) => ({ decision: 'deny', reason });
 
-// The hook input as { ok: true, tool, command? } or { ok: false, reason }.
+// The hook input as { ok: true, tool, command?, call, input } or { ok: false, reason }.
 export function parseAgyInput(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return unreadable('empty stdin');
   let p;
@@ -41,26 +58,76 @@ export function parseAgyInput(raw) {
   if (!isObject(call)) return unreadable(`toolCall is ${call === undefined ? 'missing' : 'not an object'}`);
   const name = call.name;
   if (typeof name !== 'string' || !name) return unreadable('toolCall.name is missing or not a string');
-  if (SHELL_TOOLS.has(name)) {
+  if (SHELL_TOOLS.includes(name)) {
     const cmd = isObject(call.args) ? call.args.CommandLine : undefined;
     if (typeof cmd !== 'string') return unreadable(`toolCall.args.CommandLine is ${cmd === undefined ? 'missing' : 'not a string'}`);
-    return { ok: true, tool: 'shell', command: cmd };
+    return { ok: true, tool: 'shell', command: cmd, call, input: p };
   }
-  if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit' };
-  if (ASK_TOOLS.has(name)) return { ok: true, tool: 'ask' };
-  return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard reads run_command, ${[...EDIT_TOOLS].join(', ')} and ask_question` };
+  if (EDIT_TOOLS.includes(name)) return { ok: true, tool: 'edit', call, input: p };
+  if (READ_TOOLS.includes(name)) return { ok: true, tool: 'read', call, input: p };
+  if (ASK_TOOLS.includes(name)) return { ok: true, tool: 'ask', call, input: p };
+  if (DENIED_TOOLS.includes(name)) return { ok: false, reason: `tool ${name} is denied for every role until a hook log confirms its text field` };
+  return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard judges ${[...SHELL_TOOLS, ...EDIT_TOOLS, ...READ_TOOLS, ...ASK_TOOLS].join(', ')} only` };
 }
 
-// One hook run: raw stdin and an env (CB_ROLE, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
+// realpath of the nearest existing ancestor plus the rest: a symlink inside the workspace cannot lead a write out of it.
+function real(p) {
+  let head = p;
+  const tail = [];
+  while (!existsSync(head)) {
+    const up = dirname(head);
+    if (up === head) return p;
+    tail.unshift(head.slice(up.length).replace(/^[\\/]+/, ''));
+    head = up;
+  }
+  try { return resolve(realpathSync(head), ...tail); } catch { return p; }
+}
+const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+
+// null when the edit may go ahead, else the reason. Resolved against the seat's cwd; only PATH_ARGS names are read.
+export function checkEditPath(call, input) {
+  const args = isObject(call.args) ? call.args : {};
+  const given = PATH_ARGS.filter((k) => args[k] !== undefined);
+  if (given.length === 0) return `the edit's target path is missing (read: ${PATH_ARGS.join(', ')})`;
+  const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
+  const ws = Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' && input.workspacePaths[0] ? input.workspacePaths[0] : null;
+  const root0 = ws ?? cwd;
+  if (!root0) return 'the hook input names no cwd or workspace to confine edits to';
+  const root = real(resolve(root0));
+  const base = resolve(cwd ?? root0);
+  for (const k of given) {
+    const v = args[k];
+    if (typeof v !== 'string' || !v.trim()) return `the edit's target path (${k}) is not a non-empty string`;
+    const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
+    const rel = relative(root, abs);
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `editing outside the workspace (${k})`;
+    const segs = rel.split(sep).filter(Boolean).map(fold);
+    if (segs.some((s) => WRITE_DENY_SEGMENTS.includes(s))) return `editing inside ${WRITE_DENY_SEGMENTS.join(', ')} is not allowed (${k})`;
+    for (const pre of WRITE_DENY_PREFIXES) if (pre.every((s, i) => segs[i] === s)) return `editing inside ${pre.join('/')} is not allowed (${k})`;
+  }
+  return null;
+}
+
+// One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
   try {
     if (!core) return deny(`Blocked: guard failed to load core (${detail(loadErr)})`);
     const p = parseAgyInput(raw);
     if (!p.ok) return deny(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
+    if (!role && !String(env.CB_AGENT ?? '').trim()) {
+      return deny('Blocked: this pane is not a board seat (neither CB_ROLE nor CB_AGENT is set), and the board guard is deployed per seat: start the session with cb squad up, or run agy without this hook file');
+    }
+    if (p.tool === 'read') return { decision: 'allow' }; // a listed read tool: core has no rule for it
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
-    if (v?.allow === true) return { decision: 'allow' };
+    if (v?.allow === true) {
+      if (p.tool === 'edit') {
+        const why = checkEditPath(p.call, p.input);
+        if (why) return deny(`Blocked: ${why}`);
+      }
+      return { decision: 'allow' };
+    }
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return deny(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));
   } catch (e) {
