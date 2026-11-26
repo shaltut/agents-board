@@ -102,7 +102,25 @@
       "Read(//**/.git-credentials)",
       "Read(//**/.npmrc)",
       "Read(//**/.pypirc)",
-      "Read(//**/cb-seat-*.claude.json)"
+      "Read(//**/cb-seat-*.claude.json)",
+      "Read(//**/.env.ci)",
+      "Read(//**/.env.uat)",
+      "Read(//**/.env.sit)",
+      "Read(//**/.env.qa)",
+      "Read(//**/.env.bak)",
+      "Read(//**/.env.old)",
+      "Read(//**/.env.backup)",
+      "Read(//**/.env.save)",
+      "Read(//**/.env.prod.local)",
+      "Read(//**/.aws/credentials)",
+      "Read(//**/.kube/config)",
+      "Read(//**/.docker/config.json)",
+      "Read(//**/*.jks)",
+      "Read(//**/*.keystore)",
+      "Read(//**/*.tfvars)",
+      "Read(//**/.htpasswd)",
+      "Read(//**/service-account*.json)",
+      "Read(//**/.claude/.credentials.json)"
     ],
     "allow": [
       "Bash(cb *)"

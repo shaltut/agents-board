@@ -155,7 +155,11 @@ test('push options that name no branch are denied, with twins; the git -* twins 
 // and .env.example/sample/template stay readable.
 const SECRETS = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.prod', '.env.development', '.env.dev',
   '.env.staging', '.env.test', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.pgpass',
-  '.netrc', '.git-credentials', '.npmrc', '.pypirc', 'cb-seat-*.claude.json'];
+  '.netrc', '.git-credentials', '.npmrc', '.pypirc', 'cb-seat-*.claude.json',
+  // review #6 I2: the closed list, widened (the guard's shell rule is a pattern; this list can only name files)
+  '.env.ci', '.env.uat', '.env.sit', '.env.qa', '.env.bak', '.env.old', '.env.backup', '.env.save', '.env.prod.local',
+  '.aws/credentials', '.kube/config', '.docker/config.json', '*.jks', '*.keystore', '*.tfvars', '.htpasswd',
+  'service-account*.json', '.claude/.credentials.json'];
 test('every role denies reading secret files anywhere, and keeps .env.example readable', () => {
   for (const r of ROLES) {
     const { deny } = load(r).permissions;
