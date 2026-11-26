@@ -5,8 +5,8 @@ Card #3703, under #3594. Builds on `2026-11-22-squad-design.md`, `2026-11-23-squ
 
 ## Why
 
-A board project is a product: QHS is four repos (api in .NET, dashboard in React, app in Flutter, bot), iHop is two
-(iHop-Platform and ihop-reading-service). The board already treats a project as a product (cards, questions, pages and
+A board project is a product: ZED is four repos (api in .NET, dashboard in React, app in Flutter, bot), Iris is two
+(widgets and worker-service). The board already treats a project as a product (cards, questions, pages and
 the GitHub watch work across any number of repos), but the squad file and the PC runner, built this week, assume one
 repo per project: every squad session starts in that one folder, and `cb run` knows one git URL per project. Ahmed
 (2026-11-23): "tying one project to one repo does not make sense". This piece makes a project hold several **repos**,
@@ -16,7 +16,7 @@ and makes squad sessions, cards and runner jobs know which repo they work in.
 
 - **1a (Ahmed):** a card that touches several repos stays **one card**. At build it gets **one part per repo**, each
   built by a builder of that repo and ending in that repo's own PR.
-- **2a (Ahmed):** role counts are **per repo** (QHS: api builders 2, dashboard 1, app 1, bot 1), not one shared pool.
+- **2a (Ahmed):** role counts are **per repo** (ZED: api builders 2, dashboard 1, app 1, bot 1), not one shared pool.
 
 ## Goals, non-goals, anti-goals
 
@@ -31,7 +31,7 @@ and makes squad sessions, cards and runner jobs know which repo they work in.
 ## The model
 
 ```
-project qhs
+project zed
  ├─ repo api        areas: api           builders 2, reviewers 1
  ├─ repo dashboard  areas: dashboard     builders 1, reviewers 1
  ├─ repo app        areas: mobile        builders 1, reviewers 1
@@ -47,11 +47,11 @@ roles (builder, reviewer, owner) take a count per repo; project-wide roles keep 
 ```json
 {
   "supervise": true,
-  "machines": { "shaltoot": { "herdr": null, "board": "F:/Work/claude-board" },
-                "macbook":  { "herdr": "macbook", "board": "/Users/ahmedshaltoot/Work/claude-board" } },
+  "machines": { "shaltoot": { "herdr": null, "board": "C:/work/claude-board" },
+                "macbook":  { "herdr": "macbook", "board": "/Users/me/work/claude-board" } },
   "repos": {
-    "api":       { "home": true, "paths": { "shaltoot": "F:/Work/QHS/api", "macbook": "/Users/ahmedshaltoot/Work/QHS/api" } },
-    "dashboard": { "paths": { "shaltoot": "F:/Work/QHS/dashboard", "macbook": "/Users/ahmedshaltoot/Work/QHS/dashboard" } }
+    "api":       { "home": true, "paths": { "shaltoot": "C:/work/ZED/api", "macbook": "/Users/me/work/ZED/api" } },
+    "dashboard": { "paths": { "shaltoot": "C:/work/ZED/dashboard", "macbook": "/Users/me/work/ZED/dashboard" } }
   },
   "areas": [ { "name": "api", "repo": "api" }, { "name": "dashboard", "repo": "dashboard" } ],
   "roles": {
@@ -66,8 +66,8 @@ roles (builder, reviewer, owner) take a count per repo; project-wide roles keep 
 - A squad file without `repos` is today's shape: one repo named `main`, its path the machine's `repo`; area strings
   stay strings. Nothing existing has to change.
 - `home`: exactly one repo; project-wide roles (lead, architect, qa, investigator) start there.
-- Names: repo-bound sessions carry the repo, `qhs-api-B1@macbook`, `qhs-dashboard-R1@macbook`; a one-repo project keeps
-  `ihop-B1@macbook`. Owners stay one per area (an area names its repo, so the owner starts there).
+- Names: repo-bound sessions carry the repo, `zed-api-B1@macbook`, `zed-dashboard-R1@macbook`; a one-repo project keeps
+  `iris-B1@macbook`. Owners stay one per area (an area names its repo, so the owner starts there).
 - The Mac cap of 8 is checked on the sum of all counts on the Mac, as today.
 
 ### 2. Sessions know their repo
@@ -95,7 +95,7 @@ started, or a one-repo project) counts as the home repo.
   in different stacks would review code it does not know.
 - **Merge and QA stay card-level**: the lead merges all PRs (in the order the design page gives), QA checks the whole
   change on dev once.
-- The digest and the card show parts in plain words: "build: api done (PR #12), dashboard building (qhs-dashboard-B1)".
+- The digest and the card show parts in plain words: "build: api done (PR #12), dashboard building (zed-dashboard-B1)".
 
 ### 5. Supervisor
 
@@ -111,7 +111,7 @@ started, or a one-repo project) counts as the home repo.
   fields a project has today). A project without `repos` is one repo `main`, as today.
 - `cb run <recipe> --sha <sha> [--repo <name>]`: the repo defaults to the session's repo; a recipe name is looked up in
   that repo. `cb jobs <project>` lists recipes per repo.
-- Slot clones are per project and repo: `C:/r/qhs-api-1`, `C:/r/qhs-dashboard-1`. The slot count stays global (2).
+- Slot clones are per project and repo: `C:/runs/zed-api-1`, `C:/runs/zed-dashboard-1`. The slot count stays global (2).
 - `cb.jobs.repo` and `cb.runner_recipes.repo` columns; the board message names the repo when the project has several.
 
 ### 7. Prompts and help
@@ -146,16 +146,16 @@ started, or a one-repo project) counts as the home repo.
   with a digest line.
 - **Runner repo names must match the squad's.** The runner publishes its repos per project at start; `cb run` with a
   repo the runner does not have is refused, naming the repos it has. No fallback to another repo.
-- **Session names:** the home repo keeps today's names (`ihop-B1@macbook`), other repos carry the repo
-  (`ihop-reading-B1@macbook`), so turning iHop into two repos needs no drain.
+- **Session names:** the home repo keeps today's names (`iris-B1@macbook`), other repos carry the repo
+  (`iris-reading-B1@macbook`), so turning Iris into two repos needs no drain.
 - Holds, stalls, closing marks, restore and `cb resume` count a part's assignee exactly like a card's.
 
-## What a person sees (QHS example)
+## What a person sees (ZED example)
 
 1. Ahmed adds "Show the visit date on the dashboard" tagged `api` and `dashboard`.
 2. The api owner (or the architect) designs it; the card now says repos: api, dashboard. Ahmed approves.
-3. The card enters build with two parts. The supervisor starts `qhs-api-B1@macbook` in the api repo and
-   `qhs-dashboard-B1@macbook` in the dashboard repo. Each builds, runs `cb run test --repo ...` on the PC, opens its PR.
+3. The card enters build with two parts. The supervisor starts `zed-api-B1@macbook` in the api repo and
+   `zed-dashboard-B1@macbook` in the dashboard repo. Each builds, runs `cb run test --repo ...` on the PC, opens its PR.
 4. When both PRs exist the card goes to review: an api reviewer and a dashboard reviewer each give a GO.
 5. The lead merges api first, then dashboard; QA checks the screen on dev; the card is done.
 
@@ -166,7 +166,7 @@ started, or a one-repo project) counts as the home repo.
 - **Merge order across repos** matters (API before the screen that calls it): the design page states it; the lead
   follows it.
 - **More sessions per card**: a two-repo card uses two builders and two reviewers. The Mac cap still holds.
-- **Old squad files**: covered by the one-repo default; tests pin that `ihop`'s current shape plans exactly as today.
+- **Old squad files**: covered by the one-repo default; tests pin that `iris`'s current shape plans exactly as today.
 
 ## Tests
 

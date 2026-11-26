@@ -85,7 +85,7 @@ test('tick: stuck work (silent holder, long block, review with no reviewer, some
   await sql`select cb.task_add(project => 'demo', title => 'Cross-review #5 (W2)', status => 'next', labels => '["review"]', actor => 'orch@test')`;
   await sql`select cb.task_add(project => 'demo', title => 'W4 job', status => 'in_progress', assignee => 'W4@m', actor => 'orch@test')`;
   await sql`select cb.log('demo', 'I am on it', '7', '{}', 'W3@m')`;
-  await sql`select cb.task_add(project => 'demo', title => 'PO questions for Omar', status => 'review', assignee => 'orch@test', actor => 'orch@test')`;
+  await sql`select cb.task_add(project => 'demo', title => 'PO questions for Cai', status => 'review', assignee => 'orch@test', actor => 'orch@test')`;
   await ago(sql, sql`actor in ('W7@m', 'W9@m')`, '2 hours');
   const r = cb(['tick', 'demo']);
   assert.match(r.out, /STUCK/);
@@ -140,14 +140,14 @@ test('tick: quiet huddles and held locks', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
   await sql`select cb.iam('macbook', 'p1', 'W1@m', 'demo')`;
-  await sql`select cb.huddle_open(topic => 'Hijri dates', members => '["W1@m"]', actor => 'orch@test', project => 'demo')`;
+  await sql`select cb.huddle_open(topic => 'Date parsing', members => '["W1@m"]', actor => 'orch@test', project => 'demo')`;
   await sql`select cb.huddle_open(topic => 'fresh talk', actor => 'orch@test', project => 'demo')`;
   await ago(sql, sql`(data ->> 'huddle')::int = 1`, '25 minutes');
   await sql`select cb.lock_take('db', 'W8@m')`;
   await sql`select cb.lock_take('db', 'W3@m')`;
   await sql`select cb.log('demo', 'running DB suites', null, '{}', 'W8@m')`; // the holder is alive
   const r = cb(['tick', 'demo']);
-  assert.match(r.out, /HUDDLES\n\s+huddle #1 'Hijri dates' quiet 25m → cb huddle close 1 '<outcome>'/);
+  assert.match(r.out, /HUDDLES\n\s+huddle #1 'Date parsing' quiet 25m → cb huddle close 1 '<outcome>'/);
   assert.doesNotMatch(r.out, /fresh talk/);
   assert.match(r.out, /LOCKS\n\s+lock db: W8@m holds it \S+, queue W3@m → cb tell W8@m 'release lock db when done: 1 waiting'/);
 });
@@ -410,21 +410,21 @@ test('q quotes for bash and PowerShell: safe words bare, the rest single-quoted 
 
 test('prRef: an Azure DevOps link is never looked up on GitHub, even with GITHUB_REPO_<PROJECT> set (#3746)', async () => {
   const { prRef } = await import('../cli/tick.ts');
-  const had = process.env.GITHUB_REPO_QHS;
-  process.env.GITHUB_REPO_QHS = 'o/r';
+  const had = process.env.GITHUB_REPO_ZED;
+  process.env.GITHUB_REPO_ZED = 'o/r';
   try {
-    assert.equal(prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
-    assert.equal(prRef('dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
-    // the clone URL's userinfo form, the old visualstudio.com host, any other site: none is a PR of GITHUB_REPO_QHS
-    assert.equal(prRef('https://o@dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs'), null);
-    assert.equal(prRef('https://o.visualstudio.com/p/_git/r/pullrequest/7', 'qhs'), null);
-    assert.equal(prRef('https://gitlab.example.org/o/r/-/merge_requests/7', 'qhs'), null);
-    // GitHub links resolve as before: a full URL, and a bare number (with or without # and a trailing slash) through GITHUB_REPO_QHS
-    assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'qhs'), { repo: 'acme/app', n: '9' });
-    assert.deepEqual(prRef('#15', 'qhs'), { repo: 'o/r', n: '15' });
-    assert.deepEqual(prRef('15/', 'qhs'), { repo: 'o/r', n: '15' });
+    assert.equal(prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'zed'), null);
+    assert.equal(prRef('dev.azure.com/o/p/_git/r/pullrequest/7', 'zed'), null);
+    // the clone URL's userinfo form, the old visualstudio.com host, any other site: none is a PR of GITHUB_REPO_ZED
+    assert.equal(prRef('https://o@dev.azure.com/o/p/_git/r/pullrequest/7', 'zed'), null);
+    assert.equal(prRef('https://o.visualstudio.com/p/_git/r/pullrequest/7', 'zed'), null);
+    assert.equal(prRef('https://gitlab.example.org/o/r/-/merge_requests/7', 'zed'), null);
+    // GitHub links resolve as before: a full URL, and a bare number (with or without # and a trailing slash) through GITHUB_REPO_ZED
+    assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'zed'), { repo: 'acme/app', n: '9' });
+    assert.deepEqual(prRef('#15', 'zed'), { repo: 'o/r', n: '15' });
+    assert.deepEqual(prRef('15/', 'zed'), { repo: 'o/r', n: '15' });
   } finally {
-    if (had === undefined) delete process.env.GITHUB_REPO_QHS; else process.env.GITHUB_REPO_QHS = had;
+    if (had === undefined) delete process.env.GITHUB_REPO_ZED; else process.env.GITHUB_REPO_ZED = had;
   }
 });
 

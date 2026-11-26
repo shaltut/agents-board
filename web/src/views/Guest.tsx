@@ -16,7 +16,7 @@ import { Account } from '@/components/Account'
 type GuestTask = Task & { my_notes: { summary: string; at: string }[] }
 
 
-/** What a guest (Omar, Iman) sees through their link: only what Ahmed handed to them.
+/** What a guest (Cai, Ana) sees through their link: only what Ahmed handed to them.
  *  Tower with the engineering taken out: one column, no callsigns or task numbers, the same lamp. */
 export function Guest({ user }: { user: User }) {
   const { data, isLoading } = useQuery({ queryKey: ['me'], queryFn: () => get<{ questions: Question[]; tasks: GuestTask[] }>('/api/me') })

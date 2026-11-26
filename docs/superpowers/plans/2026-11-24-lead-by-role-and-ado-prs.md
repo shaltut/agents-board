@@ -23,7 +23,7 @@
 ## Review Focus
 
 1. **A lead-role session in another project.** `cb._role(a)` reads the actor's latest session, whichever project it is in. A check that must mean "lead of THIS project" must also test the project. Each task-1 test seeds the lead in project A and asserts nothing changes in project B.
-2. **ihop-squad unchanged.** Its plan today: `orch@shaltoot` is live in ihop-squad, so it is skipped, nothing renamed. The squad-up test pins it.
+2. **iris-squad unchanged.** Its plan today: `orch@shaltoot` is live in iris-squad, so it is skipped, nothing renamed. The squad-up test pins it.
 3. **Push-fence false positives.** `git push origin feature/development-fix` and `git push origin my-staging` must NOT be blocked when `development` and `staging` are protected; the match is on the whole destination branch name (globs only where the list has `*`).
 4. **Push-fence bypass forms.** `git -C path push origin x:development`, `git push origin +x:refs/heads/development`, `git push --delete origin development`, `git push origin :development` must be blocked.
 5. **Hook without the variable.** With `CB_PROTECTED_BRANCHES` unset or empty, the hook's output is byte-for-byte today's for every existing test.
@@ -66,7 +66,7 @@
 - Produces: accepted PR link forms at build for a card with repos: `^https://github\.com/[^/]+/[^/]+/pull/[0-9]+/?$` and `^https://dev\.azure\.com/[^/]+/[^/]+/_git/[^/]+/pullrequest/[0-9]+/?$`.
 - Produces: `prRef(link, project)` returns `null` for any `dev.azure.com` link, even when `GITHUB_REPO_<PROJECT>` is set (export it if the test needs it).
 
-- [ ] **Step 1: failing tests**: build pass with `https://dev.azure.com/org/proj/_git/api/pullrequest/12` succeeds for a part; `https://dev.azure.com/org/proj/_git/api/pullrequests` (no number) and `https://dev.azure.com/org/proj/pullrequest/12` (no `_git/<repo>`) are refused, and the error names both forms; `prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'qhs')` is null with `GITHUB_REPO_QHS=o/r` set.
+- [ ] **Step 1: failing tests**: build pass with `https://dev.azure.com/org/proj/_git/api/pullrequest/12` succeeds for a part; `https://dev.azure.com/org/proj/_git/api/pullrequests` (no number) and `https://dev.azure.com/org/proj/pullrequest/12` (no `_git/<repo>`) are refused, and the error names both forms; `prRef('https://dev.azure.com/o/p/_git/r/pullrequest/7', 'zed')` is null with `GITHUB_REPO_ZED=o/r` set.
 - [ ] **Step 2: run, see them fail**
 - [ ] **Step 3: code**: the regex and error text (`give the full pull request URL: https://github.com/<owner>/<repo>/pull/<n> or https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>`); `prRef` early return.
 - [ ] **Step 4: role files**, each a short block headed "On Azure DevOps (a dev.azure.com PR link)":

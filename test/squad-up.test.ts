@@ -324,11 +324,11 @@ test('squad up: agent_not_ready keeps the pane and prints how to finish; any oth
 
 // ---- several repos in one project (#3703) ----
 // the saved shape (squad_set fills models and home); dashboard listed first: the home repo still comes first
-const QHS: any = {
-  machines: { shaltoot: { herdr: null, board: 'F:/Work/claude-board' }, macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
+const ZED: any = {
+  machines: { shaltoot: { herdr: null, board: 'C:/work/claude-board' }, macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
   repos: {
-    dashboard: { home: false, paths: { shaltoot: 'F:/Work/QHS/dashboard', macbook: '/Users/me/Work/QHS/dashboard' } },
-    api: { home: true, paths: { shaltoot: 'F:/Work/QHS/api', macbook: '/Users/me/Work/QHS/api' } },
+    dashboard: { home: false, paths: { shaltoot: 'C:/work/ZED/dashboard', macbook: '/Users/me/Work/ZED/dashboard' } },
+    api: { home: true, paths: { shaltoot: 'C:/work/ZED/api', macbook: '/Users/me/Work/ZED/api' } },
   },
   areas: [{ name: 'api', repo: 'api' }, { name: 'dashboard', repo: 'dashboard' }],
   roles: {
@@ -342,98 +342,98 @@ const QHS: any = {
 };
 
 test('repos: one name per repo, folders from the repo paths', () => {
-  const w = wantList('qhs', QHS);
+  const w = wantList('zed', ZED);
   // seatKey (#4002): the key a squad seat override is saved under, as cb.squad_set and cb._expected_model read it
   assert.deepEqual(w, [
     { name: 'orch@shaltoot', role: 'lead', repo: 'api', seatKey: '1' },
-    { name: 'qhs-A1@shaltoot', role: 'architect', repo: 'api', seatKey: '1' },
-    { name: 'qhs-O-api@shaltoot', role: 'owner', area: 'api', repo: 'api', seatKey: 'api' },
-    { name: 'qhs-O-dashboard@shaltoot', role: 'owner', area: 'dashboard', repo: 'dashboard', seatKey: 'dashboard' },
-    { name: 'qhs-B1@macbook', role: 'builder', repo: 'api', seatKey: 'api:1' },
-    { name: 'qhs-B2@macbook', role: 'builder', repo: 'api', seatKey: 'api:2' },
-    { name: 'qhs-dashboard-B1@macbook', role: 'builder', repo: 'dashboard', seatKey: 'dashboard:1' },
-    { name: 'qhs-R1@macbook', role: 'reviewer', repo: 'api', seatKey: 'api:1' },
-    { name: 'qhs-dashboard-R1@macbook', role: 'reviewer', repo: 'dashboard', seatKey: 'dashboard:1' },
-    { name: 'qhs-Q1@macbook', role: 'qa', repo: 'api', seatKey: '1' },
+    { name: 'zed-A1@shaltoot', role: 'architect', repo: 'api', seatKey: '1' },
+    { name: 'zed-O-api@shaltoot', role: 'owner', area: 'api', repo: 'api', seatKey: 'api' },
+    { name: 'zed-O-dashboard@shaltoot', role: 'owner', area: 'dashboard', repo: 'dashboard', seatKey: 'dashboard' },
+    { name: 'zed-B1@macbook', role: 'builder', repo: 'api', seatKey: 'api:1' },
+    { name: 'zed-B2@macbook', role: 'builder', repo: 'api', seatKey: 'api:2' },
+    { name: 'zed-dashboard-B1@macbook', role: 'builder', repo: 'dashboard', seatKey: 'dashboard:1' },
+    { name: 'zed-R1@macbook', role: 'reviewer', repo: 'api', seatKey: 'api:1' },
+    { name: 'zed-dashboard-R1@macbook', role: 'reviewer', repo: 'dashboard', seatKey: 'dashboard:1' },
+    { name: 'zed-Q1@macbook', role: 'qa', repo: 'api', seatKey: '1' },
   ]);
-  const l = (n: string, first: 'next' | 'resume' = 'next') => launchFor('qhs', QHS, w.find((x) => x.name === n)!, first);
-  const b = l('qhs-dashboard-B1@macbook');
-  assert.equal(b.cwd, '/Users/me/Work/QHS/dashboard');
+  const l = (n: string, first: 'next' | 'resume' = 'next') => launchFor('zed', ZED, w.find((x) => x.name === n)!, first);
+  const b = l('zed-dashboard-B1@macbook');
+  assert.equal(b.cwd, '/Users/me/Work/ZED/dashboard');
   assert.equal(b.repo, 'dashboard');
-  assert.equal(b.prompt, 'cb iam qhs-dashboard-B1@macbook qhs --role builder --model sonnet --repo dashboard, then cb role builder, then cb next');
-  assert.equal(l('qhs-B1@macbook').cwd, '/Users/me/Work/QHS/api');
-  const o = l('qhs-O-dashboard@shaltoot');
-  assert.equal(o.cwd, 'F:/Work/QHS/dashboard');
-  assert.equal(o.prompt, 'cb iam qhs-O-dashboard@shaltoot qhs --role owner --area dashboard --model opus --repo dashboard, then cb role owner, then cb next');
-  assert.equal(l('orch@shaltoot').prompt, 'cb iam orch@shaltoot qhs --role lead --model opus --repo api, then cb role lead, then cb next');
-  assert.equal(l('orch@shaltoot').cwd, 'F:/Work/QHS/api');
+  assert.equal(b.prompt, 'cb iam zed-dashboard-B1@macbook zed --role builder --model sonnet --repo dashboard, then cb role builder, then cb next');
+  assert.equal(l('zed-B1@macbook').cwd, '/Users/me/Work/ZED/api');
+  const o = l('zed-O-dashboard@shaltoot');
+  assert.equal(o.cwd, 'C:/work/ZED/dashboard');
+  assert.equal(o.prompt, 'cb iam zed-O-dashboard@shaltoot zed --role owner --area dashboard --model opus --repo dashboard, then cb role owner, then cb next');
+  assert.equal(l('orch@shaltoot').prompt, 'cb iam orch@shaltoot zed --role lead --model opus --repo api, then cb role lead, then cb next');
+  assert.equal(l('orch@shaltoot').cwd, 'C:/work/ZED/api');
   // architect and qa read across repos: every repo path on their machine
-  assert.equal(l('qhs-Q1@macbook').cwd, '/Users/me/Work/QHS/api');
-  assert.equal(l('qhs-Q1@macbook').prompt, 'cb iam qhs-Q1@macbook qhs --role qa --model sonnet --repo api, then cb role qa, then cb next. Repos: api /Users/me/Work/QHS/api, dashboard /Users/me/Work/QHS/dashboard');
-  assert.equal(l('qhs-A1@shaltoot').prompt, 'cb iam qhs-A1@shaltoot qhs --role architect --model opus --repo api, then cb role architect, then cb next. Repos: api F:/Work/QHS/api, dashboard F:/Work/QHS/dashboard');
-  assert.equal(l('qhs-A1@shaltoot', 'resume').prompt, 'cb iam qhs-A1@shaltoot qhs --role architect --model opus --repo api, then cb role architect, then cb resume. Repos: api F:/Work/QHS/api, dashboard F:/Work/QHS/dashboard');
+  assert.equal(l('zed-Q1@macbook').cwd, '/Users/me/Work/ZED/api');
+  assert.equal(l('zed-Q1@macbook').prompt, 'cb iam zed-Q1@macbook zed --role qa --model sonnet --repo api, then cb role qa, then cb next. Repos: api /Users/me/Work/ZED/api, dashboard /Users/me/Work/ZED/dashboard');
+  assert.equal(l('zed-A1@shaltoot').prompt, 'cb iam zed-A1@shaltoot zed --role architect --model opus --repo api, then cb role architect, then cb next. Repos: api C:/work/ZED/api, dashboard C:/work/ZED/dashboard');
+  assert.equal(l('zed-A1@shaltoot', 'resume').prompt, 'cb iam zed-A1@shaltoot zed --role architect --model opus --repo api, then cb role architect, then cb resume. Repos: api C:/work/ZED/api, dashboard C:/work/ZED/dashboard');
   // a repo with no path on that machine is left out of the repos line
-  const noDash = structuredClone(QHS); delete noDash.repos.dashboard.paths.macbook;
-  assert.ok(launchFor('qhs', noDash, w.find((x) => x.name === 'qhs-Q1@macbook')!).prompt.endsWith('then cb next. Repos: api /Users/me/Work/QHS/api'));
+  const noDash = structuredClone(ZED); delete noDash.repos.dashboard.paths.macbook;
+  assert.ok(launchFor('zed', noDash, w.find((x) => x.name === 'zed-Q1@macbook')!).prompt.endsWith('then cb next. Repos: api /Users/me/Work/ZED/api'));
 });
 
-// the ihop squad as saved today (no repos): captured from wantList and launchFor on the base commit (3d2e210)
-const IHOP: any = {"areas":["claims","preauth","fwa","kb","platform"],"roles":{"qa":{"count":1,"model":"sonnet","machine":"macbook"},"lead":{"count":1,"model":"opus","machine":"shaltoot"},"owner":{"model":"opus","machine":"shaltoot"},"builder":{"count":3,"model":"sonnet","machine":"macbook"},"reviewer":{"count":2,"model":"opus","machine":"macbook"},"architect":{"count":1,"model":"opus","machine":"shaltoot"},"investigator":{"count":1,"model":"opus","machine":"macbook"}},"machines":{"macbook":{"repo":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","board":"/Users/ahmedshaltoot/Work/claude-board","herdr":"macbook"},"shaltoot":{"repo":"F:/Work/Tawuniya/iHop-Platform","board":"F:/Work/claude-board","herdr":null}},"supervise":true};
-const IHOP_WANT = [{"name":"orch@shaltoot","role":"lead"},{"name":"ihop-A1@shaltoot","role":"architect"},{"name":"ihop-O-claims@shaltoot","role":"owner","area":"claims"},{"name":"ihop-O-preauth@shaltoot","role":"owner","area":"preauth"},{"name":"ihop-O-fwa@shaltoot","role":"owner","area":"fwa"},{"name":"ihop-O-kb@shaltoot","role":"owner","area":"kb"},{"name":"ihop-O-platform@shaltoot","role":"owner","area":"platform"},{"name":"ihop-B1@macbook","role":"builder"},{"name":"ihop-B2@macbook","role":"builder"},{"name":"ihop-B3@macbook","role":"builder"},{"name":"ihop-R1@macbook","role":"reviewer"},{"name":"ihop-R2@macbook","role":"reviewer"},{"name":"ihop-Q1@macbook","role":"qa"},{"name":"ihop-I1@macbook","role":"investigator"}];
-const IHOP_LAUNCH = [{"name":"orch@shaltoot","role":"lead","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/lead.json","prompt":"cb iam orch@shaltoot ihop --role lead --model opus, then cb role lead, then cb next"},{"name":"ihop-A1@shaltoot","role":"architect","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/architect.json","prompt":"cb iam ihop-A1@shaltoot ihop --role architect --model opus, then cb role architect, then cb next"},{"name":"ihop-O-claims@shaltoot","role":"owner","area":"claims","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/owner.json","prompt":"cb iam ihop-O-claims@shaltoot ihop --role owner --area claims --model opus, then cb role owner, then cb next"},{"name":"ihop-O-preauth@shaltoot","role":"owner","area":"preauth","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/owner.json","prompt":"cb iam ihop-O-preauth@shaltoot ihop --role owner --area preauth --model opus, then cb role owner, then cb next"},{"name":"ihop-O-fwa@shaltoot","role":"owner","area":"fwa","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/owner.json","prompt":"cb iam ihop-O-fwa@shaltoot ihop --role owner --area fwa --model opus, then cb role owner, then cb next"},{"name":"ihop-O-kb@shaltoot","role":"owner","area":"kb","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/owner.json","prompt":"cb iam ihop-O-kb@shaltoot ihop --role owner --area kb --model opus, then cb role owner, then cb next"},{"name":"ihop-O-platform@shaltoot","role":"owner","area":"platform","model":"opus","machine":"shaltoot","herdr":null,"cwd":"F:/Work/Tawuniya/iHop-Platform","settings":"F:/Work/claude-board/kit/permissions/owner.json","prompt":"cb iam ihop-O-platform@shaltoot ihop --role owner --area platform --model opus, then cb role owner, then cb next"},{"name":"ihop-B1@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json","prompt":"cb iam ihop-B1@macbook ihop --role builder --model sonnet, then cb role builder, then cb next"},{"name":"ihop-B2@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json","prompt":"cb iam ihop-B2@macbook ihop --role builder --model sonnet, then cb role builder, then cb next"},{"name":"ihop-B3@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json","prompt":"cb iam ihop-B3@macbook ihop --role builder --model sonnet, then cb role builder, then cb next"},{"name":"ihop-R1@macbook","role":"reviewer","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/reviewer.json","prompt":"cb iam ihop-R1@macbook ihop --role reviewer --model opus, then cb role reviewer, then cb next"},{"name":"ihop-R2@macbook","role":"reviewer","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/reviewer.json","prompt":"cb iam ihop-R2@macbook ihop --role reviewer --model opus, then cb role reviewer, then cb next"},{"name":"ihop-Q1@macbook","role":"qa","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/qa.json","prompt":"cb iam ihop-Q1@macbook ihop --role qa --model sonnet, then cb role qa, then cb next"},{"name":"ihop-I1@macbook","role":"investigator","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/ahmedshaltoot/Work/Tachyhealth/Tawuniya/iHop-Platform","settings":"/Users/ahmedshaltoot/Work/claude-board/kit/permissions/investigator.json","prompt":"cb iam ihop-I1@macbook ihop --role investigator --model opus, then cb role investigator, then cb next"}];
-const IHOP_RESUME = ["cb iam orch@shaltoot ihop --role lead --model opus, then cb role lead, then cb resume","cb iam ihop-A1@shaltoot ihop --role architect --model opus, then cb role architect, then cb resume","cb iam ihop-O-claims@shaltoot ihop --role owner --area claims --model opus, then cb role owner, then cb resume","cb iam ihop-O-preauth@shaltoot ihop --role owner --area preauth --model opus, then cb role owner, then cb resume","cb iam ihop-O-fwa@shaltoot ihop --role owner --area fwa --model opus, then cb role owner, then cb resume","cb iam ihop-O-kb@shaltoot ihop --role owner --area kb --model opus, then cb role owner, then cb resume","cb iam ihop-O-platform@shaltoot ihop --role owner --area platform --model opus, then cb role owner, then cb resume","cb iam ihop-B1@macbook ihop --role builder --model sonnet, then cb role builder, then cb resume","cb iam ihop-B2@macbook ihop --role builder --model sonnet, then cb role builder, then cb resume","cb iam ihop-B3@macbook ihop --role builder --model sonnet, then cb role builder, then cb resume","cb iam ihop-R1@macbook ihop --role reviewer --model opus, then cb role reviewer, then cb resume","cb iam ihop-R2@macbook ihop --role reviewer --model opus, then cb role reviewer, then cb resume","cb iam ihop-Q1@macbook ihop --role qa --model sonnet, then cb role qa, then cb resume","cb iam ihop-I1@macbook ihop --role investigator --model opus, then cb role investigator, then cb resume"];
+// the iris squad as saved today (no repos): captured from wantList and launchFor on the base commit (3d2e210)
+const IRIS: any = {"areas":["claims","preauth","fwa","kb","platform"],"roles":{"qa":{"count":1,"model":"sonnet","machine":"macbook"},"lead":{"count":1,"model":"opus","machine":"shaltoot"},"owner":{"model":"opus","machine":"shaltoot"},"builder":{"count":3,"model":"sonnet","machine":"macbook"},"reviewer":{"count":2,"model":"opus","machine":"macbook"},"architect":{"count":1,"model":"opus","machine":"shaltoot"},"investigator":{"count":1,"model":"opus","machine":"macbook"}},"machines":{"macbook":{"repo":"/Users/me/work/acme/widgets","board":"/Users/me/work/claude-board","herdr":"macbook"},"shaltoot":{"repo":"C:/work/acme/widgets","board":"C:/work/claude-board","herdr":null}},"supervise":true};
+const IRIS_WANT = [{"name":"orch@shaltoot","role":"lead"},{"name":"iris-A1@shaltoot","role":"architect"},{"name":"iris-O-claims@shaltoot","role":"owner","area":"claims"},{"name":"iris-O-preauth@shaltoot","role":"owner","area":"preauth"},{"name":"iris-O-fwa@shaltoot","role":"owner","area":"fwa"},{"name":"iris-O-kb@shaltoot","role":"owner","area":"kb"},{"name":"iris-O-platform@shaltoot","role":"owner","area":"platform"},{"name":"iris-B1@macbook","role":"builder"},{"name":"iris-B2@macbook","role":"builder"},{"name":"iris-B3@macbook","role":"builder"},{"name":"iris-R1@macbook","role":"reviewer"},{"name":"iris-R2@macbook","role":"reviewer"},{"name":"iris-Q1@macbook","role":"qa"},{"name":"iris-I1@macbook","role":"investigator"}];
+const IRIS_LAUNCH = [{"name":"orch@shaltoot","role":"lead","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/lead.json","prompt":"cb iam orch@shaltoot iris --role lead --model opus, then cb role lead, then cb next"},{"name":"iris-A1@shaltoot","role":"architect","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/architect.json","prompt":"cb iam iris-A1@shaltoot iris --role architect --model opus, then cb role architect, then cb next"},{"name":"iris-O-claims@shaltoot","role":"owner","area":"claims","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/owner.json","prompt":"cb iam iris-O-claims@shaltoot iris --role owner --area claims --model opus, then cb role owner, then cb next"},{"name":"iris-O-preauth@shaltoot","role":"owner","area":"preauth","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/owner.json","prompt":"cb iam iris-O-preauth@shaltoot iris --role owner --area preauth --model opus, then cb role owner, then cb next"},{"name":"iris-O-fwa@shaltoot","role":"owner","area":"fwa","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/owner.json","prompt":"cb iam iris-O-fwa@shaltoot iris --role owner --area fwa --model opus, then cb role owner, then cb next"},{"name":"iris-O-kb@shaltoot","role":"owner","area":"kb","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/owner.json","prompt":"cb iam iris-O-kb@shaltoot iris --role owner --area kb --model opus, then cb role owner, then cb next"},{"name":"iris-O-platform@shaltoot","role":"owner","area":"platform","model":"opus","machine":"shaltoot","herdr":null,"cwd":"C:/work/acme/widgets","settings":"C:/work/claude-board/kit/permissions/owner.json","prompt":"cb iam iris-O-platform@shaltoot iris --role owner --area platform --model opus, then cb role owner, then cb next"},{"name":"iris-B1@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/builder.json","prompt":"cb iam iris-B1@macbook iris --role builder --model sonnet, then cb role builder, then cb next"},{"name":"iris-B2@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/builder.json","prompt":"cb iam iris-B2@macbook iris --role builder --model sonnet, then cb role builder, then cb next"},{"name":"iris-B3@macbook","role":"builder","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/builder.json","prompt":"cb iam iris-B3@macbook iris --role builder --model sonnet, then cb role builder, then cb next"},{"name":"iris-R1@macbook","role":"reviewer","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/reviewer.json","prompt":"cb iam iris-R1@macbook iris --role reviewer --model opus, then cb role reviewer, then cb next"},{"name":"iris-R2@macbook","role":"reviewer","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/reviewer.json","prompt":"cb iam iris-R2@macbook iris --role reviewer --model opus, then cb role reviewer, then cb next"},{"name":"iris-Q1@macbook","role":"qa","model":"sonnet","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/qa.json","prompt":"cb iam iris-Q1@macbook iris --role qa --model sonnet, then cb role qa, then cb next"},{"name":"iris-I1@macbook","role":"investigator","model":"opus","machine":"macbook","herdr":"macbook","cwd":"/Users/me/work/acme/widgets","settings":"/Users/me/work/claude-board/kit/permissions/investigator.json","prompt":"cb iam iris-I1@macbook iris --role investigator --model opus, then cb role investigator, then cb next"}];
+const IRIS_RESUME = ["cb iam orch@shaltoot iris --role lead --model opus, then cb role lead, then cb resume","cb iam iris-A1@shaltoot iris --role architect --model opus, then cb role architect, then cb resume","cb iam iris-O-claims@shaltoot iris --role owner --area claims --model opus, then cb role owner, then cb resume","cb iam iris-O-preauth@shaltoot iris --role owner --area preauth --model opus, then cb role owner, then cb resume","cb iam iris-O-fwa@shaltoot iris --role owner --area fwa --model opus, then cb role owner, then cb resume","cb iam iris-O-kb@shaltoot iris --role owner --area kb --model opus, then cb role owner, then cb resume","cb iam iris-O-platform@shaltoot iris --role owner --area platform --model opus, then cb role owner, then cb resume","cb iam iris-B1@macbook iris --role builder --model sonnet, then cb role builder, then cb resume","cb iam iris-B2@macbook iris --role builder --model sonnet, then cb role builder, then cb resume","cb iam iris-B3@macbook iris --role builder --model sonnet, then cb role builder, then cb resume","cb iam iris-R1@macbook iris --role reviewer --model opus, then cb role reviewer, then cb resume","cb iam iris-R2@macbook iris --role reviewer --model opus, then cb role reviewer, then cb resume","cb iam iris-Q1@macbook iris --role qa --model sonnet, then cb role qa, then cb resume","cb iam iris-I1@macbook iris --role investigator --model opus, then cb role investigator, then cb resume"];
 
 test('no repos: names, folders and prompts exactly as before', () => {
-  const w = wantList('ihop', IHOP);
+  const w = wantList('iris', IRIS);
   // the one new field is repo, main on every item
   assert.ok(w.every((x) => x.repo === 'main'));
-  assert.deepEqual(w.map(({ repo, seatKey, ...x }) => x), IHOP_WANT);
+  assert.deepEqual(w.map(({ repo, seatKey, ...x }) => x), IRIS_WANT);
   // seat keys (#4002): no repos, so the bare number (never main:2); an owner its area; the lead 1
   assert.deepEqual(w.map((x) => x.seatKey), ['1', '1', 'claims', 'preauth', 'fwa', 'kb', 'platform', '1', '2', '3', '1', '2', '1', '1']);
-  const ls = w.map((x) => launchFor('ihop', IHOP, x));
+  const ls = w.map((x) => launchFor('iris', IRIS, x));
   assert.ok(ls.every((x) => x.repo === 'main'));
   // the snapshot stays byte for byte; the agent-neutral fields (#4002) are checked on their own
-  assert.deepEqual(ls.map(({ repo, seatKey, agent, board, env, ...x }) => x), IHOP_LAUNCH);
+  assert.deepEqual(ls.map(({ repo, seatKey, agent, board, env, ...x }) => x), IRIS_LAUNCH);
   for (const l of ls) {
     assert.equal(l.agent, 'claude', l.name);
-    assert.equal(l.board, IHOP.machines[l.machine].board, l.name);
+    assert.equal(l.board, IRIS.machines[l.machine].board, l.name);
     assert.deepEqual(l.env, { CB_ROLE: l.role, CB_AGENT: 'claude' }, l.name);
   }
-  assert.deepEqual(w.map((x) => launchFor('ihop', IHOP, x, 'resume').prompt), IHOP_RESUME);
+  assert.deepEqual(w.map((x) => launchFor('iris', IRIS, x, 'resume').prompt), IRIS_RESUME);
 });
 
 // #4002: the whole herdr call that starts a Claude seat, byte for byte as before the adapter (pinned on the code before it)
 test('startOne: a Claude seat starts with exactly today\'s herdr argv', () => {
-  const b1 = launchFor('ihop', IHOP, wantList('ihop', IHOP).find((w) => w.name === 'ihop-B1@macbook')!);
+  const b1 = launchFor('iris', IRIS, wantList('iris', IRIS).find((w) => w.name === 'iris-B1@macbook')!);
   const f = fake((c) => { if (c.args[0] === 'tab') return paneOut('w2:p5'); });
   assert.ok(startOne(b1, f.run, {}).ok);
   const start = f.calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'start');
-  assert.deepEqual(start.map((c) => [c.m, ...c.args]), [['macbook', 'agent', 'start', 'ihop-b1-macbook', '--kind', 'claude', '--pane', 'w2:p5',
+  assert.deepEqual(start.map((c) => [c.m, ...c.args]), [['macbook', 'agent', 'start', 'iris-b1-macbook', '--kind', 'claude', '--pane', 'w2:p5',
     '--timeout', '120000', '--', '--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings',
-    '/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json']]);
+    '/Users/me/work/claude-board/kit/permissions/builder.json']]);
 });
 
-test('the ihop squad with orch@shaltoot live in ihop: the lead is skipped, nothing renamed (#3746)', () => {
-  const p = planSquad('ihop', IHOP, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'ihop', role: 'lead' }], {});
+test('the iris squad with orch@shaltoot live in iris: the lead is skipped, nothing renamed (#3746)', () => {
+  const p = planSquad('iris', IRIS, [{ actor: 'orch@shaltoot', machine: 'shaltoot', project: 'iris', role: 'lead' }], {});
   assert.deepEqual(p.skip, ['orch@shaltoot']);
   assert.deepEqual(p.heldBy, {});
-  assert.deepEqual(names(p), IHOP_WANT.slice(1).map((w) => w.name));
+  assert.deepEqual(names(p), IRIS_WANT.slice(1).map((w) => w.name));
   assert.deepEqual(p.refused, []);
 });
 
 // ---- a machine's herdr workspace (#3719): new tabs open in the squad's workspace, not the focused one ----
-const wsSquad = { ...squad, machines: { ...squad.machines, macbook: { ...mach('macbook', '/Users/me/board'), workspace: 'iHop Squad' } } };
+const wsSquad = { ...squad, machines: { ...squad.machines, macbook: { ...mach('macbook', '/Users/me/board'), workspace: 'Iris Squad' } } };
 const wsLaunch = (name: string) => launchFor('demo', wsSquad, wantList('demo', wsSquad).find((w) => w.name === name)!);
 const wsList = (...ws: [string, string][]) => ({ status: 0, stdout: JSON.stringify({ result: { workspaces: ws.map(([workspace_id, label]) => ({ workspace_id, label })) } }), stderr: '' });
 
 test('launchFor carries the machine workspace; none when the squad names none', () => {
-  assert.equal(wsLaunch('demo-B1@macbook').workspace, 'iHop Squad');
+  assert.equal(wsLaunch('demo-B1@macbook').workspace, 'Iris Squad');
   assert.equal(wsLaunch('orch@shaltoot').workspace, undefined);
 });
 
 test('startOne: the tab opens in the named workspace when herdr has it', () => {
   const f = fake((c) => {
-    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w1', 'Workers'], ['w4', 'iHop Squad']);
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w1', 'Workers'], ['w4', 'Iris Squad']);
     if (c.args[0] === 'tab') return paneOut('w4:p9');
   });
   const r = startOne(wsLaunch('demo-B1@macbook'), f.run, {});
@@ -448,12 +448,12 @@ test('startOne: a missing workspace is created with its label, and its first pan
   const f = fake((c) => {
     if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w1', 'Workers']);
     if (c.args[0] === 'workspace' && c.args[1] === 'create')
-      return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7', label: 'iHop Squad' }, tab: { tab_id: 'w7:t1' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
+      return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7', label: 'Iris Squad' }, tab: { tab_id: 'w7:t1' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
   });
   const r = startOne(wsLaunch('demo-B1@macbook'), f.run, {});
   assert.ok(r.ok, r.line);
   const ws = f.calls.find((c) => c.args[0] === 'workspace' && c.args[1] === 'create')!;
-  assert.equal(ws.args[ws.args.indexOf('--label') + 1], 'iHop Squad');
+  assert.equal(ws.args[ws.args.indexOf('--label') + 1], 'Iris Squad');
   assert.equal(ws.args[ws.args.indexOf('--cwd') + 1], '/Users/me/Work/demo');
   assert.ok(!has(f.calls, 'tab', 'create'));
   assert.ok(f.calls.some((c) => c.args[1] === 'start' && c.args.includes('w7:p1')));
@@ -469,7 +469,7 @@ test('startOne: no workspace in the squad keeps today\'s tab in the focused work
 test('startOne: three launches on one machine: a tab in the workspace, a split of it, then a new tab there', () => {
   let n = 0;
   const f = fake((c) => {
-    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w4', 'iHop Squad']);
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return wsList(['w4', 'Iris Squad']);
     if (c.args[0] === 'tab' || (c.args[0] === 'pane' && c.args[1] === 'split')) return paneOut(`w4:p${++n}`);
   });
   const tabs = {};
@@ -571,7 +571,7 @@ function launchFour(s: any) {
   const launch = (name: string) => launchFor('demo', s, wantList('demo', s).find((w) => w.name === name)!);
   let made = false, n = 1;
   const f = fake((c) => {
-    if (c.args[0] === 'workspace' && c.args[1] === 'list') return made ? wsList(['w7', 'iHop Squad']) : wsList();
+    if (c.args[0] === 'workspace' && c.args[1] === 'list') return made ? wsList(['w7', 'Iris Squad']) : wsList();
     if (c.args[0] === 'workspace' && c.args[1] === 'create') {
       made = true;
       return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
@@ -659,12 +659,12 @@ test('seatSpec resolves per-seat overrides and non-Claude prompt includes --agen
     'cb iam demo-O-claims@macbook demo --role owner --area claims --model gemini-4-neon-xhigh --agent agy, then cb role owner, then cb next');
 
   // with repos, a builder's seat is <repo>:<n>, the home repo's too: a bare number names no seat there
-  const q = structuredClone(QHS);
+  const q = structuredClone(ZED);
   q.roles.builder.seats = { 'api:2': { model: 'opus' }, 'dashboard:1': { model: 'haiku' }, '1': { model: 'fable' } };
-  const qw = (n: string) => wantList('qhs', q).find((w) => w.name === n)!;
-  assert.equal(seatSpec(q, qw('qhs-B1@macbook')).model, 'sonnet');
-  assert.equal(seatSpec(q, qw('qhs-B2@macbook')).model, 'opus');
-  assert.equal(seatSpec(q, qw('qhs-dashboard-B1@macbook')).model, 'haiku');
+  const qw = (n: string) => wantList('zed', q).find((w) => w.name === n)!;
+  assert.equal(seatSpec(q, qw('zed-B1@macbook')).model, 'sonnet');
+  assert.equal(seatSpec(q, qw('zed-B2@macbook')).model, 'opus');
+  assert.equal(seatSpec(q, qw('zed-dashboard-B1@macbook')).model, 'haiku');
 });
 
 test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as before', async () => {

@@ -25,7 +25,7 @@ const TABS: { view: View; label: string; key: string }[] = [
 
 export function TopBar({ route, live, onSearch }: { route: Route; live: 'live' | 'reconnecting'; onSearch: () => void }) {
   const { data: all = [] } = useQuestions(route.project, 'open')
-  const open = all.filter((q) => !q.assigned_to) // questions handed to Omar/Iman aren't waiting on Ahmed
+  const open = all.filter((q) => !q.assigned_to) // questions handed to Cai/Ana aren't waiting on Ahmed
   const { data: mems = [] } = useMemories(route.project)
   const proposed = mems.filter((m) => m.status === 'proposed').length
   useTabLamp(open.length)

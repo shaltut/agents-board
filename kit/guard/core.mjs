@@ -84,7 +84,7 @@ export function stripMessages(cmd) {
 // PowerShell and cmd (#4002): a recursive delete whose target is a root, a drive root or the home folder. The command,
 // its recursion flag and its target sit in one command segment (stops at ; & | newline), in any order (Remove-Item ~
 // -Recurse). The target is a whole word, quoted or not, so rm -rf *, Remove-Item -Recurse -Force dist, dist/ and
-// C:\w\dist pass. Each part is one linear test per segment: a lookahead per command word would be quadratic, and a
+// C:\work\dist pass. Each part is one linear test per segment: a lookahead per command word would be quadratic, and a
 // long command must not run past the hook's timeout.
 // A backslash before a newline (bash's line continuation) or before ; & | (bash's escaped character: find -exec rm
 // -rf {} \;) is the shell's, not a \ root: joined or replaced before the split, as is PowerShell's ` continuation. The

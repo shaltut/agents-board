@@ -1,5 +1,5 @@
 
- RUN  v4.1.10 C:/r/demo-1
+ RUN  v4.1.10 C:/runs/demo-1
 
  ❯ c.test.ts (3 tests | 1 failed | 1 skipped) 5ms
      × breaks on purpose 3ms

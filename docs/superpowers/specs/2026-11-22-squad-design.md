@@ -24,7 +24,7 @@ Claude Board. It is slow and hard to trust. The causes, all four agreed by Ahmed
 - Long-lived **area owners** (business or technical) plus **stage roles**: architect, builder, reviewer, QA (Q2309).
 - Builders run Sonnet; architects, area owners and reviewers run Opus.
 - Sessions live on the MacBook (fast internet, light CPU). Heavy commands run on the PC (strong CPU, slow internet).
-- One command starts a squad on any of Ahmed's projects: replicable, not tied to iHop.
+- One command starts a squad on any of Ahmed's projects: replicable, not tied to Iris.
 
 ## Non-goals
 
@@ -112,7 +112,7 @@ is `review` (Ahmed's eyes, as the column means today).
 
 ### Roles on sessions
 
-- `cb iam W1@macbook ihop --role builder [--area claims]` stores `role` and `area` on the session row
+- `cb iam W1@macbook iris --role builder [--area claims]` stores `role` and `area` on the session row
   (`sessions` gets `role`, `area`, `model`; names stay the current convention).
 - Roles: `lead`, `architect`, `owner` (area owner), `builder`, `reviewer`, `qa`, `investigator` (see Investigations).
 - An area is a tag. A card's area tag routes `design` to that area's owner first.
@@ -184,7 +184,7 @@ is `review` (Ahmed's eyes, as the column means today).
 
 ## Investigations (added 2026-11-22, Ahmed, after approval)
 
-Ahmed's ask: a session that only helps him debug and trace, often on UAT or production, which are air-gapped (Claude
+Ahmed's ask: a session that only helps him debug and trace, often on staging or production, which are air-gapped (Claude
 can't reach them: Ahmed runs the steps and pastes results). Long investigations lose track and drop findings.
 
 - An investigation is a card of type `research`. It never gets a stage: it is claimed by a new role,

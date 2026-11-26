@@ -55,10 +55,10 @@ test('defaultModelFor agrees with cb._role_model', () => {
 });
 
 test("buildLaunch: today's claude args, trailing slashes stripped", () => {
-  const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/w/board//', cwd: 'C:/w/x' };
+  const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/work/board//', cwd: 'C:/work/x' };
   assert.deepEqual(claudeAdapter.buildLaunch(input), {
     kind: 'claude',
-    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/w/board/kit/permissions/builder.json'],
+    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/work/board/kit/permissions/builder.json'],
     env: {},
   });
   assert.deepEqual(claudeAdapter.buildLaunch({ ...input, board: '/Users/x/board', env: { CB_ROLE: 'builder' } }).env, { CB_ROLE: 'builder' });
@@ -314,11 +314,11 @@ test('detectQuotaStop: usage and rate limit lines in the pane tail', () => {
 });
 
 test('static specs: guard, instructions, trust, disable-ask', () => {
-  const w = claudeAdapter.guardInstallSpec('C:/w/board/', 'win32');
+  const w = claudeAdapter.guardInstallSpec('C:/work/board/', 'win32');
   assert.equal(w.matchers.win32, 'Bash|PowerShell');
   assert.equal(claudeAdapter.guardInstallSpec('/b', 'darwin').matchers.darwin, 'Bash');
   assert.equal(w.targetPath, '~/.claude/settings.json');
-  assert.equal(w.shimFile, 'C:/w/board/kit/guard/shim-claude.mjs');
+  assert.equal(w.shimFile, 'C:/work/board/kit/guard/shim-claude.mjs');
   const i = claudeAdapter.instructionMapping({} as LaunchInput);
   assert.deepEqual([i.nativeFiles, i.extraArgs, i.env], [['CLAUDE.md', '~/.claude/CLAUDE.md'], [], {}]);
   const t = claudeAdapter.trustSpec(['/r'], 'darwin');
