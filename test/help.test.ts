@@ -59,6 +59,17 @@ test('cb help <unknown> exits 1 and lists the topics and commands', () => {
   assert.match(r.err, /no help for "queue"\. Topics: start, work, ask, huddle, relay, orchestrate, project, rules, memory\. Commands: .*next/);
 });
 
+test('cb help iam documents --agent; cb help squad documents agent, seats and fallback (#4002)', () => {
+  const iam = cb(['help', 'iam']);
+  assert.equal(iam.code, 0, iam.err);
+  assert.match(iam.out, /^cb iam <name> \[project\] .*\[--agent <agent>\]/);
+  assert.match(iam.out, /--agent is .*claude \(the default\), codex, opencode or agy/);
+  assert.match(iam.out, /\$CB_AGENT/);
+  const squad = cb(['help', 'squad']).out;
+  for (const k of ['"agent"', '"fallback"', '"seats"', 'CB_ROLE', 'CB_AGENT']) assert.ok(squad.includes(k), k);
+  assert.match(squad, /phase 1 starts claude only/);
+});
+
 test('prompts/claude-md-snippet.md is the snippet cb help project prints', () => {
   assert.equal(readFileSync('prompts/claude-md-snippet.md', 'utf8').trim(), SNIPPET);
   assert.match(SNIPPET, /Work only in project/);

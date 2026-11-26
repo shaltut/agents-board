@@ -32,9 +32,10 @@ async function card(sql: any, o: { stage?: string; assignee?: string | null; sta
   await sql`update cb.tasks set stage = ${o.stage ?? 'build'}, stage_since = now(), assignee = ${o.assignee ?? null}, status = ${o.status ?? 'next'} where id = ${id}`;
   return Number(id);
 }
-const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number } = {}) =>
-  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen)
-      values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}))`;
+const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number; agent?: string } = {}) =>
+  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent)
+      values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}),
+              ${o.agent ?? 'claude'})`;
 const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what}`) as any[];
 
 // ---- a fake herdr: nothing real is started; `live` holds the herdr names it reports ----
@@ -134,6 +135,53 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   assert.equal((await events(sql, 'close')).length, 1);
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
+});
+
+// #4002: the agent running in the seat judges and closes it; one with no adapter yet is never closed
+test('closeOne delegates through Claude adapter and safely skips unregistered agent', async () => {
+  const closingAt = async (sql: any) => (await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at;
+  { // claude: its adapter's /exit, then the pane closed
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const out = await tick(deps(sup, h.run));
+    assert.ok(has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.equal(h.calls.find((c) => c.args[3] === '/exit')!.m, 'macbook');
+    assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
+  }
+  { // a seat bound as codex (no adapter in phase 1): never planned for a close, never marked
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'codex' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const out = await tick(deps(sup, h.run));
+    assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
+    assert.equal(await closingAt(sql), null);
+    assert.equal((await events(sql, 'close')).length, 0);
+    const dry = await tick(deps(sup, h.run, { dryRun: true }));
+    assert.ok(!dry.some((l) => /close/.test(l)), dry.join('\n'));
+  }
+  { // planned as claude, but the seat runs codex by the time it is closed (bound again between): the fresh row decides
+    const { sql, sup } = await setup();
+    await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' });
+    const h = fakeHerdr();
+    h.live.set('sv-b1-macbook', 'w1:p9');
+    const hooked = new Proxy(sup, {
+      apply(t, self, args: any[]) {
+        const q = Reflect.apply(t, self, args);
+        if (!/supervise_mark\(.*, true\)/.test(String(args[0]?.join?.('?')))) return q;
+        return q.then(async (r: any) => { await sql`update cb.sessions set agent = 'codex' where actor = 'sv-B1@macbook'`; return r; });
+      },
+    });
+    const out = await tick(deps(hooked, h.run));
+    assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+    assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
+    assert.ok(out.includes('skip closing sv-B1@macbook: agent "codex" is not installed yet (phase 1 supports claude only)'), out.join('\n'));
+    assert.equal(await closingAt(sql), null, 'the mark is cleared');
+    assert.equal((await events(sql, 'close')).length, 0);
+  }
 });
 
 test('a claim between mark and re-check stops the close', async () => {

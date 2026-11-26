@@ -283,6 +283,23 @@ test('cb squad set / show', async () => {
   } finally { rmSync(dir, { recursive: true }); }
 });
 
+test('cb squad show prints Claude roles unchanged and prints seats and fallback when configured (#4002)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const s = { machines: SQUAD.machines, roles: { lead: { count: 1, machine: 'shaltoot' },
+    builder: { count: 2, machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }], seats: { '2': { model: 'opus' } } },
+    reviewer: { count: 1, machine: 'macbook', seats: { '1': { fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] } } } } };
+  await sql`select cb.squad_set('demo', ${sql.json(s as any)}, 'ahmed')`;
+  const show = cb(['squad', 'show', 'demo']);
+  assert.equal(show.code, 0, show.err);
+  assert.equal(show.out, ['lead  1 × opus on shaltoot',
+    'builder  2 × sonnet on macbook; fallback gpt-6.1-sol (codex)',
+    '  seat 2: opus',
+    'reviewer  1 × opus on macbook',
+    '  seat 1: opus; fallback anthropic/claude-opus-5-5 (opencode)',
+    'areas: none'].join('\n'));
+});
+
 // ---- agent-neutral core (#4002): a session and a squad seat carry an agent; claude is the default and never written ----
 test('cb.iam stores agent, defaults to claude, preserves on rebind, refuses unknown (#4002)', async () => {
   const sql = await db();

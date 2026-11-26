@@ -8,8 +8,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
-import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, startOne, type Launch, type Runner } from './squad-up.ts';
-import { planTick, READY, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
+import { planTick, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { getAdapter } from './agents/index.ts';
+import type { AgentAdapter, SeatHandle } from './agents/types.ts';
 
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
   CLOSE_RETRY = 10 * 60_000;
@@ -84,7 +86,8 @@ export async function tick(d: Deps): Promise<string[]> {
 
   for (const state of states) {
     try {
-      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now });
+      const safeToClose = await safeToCloseOf(state, herdrStatus);
+      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length;
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -99,6 +102,24 @@ export async function tick(d: Deps): Promise<string[]> {
 }
 
 type Log = (project: string | null, what: string, session: string, note?: string) => Promise<void>;
+
+// The seat of a session, as its agent adapter reads it (#4002): the board's machine and pane, herdr's name and label
+const seatOf = (state: State, actor: string, agent: AgentAdapter['kind'], pane: string | null, machine?: string | null): SeatHandle => ({
+  machine: machine ?? actor.split('@')[1] ?? '', pane: pane ?? '', actor, agent, herdrName: herdrName(actor),
+  herdr: state.squad.machines[actor.split('@')[1] ?? '']?.herdr ?? null });
+
+// Whether each session may be closed now, by its own agent's adapter (#4002). An agent with no adapter yet: never.
+async function safeToCloseOf(state: State, herdrStatus: Record<string, string>): Promise<Record<string, boolean>> {
+  const safe: Record<string, boolean> = {};
+  for (const s of state.sessions) {
+    const hn = herdrName(s.actor);
+    try {
+      const a = getAdapter(s.agent ?? 'claude');
+      safe[s.actor] = (await a.readStatus(seatOf(state, s.actor, a.kind, s.pane, s.machine), Object.hasOwn(herdrStatus, hn) ? { agent_status: herdrStatus[hn] } : null)).safeToClose;
+    } catch { safe[s.actor] = false; }
+  }
+  return safe;
+}
 // the live session bound to the project in the lead role, whatever its name
 const leadOf = (s: State) => s.sessions.find((x) => x.role === 'lead' && x.live)?.actor;
 
@@ -107,7 +128,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
   const tabs: Record<string, { pane: string; panes: number }> = {};
   for (const [what, list] of [['restore', plan.restore], ['start', plan.start]] as const) {
     for (const l of list) {
-      if (dryRun) { out.push(`would ${what} ${l.name} (${l.role}, ${l.model}) on ${l.machine}`); continue; }
+      if (dryRun) { out.push(`would ${what} ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`); continue; }
       const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
       if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); continue; }
       const r = startOne(l, run, tabs);
@@ -159,7 +180,8 @@ async function tell(d: Deps, to: string, text: string, out: string[]) {
   try { await d.sql`select cb.tell(${to}, ${text}, 'supervisor')`; return true; } catch (e) { out.push(`could not tell ${to}: ${msg(e)}`); return false; }
 }
 
-// Mark closing, find its pane, re-check on a fresh statement, /exit, wait for herdr to drop the agent, close its pane.
+// Mark closing, find its pane, re-check on a fresh statement, /exit (its agent adapter's close), wait for herdr to drop
+// the agent, close its pane.
 async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<string> {
   const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
@@ -168,12 +190,16 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
   let pane: string | undefined, status: string | undefined, s: Session | undefined;
   try { // a throw before /exit is sent (the re-check, herdr) clears the mark too
     try { const got = herdrJson(run, m, ['agent', 'get', hn], 30_000); pane = find(got, 'pane_id'); status = find(got, 'agent_status'); } catch {}
-    if (pane && status !== undefined && !READY.has(status)) { await unmark(); return `skip closing ${name}: herdr shows it ${status}`; }
     if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return `could not close ${name}: herdr does not show it`; }
     // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
     s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
     if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return `skip closing ${name}: it took work`; }
-    if (run(m, ['agent', 'prompt', hn, '/exit'], 30_000).status !== 0) { await unmark(); return `could not close ${name}: /exit was not sent`; }
+    // the agent running there now judges and closes it (#4002); one with no adapter yet is never closed
+    let adapter: AgentAdapter;
+    try { adapter = getAdapter(s.agent ?? 'claude'); } catch (e) { await unmark(); return `skip closing ${name}: ${msg(e)}`; }
+    const seat = seatOf(state, name, adapter.kind, pane, s.machine);
+    if (status !== undefined && !(await adapter.readStatus(seat, { agent_status: status })).safeToClose) { await unmark(); return `skip closing ${name}: herdr shows it ${status}`; }
+    if (await adapter.close(seat, run) !== 'sent') { await unmark(); return `could not close ${name}: /exit was not sent`; }
   } catch (e) { await unmark(); throw e; }
   for (const until = clock() + CLOSE_WAIT; clock() < until;) { // wall time: one agent get can take 30 s
     await sleep(POLL);
@@ -252,7 +278,7 @@ export const locked = async (lock: any) => (await lock`select pg_try_advisory_lo
 
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/claude.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`, sql = connect(undefined, { app, max: 1 });
   // A dry run writes nothing, so it takes no lock (it may preview while a supervisor runs). Checked every tick, before
