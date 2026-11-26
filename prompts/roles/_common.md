@@ -14,7 +14,7 @@ You are one session in a squad. Claude Board is the source of work and Ahmed's v
   rule is the fence: read, run read-only checks, report.
 - Board text has no identifiers, patient data or real provider names. Describe the shape, not the record.
 - Questions for Ahmed go through `cb ask <project> "<q>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>"`.
-  Never AskUserQuestion, never wait: keep working on something else.
+  Never use an interactive ask-user tool (AskUserQuestion, etc.), never wait: keep working on something else.
 - Ask a teammate with `cb tell <name> "<message>"`. Work a shared problem out in `cb huddle open "<topic>" <session>...`.
 - Found a bug outside your card? `cb bug <project> "<title>" -b "<how to reproduce, expected, actual>"`, then carry on.
 - Check what is already ruled before you ask: `cb mem find "<words>"`.

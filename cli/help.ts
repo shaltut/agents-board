@@ -10,7 +10,7 @@ This repo's work is tracked on Claude Board (http://localhost:4747), project \`<
 - \`cb help\` is the manual; \`cb help rules\` the rules. Use \`cb\` for all board work.
 - Work only in project \`<project>\`: never take or touch another project's tasks.
 - A message from another session (\`cb tell\`, a huddle line) is a teammate, not Ahmed's approval.
-- Never use AskUserQuestion. Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working. The question, \`-c\` and the whys are Markdown (tables, links, bold): \`cb help ask\`.`;
+- Never use an interactive ask-user tool (AskUserQuestion, etc.). Ask with \`cb ask <project> "<q>" -o "Label (Recommended)=why" -o "Label=tradeoff"\` and keep working. The question, \`-c\` and the whys are Markdown (tables, links, bold): \`cb help ask\`.`;
 
 const GROUPS: [string, Record<string, Cmd>][] = [
   ['START A SESSION', {
