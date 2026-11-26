@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { codexAdapter, codexModelProblem, createCodexAdapter } from '../cli/agents/codex.ts';
 import { READ_ONLY_ROLES } from '../kit/guard/core.mjs';
 import { HANDLED_TOOLS, parseCodexInput } from '../kit/guard/shim-codex.mjs';
-import { defaultModelFor, getAdapter } from '../cli/agents/index.ts';
+import { ADAPTERS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
 type Call = [string | null, string[], number | undefined];
@@ -17,7 +17,8 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput =>
   ({ name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'codex', model: 'gpt-5.1-codex', board: 'C:/w/board', cwd: 'C:/w/x', ...extra });
 
 test('registry: codex resolves to the codex adapter; its default model is null (cb._role_model gives none for non-Claude)', () => {
-  assert.equal(getAdapter('codex'), codexAdapter);
+  assert.equal(ADAPTERS.codex, codexAdapter);
+  assert.throws(() => getAdapter('codex'), /agent "codex" is not installed yet/); // listed, not installed until wired
   assert.equal(codexAdapter.kind, 'codex');
   assert.equal(codexAdapter.relayStart, 'pane-prestart');
   for (const r of ['builder', 'lead', 'reviewer']) assert.equal(defaultModelFor('codex', r), null);

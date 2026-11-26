@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import {
   OPENCODE_MODEL, clearOpencodeEndpoint, freellmRefusal, makeOpencodeAdapter, newestSession, normalizeAbs, opencodeAdapter,
   opencodeEndpointPath, readOpencodeEndpoint, writeOpencodeEndpoint, type FreellmRule,
@@ -26,7 +26,8 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput => ({
 });
 
 test('registry: opencode is registered; defaultModelFor stays null like cb._role_model', () => {
-  assert.equal(getAdapter('opencode'), opencodeAdapter);
+  assert.equal(ADAPTERS.opencode, opencodeAdapter);
+  assert.throws(() => getAdapter('opencode'), /agent "opencode" is not installed yet/); // listed, not installed until wired
   assert.equal(opencodeAdapter.kind, 'opencode');
   assert.equal(opencodeAdapter.relayStart, 'pane-prestart');
   assert.ok(AGENT_KINDS.includes('opencode'));

@@ -41,7 +41,8 @@ function retryAfterSec(text: string): number | undefined {
   return total > 0 ? total : undefined;
 }
 
-export function createCodexAdapter(run: Runner = realRun): AgentAdapter {
+// realRun is read when a call is made, never at import: squad-up.ts imports the registry that imports this file.
+export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)): AgentAdapter {
   const adapter: AgentAdapter = {
     kind: 'codex',
     // No SessionStart hook hands the relay anything: the seat's relay is started by the pane before the agent runs.

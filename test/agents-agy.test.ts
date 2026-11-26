@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
-import { AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import { agyAdapter, checkAgyModel, createAgyAdapter } from '../cli/agents/agy.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 import type { Runner } from '../cli/squad-up.ts';
@@ -20,7 +20,8 @@ function fake(res: { status: number | null; stderr?: string; stdout?: string; er
 }
 
 test('registry: agy is registered and is the adapter this file builds', () => {
-  assert.equal(getAdapter('agy'), agyAdapter);
+  assert.equal(ADAPTERS.agy, agyAdapter);
+  assert.throws(() => getAdapter('agy'), /agent "agy" is not installed yet/); // listed, not installed until wired
   assert.ok(AGENT_KINDS.includes('agy'));
   assert.equal(agyAdapter.kind, 'agy');
   assert.equal(agyAdapter.relayStart, 'pane-prestart');
@@ -154,7 +155,7 @@ test('import order: agy.ts loaded first (not through index.ts) and squad-up.ts l
   const root = fileURLToPath(new URL('..', import.meta.url));
   for (const [first, then] of [['cli/agents/agy.ts', 'cli/squad-up.ts'], ['cli/squad-up.ts', 'cli/agents/agy.ts'], ['cli/agents/index.ts', 'cli/squad-up.ts']]) {
     const code = `const a = await import(${JSON.stringify(pathToFileURL(root + first).href)}); const b = await import(${JSON.stringify(pathToFileURL(root + then).href)});` +
-      ` const { getAdapter } = await import(${JSON.stringify(pathToFileURL(root + 'cli/agents/index.ts').href)}); console.log(getAdapter('agy').kind, typeof getAdapter('agy').deliver);`;
+      ` const { ADAPTERS } = await import(${JSON.stringify(pathToFileURL(root + 'cli/agents/index.ts').href)}); console.log(ADAPTERS.agy.kind, typeof ADAPTERS.agy.deliver);`;
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
     assert.equal(r.status, 0, `${first} then ${then}: ${r.stderr}`);
     assert.equal(r.stdout.trim(), 'agy function');
