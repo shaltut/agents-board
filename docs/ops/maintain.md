@@ -26,10 +26,10 @@ Never `dc down -v`: `-v` deletes the database volume (and gh's login).
 
 ## Upgrade
 
-A release is: the change merged to `main` (reviewed, the suite green on the PC or Mac), then:
-
 The agent-neutral core (#4002: the per-seat relay, Stage A+B, and the unified command guard, Stage C) ships as ONE
 release. Order: vps2 (the board and its schema) first, then the PC, then the Mac, then restart `cb supervise`.
+
+A release is: the change merged to `main` (reviewed, the suite green on the PC or Mac), then:
 
 ```bash
 cd /opt/claude-board && git fetch && git merge --ff-only origin/main
@@ -59,6 +59,10 @@ Then the workers, right away, because their `cb` must match the schema:
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
   broke every `cb` on the Mac for 15 minutes.
+- **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
+  own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
+  Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac
+  rollout and roll the Mac back. Pair it with the first live `herdr --env` start.
 - Relays restart themselves when their code changes. Their connections are named `cb-relay/<version>` (a hash of
   the relay's code), so one query shows which sessions run what:
   `dc exec db psql -U cb -d claude_board -c "select application_name, count(*) from pg_stat_activity group by 1"`.
@@ -71,6 +75,8 @@ Then the workers, right away, because their `cb` must match the schema:
   **Never copy `kit/hooks/block-dangerous.mjs` into `~/.claude/hooks/`.** It is now a thin wrapper that imports
   `../guard/core.mjs`; copied alone it cannot find it, and it blocks EVERY shell command on that machine.
 - **Restart the supervisor** (`cb supervise`, see [Supervisor](#supervisor)) after the PC has the new code.
+  After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise` (rule 3 under
+  [PC job runner](#pc-job-runner)).
   Relays restart themselves once when their code changes.
 - **Claude seats need no `~/.claude` change for the relay.** The live SessionStart hook already runs
   `node <checkout>/cli/relay.ts` (the launcher). It now hands Claude's messaging socket and token to the seat relay
@@ -100,7 +106,7 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 1. From the checkout, install: `node kit/guard/install.mjs`. It defaults to `~/.claude-board/guard` (`--target <dir>`
    changes that). Then verify: `node kit/guard/install.mjs --check` exits 0 when the installed files match the checkout.
 2. In `~/.claude/settings.json`, point the PreToolUse hook command at
-   `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`). On Windows, set that
+   `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`: the full home path, e.g. `C:/Users/<you>` on Windows, `/Users/<you>` on the Mac). On Windows, set that
    entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
    On the Mac the matcher is `Bash`.
 3. Leave the pre-release `~/.claude/hooks/block-dangerous.mjs` (the standalone copy) in place, untouched. The way
@@ -115,9 +121,10 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
    And, the kill-by-name rule (#3809),
    `echo '{"tool_input":{"command":"taskkill /F /IM node.exe"}}' | node ~/.claude-board/guard/shim-claude.mjs` prints
    the block JSON with a reason starting `Blocked dangerous command: kill by process name`. And, malformed stdin
-   (`echo 'not json' | node ~/.claude-board/guard/shim-claude.mjs`) must block, not allow. And, a builder's push to main:
+   (`echo 'not json' | node ~/.claude-board/guard/shim-claude.mjs`) must block, not allow: the reason starts
+   `Blocked: guard could not read hook input (invalid JSON`. And, a builder's push to main:
    `echo '{"tool_input":{"command":"git push origin main"}}' | CB_ROLE=builder node ~/.claude-board/guard/shim-claude.mjs`
-   must block. The installed hook blocks these command lines when a Claude session runs them, so a session runs the
+   must block, with a reason starting `Blocked by role (builder): git push to protected branch main`. The installed hook blocks these command lines when a Claude session runs them, so a session runs the
    checks from a small script that builds the command strings.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
    treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
@@ -337,7 +344,7 @@ A squad may list the branches its sessions must never push to: `"protected": ["d
 30, each 1 to 100 characters of letters, digits and `. _ / * -`, not starting with `-`). Give each branch as git shows
 it: `cb squad set` refuses an entry starting with `refs/`, `heads/` or `origin/`, or ending with `/`, since the hook
 could never match it. `cb squad up` and the supervisor then create each new session's pane with
-`CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`), and the dangerous-commands hook blocks a `git push`
+`CB_PROTECTED_BRANCHES=<the list, comma-joined>` (herdr `--env`), and the guard blocks a `git push`
 whose destination is on it: `git push origin development`, `x:development`, `HEAD:refs/heads/development`,
 `x:heads/development`, `+x:development`, `--delete origin development`. Plain `git push` and `git push origin` stay
 denied by the role permission files. Card #3746.
