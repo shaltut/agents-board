@@ -10,8 +10,10 @@ import { connect, machine } from '../server/db.ts';
 import { freeLane, loadConfig, published, type RunnerConfig } from './recipes.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob } from './runner-job.ts';
+import { survive } from './survive.ts';
 
 const say = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
+survive(say); // #3902: a dropped board connection is logged and outlived, not an exit (anything else still exits)
 const CONFIG = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
 const HOME = process.env.CB_RUNNER_HOME || join(homedir(), '.claude-board', 'runner');
 const LOGS = join(HOME, 'logs');

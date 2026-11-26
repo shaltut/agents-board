@@ -216,8 +216,17 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
 // still held. A start that does not beat, or a held port, is told to every supervised project's lead, hourly.
 async function runnerCheck(d: Deps, out: string[], log: Log, leads: string[]) {
   if (!d.runnerConfig) return;
-  let cfg;
-  try { cfg = loadConfig(readFileSync(d.runnerConfig, 'utf8')); } catch (e) { out.push(`runner config: ${msg(e)}`); return; }
+  // #3902: validated with the recipes.ts this supervisor started with. A newer runner.json it refuses (a raised cap, a
+  // new key) must not stop it restarting a dead runner: the name and log port are enough here, and the runner, started
+  // fresh, checks the whole file with current code. Only a file with no usable name/port stops it.
+  let cfg: { name?: string; log: { host: string; port: number } };
+  try { cfg = loadConfig(readFileSync(d.runnerConfig, 'utf8')); } catch (e) {
+    let raw: any;
+    try { raw = JSON.parse(readFileSync(d.runnerConfig, 'utf8')); } catch {}
+    if (!raw || typeof raw?.log?.host !== 'string' || !Number.isInteger(raw?.log?.port)) { out.push(`runner config: ${msg(e)}`); return; }
+    out.push(`runner config: ${msg(e)} (by this supervisor's code; the runner checks it again with current code)`);
+    cfg = { name: typeof raw.name === 'string' ? raw.name : undefined, log: { host: raw.log.host, port: raw.log.port } };
+  }
   const name = cfg.name ?? machine();
   const { runners } = (await d.sql`select cb.jobs_list(null) as j`)[0].j;
   const beat = runners.find((r: any) => r.name === name)?.last_seen;

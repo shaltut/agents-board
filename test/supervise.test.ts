@@ -346,6 +346,25 @@ test('runner: no beat and its port free, it is started in a herdr tab', async ()
   assert.equal(ev[0].data.note, 'started');
 });
 
+// #3902: the supervisor validates runner.json with the recipes.ts it loaded at start. After the slots cap went to 10 it
+// refused the new config ("slots: must be an integer 1-4") and so could not restart a dead runner. A config it refuses
+// still names the runner and its port; the runner, started fresh, checks the file with current code itself.
+test('runner: a runner.json this supervisor refuses still gets a dead runner restarted, and says why it was refused', async () => {
+  const { sup } = await setup();
+  const file = runnerJson();
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), slots: 999, futureKey: { x: 1 } }));
+  const h = fakeHerdr();
+  const out = await tick(deps(sup, h.run, { runnerConfig: file, probe: async () => false }));
+  assert.ok(out.some((l) => /^runner config: .*(?:slots|futureKey).*the runner checks it again with current code/.test(l)), out.join('\n'));
+  assert.ok(has(h.calls, 'pane', 'run', 'p1', 'cb runner'), out.join('\n'));
+  // not JSON at all: nothing to go on, nothing started
+  writeFileSync(file, '{ nope');
+  const h2 = fakeHerdr();
+  const out2 = await tick(deps(sup, h2.run, { runnerConfig: file, probe: async () => false }));
+  assert.ok(out2.some((l) => l.startsWith('runner config: ')), out2.join('\n'));
+  assert.ok(!h2.calls.some((c) => c.args[0] === 'tab'));
+});
+
 test('runner: a beating runner is left alone; a held port is reported at most hourly', async () => {
   const { sql, sup } = await setup();
   const cfg = runnerJson();
