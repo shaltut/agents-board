@@ -200,6 +200,34 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
+// .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
+const fenceWrites = [
+  `echo '{}' > ~/.claude/settings.json`, 'echo x >> ~/.claude/settings.local.json', 'tee ~/.claude/settings.json < evil.json',
+  'cp evil.json $HOME/.claude/settings.json', `sed -i 's/PreToolUse/x/' ~/.claude/settings.json`,
+  String.raw`Set-Content -Path $env:USERPROFILE\.claude\settings.json -Value x`, String.raw`del C:\Users\u\.claude\settings.json`,
+  'rm -rf ~/.claude-board/guard', 'cp core.mjs ~/.claude-board/guard/core.mjs', 'mv x.json /home/u/.claude-board/runner.json',
+  `python3 -c "open('/home/u/.claude/settings.json','w').write('{}')"`, `bash -c "echo x > ~/.claude/settings.json"`,
+  `cd ~/.claude && echo '{}' > settings.json`, 'echo x > .claude/settings.json', 'echo x>~/.claude/settings.json',
+  'node kit/guard/install.mjs', 'node kit/guard/install.mjs --target /tmp/g', String.raw`node kit\guard\install.mjs`,
+];
+const fenceReads = [
+  'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
+  'ls ~/.claude-board/guard', 'cat ~/.claude/settings.json 2>/dev/null', 'node kit/guard/install.mjs --check',
+  `cb log 4345 "blocked: echo x > ~/.claude/settings.json"`, `git commit -m "fence: no writes to ~/.claude/settings.json"`,
+  'echo x > notes.claude.txt', 'cp a.json b.json', 'cat .claude.json',
+];
+test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
+  for (const role of ROLES) {
+    blocksByRole(role, fenceWrites);
+    // a read-only role commits nothing at all (its own rule), so the commit message case is for the others
+    passes(role, fenceReads.filter((c) => !(READ_ONLY_ROLES.includes(role) && c.startsWith('git commit'))));
+  }
+  assert.match(shell('cp x ~/.claude/settings.json', { CB_ROLE: 'builder' }).reason!, /#4345.*cb ask/);
+  // a hand-started session (no CB_ROLE) is the owner's: his own maintenance stays open
+  for (const c of ['echo x > ~/.claude/settings.json', 'node kit/guard/install.mjs']) assert.deepEqual(shell(c), {}, c);
+});
+
 test('role parity and evaluate(edit/ask)', () => {
   assert.deepEqual([...ROLES], ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);
   assert.deepEqual([...READ_ONLY_ROLES], ['reviewer', 'qa', 'investigator']);
@@ -316,6 +344,9 @@ test('long commands stay fast', () => {
   const cases: [string, () => unknown][] = [
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
     // earlier < feed is a running flag, not a look-back from every by-name lookup
+    // the fence (#4345): a fence path everywhere, with and without a writer, reads each test once
+    ['fence, 200 KB of fence-path reads, as a builder', asBuilder(kb200('cat ~/.claude/settings.json; '))],
+    ['fence, 200 KB of fence paths then a copy, as a builder', asBuilder(kb200('ls ~/.claude-board/guard ') + '; cp a b')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

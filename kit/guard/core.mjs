@@ -506,6 +506,32 @@ function pastOpts(w, j, valueOpt) {
   return j;
 }
 
+// The fence (#4345). A squad seat runs under bypassPermissions, so the guard's hook entry in ~/.claude/settings*.json
+// (or a repo's .claude/settings*.json) and ~/.claude-board (the installed guard, the runner config) are all that stand
+// between it and anything: no role writes them from a shell, and none runs the guard installer (it installs whatever
+// guard its own checkout holds). Reading stays open. kit/permissions/<role>.json denies the same paths to Edit/Write.
+// The whole command counts, not one segment, so `cd ~/.claude && echo x > settings.json` blocks too. Fail closed: any
+// write word or redirection next to a fence path blocks, e.g. a copy out of it. Linear: a few single-pass tests.
+const FENCE_PATH = /(?:^|[\s"'=:(\\/~])\.claude(?:-board)?(?=[\\/\s"';&|)>]|$)/i;
+const FENCE_REDIRECT = /(?<!-)>(?!&|>?[ \t]*(?:\/dev\/null|\$null|nul)(?![\w/.\\-]))/;
+const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
+  'python', 'python3', 'py', 'node', 'deno', 'bun', 'ruby', 'set-content', 'sc', 'add-content', 'ac', 'out-file', 'new-item',
+  'ni', 'remove-item', 'ri', 'del', 'erase', 'copy-item', 'cpi', 'copy', 'move-item', 'mi', 'move', 'rename-item', 'rni',
+  'ren', 'clear-content', 'clc', 'mklink', 'robocopy', 'xcopy', 'icacls', 'takeown', 'attrib'];
+const FENCE_WRITER = new RegExp(String.raw`(?<![\w.-])(?:${FENCE_WORDS.join('|')})(?![\w.-])`, 'i');
+const IN_PLACE = thenLater(SEGMENTS, String.raw`(?<![\w.-])(?:sed|perl)(?![\w.-])`, String.raw`[ \t](?:-[a-z]*i|--in-place)`);
+const GUARD_INSTALL = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
+const FENCE = 'the fence (#4345): ~/.claude/settings*.json, a repo\'s .claude/settings*.json and ~/.claude-board (the guard, the runner config) are Ahmed\'s, and a squad seat never writes them or runs the guard installer. Reading them is fine (cat, Get-Content, grep, without a redirection). A change there is his: cb ask';
+// Stripping only removes text, so a raw command naming neither a fence path nor the installer cannot name one stripped:
+// skip the second stripMessages (the costly step on big heredocs) for nearly every command.
+function fenceWrite(command) {
+  if (!FENCE_PATH.test(command) && !GUARD_INSTALL.test(command)) return null;
+  const text = stripMessages(command);
+  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !GUARD_INSTALL.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
+  if (!FENCE_PATH.test(text)) return null;
+  return FENCE_REDIRECT.test(text) || FENCE_WRITER.test(text) || IN_PLACE.test(text) ? FENCE : null;
+}
+
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
@@ -513,6 +539,8 @@ function pastOpts(w, j, valueOpt) {
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
+  const fence = fenceWrite(String(command ?? ''));
+  if (fence) return fence;
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);
