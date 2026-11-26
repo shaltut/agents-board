@@ -354,7 +354,7 @@ const unquote = (w) => (/["'\\]/.test(w)
 const EVERY_QUOTED = () => () => true;
 const SHELL_C = new Set(['bash', 'sh', 'zsh', 'su']);
 const RUNS_REST = new Set(['ssh', 'eval', 'xargs', 'iex', 'invoke-expression', 'pwsh', 'powershell']);
-const PIPE_RUNNERS = new Set(['sh', 'bash', 'zsh', 'pwsh', 'powershell', 'cmd', 'iex', 'invoke-expression']);
+const PIPE_RUNNERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'pwsh', 'powershell', 'cmd', 'iex', 'invoke-expression']);
 function runnerArg(raw, w, name, piped) {
   const seen = []; // seen[k]: which runners are among the names of words 0 .. k-1
   let s = { shellC: false, cmd: false, herdr: false, rest: false };
@@ -390,16 +390,18 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map(cmdName) };
   });
-  // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs (sudo before it too).
-  // into[k]: what is piped into segment k reaches one: k runs it, or k is blank and a newline carries the pipeline on
+  // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs.
+  // into[k]: what is piped into segment k reaches one: ANY word of k names one (so env bash, command bash, sudo -u x bash,
+  // exec, nohup and xargs bash -c all count, with no wrapper list; one pass over the words), or k is blank and a newline carries the pipeline on
   // (a pipe may end a line; a CRLF or trailing blanks leave a blank segment). An & right after > or < is a redirection
   // (2>&1), not a new command, so the segment before it shares the next one's flag.
   const piped = segs.map(() => false);
   const into = segs.map(() => false);
   for (let k = segs.length - 1; k >= 0; k--) {
     const gap = k + 1 < segs.length ? text.slice(segs[k].end, segs[k + 1].start) : null;
-    const [first, second] = segs[k].name;
-    into[k] = PIPE_RUNNERS.has(first === 'sudo' ? second : first) || (segs[k].raw.length === 0 && /^\n+$/.test(gap ?? '') && into[k + 1]);
+    into[k] = segs[k].name.some((n) => PIPE_RUNNERS.has(n)) || (segs[k].raw.length === 0 && /^\n+$/.test(gap ?? '') && into[k + 1]) ||
+      // a brace ends a segment, not the stage: xargs -I{} bash -c {}
+      (/^[{}]+$/.test(gap ?? '') && into[k + 1]);
     if (gap === null) continue;
     if (/^\|&?\n*$/.test(gap)) piped[k] = into[k + 1] || piped[k + 1];
     else if (gap === '&' && /[<>]$/.test(text.slice(segs[k].start, segs[k].end))) piped[k] = piped[k + 1];

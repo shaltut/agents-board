@@ -280,8 +280,27 @@ test('role rules: main/master read every quoted string; a pipe into a shell, iex
   blocksByRole('reviewer', runs('git commit -m x'));
   blocksByRole('builder', runs('git push origin feat/x --force'));
   // text no shell runs stays text: a redirect to a file, a pipe into something else, a stage after the shell, ||
-  passes('reviewer', ['echo "git commit" > notes.txt', "echo 'git commit -m x' | grep bash", "echo hi | sh | grep 'git commit -m x'",
+  passes('reviewer', ['echo "git commit" > notes.txt', "echo hi | sh | grep 'git commit -m x'",
     "echo 'git commit -m x' || sh"]);
+});
+
+test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still runs what is piped in', () => {
+  const merge = ['gh', 'pr', 'merge', '123', '--squash'].join(' ');
+  const commit = ['git', 'commit', '-m', 'x'].join(' ');
+  // any word of the stage naming a shell makes it a runner: no wrapper list
+  const wrapped = (c: string) => [
+    `printf '%s\n' '${c}' | env bash`, `printf '%s\n' '${c}' | env -i bash`, `printf '%s\n' '${c}' | env FOO=1 bash`,
+    `printf '%s\n' '${c}' | command bash`, `printf '%s\n' '${c}' | sudo -u x bash`, `printf '%s\n' '${c}' | exec bash`,
+    `printf '%s\n' '${c}' | nohup bash`, `printf '%s\n' '${c}' | xargs -I{} bash -c {}`, `printf '%s\n' '${c}' | /bin/bash`,
+    `echo '${c}' | dash`, `echo '${c}' | ksh`, `echo '${c}' | env dash`,
+  ];
+  blocksByRole('builder', wrapped(merge));
+  blocksByRole('reviewer', wrapped(commit));
+  // quoted text with no pipe, or piped into a stage naming no shell, stays text
+  passes('builder', [`grep '${merge}' notes.txt`, `printf '${merge}' | grep x`]);
+  passes('lead', [`printf '${merge}' | env bash`]);
+  // accepted cost: a stage that merely names a shell counts as one
+  blocksByRole('builder', [`printf '${merge}' | grep bash`]);
 });
 
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
@@ -327,6 +346,7 @@ test('long commands stay fast', () => {
     ['role scan, 20,000 quoted words after echo', () => evaluate({ tool: 'shell', command: 'echo ' + '"a b" '.repeat(20000), role: 'reviewer' })],
     ['role scan, 5,000 git pushes in one segment', () => evaluate({ tool: 'shell', command: 'git push origin feat/x '.repeat(5000), role: 'builder' })],
     ['role scan, gh -R 20,000 repeats', () => evaluate({ tool: 'shell', command: 'gh -R '.repeat(20000), role: 'builder' })],
+    ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
   ];
   for (const [name, run] of cases) {
     const t = performance.now();
