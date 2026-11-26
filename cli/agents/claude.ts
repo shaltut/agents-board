@@ -16,7 +16,9 @@ export const claudeEndpointPath = (machine: string, pane: string) => join(tmpdir
 export function writeClaudeEndpoint(machine: string, pane: string, ep: { socket: string; token: string; pid?: number }): void {
   const file = claudeEndpointPath(machine, pane), tmp = `${file}.tmp.${process.pid}`;
   try {
-    writeFileSync(tmp, JSON.stringify({ socket: ep.socket, token: ep.token, pid: ep.pid, updatedAt: Date.now() }), { mode: 0o600 });
+    // Always a fresh file: `mode` only applies on create, so a leftover temp file would keep its old (maybe wider) mode.
+    rmSync(tmp, { force: true });
+    writeFileSync(tmp, JSON.stringify({ socket: ep.socket, token: ep.token, pid: ep.pid, updatedAt: Date.now() }), { mode: 0o600, flag: 'wx' });
     renameSync(tmp, file);
   } catch (e) {
     try { rmSync(tmp, { force: true }); } catch {}
@@ -24,19 +26,34 @@ export function writeClaudeEndpoint(machine: string, pane: string, ep: { socket:
   }
 }
 
-/** The endpoint, or null when there is no file or it is not one. */
-export function readClaudeEndpoint(machine: string, pane: string): ClaudeEndpoint | null {
+function parseEndpoint(file: string): ClaudeEndpoint | null {
   try {
-    const o = JSON.parse(readFileSync(claudeEndpointPath(machine, pane), 'utf8'));
+    const o = JSON.parse(readFileSync(file, 'utf8'));
     if (!o || typeof o.socket !== 'string' || typeof o.token !== 'string' || !o.socket || !o.token) return null;
     return { socket: o.socket, token: o.token, pid: typeof o.pid === 'number' ? o.pid : undefined, updatedAt: Number(o.updatedAt) || 0 };
   } catch { return null; }
 }
 
-/** Remove the file; with `expectedSocket`, only when it still names that socket (a newer Claude may have rewritten it). */
+/** The endpoint, or null when there is no file or it is not one. */
+export function readClaudeEndpoint(machine: string, pane: string): ClaudeEndpoint | null {
+  return parseEndpoint(claudeEndpointPath(machine, pane));
+}
+
+/**
+ * Remove the file; with `expectedSocket`, only when it still names that socket. The file is claimed by rename first, so a
+ * newer Claude's rewrite can never be deleted by a check-then-remove race. Never throws, never leaves the claim file.
+ */
 export function clearClaudeEndpoint(machine: string, pane: string, expectedSocket?: string): void {
-  if (expectedSocket !== undefined && readClaudeEndpoint(machine, pane)?.socket !== expectedSocket) return;
-  try { rmSync(claudeEndpointPath(machine, pane), { force: true }); } catch {}
+  const file = claudeEndpointPath(machine, pane);
+  if (expectedSocket === undefined) { try { rmSync(file, { force: true }); } catch {} return; }
+  const claimed = `${file}.clear.${process.pid}`;
+  try { renameSync(file, claimed); } catch { return; } // no file, or busy: nothing to do
+  try {
+    if (parseEndpoint(claimed)?.socket !== expectedSocket) {
+      // A newer Claude's endpoint: put it back unless an even newer one landed meanwhile.
+      if (!existsSync(file)) { try { renameSync(claimed, file); } catch {} }
+    }
+  } finally { try { rmSync(claimed, { force: true }); } catch {} }
 }
 
 /** One line per connection, opened only when the message is ready (Claude closes idle connections). Same as cli/relay.ts. */

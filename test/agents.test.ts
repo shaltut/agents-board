@@ -2,9 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
 import { claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
@@ -100,6 +101,41 @@ test('clearClaudeEndpoint: only when the socket matches, if one is given', () =>
   } finally { cleanup(pane); }
 });
 
+test('endpoint file: a leftover temp file is replaced, not reused', () => {
+  const pane = fresh(); cleanup(pane);
+  const tmp = `${claudeEndpointPath(M, pane)}.tmp.${process.pid}`;
+  try {
+    writeFileSync(tmp, 'leftover');
+    if (process.platform !== 'win32') chmodSync(tmp, 0o644);
+    writeClaudeEndpoint(M, pane, { socket: 'S-NEW', token: 'T-NEW' });
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, 'S-NEW');
+    if (process.platform !== 'win32') assert.equal(statSync(claudeEndpointPath(M, pane)).mode & 0o777, 0o600);
+    assert.equal(existsSync(tmp), false);
+  } finally { rmSync(tmp, { force: true }); cleanup(pane); }
+});
+
+test('endpoint file: a failed write leaves no temp file and throws', () => {
+  const pane = fresh(), file = claudeEndpointPath(M, pane); cleanup(pane);
+  try {
+    mkdirSync(file);
+    assert.throws(() => writeClaudeEndpoint(M, pane, { socket: 'S', token: 'T' }));
+    assert.equal(existsSync(`${file}.tmp.${process.pid}`), false);
+  } finally { rmSync(file, { recursive: true, force: true }); rmSync(`${file}.tmp.${process.pid}`, { force: true }); }
+});
+
+test('clearClaudeEndpoint: a non-matching endpoint is left byte-identical and no claim file remains', () => {
+  const pane = fresh(), file = claudeEndpointPath(M, pane); cleanup(pane);
+  try {
+    writeClaudeEndpoint(M, pane, { socket: 'S1', token: 'T1' });
+    const before = readFileSync(file, 'utf8');
+    clearClaudeEndpoint(M, pane, 'OTHER');
+    assert.equal(readFileSync(file, 'utf8') === before, true, 'endpoint file changed'); // never print the text: it holds the token
+    assert.deepEqual(readdirSync(dirname(file)).filter((f) => f.startsWith(basename(file)) && f.includes('.clear.')), []);
+    cleanup(pane);
+    assert.doesNotThrow(() => clearClaudeEndpoint(M, pane, 'S1')); // file missing
+  } finally { cleanup(pane); }
+});
+
 test('deliver: auth line then user line on the socket from the endpoint file', async () => {
   const pane = fresh(), sock = sockName(pane); cleanup(pane);
   const srv = await listen(sock);
@@ -138,6 +174,48 @@ test('deliver: retries once when the endpoint file rotated to a live socket', as
     assert.deepEqual(JSON.parse(srv.lines[0]!), { type: 'auth', token: 'NEW' });
     assert.equal(JSON.parse(srv.lines[1]!).message.content, 'after rotation');
   } finally { await srv.close(); cleanup(pane); }
+});
+
+test('deliver: an inbox that never closes times out after 5 s, token not in the error', { timeout: 15_000, skip: process.platform === 'win32' ? 'a named-pipe client closes on its own end(); the half-open hang only reproduces on unix sockets' : false }, async () => {
+  const pane = fresh(), sock = sockName(pane), conns = new Set<net.Socket>(); cleanup(pane);
+  const srv = net.createServer({ allowHalfOpen: true }, (c) => { conns.add(c); c.on('error', () => {}); });
+  await new Promise<void>((r) => srv.listen(sock, () => r()));
+  try {
+    writeClaudeEndpoint(M, pane, { socket: sock, token: 'SECRET-TOKEN' });
+    await assert.rejects(claudeAdapter.deliver(seatOf(pane), 'x'), (e: Error) =>
+      /inbox timeout/.test(e.message) && !e.message.includes('SECRET-TOKEN') && !String(e.stack).includes('SECRET-TOKEN'));
+  } finally {
+    for (const c of conns) c.destroy();
+    await new Promise<void>((r) => srv.close(() => r()));
+    cleanup(pane);
+  }
+});
+
+test('deliver: a refused socket retries once on the rotated endpoint', { skip: process.platform === 'win32' }, async () => {
+  const pane = fresh(), stale = sockName(`${pane}-stale`), live = sockName(pane); cleanup(pane);
+  rmSync(stale, { force: true });
+  const child = spawn(process.execPath, ['-e',
+    "require('net').createServer().listen(process.argv[1], () => console.log('up'))", stale], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise((r) => child.on('exit', r));
+  const srv = await listen(live);
+  try {
+    await new Promise<void>((res, rej) => {
+      child.on('error', rej);
+      void exited.then(() => rej(new Error('listener exited before it was up')));
+      child.stdout!.on('data', (d) => { if (String(d).includes('up')) res(); });
+    });
+    child.kill('SIGKILL');
+    await exited;
+    assert.equal(existsSync(stale), true, 'killed owner should leave its socket file');
+    writeClaudeEndpoint(M, pane, { socket: stale, token: 'OLD' });
+    assert.equal(await claudeAdapter.isAlive(seatOf(pane)), true, "known gap R4 (parked): a killed owner's socket file still reads alive");
+    const p = claudeAdapter.deliver(seatOf(pane), 'after refusal'); // has read the stale endpoint by now
+    writeClaudeEndpoint(M, pane, { socket: live, token: 'NEW' });
+    await p;
+    await settle();
+    assert.deepEqual(JSON.parse(srv.lines[0]!), { type: 'auth', token: 'NEW' });
+    assert.equal(JSON.parse(srv.lines[1]!).message.content, 'after refusal');
+  } finally { child.kill('SIGKILL'); await srv.close(); rmSync(stale, { force: true }); cleanup(pane); }
 });
 
 test('isAlive: true while the socket exists, false when it is gone or there is no endpoint', async () => {
