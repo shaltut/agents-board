@@ -2,6 +2,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseOpencodeInput, runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
 
@@ -84,4 +87,17 @@ test('runOpencodeShim in process matches the process output and never throws', (
   assert.deepEqual(runOpencodeShim('{"tool":"bash","args":{"command":"ls"}}', {}), {});
   assert.equal(runOpencodeShim(undefined as any, {}).decision, 'block');
   assert.equal(runOpencodeShim('{"tool":"bash","args":{"command":"ls"}}', null as any).decision, 'block');
+});
+
+test('a shim copied without core.mjs still blocks (core load failure fails closed)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-shim-'));
+  try {
+    const lone = join(dir, 'shim-opencode.mjs');
+    copyFileSync(SHIM, lone);
+    const r = spawnSync(process.execPath, [lone], { input: JSON.stringify({ tool: 'bash', args: { command: 'ls' } }), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.decision, 'block');
+    assert.match(out.reason, /^Blocked: guard failed to load core/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

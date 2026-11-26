@@ -38,7 +38,7 @@ test('seatKey: sha1 of lowercased machine and trimmed pane, 12 hex', () => {
   assert.notEqual(seatKey('testbox', 'p1'), seatKey('testbox', 'p2'));
 });
 
-test('registry: claude is registered; codex/opencode/agy are not installed yet; anything else is unknown', () => {
+test('registry: claude and opencode are registered; codex/agy are not installed yet; anything else is unknown', () => {
   assert.deepEqual([...AGENT_KINDS], ['claude', 'codex', 'opencode', 'agy']);
   assert.equal(getAdapter('claude'), claudeAdapter);
   for (const k of ['codex', 'agy'] as const) assert.throws(() => getAdapter(k), new RegExp(`agent "${k}" is not installed yet \\(phase 1 supports claude only\\)`));

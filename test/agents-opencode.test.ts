@@ -2,14 +2,20 @@
 // fake Runner, quota text, and every spec method. Pure: no OpenCode, no network, no database.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import {
-  OPENCODE_MODEL, clearOpencodeEndpoint, freellmRefusal, makeOpencodeAdapter, newestSession, opencodeAdapter, opencodeEndpointPath,
-  readOpencodeEndpoint, writeOpencodeEndpoint,
+  OPENCODE_MODEL, clearOpencodeEndpoint, freellmRefusal, makeOpencodeAdapter, newestSession, normalizeAbs, opencodeAdapter,
+  opencodeEndpointPath, readOpencodeEndpoint, writeOpencodeEndpoint, type FreellmRule,
 } from '../cli/agents/opencode.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
+// The folder rule with git stubbed (not a repo): launch tests do not need real folders. Real-git cases use a temp root below.
+const NO_REPO: FreellmRule = { root: 'F:\\Work', allowed: ['F:\\Work\\TactiAI', 'F:\\Work\\arabcomputers'], git: () => ({ ok: true, notRepo: true }) };
+const A = makeOpencodeAdapter(undefined, undefined, NO_REPO);
 const M = 'testbox';
 let n = 0;
 const pane = () => `oc-${process.pid}-${++n}`;
@@ -28,7 +34,7 @@ test('registry: opencode is registered; defaultModelFor stays null like cb._role
 });
 
 test('buildLaunch: argv, env, no secret in argv', () => {
-  const s = opencodeAdapter.buildLaunch(input());
+  const s = A.buildLaunch(input());
   assert.equal(s.kind, 'opencode');
   assert.deepEqual(s.args, ['C:/w/x', '--hostname', '127.0.0.1', '--port', '41234', '-m', 'freellmapi/auto', '--auto']);
   assert.equal(s.env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT, '1');
@@ -39,28 +45,89 @@ test('buildLaunch: argv, env, no secret in argv', () => {
 });
 
 test('buildLaunch: never passes Claude-only secrets through', () => {
-  const s = opencodeAdapter.buildLaunch(input({ env: {
+  const s = A.buildLaunch(input({ env: {
     ...input().env, GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'y', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't', CLAUDE_CODE_ENTRYPOINT: 'e',
   } }));
   assert.deepEqual(Object.keys(s.env).filter((k) => /^(GITHUB_PERSONAL|CLAUDE_CODE_)/i.test(k)), []);
 });
 
 test('buildLaunch: model must be provider/model', () => {
-  for (const m of ['sonnet', 'opus', 'auto', '', '/auto', 'Free/auto', 'a/', 'a b/c']) assert.throws(() => opencodeAdapter.buildLaunch(input({ model: m })), /provider\/model/, m);
-  for (const m of ['freellmapi/auto', 'anthropic/claude-sonnet-4', 'openrouter/qwen/qwen3-coder:free']) assert.doesNotThrow(() => opencodeAdapter.buildLaunch(input({ model: m })), m);
+  for (const m of ['sonnet', 'opus', 'auto', '/auto', 'Free/auto', 'a/', 'a b/c']) assert.throws(() => A.buildLaunch(input({ model: m })), /provider\/model/, m);
+  for (const m of ['freellmapi/auto', 'anthropic/claude-sonnet-4', 'openrouter/qwen/qwen3-coder:free']) assert.doesNotThrow(() => A.buildLaunch(input({ model: m })), m);
   assert.ok(OPENCODE_MODEL.test('freellmapi/auto'));
 });
 
 test('buildLaunch: needs port and password; refuses client folders for the free router only', () => {
-  assert.throws(() => opencodeAdapter.buildLaunch(input({ env: { OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
-  assert.throws(() => opencodeAdapter.buildLaunch(input({ env: { CB_OPENCODE_PORT: '80', OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
-  assert.throws(() => opencodeAdapter.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234' } })), /OPENCODE_SERVER_PASSWORD/);
-  assert.throws(() => opencodeAdapter.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\iHop-Platform' })), /freellmapi refused/);
-  assert.throws(() => opencodeAdapter.buildLaunch(input({ cwd: 'f:/work/QHS/x' })), /freellmapi refused/);
-  assert.doesNotThrow(() => opencodeAdapter.buildLaunch(input({ cwd: 'F:\\Work\\TactiAI\\app' })));
-  assert.doesNotThrow(() => opencodeAdapter.buildLaunch(input({ cwd: 'C:/w/anything' })));
-  assert.doesNotThrow(() => opencodeAdapter.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\x', model: 'anthropic/claude-sonnet-4' })));
-  assert.match(freellmRefusal('F:\\Work\\wiki')!, /refused/);
+  assert.throws(() => A.buildLaunch(input({ env: { OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
+  assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '80', OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
+  assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234' } })), /OPENCODE_SERVER_PASSWORD/);
+  assert.throws(() => A.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\iHop-Platform' })), /freellmapi refused/);
+  assert.throws(() => A.buildLaunch(input({ cwd: 'f:/work/QHS/x' })), /freellmapi refused/);
+  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'F:\\Work\\TactiAI\\app' })));
+  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'C:/w/outside-and-not-a-repo' })));
+  // other providers are not checked (owner decision, see the design note)
+  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\x', model: 'anthropic/claude-sonnet-4' })));
+  assert.match(freellmRefusal('F:\\Work\\wiki', NO_REPO)!, /refused/);
+});
+
+test('buildLaunch: no model means the config default (freellmapi/auto): no -m, and the folder rule still applies', () => {
+  const s = A.buildLaunch(input({ model: '' }));
+  assert.ok(!s.args.includes('-m'));
+  assert.throws(() => A.buildLaunch(input({ model: '', cwd: 'F:\\Work\\QHS' })), /freellmapi refused/);
+});
+
+test('buildLaunch: the cwd must be absolute and is passed normalised (never a flag)', () => {
+  for (const c of ['', '  ', 'rel/path', '-rf', '--help', '.']) assert.throws(() => A.buildLaunch(input({ cwd: c })), /absolute cwd/, c);
+  assert.equal(A.buildLaunch(input({ cwd: 'C:\\w\\a\\..\\x\\' })).args[0], 'C:/w/x');
+});
+
+test('normalizeAbs: GetFullPath-like forms', () => {
+  assert.equal(normalizeAbs('F:\\Work\\TactiAI\\..\\Tawuniya\\x'), 'F:/Work/Tawuniya/x');
+  assert.equal(normalizeAbs('\\\\?\\F:\\Work\\QHS'), 'F:/Work/QHS');
+  assert.equal(normalizeAbs('//?/F:/Work/QHS'), 'F:/Work/QHS');
+  assert.equal(normalizeAbs('/f/work/qhs'), 'f:/work/qhs');
+  assert.equal(normalizeAbs('F:'), 'F:/');
+  assert.equal(normalizeAbs('/home/x/'), '/home/x');
+  for (const bad of ['', 'rel', '..', undefined, 5, 'a\0b']) assert.equal(normalizeAbs(bad), null, String(bad));
+});
+
+test('freellmRefusal: dot-dot, device and Git Bash forms of a protected folder are refused', () => {
+  for (const c of ['F:/Work/TactiAI/../Tawuniya/x', '//?/F:/Work/QHS', '\\\\?\\F:\\Work\\QHS', '/f/work/qhs', 'f:\\WORK\\Tawuniya', 'F:\\Work\\TactiAI2']) {
+    assert.match(freellmRefusal(c, NO_REPO)!, /refused/, c);
+  }
+  for (const c of ['', 'rel/path', 'F:Work']) assert.match(freellmRefusal(c, NO_REPO)!, /refused/, c);
+  for (const c of ['F:/Work/TactiAI', 'F:\\Work\\arabcomputers\\a\\b', 'D:/anything', 'F:/Workshop/x']) assert.equal(freellmRefusal(c, NO_REPO), null, c);
+});
+
+test('freellmRefusal: git failure refuses; a bad git path refuses; the common dir is judged', () => {
+  const rule = (git: FreellmRule['git']): FreellmRule => ({ ...NO_REPO, git });
+  assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: false })))!, /git could not say/);
+  assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: '' })))!, /no usable repository path/);
+  assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'F:/Work/Tawuniya/iHop-Platform/.git' })))!, /under F:\\Work/);
+  assert.equal(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'F:/Work/TactiAI/app/.git' }))), null);
+  assert.match(freellmRefusal('C:/w/x', { ...NO_REPO, root: 'rel' })!, /protected root/);
+  assert.match(freellmRefusal('C:/w/x', { ...NO_REPO, allowed: ['rel'] })!, /allowed folder/);
+});
+
+test('freellmRefusal with real git: a worktree outside the protected root belongs to its repo', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'oc-fl-')));
+  const git = (cwd: string, ...a: string[]) => { const r = spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
+  try {
+    const root = join(tmp, 'protected'), ok = join(root, 'open'), bad = join(root, 'secret'), out = join(tmp, 'outside');
+    for (const d of [ok, bad, out]) mkdirSync(d, { recursive: true });
+    const rule: FreellmRule = { root, allowed: [ok] };
+    git(bad, 'init', '-q'); writeFileSync(join(bad, 'a'), 'x'); git(bad, 'add', 'a'); git(bad, 'commit', '-q', '-m', 'i');
+    git(ok, 'init', '-q'); writeFileSync(join(ok, 'a'), 'x'); git(ok, 'add', 'a'); git(ok, 'commit', '-q', '-m', 'i');
+    const wtBad = join(out, 'wt-bad'), wtOk = join(out, 'wt-ok');
+    git(bad, 'worktree', 'add', '-q', wtBad, '-b', 'w1');
+    git(ok, 'worktree', 'add', '-q', wtOk, '-b', 'w2');
+    assert.match(freellmRefusal(bad, rule)!, /refused/);
+    assert.match(freellmRefusal(wtBad, rule)!, /refused/, 'worktree of a protected repo');
+    assert.equal(freellmRefusal(ok, rule), null);
+    assert.equal(freellmRefusal(wtOk, rule), null, 'worktree of an allowed repo');
+    assert.equal(freellmRefusal(out, rule), null, 'a folder that is not a repo');
+    assert.match(freellmRefusal(join(out, 'missing'), rule)!, /git could not say/, 'unresolvable folder');
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('endpoint file: 0600, round trip, bad content reads as none', () => {
@@ -72,6 +139,12 @@ test('endpoint file: 0600, round trip, bad content reads as none', () => {
     if (process.platform !== 'win32') assert.equal(statSync(opencodeEndpointPath(M, p)).mode & 0o777, 0o600);
     assert.throws(() => writeOpencodeEndpoint(M, p, { port: 22, password: 'pw' }));
     assert.throws(() => writeOpencodeEndpoint(M, p, { port: 41234, password: '' }));
+    for (const u of ['a:b', '', 'a b', 'x/y']) assert.throws(() => writeOpencodeEndpoint(M, p, { port: 41234, password: 'pw', username: u }), /username/, u);
+    writeOpencodeEndpoint(M, p, { port: 41234, password: 'pw', username: 'oc.user-1' });
+    assert.equal(readOpencodeEndpoint(M, p)!.username, 'oc.user-1');
+    // a hand-edited file with a bad username reads as none, never a broken Basic header
+    writeFileSync(opencodeEndpointPath(M, p), JSON.stringify({ port: 41234, password: 'pw', username: 'a:b' }));
+    assert.equal(readOpencodeEndpoint(M, p), null);
   } finally { clearOpencodeEndpoint(M, p); }
   assert.equal(readOpencodeEndpoint(M, p), null);
 });
@@ -96,6 +169,8 @@ test('deliver: picks the newest session and posts prompt_async with basic auth',
     assert.equal(calls[0]!.url, 'http://127.0.0.1:41234/session');
     assert.equal(calls[1]!.url, 'http://127.0.0.1:41234/session/b/prompt_async');
     assert.equal(calls[1]!.init.method, 'POST');
+    assert.equal(calls[0]!.init.redirect, 'error');
+    assert.equal(calls[1]!.init.redirect, 'error');
     assert.deepEqual(JSON.parse(calls[1]!.init.body), { parts: [{ type: 'text', text: 'hello' }] });
     assert.equal(calls[1]!.init.headers.authorization, 'Basic ' + Buffer.from('opencode:pw').toString('base64'));
   })();
@@ -116,6 +191,9 @@ test('newestSession reads arrays, {data}, {items}; junk is none', () => {
   assert.equal(newestSession({ data: [{ id: 'x' }] }), 'x');
   assert.equal(newestSession({ items: [{ id: 'y' }] }), 'y');
   for (const j of [null, 'x', 5, {}, [null, { id: 3 }]]) assert.equal(newestSession(j), null);
+  // a subagent's child session is never the seat's, even when it is the newest
+  assert.equal(newestSession([{ id: 'root', time: { updated: 1 } }, { id: 'child', parentID: 'root', time: { updated: 9 } }]), 'root');
+  assert.equal(newestSession([{ id: 'child', parentID: 'root' }]), null);
 });
 
 test('isAlive: health answer alive (any status), refused is dead, timeout alive, no endpoint dead', async () => {
@@ -125,10 +203,15 @@ test('isAlive: health answer alive (any status), refused is dead, timeout alive,
     const a = fake([json({ healthy: true })]);
     assert.equal(await makeOpencodeAdapter(a.f).isAlive(seat(p)), true);
     assert.equal(a.calls[0]!.url, 'http://127.0.0.1:41234/global/health');
-    assert.equal(await makeOpencodeAdapter(fake([json({}, 401)]).f).isAlive(seat(p)), true);
-    const refused = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
-    assert.equal(await makeOpencodeAdapter(fake([refused]).f).isAlive(seat(p)), false);
+    for (const s of [401, 403, 404]) assert.equal(await makeOpencodeAdapter(fake([json({}, s)]).f).isAlive(seat(p)), false, String(s));
+    assert.equal(await makeOpencodeAdapter(fake([json({}, 500)]).f).isAlive(seat(p)), true);
+    for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ECONNRESET', 'EADDRNOTAVAIL', 'ENOENT']) {
+      const e = Object.assign(new TypeError('fetch failed'), { cause: { code } });
+      assert.equal(await makeOpencodeAdapter(fake([e]).f).isAlive(seat(p)), false, code);
+    }
+    assert.equal(await makeOpencodeAdapter(fake([new TypeError('redirect mode is set to error')]).f).isAlive(seat(p)), false);
     assert.equal(await makeOpencodeAdapter(fake([new DOMException('timed out', 'TimeoutError')]).f).isAlive(seat(p)), true);
+    assert.equal(await makeOpencodeAdapter(fake([new DOMException('aborted', 'AbortError')]).f).isAlive(seat(p)), true);
   })();
 });
 
@@ -157,9 +240,17 @@ test('detectQuotaStop: real-looking pane text', () => {
   assert.deepEqual(d('Error: FreeUsageLimitError: Free usage exceeded, retry in 2 hours'), { kind: 'quota', raw: 'FreeUsageLimitError' });
   assert.equal(d('AI_APICallError: You exceeded your current quota (insufficient_quota)')?.kind, 'quota');
   const r = d('Rate limit reached for freellmapi/auto. Retrying in 30 seconds');
-  assert.deepEqual(r, { kind: 'rate_limit', raw: 'Rate limit', retryAfterSec: 30 });
+  assert.deepEqual(r, { kind: 'rate_limit', raw: 'Rate limit reached', retryAfterSec: 30 });
   assert.equal(d('HTTP 429 Too Many Requests, try again in 2 min')?.retryAfterSec, 120);
   assert.equal(d('processed 4290 files'), null);
+});
+
+test('detectQuotaStop: a bare 429 or "rate limit" in normal output is not a stop; only the last lines count', () => {
+  const d = (t?: string) => opencodeAdapter.detectQuotaStop(seat('p'), null, t);
+  for (const t of ['processed 429 files', 'see line 429 of src/a.ts', 'wrote src/rate-limit.ts and 429 tests', 'the rate limit config is in ratelimit.json', 'port 4290 ok']) assert.equal(d(t), null, t);
+  const old = 'Error: FreeUsageLimitError\n' + Array.from({ length: 20 }, (_, i) => `building step ${i}`).join('\n');
+  assert.equal(d(old), null, 'a banner scrolled out of the last lines');
+  assert.equal(d(`${old}\nrate limited, retrying in 5 seconds`)?.kind, 'rate_limit');
 });
 
 test('spec methods return what the design note says', () => {
