@@ -4,7 +4,7 @@
 
 [![node](https://img.shields.io/badge/node-%3E%3D24-339933)](package.json)
 [![postgres](https://img.shields.io/badge/postgres-16-336791)](deploy/compose.yml)
-[![license](https://img.shields.io/badge/license-not%20chosen%20yet-lightgrey)](#license)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Run twenty agent sessions and the problems are not the models: two sessions take the same task, one stalls on a
 question nobody sees, a shell command deletes the wrong folder. Agents Board gives the sessions one shared place to
@@ -252,4 +252,4 @@ Branch from `main`, keep a change to one concern, write the failing test first a
 
 ## License
 
-No license has been chosen yet. Until one is added to this repository, no permission to reuse the code is granted.
+[MIT](LICENSE). Use it, change it, ship it; keep the copyright line.
