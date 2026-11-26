@@ -468,50 +468,80 @@ test('stage_stalls_due: no nudge to the holder of a card waiting on a person (Q2
   assert.equal(await due(), 1, 'a dormant question does not hold it');
 });
 
-// #4335: a builder waiting on the review of its open PR was quiet, so the sweep freed the card: the builder could no
-// longer pass it and the digest still said it held it. A card (or part) with a linked PR keeps its holder; it is nudged
-// (once a quiet spell, never told it goes back to the queue).
-test('stage_stalls_due: a card or a part with a linked PR keeps its holder, and is nudged without the threat (#4335)', async () => {
+// #4335: a builder working on its open PR was quiet, so the sweep freed the card. Its review (C1, C2, I1): keyed on a
+// links.pr that every card past build has, that kept every reviewer and QA holder and held a merged PR's card forever.
+// Kept now only while the PR is open by the GitHub poller (watched repo, in its open list), the holder is a builder at
+// build (where it can act), and the card has been quiet under 24 h; anything else follows the usual rules.
+test('stage_stalls_due: only a builder at build with an open PR keeps a quiet card, for up to 24 h (#4335)', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
   await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
-  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p2','B1@mac','demo','builder'), ('pc','p4','orch@pc','demo',null)`;
-  for (const t of ['With a PR', 'No PR']) await sql`select cb.task_add(project => 'demo', title => ${t}, type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`;
-  await sql`update cb.tasks set status = 'in_progress', assignee = 'B1@mac', stage = 'review' where id in (1, 2)`;
-  await sql`update cb.tasks set links = '{"pr": "https://github.com/o/r/pull/5947"}' where id = 1`;
-  const quiet = async (m: string) => {
-    await sql`update cb.tasks set updated_at = now() - ${m}::interval where id in (1, 2)`;
-    await sql`update cb.sessions set started_at = now() - ${m}::interval where actor = 'B1@mac'`;
-    await sql`update cb.events set at = now() - ${m}::interval where (task_id in (1, 2) or actor = 'B1@mac') and not (data ? 'nudge')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p2','B1@mac','demo','builder'),
+    ('mac','p3','R1@mac','demo','reviewer'), ('mac','p5','B2@mac','demo','builder'), ('pc','p4','orch@pc','demo',null)`;
+  // the poller's state: PRs 5947 and 6001 of o/r are open; 5948 merged (dropped from the list); x/y is not watched
+  await sql`insert into cb.settings (key, value) values ('github:O/R', '{"prs": {"5947": 90, "6001": 91}}')`;
+  const PR = (n: number, repo = 'o/r') => `https://github.com/${repo}/pull/${n}`;
+  const cases: [string, string, string, string | null][] = [ // title, holder, stage, pr
+    ['open PR, builder at build', 'B1@mac', 'build', PR(5947)],
+    ['no PR', 'B1@mac', 'build', null],
+    ['merged PR', 'B1@mac', 'build', PR(5948)],
+    ['unwatched repo', 'B1@mac', 'build', PR(5947, 'x/y')],
+    ['open PR, reviewer at review', 'R1@mac', 'review', PR(5947)],
+    ['open PR, builder at review', 'B1@mac', 'review', PR(5947)],
+    ['open PR, quiet 25 h', 'B2@mac', 'build', PR(5947)], // quiet counts the holder's work anywhere: its own builder
+  ];
+  for (const [title, who, stage, pr] of cases) {
+    const [{ id }] = await sql`select cb.task_add(project => 'demo', title => ${title}, type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`;
+    await sql`update cb.tasks set status = 'in_progress', assignee = ${who}, stage = ${stage}, links = ${pr ? sql.json({ pr }) : sql.json({})} where id = ${id}`;
+  }
+  const quiet = async (m: string, ids = [1, 2, 3, 4, 5, 6]) => {
+    await sql`update cb.tasks set updated_at = now() - ${m}::interval where id = any(${ids})`;
+    await sql`update cb.events set at = now() - ${m}::interval where task_id = any(${ids}) and not (data ? 'nudge')`;
   };
-  const due = async () => (await sql`select cb.stage_stalls_due() as n`)[0].n;
+  const idle = async (m: string) => {
+    await sql`update cb.sessions set started_at = now() - ${m}::interval where actor in ('B1@mac', 'R1@mac')`;
+    await sql`update cb.events set at = least(at, now() - ${m}::interval) where actor in ('B1@mac', 'R1@mac') and not (data ? 'nudge')`;
+  };
   const nudge = async (id: number) => (await sql`select summary from cb.events where task_id = ${id} and data ? 'nudge' order by id desc limit 1`)[0]?.summary;
-  await quiet('40 minutes');
-  assert.equal(await due(), 2, 'both nudged');
-  assert.match(await nudge(1), /^#1 "With a PR" has its PR open with no update for 0h 40m at .*cb log 1/);
+  await sql`update cb.sessions set started_at = now() - interval '25 hours' where actor = 'B2@mac'`;
+  await idle('40 minutes'); await quiet('40 minutes'); await quiet('25 hours', [7]);
+  await sql`select cb.stage_stalls_due()`;
+  assert.match(await nudge(1), /^#1 "open PR, builder at build" has PR #5947 open, with no update for 0h 40m at .*cb log 1 /);
   assert.doesNotMatch(await nudge(1), /back to the queue/);
-  assert.match(await nudge(2), /goes back to the queue in an hour/);
-  // 70 minutes after the nudges, 110 quiet: the card without a PR is freed, the one with a PR is not, nor nudged again
+  for (const id of [2, 3, 4, 5, 6]) assert.match(await nudge(id), /goes back to the queue in an hour/, `card ${id}`);
+  // 110 minutes quiet, the nudges 70 minutes old: only card 1 keeps its holder
   await sql`update cb.stage_nudges set nudged_at = now() - interval '70 minutes'`;
-  await quiet('110 minutes');
-  assert.equal(await due(), 2, 'only the card without a PR is freed (a note and a message)');
-  const rows = await sql`select id, assignee, status, stage from cb.tasks where id in (1, 2) order by id`;
-  assert.deepEqual(rows.map((r: any) => [String(r.id), r.assignee, r.status]), [['1', 'B1@mac', 'in_progress'], ['2', null, 'next']]);
-  // a hold (Next) with a PR is not freed either
+  await idle('110 minutes'); await quiet('110 minutes'); await quiet('25 hours', [7]);
+  await sql`select cb.stage_stalls_due()`;
+  const held = await sql`select id, assignee from cb.tasks order by id`;
+  assert.deepEqual(held.map((r: any) => [Number(r.id), r.assignee]), [[1, 'B1@mac'], [2, null], [3, null], [4, null], [5, null], [6, null], [7, null]]);
+  // a Next hold: the same rule, and the PR that merges ends the exemption
   await sql`update cb.tasks set status = 'next' where id = 1`;
-  await quiet('110 minutes');
-  assert.equal(await due(), 0);
-  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac');
+  await quiet('110 minutes', [1]);
+  await sql`select cb.stage_stalls_due()`;
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, 'B1@mac', 'a Next hold with an open PR is kept');
+  await sql`update cb.settings set value = '{"prs": {"6001": 91}}' where key = 'github:O/R'`;
+  await quiet('110 minutes', [1]);
+  await sql`select cb.stage_stalls_due()`;
+  assert.equal((await sql`select assignee from cb.tasks where id = 1`)[0].assignee, null, 'merged: the usual rules free it');
 
-  // a part with its PR: the same
-  await sql`select cb.task_add(project => 'demo', title => 'Parts', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc')`;
-  await sql`update cb.tasks set status = 'in_progress', stage = 'build' where id = 3`;
+  // a part: the same rule on the part's holder, stage and PR
+  const [{ id: pid }] = await sql`select cb.task_add(project => 'demo', title => 'Parts', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`;
+  await sql`update cb.tasks set status = 'in_progress', stage = 'build' where id = ${pid}`;
   await sql`insert into cb.task_parts (task_id, repo, stage, status, assignee, pr, since, nudged_at) values
-    (3, 'api', 'review', 'in_progress', 'B1@mac', 'https://github.com/o/r/pull/6001', now() - interval '110 minutes', now() - interval '70 minutes')`;
-  await sql`update cb.events set at = now() - interval '110 minutes' where task_id = 3 or actor = 'B1@mac'`;
-  await sql`update cb.tasks set updated_at = now() - interval '110 minutes'`;
-  await due();
-  assert.equal((await sql`select assignee from cb.task_parts where task_id = 3`)[0].assignee, 'B1@mac', 'a part with a PR keeps its holder');
+    (${pid}, 'api', 'build', 'in_progress', 'B1@mac', ${PR(6001)}, now() - interval '110 minutes', now() - interval '70 minutes'),
+    (${pid}, 'web', 'review', 'in_progress', 'R1@mac', ${PR(6001)}, now() - interval '110 minutes', now() - interval '70 minutes')`;
+  await sql`update cb.events set at = now() - interval '110 minutes' where task_id = ${pid}`;
+  await sql`update cb.tasks set updated_at = now() - interval '110 minutes' where id = ${pid}`;
+  await sql`select cb.stage_stalls_due()`;
+  const parts = await sql`select repo, assignee from cb.task_parts where task_id = ${pid} order by repo`;
+  assert.deepEqual(parts.map((r: any) => [r.repo, r.assignee]), [['api', 'B1@mac'], ['web', null]], 'the builder part is kept, the reviewer part is freed');
+  await sql`update cb.task_parts set since = now() - interval '25 hours' where task_id = ${pid} and repo = 'api'`;
+  await sql`update cb.events set at = now() - interval '25 hours' where task_id = ${pid}`;
+  await sql`update cb.tasks set updated_at = now() - interval '25 hours' where id = ${pid}`;
+  await idle('25 hours');
+  await sql`select cb.stage_stalls_due()`;
+  assert.equal((await sql`select assignee from cb.task_parts where task_id = ${pid} and repo = 'api'`)[0].assignee, null, 'after 24 h the usual rules apply');
 });
 
 test('role texts name the repo rules', () => {
