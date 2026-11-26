@@ -327,11 +327,18 @@ drop function if exists cb.goals_list cascade;
 -- accidents and prompt-injected sessions, not a determined local process. Real auth = a Postgres role per client.
 -- #4356: what a guest (a member) writes reaches sessions, so the invisible format characters (Unicode Cf: zero-width,
 -- bidi overrides, tag characters) come out where it is written: answers, send-back notes, log lines. The class is every
--- Cf code point of Unicode 17 (Postgres regexes have no \p{}; test/guest-text.test.ts checks it against Node's).
+-- Cf code point of Unicode 17, written as \u escapes so it can be read and diffed (Postgres regexes have no \p{};
+-- test/guest-text.test.ts pins it and checks it against Node's). Cf only, by design: other invisible or confusable
+-- letters and marks (Hangul fillers, U+034F, variation selectors, braille blank) are ordinary text and stay.
+-- Control characters go too (review I2: a terminal acts on an ESC sequence, \r, a backspace): a line break of any
+-- kind (\r\n, \r, U+0085) becomes \n, which the relay indents; the other C0 and C1 controls but \n and \t are removed.
 -- The owner's and admins' text stays as typed (a right-to-left mark, an emoji joiner).
 create function cb.guest_text(actor text, t text) returns text language sql stable as $$
-  select case when t is not null and exists (select 1 from cb.users u where u.name = actor and u.role = 'member')
-    then regexp_replace(t, '[­؀-؅؜۝܏࢐-࢑࣢᠎​-‏‪-‮⁠-⁤⁦-⁯﻿￹-￻\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g') else t end $$;
+  select case when t is not null and exists (select 1 from cb.users u where lower(u.name) = lower(trim(coalesce(actor, ''))) and u.role = 'member')
+    then regexp_replace(regexp_replace(regexp_replace(t, '\r\n?|\u0085', E'\n', 'g'),
+           '[\u0001-\u0008\u000b-\u001f\u007f-\u009f]', '', 'g'),
+           '[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g')
+    else t end $$;
 create function cb.ahmed_like(a text) returns boolean language sql immutable as $$ select coalesce(a, '') ~* '\mahmed\M' $$;
 create function cb.not_ahmed(a text) returns void language plpgsql as $$
 begin
