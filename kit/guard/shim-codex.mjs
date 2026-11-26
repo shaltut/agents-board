@@ -20,6 +20,8 @@ try {
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const EDIT_TOOLS = new Set(['apply_patch', 'Edit', 'Write']);
 const ASK_TOOLS = new Set(['request_user_input']);
+/** Every tool name this shim judges: the installer's hook matcher must name exactly these (an unmatched tool is never guarded). */
+export const HANDLED_TOOLS = [...SHELL_TOOLS, ...EDIT_TOOLS, ...ASK_TOOLS];
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const detail = (e) => String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 200);
 const unreadable = (why) => ({ ok: false, reason: `guard could not read hook input (${why})` });

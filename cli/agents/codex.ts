@@ -4,6 +4,8 @@
 // Message text is never logged or put in an error message.
 import { classifyAgentGet, realRun } from '../squad-up.ts';
 import type { Runner } from '../squad-up.ts';
+import { READ_ONLY_ROLES } from '../../kit/guard/core.mjs';
+import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
@@ -16,14 +18,12 @@ export function codexModelProblem(model: string): string | null {
   return MODEL.test(model) ? null : `"${model}" is not a Codex model name (letters, digits, dot, dash, underscore; at most 64)`;
 }
 
-/** Roles that must not change files: Codex's own sandbox backs the guard's role block. */
-const READ_ONLY_ROLES = ['reviewer', 'qa', 'investigator'];
 /** Claude-only secrets: the owner's standing rule is that a non-Claude seat never carries them. */
-const FORBIDDEN_ENV = /^(?:GITHUB_PERSONAL_ACCESS_TOKEN|CLAUDE_CODE_.*)$/i;
+const FORBIDDEN_ENV = /^(?:GITHUB_PERSONAL_ACCESS_TOKEN|CLAUDE_CODE_.*|ANTHROPIC_.*|CLAUDECODE)$/i;
 /** The same names as a glob list for Codex's own `shell_environment_policy.exclude`: commands the model runs never see
  *  them, even though the pane's env (set by herdr from the PC's) still holds them. TOML literal strings, so there are no
  *  double quotes for a shell to lose. */
-const EXCLUDE = "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*']";
+const EXCLUDE = "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']";
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 // Real strings in the 0.166 binary (the apostrophe is the typographic one): "You’ve hit your usage limit. Upgrade to Pro ...",
@@ -51,7 +51,7 @@ export function createCodexAdapter(run: Runner = realRun): AgentAdapter {
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
-      const readOnly = READ_ONLY_ROLES.includes(l.role);
+      const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
       const env = Object.fromEntries(Object.entries(l.env ?? {}).filter(([k]) => !FORBIDDEN_ENV.test(k)));
       return {
         kind: 'codex',
@@ -108,13 +108,16 @@ export function createCodexAdapter(run: Runner = realRun): AgentAdapter {
       return r ? { kind: 'rate_limit', raw: r[0].trim() } : null;
     },
 
+    // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open), so it names
+    // exactly the tools the shim judges (HANDLED_TOOLS; PowerShell only on Windows, where a shell tool may carry that name).
     guardInstallSpec(boardDir) {
-      const match = '^(Bash|apply_patch|request_user_input)$'; // Codex hook matchers are regexes on the tool name
+      const re = (names: string[]) => `^(${names.join('|')})$`;
+      const base = HANDLED_TOOLS.filter((t: string) => t !== 'PowerShell');
       return {
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
-        matchers: { win32: match, darwin: match, linux: match },
-        notes: 'PreToolUse entry in ~/.codex/hooks.json beside herdr\'s SessionStart entry (never edit that one); [features] hooks = true is already set. A changed hooks.json makes Codex show "Hooks need review" at the next start: only Ahmed trusts it, the board never answers it.',
+        matchers: { win32: re([...HANDLED_TOOLS]), darwin: re(base), linux: re(base) },
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json makes Codex show \"Hooks need review\" at the next start: only Ahmed trusts it, the board never answers it.",
       };
     },
 

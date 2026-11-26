@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { codexAdapter, codexModelProblem, createCodexAdapter } from '../cli/agents/codex.ts';
+import { READ_ONLY_ROLES } from '../kit/guard/core.mjs';
+import { HANDLED_TOOLS, parseCodexInput } from '../kit/guard/shim-codex.mjs';
 import { defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
@@ -26,7 +28,7 @@ test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a bu
     kind: 'codex',
     args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '-s', 'workspace-write',
       '-c', 'sandbox_workspace_write.network_access=true',
-      '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*']",
+      '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
     env: { CB_ROLE: 'builder', CB_AGENT: 'codex' },
@@ -122,14 +124,32 @@ test('detectQuotaStop: real Codex limit text is a quota stop; a normal tail is n
   assert.equal(q(undefined), null);
 });
 
-test('guardInstallSpec: ~/.codex/hooks.json, shim-codex.mjs under the board, one matcher for every platform', () => {
+test('guardInstallSpec: ~/.codex/hooks.json, shim-codex.mjs under the board, matcher per platform', () => {
   const g = codexAdapter.guardInstallSpec('C:/w/board//', 'win32');
   assert.equal(g.targetPath, '~/.codex/hooks.json');
   assert.equal(g.shimFile, 'C:/w/board/kit/guard/shim-codex.mjs');
-  assert.deepEqual(g.matchers, { win32: '^(Bash|apply_patch|request_user_input)$', darwin: '^(Bash|apply_patch|request_user_input)$', linux: '^(Bash|apply_patch|request_user_input)$' });
-  for (const m of Object.values(g.matchers)) { const re = new RegExp(m); assert.ok(re.test('Bash') && re.test('apply_patch') && re.test('request_user_input') && !re.test('mcp__x__y') && !re.test('BashX')); }
+  assert.equal(g.matchers.win32, '^(Bash|PowerShell|apply_patch|Edit|Write|request_user_input)$');
+  assert.equal(g.matchers.darwin, '^(Bash|apply_patch|Edit|Write|request_user_input)$');
+  assert.equal(g.matchers.linux, g.matchers.darwin);
   assert.match(g.notes, /Hooks need review/);
   assert.match(g.notes, /never edit that one/);
+  assert.match(g.notes, /never guarded/);
+});
+
+test('matcher and shim agree: every tool the shim judges matches (PowerShell only on win32); the matcher names nothing the shim calls unknown', () => {
+  const g = codexAdapter.guardInstallSpec('C:/w/board', 'win32');
+  for (const [platform, m] of Object.entries(g.matchers)) {
+    const re = new RegExp(m);
+    for (const t of HANDLED_TOOLS) assert.equal(re.test(t), platform === 'win32' || t !== 'PowerShell', `${platform} ${t}`);
+    for (const t of m.slice(2, -2).split('|')) {
+      assert.equal(parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls' } })).ok, true, `${platform} names ${t}, the shim must judge it`);
+    }
+    for (const t of ['mcp__x__y', 'BashX', 'bash', 'shell', 'local_shell', '']) assert.equal(re.test(t), false, `${platform} ${t}`);
+  }
+});
+
+test('READ_ONLY_ROLES: the sandbox choice follows the guard list', () => {
+  for (const role of READ_ONLY_ROLES) { const a = codexAdapter.buildLaunch(input({ role })).args; assert.equal(a[a.indexOf('-s') + 1], 'read-only', role); }
 });
 
 test('instructionMapping: AGENTS.md native, CLAUDE.md as the fallback filename, no env', () => {
