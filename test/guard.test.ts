@@ -284,14 +284,31 @@ test('role rules: main/master read every quoted string; a pipe into a shell, iex
     "echo 'git commit -m x' || sh"]);
 });
 
-// A fail-closed hook has one way left to fail open: running past its timeout. Each case below took seconds to minutes
-// before #4002's fix rounds 1 and 2; the rules it reaches are now linear in the command's length.
+// A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
+// than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
+// command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
 test('long commands stay fast', () => {
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
   const heredocThen600KB = "cat > notes.txt <<'EOF'\n" + 'a line of notes\n'.repeat(37500); // no end line
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
   const asBuilder = (command: string) => () => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: ['development'] });
+  const kb200 = (s: string) => s.repeat(Math.ceil(200000 / s.length));
+  const tail100KB = 'x '.repeat(50000);
   const cases: [string, () => unknown][] = [
+    // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
+    // earlier < feed is a running flag, not a look-back from every by-name lookup
+    ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
+    ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
+    ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
+    ['kill scan, 200 KB of by-name lookups after a stop, as a builder', asBuilder('gh pr merge 12; kill $x; ' + kb200('gps '))],
+    // bounded per word: each stop reads a 64-word window; each quoted word is read once more
+    ['kill scan, 200 KB of kill words', () => check(kb200('kill '))],
+    ['kill scan, 200 KB of taskkill /pid', () => check(kb200('taskkill /pid 1 '))],
+    ['kill scan, 200 KB of quoted words', () => check('echo ' + kb200('"a b" '))],
+    // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
+    ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
+    ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
+    ['16 az repos pr update (the cap), then 100 KB, as a builder', asBuilder('az repos pr update '.repeat(16) + tail100KB)],
     ['an unterminated quoted heredoc header, then 600 KB', () => check(heredocThen600KB)],
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],

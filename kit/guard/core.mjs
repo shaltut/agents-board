@@ -256,7 +256,12 @@ function scanKills(text, seen, inArgs) {
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
     let argsEnd = -1; // the last word of a stop's arguments in this segment
+    // once per segment, not once per word (#4002: per word, both re-read the whole segment: 200 KB took 7 to 16 s)
+    let one; // oneProcess(w): the segment's ProcessId filter names one process
+    const isOne = () => (one ??= oneProcess(w));
+    let fed = false; // an earlier word is a < that feeds stdin: < <(...) or done < ...
     for (let i = 0; i < w.length; i++) {
+      if (i > 0 && w[i - 1] === '<' && (w[i - 2] === '<' || name[i - 2] === 'done')) fed = true;
       const args = inArgs || i <= argsEnd;
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args)) return true;
       const n = name[i], prev = name[i - 1];
@@ -287,14 +292,13 @@ function scanKills(text, seen, inArgs) {
       const byId = rest.some((x) => /^(?:-id|-p|--pid|-q)(?::|=|$)/i.test(x) || (n === 'ps' && /^-[a-zA-Z]*p\d*$/.test(x))); // ps -fp $PID
       const lookup = ((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
         || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist'
-        || (n === 'win32_process' && !oneProcess(w)) || (n === 'wmic' && /^process$/i.test(rest[0] ?? '') && !oneProcess(w))
+        || (n === 'win32_process' && !isOne()) || (n === 'wmic' && /^process$/i.test(rest[0] ?? '') && !isOne())
         || (n === 'lsof' && rest.some((x) => /^-c/.test(x))) // lsof -c node
         || n.includes('getprocessesbyname');
       // inside a stop's arguments, or fed to an earlier stop's input: xargs kill < <(pgrep node), done < <(pgrep node)
       // ... or -InputObject (Get-Process node) after a ForEach-Object { Stop-Process ... } block
       if (lookup) {
-        if (args || (seen.stop && (prev === '-inputobject'
-          || w.slice(0, i).some((x, k) => x === '<' && (w[k - 1] === '<' || name[k - 1] === 'done'))))) return true;
+        if (args || (seen.stop && (prev === '-inputobject' || fed))) return true;
         seen.lookup = true;
       }
       const stop = ((n === 'stop-process' || n === 'spps' || n === 'taskkill' || n === 'remove-ciminstance'
