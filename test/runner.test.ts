@@ -87,6 +87,7 @@ const recipes = {
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
   swap: { steps: [node('swap.mjs')], timeout: 60 },
+  nmswap: { steps: [node('nmswap.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
   headless: { steps: [node('-e', "require('fs').writeFileSync('.git/HEAD', '')")], timeout: 60 },
@@ -463,6 +464,32 @@ test('a link a job leaves over a tracked folder is removed before the checkout: 
   assert.match(logOf(qid), /removed 1 link\(s\) a job left in the slot: pkg/);
 });
 
+// review I1 of #3776: a link the runner drops may be the install itself (node_modules swapped for a link). The install
+// record still matched the lockfile, so every later job on the slot ran with no install: dropping a link forces one.
+test('a node_modules a job swaps for a link is removed and the next job installs again', async () => {
+  const outside = join(TMP, 'nm-target').replaceAll('\\', '/');
+  mkdirSync(outside, { recursive: true });
+  const plant = [
+    "import { rmSync, symlinkSync } from 'node:fs';",
+    `rmSync('node_modules', { recursive: true, force: true }); symlinkSync('${outside}', 'node_modules', 'junction');`,
+    "console.log('planted');",
+  ].join('\n');
+  git('checkout', '-q', '-b', 'nmswap', 'main');
+  const P = commit('nm swap', { 'nmswap.mjs': plant });
+  git('push', '-q', 'origin', 'nmswap');
+  git('checkout', '-q', 'main');
+  assert.equal((await ended(await add('ok', P))).state, 'passed'); // installed for this lockfile, or already was
+  const jp = await ended(await add('nmswap', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const qid = await add('ok', P);
+  assert.equal((await ended(qid)).state, 'passed');
+  assert.match(logOf(qid), /removed 1 link\(s\) a job left in the slot: node_modules/);
+  assert.match(logOf(qid), /^installed$/m, 'the install record outlived the install');
+  const rid = await add('ok', P);
+  assert.equal((await ended(rid)).state, 'passed');
+  assert.doesNotMatch(logOf(rid), /installed/, 'one reinstall, not one per job');
+});
+
 test('a NUL folder a job plants in the slot does not break the next job', { skip: !WIN && 'Windows only' }, async () => {
   git('checkout', '-q', '-b', 'folder', 'main');
   const P = commit('nul', { 'folder.mjs': String.raw`import { mkdirSync, writeFileSync } from 'node:fs'; import { resolve } from 'node:path'; const d = '\\\\?\\' + resolve('NUL'); mkdirSync(d, { recursive: true }); writeFileSync(d + '\\x', '1'); console.log('planted');` });
@@ -622,5 +649,11 @@ test('a slot reset drops each package\'s node_modules/.cache, keeps the install'
   assert.ok(!existsSync(join(slot, 'node_modules', '.cache')), 'the root cache is gone');
   assert.ok(!existsSync(join(slot, 'pkg', 'a', 'node_modules', '.cache')), 'a package cache is gone');
   assert.ok(existsSync(join(slot, 'node_modules', 'keep.txt')) && existsSync(join(slot, 'pkg', 'a', 'node_modules', 'dep', 'index.js')), 'the install stays');
-  assert.doesNotMatch(dlog(900031), /^installed$/m, 'no reinstall');
+  // the two links were dropped before the checkout (#3776), and a dropped link forces one install (its review, I1)
+  assert.match(dlog(900031), /^installed$/m, 'dropped links force one install');
+  // a cache drop alone never reinstalls
+  for (const f of ['node_modules/.cache/tsbuildinfo', 'pkg/a/node_modules/.cache/tsbuildinfo']) plant(f);
+  assert.equal((await direct('caches', ORIGIN, 900032, C))?.state, 'passed');
+  assert.ok(!existsSync(join(slot, 'node_modules', '.cache')), 'the root cache is gone');
+  assert.doesNotMatch(dlog(900032), /^installed$/m, 'no reinstall');
 });

@@ -309,7 +309,11 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   // let the clean delete what it points at, outside the slot. Every link goes first; the checkout puts tracked ones back.
   const links = dropLinks(dir);
   // the log stays on the PC (the summary is read from after the steps start)
-  if (links.length) writeSync(io.fd, `runner: removed ${links.length} link(s) a job left in the slot: ${links.slice(0, 5).join(', ')}${links.length > 5 ? ', ...' : ''}\n`);
+  if (links.length) {
+    writeSync(io.fd, `runner: removed ${links.length} link(s) a job left in the slot: ${links.slice(0, 5).join(', ')}${links.length > 5 ? ', ...' : ''}\n`);
+    // a dropped link may have been the install (node_modules swapped for one): the record must not outlive it (review I1)
+    rmSync(lockState, { force: true });
+  }
   for (const args of [['checkout', '--force', '--detach', full], ['clean', '-ffdx', '-e', 'node_modules']]) {
     const r = await git(args);
     if (stop.aborted) return null;
