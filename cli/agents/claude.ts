@@ -1,5 +1,5 @@
 // The Claude Code adapter. Pure: no database. Claude hands its messaging socket and token to the relay through an
-// endpoint file in the temp dir (written by the relay launcher); delivery is today's socket protocol (cli/relay.ts).
+// endpoint file in the temp dir (hooks/claude-endpoint.mjs or the relay launcher); deliver() below is the only sender.
 // The token lives only in that file and the auth line: it is never logged or put in an error message.
 import net from 'node:net';
 import { existsSync, linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -62,7 +62,7 @@ export function clearClaudeEndpoint(machine: string, pane: string, expectedSocke
   } finally { try { rmSync(claimed, { force: true }); } catch {} }
 }
 
-/** One line per connection, opened only when the message is ready (Claude closes idle connections). Same as cli/relay.ts. */
+/** One line per connection, opened only when the message is ready (Claude closes idle connections). The relay's only path in. */
 function post(ep: ClaudeEndpoint, text: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const c = net.connect(ep.socket, () => {

@@ -10,7 +10,7 @@
 import net from 'node:net';
 import v8 from 'node:v8';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +19,17 @@ const IN = '\u0000cb-in'; // sql(list) inside a template: `where id in ${sql(ids
 
 /** The relay's per-seat key: the same for every process on one machine and pane, whatever agent runs there. */
 export const seatKey = (machine: string, pane: string) => createHash('sha1').update(`${machine.trim().toLowerCase()}:${pane.trim()}`).digest('hex').slice(0, 12);
+
+/** The relay holding a seat lock (cli/relay.ts LOCK), or 0. Held = its pid answers AND the file was touched in the last
+ *  15 s (a running relay touches it every 2 s): a lock a relay left behind names a pid Windows may have reused. */
+export function seatLockHolder(lock: string): number {
+  try {
+    const pid = Number(readFileSync(lock, 'utf8')) || 0;
+    if (pid <= 0 || Date.now() - statSync(lock).mtimeMs > 15_000) return 0;
+    process.kill(pid, 0);
+    return pid;
+  } catch { return 0; }
+}
 
 export function bridgeFiles(key: string) {
   return {

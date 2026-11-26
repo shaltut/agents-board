@@ -828,6 +828,146 @@ test('hooks/claude-endpoint.mjs starts the seat relay when none runs; it serves 
   }
 });
 
+test('R1 on POSIX: a --child replaces an endpoint whose socket file a killed Claude left behind', { skip: process.platform === 'win32' && 'a Windows pipe vanishes with its owner', timeout: 30_000 }, async () => {
+  const pane = `p-seed-px-${process.pid}`, path = sockPath('seed-px'), stale = sockPath('seed-px-stale');
+  rmSeat(pane); fs.rmSync(stale, { force: true });
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  const owner = spawn(process.execPath, ['-e', "require('net').createServer().listen(process.argv[1], () => console.log('up'))", stale], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await new Promise<void>((r) => owner.stdout!.on('data', (d) => { if (String(d).includes('up')) r(); }));
+    owner.kill('SIGKILL');
+    await exitOf(owner);
+    assert.ok(fs.lstatSync(stale).isSocket(), 'the killed owner left its socket file');
+    writeClaudeEndpoint(M, pane, { socket: stale, token: 'old' });
+    fs.writeFileSync(seatFiles(pane).lock, String(process.pid)); // a live relay holds the seat
+    const p = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+    assert.equal(await Promise.race([exitOf(p), wait(10_000).then(() => { p.kill(); return 'timeout'; })]), 0);
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, path, 'an endpoint nothing listens on is replaced by the env inbox');
+  } finally {
+    owner.kill('SIGKILL');
+    await inbox.close();
+    fs.rmSync(stale, { force: true });
+    rmSeat(pane);
+  }
+});
+
+test('a nested session never takes the seat: its hook and launcher leave a live first session\'s endpoint, which keeps getting the board', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  const pane = `p-nest-${process.pid}`, first = sockPath('nest-a'), nested = sockPath('nest-b'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(nested, 'tok2');
+  await Promise.all([boxA.ready, boxB.ready]);
+  await sql`select cb.ask(project => 'demo', body => 'Who gets it?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, first) });
+  const start = (file: string) => spawnSync('node', [file], { encoding: 'utf8', timeout: 15_000, env: seatEnv(pane, nested, 'tok2') });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, first);
+    // a nested `claude -p` in the same pane: its SessionStart hook, and the relay launcher an older hook runs
+    assert.equal(start('hooks/claude-endpoint.mjs').status, 0);
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, first, 'the hook left the live first session\'s endpoint');
+    assert.equal(start('cli/relay.ts').status, 0);
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, first, 'so did the launcher');
+    await sql`select cb.answer('1', 'for the first')`;
+    assert.ok(await until(() => boxA.got.length > 0, 8000), 'the first session still gets the board');
+    assert.equal(boxB.got.length, 0);
+    // the first session ends: the next SessionStart in the pane takes the seat
+    await boxA.close();
+    assert.equal(start('hooks/claude-endpoint.mjs').status, 0);
+    assert.ok(await until(() => readClaudeEndpoint(M, pane)?.socket === nested, 3000), 'a dead first session\'s endpoint is replaced');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+// Seat lock freshness: a relay touches its lock every watchdog tick; a lock counts as held only if its pid answers AND
+// it was touched in the last 15 s. A lock a relay left behind names a pid Windows may since have given to anything.
+const backdate = (file: string, s = 60) => { const t = new Date(Date.now() - s * 1000); fs.utimesSync(file, t, t); };
+
+test('a seat lock not touched for 15 s is not held: a new relay takes the seat although the lock\'s pid answers', { timeout: 30_000 }, async () => {
+  await db();
+  const pane = `p-stale-${process.pid}`, path = sockPath('stale'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  fs.writeFileSync(f.lock, String(process.pid)); // alive, but no relay: a reused pid
+  backdate(f.lock);
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+  try {
+    assert.ok(await until(() => lockHolder(pane) === relay.pid, 10_000), 'the new relay took the seat');
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'and serves it');
+    assert.equal(relay.exitCode, null);
+  } finally {
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
+test('cb relay --restart signals only a fresh lock holder: a stale lock is just cleared, its pid left alone', { timeout: 30_000 }, async () => {
+  await db();
+  const pane = `p-restart-${process.pid}`, path = sockPath('restart'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  // alive and no relay, started by this test so a wrong signal costs nothing: what a stale lock's pid may now be
+  const bystander = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: 'ignore' });
+  try {
+    fs.writeFileSync(f.lock, String(bystander.pid));
+    backdate(f.lock);
+    const r = spawnSync('node', ['cli/relay.ts', '--restart'], { encoding: 'utf8', timeout: 15_000, env: seatEnv(pane, path) });
+    assert.equal(r.status, 0);
+    assert.ok(await until(() => { const p = lockHolder(pane); return p > 0 && p !== bystander.pid; }, 10_000), 'a relay took the seat');
+    await wait(500);
+    assert.equal(bystander.exitCode, null, 'the stale lock\'s pid was not signalled');
+    assert.equal(bystander.signalCode, null);
+  } finally {
+    bystander.kill(); // by its handle
+    await inbox.close();
+    await stopSeat(pane);
+  }
+});
+
+test('a running relay keeps its lock fresh: a second --child exits at once even after the lock looked 60 s old', { timeout: 30_000 }, async () => {
+  await db();
+  const pane = `p-fresh-${process.pid}`, path = sockPath('fresh'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    backdate(f.lock);
+    assert.ok(await until(() => Date.now() - fs.statSync(f.lock).mtimeMs < 5000, 5000), 'the relay touched its lock within a tick');
+    const second = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+    assert.equal(await Promise.race([exitOf(second), wait(5000).then(() => { second.kill(); return 'timeout'; })]), 0, 'exits at once');
+    assert.equal(lockHolder(pane), relay.pid);
+  } finally {
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
+test('a relay whose seat lock names another pid leaves, and leaves the endpoint to the new holder', { timeout: 30_000 }, async () => {
+  await db();
+  const pane = `p-taken-${process.pid}`, path = sockPath('taken'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env: seatEnv(pane, path) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    fs.writeFileSync(f.lock, String(process.pid)); // another relay holds the seat now
+    assert.equal(await Promise.race([exitOf(relay), wait(6000).then(() => 'still running')]), 0, 'it leaves within a tick or two');
+    assert.equal(readClaudeEndpoint(M, pane)?.socket, path, 'the live agent\'s endpoint stays');
+    assert.equal(lockHolder(pane), process.pid, 'the new holder\'s lock stays');
+  } finally {
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
 // #3746: a project's lead is its lead-role session, whatever its name (an orch@ session with no role still is); the
 // same session bound to another project leads that one, not this. [actor, role, bound to, leads p]
 const LEADS: [string, string | null, string, boolean][] = [['QO@m', 'lead', 'p', true], ['QO@m', 'lead', 'q', false], ['orch@m', null, 'p', true]];

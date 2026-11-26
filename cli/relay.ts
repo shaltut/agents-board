@@ -10,12 +10,12 @@
 // blip (on macOS a connect is also refused while a listener's accept queue is full) never ends a healthy relay. So an
 // agent that accepts no connection for minutes (stopped with Ctrl+Z, held in a debugger) counts as dead.
 import { spawn } from 'node:child_process';
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect, databaseUrl, machine } from '../server/db.ts';
-import { seatKey, serveBridge } from './bridge.ts';
+import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
 import { clearClaudeEndpoint, readClaudeEndpoint, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
@@ -40,8 +40,11 @@ const adapter = (() => { try { return getAdapter(AGENT); } catch (e: any) { log(
 const claude = adapter.kind === 'claude';
 const seat: SeatHandle = { machine: M, pane: PANE, agent: adapter.kind };
 
-const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const lockPid = () => { try { return Number(readFileSync(LOCK, 'utf8')) || 0; } catch { return 0; } };
+/** Keeps this relay's lock fresh: a lock counts as held only while touched in the last 15 s (bridge.ts seatLockHolder). */
+const touch = () => { if (lockPid() !== process.pid) return; const now = new Date(); try { utimesSync(LOCK, now, now); } catch {} };
+/** The adapter's answer; an unknown one counts as alive (it never stops a relay, never takes a seat). */
+const aliveNow = async () => { try { return await adapter.isAlive(seat); } catch { return true; } };
 const relaunch = () => spawn(process.execPath, [import.meta.filename, '--child', '--pane', PANE, '--agent', adapter.kind],
   { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 /** Claude's endpoint file names a socket that is there. Never existsSync: a busy Windows pipe reads as missing. */
@@ -51,16 +54,19 @@ const handOver = (pid?: number) => {
   try { writeClaudeEndpoint(M, PANE, { socket: SOCKET, token: TOKEN, pid }); return true; }
   catch (e: any) { log(`endpoint not written: ${e?.code ?? 'error'}`); return false; }
 };
+/** A SessionStart never takes the seat from a live agent on another socket: a nested `claude -p` in this pane gets no
+ *  relay, and the session already here keeps its own. Same socket (a /clear, a resume) or a dead agent: it does. */
+const mayTakeSeat = async () => { const ep = readClaudeEndpoint(M, PANE); return !ep || ep.socket === SOCKET || !(await aliveNow()); };
 
 // The hook must return at once: hand Claude's inbox over, re-launch detached and exit. --restart replaces a running relay.
 if (!process.argv.includes('--child')) {
   if (claude) {
-    if (SOCKET && TOKEN) handOver(process.ppid); // this Claude's inbox, newest by definition
+    if (SOCKET && TOKEN) { if (await mayTakeSeat()) handOver(process.ppid); }
     else if (!liveEndpoint()) process.exit(0); // no inbox to push to
   }
   if (process.argv.includes('--restart')) {
-    const old = lockPid();
-    if (old && alive(old)) try { process.kill(old); } catch {}
+    const old = seatLockHolder(LOCK); // only a fresh lock's pid is a relay: a stale one's may be any process by now
+    if (old && old !== process.pid) try { process.kill(old); } catch {}
     writeFileSync(LOCK, '');
   }
   relaunch();
@@ -68,14 +74,12 @@ if (!process.argv.includes('--child')) {
 }
 
 // A child with Claude's inbox in its env (a Stage A relay restarting into this code, a test) hands it over itself when
-// no newer endpoint is there: no file, or one whose socket is gone. Before the lock check, so a child that leaves on a
-// live lock still corrects a stale file.
-if (claude && SOCKET && TOKEN && socketExists(SOCKET)) {
-  const ep = readClaudeEndpoint(M, PANE);
-  if ((!ep || !socketExists(ep.socket)) && handOver()) log('endpoint handed over from env');
-}
-{ const held = lockPid(); if (held > 0 && held !== process.pid && alive(held)) process.exit(0); } // one relay per seat (empty lock = none)
+// no newer endpoint is there: no file, or one whose agent the adapter reads dead (on POSIX a probe: a killed Claude can
+// leave its socket file behind). Before the lock check, so a child that leaves on a live lock still corrects a stale file.
+if (claude && SOCKET && TOKEN && socketExists(SOCKET) && !(await aliveNow()) && handOver()) log('endpoint handed over from env');
+{ const held = seatLockHolder(LOCK); if (held && held !== process.pid) process.exit(0); } // one relay per seat
 writeFileSync(LOCK, String(process.pid));
+const keepFresh = setInterval(touch, 2000); // from the start: setting up can outlast 15 s while the board is unreachable
 
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
@@ -116,7 +120,7 @@ function bindNotice(p: string) {
 let lastSocket = '';
 async function agentAlive(): Promise<boolean> {
   if (claude) { const s = readClaudeEndpoint(M, PANE)?.socket; if (s) lastSocket = s; }
-  try { return await adapter.isAlive(seat); } catch { return true; } // an unknown answer never stops a relay
+  return aliveNow();
 }
 
 // Ahmed's answers carry his authority; anyone else's (a guest like Omar) must say so.
@@ -291,10 +295,13 @@ const born = version().join();
 const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK, ''); } catch {} };
 
 /** The agent is gone: clear what it handed over, free the seat, and hand it to a new agent in the same pane if one
- *  wrote its endpoint meanwhile (its hook's relay child may have left on this relay's lock). */
-async function leave() {
-  log('agent gone; exiting');
+ *  wrote its endpoint meanwhile (its hook's relay child may have left on this relay's lock).
+ *  seatTaken: the lock names another relay (this one's looked stale, or --restart cleared it). The agent may be alive
+ *  and served by that relay, so its endpoint and the lock stay; this relay only closes its own bridge. */
+async function leave(seatTaken = false) {
+  log(seatTaken ? 'seat lock taken by another relay; exiting' : 'agent gone; exiting');
   try {
+    if (seatTaken) { await unbridge(); return; }
     if (claude && lastSocket) clearClaudeEndpoint(M, PANE, lastSocket);
     release();
     await unbridge();
@@ -302,11 +309,14 @@ async function leave() {
   } finally { process.exit(0); }
 }
 
+clearInterval(keepFresh); // the watchdog touches the lock from here on
 let leaving = false, ticking = false, dead = 0; // unbridge() is async: one exit, not one per tick
 setInterval(async () => {
   if (leaving || ticking) return;
   ticking = true;
   try {
+    if (lockPid() !== process.pid) { leaving = true; await leave(true); return; }
+    touch();
     if (await agentAlive()) dead = 0;
     else if (++dead === 1) log('watchdog: agent not alive (leaves if the next reading agrees)');
     if (dead >= 2) { leaving = true; await leave(); return; }
