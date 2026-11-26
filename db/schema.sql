@@ -260,6 +260,7 @@ drop function if exists cb.task_move cascade;
 drop function if exists cb.task_update cascade;
 drop function if exists cb.task_done cascade;
 drop function if exists cb.log cascade;
+drop function if exists cb.guest_text cascade;
 drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb.iam cascade;
@@ -324,6 +325,13 @@ drop function if exists cb.goals_list cascade;
 -- ponytail: a deterrent, not auth. Known bypasses: PGAPPNAME=cb-web (or set application_name) on any
 -- psql/postgres connection, and a local POST to /api/rpc with a forged same-host Origin header. It stops
 -- accidents and prompt-injected sessions, not a determined local process. Real auth = a Postgres role per client.
+-- #4356: what a guest (a member) writes reaches sessions, so the invisible format characters (Unicode Cf: zero-width,
+-- bidi overrides, tag characters) come out where it is written: answers, send-back notes, log lines. The class is every
+-- Cf code point of Unicode 17 (Postgres regexes have no \p{}; test/guest-text.test.ts checks it against Node's).
+-- The owner's and admins' text stays as typed (a right-to-left mark, an emoji joiner).
+create function cb.guest_text(actor text, t text) returns text language sql stable as $$
+  select case when t is not null and exists (select 1 from cb.users u where u.name = actor and u.role = 'member')
+    then regexp_replace(t, '[­؀-؅؜۝܏࢐-࢑࣢᠎​-‏‪-‮⁠-⁤⁦-⁯﻿￹-￻\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g') else t end $$;
 create function cb.ahmed_like(a text) returns boolean language sql immutable as $$ select coalesce(a, '') ~* '\mahmed\M' $$;
 create function cb.not_ahmed(a text) returns void language plpgsql as $$
 begin
@@ -822,6 +830,7 @@ returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
 begin
+  summary := cb.guest_text(a, summary);
   if coalesce(trim(summary), '') = '' then raise exception 'summary is required'; end if;
   insert into cb.events (actor, project, task_id, kind, summary, data)
   values (a, p, case when task_id is null then null else cb.norm_id(task_id) end, 'note', trim(summary), coalesce(data, '{}'))
@@ -1107,6 +1116,7 @@ begin
     if stale then raise exception 'M% is past its review date: renew it on the Memory page first', rid; end if;
     if rp is not null and rp <> qp then raise exception 'M% is in %, not %: only a global entry or one in Q%''s project', rid, rp, qp, qid; end if;
   end if;
+  answer := cb.guest_text(a, answer);
   if coalesce(trim(answer), '') = '' then raise exception 'answer is required'; end if;
   if cur = 'withdrawn' then raise exception 'question Q% is already withdrawn', qid; end if;
   if cur = 'delivered' then
@@ -1307,7 +1317,7 @@ returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
         r text := lower(trim(coalesce(reason, '')));
-        n text := nullif(trim(regexp_replace(coalesce(note, ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
+        n text := nullif(trim(regexp_replace(coalesce(cb.guest_text(a, note), ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
 begin
   perform cb.dashboard_only('Today');
   perform cb._approval_guard(qid);
