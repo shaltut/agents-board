@@ -273,6 +273,8 @@ test('role rules: main/master read every quoted string; a pipe into a shell, iex
   const runs = (c: string) => [
     `echo '${c}' | sh`, `echo '${c}' | bash -s`, `echo '${c}' | zsh`, `echo "${c}" | pwsh -Command -`, `echo "${c}" | powershell -`,
     `echo "${c}" | cmd`, `echo '${c}' | sudo bash`, `printf '%s\\n' '${c}' | tee log.txt | sh`, `"${c}" | iex`,
+    // 2>&1's & is not a new command, and a pipeline goes on past a newline (LF or CRLF, blanks around it)
+    `echo '${c}' 2>&1 | sh`, `echo '${c}' |\nsh`, `echo '${c}' |\r\n  bash`, `echo '${c}' | \n  zsh`,
     `iex '${c}'`, `Invoke-Expression "${c}"`, `powershell "${c}"`, `pwsh '${c}'`, `su -c '${c}'`, `su root -c "${c}"`,
   ];
   blocksByRole('reviewer', runs('git commit -m x'));

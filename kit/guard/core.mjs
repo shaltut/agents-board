@@ -386,12 +386,19 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map(cmdName) };
   });
-  // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs (sudo before it too)
+  // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs (sudo before it too).
+  // into[k]: what is piped into segment k reaches one: k runs it, or k is blank and a newline carries the pipeline on
+  // (a pipe may end a line; a CRLF or trailing blanks leave a blank segment). An & right after > or < is a redirection
+  // (2>&1), not a new command, so the segment before it shares the next one's flag.
   const piped = segs.map(() => false);
-  for (let k = segs.length - 2; k >= 0; k--) {
-    if (!/^\|&?$/.test(text.slice(segs[k].end, segs[k + 1].start))) continue;
-    const [first, second] = segs[k + 1].name;
-    piped[k] = piped[k + 1] || PIPE_RUNNERS.has(first === 'sudo' ? second : first);
+  const into = segs.map(() => false);
+  for (let k = segs.length - 1; k >= 0; k--) {
+    const gap = k + 1 < segs.length ? text.slice(segs[k].end, segs[k + 1].start) : null;
+    const [first, second] = segs[k].name;
+    into[k] = PIPE_RUNNERS.has(first === 'sudo' ? second : first) || (segs[k].raw.length === 0 && /^\n+$/.test(gap ?? '') && into[k + 1]);
+    if (gap === null) continue;
+    if (/^\|&?\n*$/.test(gap)) piped[k] = into[k + 1] || piped[k + 1];
+    else if (gap === '&' && /[<>]$/.test(text.slice(segs[k].start, segs[k].end))) piped[k] = piped[k + 1];
   }
   for (const [k, { raw, name }] of segs.entries()) {
     const w = raw.map(unquote);
