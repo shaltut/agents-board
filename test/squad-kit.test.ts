@@ -283,6 +283,119 @@ test('cb squad set / show', async () => {
   } finally { rmSync(dir, { recursive: true }); }
 });
 
+// ---- agent-neutral core (#4002): a session and a squad seat carry an agent; claude is the default and never written ----
+test('cb.iam stores agent, defaults to claude, preserves on rebind, refuses unknown (#4002)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const agent = async (pane: string) => (await sql`select agent from cb.sessions where machine = 'mac' and pane = ${pane}`)[0].agent;
+  await sql`select cb.iam('mac', 'p1', 'W1@mac', 'demo')`;
+  assert.equal(await agent('p1'), 'claude', 'a new session without an agent is claude');
+  await sql`select cb.iam('mac', 'p2', 'W2@mac', 'demo', agent => 'codex')`;
+  assert.equal(await agent('p2'), 'codex');
+  await sql`select cb.iam('mac', 'p2', 'W2@mac')`;
+  assert.equal(await agent('p2'), 'codex', 'the same name re-binding keeps its agent');
+  await sql`select cb.iam('mac', 'p2', 'W2@mac', agent => 'opencode')`;
+  assert.equal(await agent('p2'), 'opencode');
+  await sql`select cb.iam('mac', 'p2', 'W3@mac')`;
+  assert.equal(await agent('p2'), 'claude', 'a pane taken over by another actor starts clean');
+  await assert.rejects(() => sql`select cb.iam('mac', 'p3', 'W4@mac', agent => 'grok')`, /agent must be one of claude, codex, opencode, agy/);
+  await assert.rejects(() => sql`update cb.sessions set agent = 'grok' where pane = 'p1'`, /sessions_agent_check/);
+  // the relay hears a change of agent (cb_bind), and still nothing for a re-bind that changes nothing
+  const got: string[] = [];
+  const listener = postgres(TEST_URL, { onnotice: () => {} }); clients.push(listener);
+  await listener.listen('cb_bind', (x: string) => got.push(x));
+  await sql`select cb.iam('mac', 'p1', 'W1@mac')`;
+  await sql`select cb.iam('mac', 'p1', 'W1@mac', agent => 'agy')`;
+  await sql`select pg_notify('cb_bind', 'end')`;
+  for (let i = 0; i < 100 && !got.includes('end'); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(got, ['mac:p1', 'end']);
+});
+
+test('cb.sessions_overview, cb.inbox and cb.resume return agent (#4002)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('mac', 'p1', 'W1@mac', 'demo')`;
+  await sql`select cb.iam('mac', 'p2', 'W2@mac', 'demo', agent => 'codex')`;
+  const rows = (await sql`select cb.sessions_overview('demo') as o`)[0].o as any[];
+  assert.deepEqual(Object.fromEntries(rows.map((r) => [r.actor, r.agent])), { 'W1@mac': 'claude', 'W2@mac': 'codex' });
+  const inbox = async (pane: string) => (await sql`select cb.inbox('mac', ${pane}, 0) as i`)[0].i;
+  assert.equal((await inbox('p1')).agent, 'claude');
+  assert.equal((await inbox('p2')).agent, 'codex');
+  assert.equal((await inbox('p9')).agent, 'claude', 'a relay before cb iam makes a claude session');
+  assert.equal((await sql`select cb.resume('W1@mac') as r`)[0].r.agent, 'claude');
+  assert.equal((await sql`select cb.resume('W2@mac') as r`)[0].r.agent, 'codex');
+});
+
+test('squad_set validates agent gate, per-agent models in fallback, and seats (#4002)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const set = async (s: any) => (await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed') as s`)[0].s;
+  const stored = async () => (await sql`select squad::text as t from cb.projects where slug = 'demo'`)[0].t;
+  const asJsonb = async (s: any) => (await sql`select ${sql.json(s)}::jsonb::text as t`)[0].t;
+  // a Claude-only squad saves byte for byte as before: no agent, fallback or seats keys appear
+  assert.deepEqual(await set(SQUAD), SQUAD);
+  assert.equal(await stored(), await asJsonb(SQUAD));
+  // claude given explicitly is the default: not written
+  assert.deepEqual(await set(mod((s) => { s.roles.builder.agent = 'claude'; s.roles.lead.agent = 'claude'; })), SQUAD);
+  assert.equal(await stored(), await asJsonb(SQUAD));
+  // an empty fallback or seats map, and a seat that only says claude, are not written either
+  assert.deepEqual(await set(mod((s) => { s.roles.builder.fallback = []; s.roles.builder.seats = {}; s.roles.owner.seats = { claims: { agent: 'claude' } }; })), SQUAD);
+
+  const fallback = [{ agent: 'codex', model: 'gpt-6.1-sol' }, { agent: 'opencode', model: 'anthropic/claude-opus-5-5' }, { agent: 'agy', model: 'gemini-4-neon-xhigh' }];
+  const seat2 = { model: 'opus', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }] };
+  const saved = await set(mod((s) => {
+    s.roles.builder.fallback = fallback;
+    s.roles.builder.seats = { '2': seat2 };
+    s.roles.owner.seats = { claims: { model: 'sonnet' } };
+    s.roles.lead.seats = { '1': { agent: 'claude', fallback: [{ agent: 'claude', model: 'sonnet' }] } };
+  }));
+  assert.deepEqual(saved.roles.builder, { count: 3, model: 'sonnet', machine: 'macbook', fallback, seats: { '2': seat2 } });
+  assert.deepEqual(saved.roles.owner, { model: 'opus', machine: 'macbook', seats: { claims: { model: 'sonnet' } } });
+  assert.deepEqual(saved.roles.lead, { count: 1, model: 'opus', machine: 'shaltoot', seats: { '1': { fallback: [{ agent: 'claude', model: 'sonnet' }] } } });
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved);
+  assert.deepEqual(await set(saved), saved, 'a saved squad saves again unchanged');
+
+  const gate = (label: string, k: string) => new RegExp(`: ${label} agent "${k}" cannot be assigned as a primary seat yet \\(phase 1 supports claude only; non-Claude agents are allowed in fallback\\)$`);
+  const fb = (f: any) => mod((s) => { s.roles.builder.fallback = f; });
+  const bad: [any, RegExp][] = [
+    [mod((s) => { s.roles.builder.agent = 'grok'; }), /: builder agent must be one of claude, codex, opencode, agy \(got "grok"\)$/],
+    [mod((s) => { s.roles.builder.agent = 5; }), /: builder agent must be one of claude, codex, opencode, agy/],
+    [mod((s) => { s.roles.builder.agent = 'codex'; s.roles.builder.model = 'gpt-6.1-sol'; }), gate('builder', 'codex')],
+    [mod((s) => { s.roles.owner.agent = 'opencode'; }), gate('owner', 'opencode')],
+    [mod((s) => { s.roles.lead.agent = 'agy'; }), gate('lead', 'agy')],
+    [mod((s) => { s.roles.builder.seats = { '2': { agent: 'codex', model: 'gpt-6.1-sol' } }; }), gate('builder seat 2', 'codex')],
+    [mod((s) => { s.roles.builder.model = null; }), /: builder model must be opus, sonnet, haiku or fable$/],
+    [fb({ agent: 'codex', model: 'gpt-6.1-sol' }), /: builder fallback must be a list of at most 5/],
+    [fb(Array.from({ length: 6 }, (_, i) => ({ agent: 'codex', model: `gpt-${i}` }))), /: builder fallback must be a list of at most 5/],
+    [fb(['codex']), /: builder fallback 1 must be \{"agent": "<agent>", "model": "<model>"\}/],
+    [fb([{ agent: 'codex', model: 'gpt-6.1-sol', effort: 'high' }]), /: builder fallback 1 has an unknown key: only agent and model$/],
+    [fb([{ agent: 'grok', model: 'x' }]), /: builder fallback 1 agent must be one of claude, codex, opencode, agy/],
+    [fb([{ model: 'gpt-6.1-sol' }]), /: builder fallback 1 agent must be one of claude, codex, opencode, agy/],
+    [fb([{ agent: 'codex', model: 'sonnet' }]), /: builder fallback 1 model for codex must be/],
+    [fb([{ agent: 'codex', model: 'GPT-6' }]), /: builder fallback 1 model for codex must be/],
+    [fb([{ agent: 'codex' }]), /: builder fallback 1 model for codex must be/],
+    [fb([{ agent: 'codex', model: 5 }]), /: builder fallback 1 model for codex must be/],
+    [fb([{ agent: 'opencode', model: 'claude-opus-5-5' }]), /: builder fallback 1 model for opencode must be provider\/model/],
+    [fb([{ agent: 'agy', model: 'opus' }]), /: builder fallback 1 model for agy must be/],
+    [fb([{ agent: 'claude', model: 'gpt' }]), /: builder fallback 1 model must be opus, sonnet, haiku or fable$/],
+    [fb([{ agent: 'codex', model: 'gpt-6.1-sol' }, { agent: 'codex', model: 'gpt-6.1-sol' }]), /: builder fallback 2 \(codex gpt-6.1-sol\) is listed twice$/],
+    [fb([{ agent: 'claude', model: 'sonnet' }]), /: builder fallback 1 \(claude sonnet\) is the same as its own agent and model: a fallback must be another$/],
+    [mod((s) => { s.roles.builder.seats = { '2': { model: 'opus', fallback: [{ agent: 'claude', model: 'opus' }] } }; }), /: builder seat 2 fallback 1 \(claude opus\) is the same as its own agent and model/],
+    [mod((s) => { s.roles.builder.seats = ['opus']; }), /: builder seats must be an object of seats: \{"<seat>": \{"agent", "model", "fallback"\}\}/],
+    [mod((s) => { s.roles.builder.seats = { '4': { model: 'opus' } }; }), /: builder seat 4 is not one of its seats: 1, 2, 3$/],
+    [mod((s) => { s.roles.builder.seats = { '01': { model: 'opus' } }; }), /: builder seat 01 is not one of its seats: 1, 2, 3$/],
+    [mod((s) => { s.roles.builder.seats = { '1': {} }; }), /: builder seat 1 is empty: give agent, model or fallback$/],
+    [mod((s) => { s.roles.builder.seats = { '1': 'opus' }; }), /: builder seat 1 must be an object: \{"agent", "model", "fallback"\}$/],
+    [mod((s) => { s.roles.builder.seats = { '1': { machine: 'shaltoot' } }; }), /: builder seat 1 has an unknown key: only agent, model and fallback$/],
+    [mod((s) => { s.roles.builder.seats = { '1': { model: 'gpt' } }; }), /: builder seat 1 model must be opus, sonnet, haiku or fable$/],
+    [mod((s) => { s.roles.owner.seats = { other: { model: 'sonnet' } }; }), /: owner seat other is not one of its seats: claims, preauth$/],
+    [mod((s) => { s.roles.lead.seats = { '2': { model: 'sonnet' } }; }), /: lead seat 2 is not one of its seats: 1$/],
+    [mod((s) => { s.roles.builder.extra = 1; }), /: role builder has an unknown key: only count, model, machine, agent, fallback and seats$/],
+  ];
+  for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re, JSON.stringify(s.roles));
+  assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved, 'a refused squad changes nothing');
+});
+
 // Q2357: a card that waits on a person's answer is not chased for silence
 async function waitingCard(sql: any) {
   await sql`select cb.ensure_project('demo')`;

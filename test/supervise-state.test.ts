@@ -81,6 +81,15 @@ test('sessions carry busy facts', async () => {
   assert.equal(by['sv-B9@macbook'].live, false);
 });
 
+// #4002: the supervisor reads each session's agent; a session row says claude unless bound as another
+test('supervise_state sessions include agent (defaulting to claude)', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.iam('macbook', 'p2', 'sv-B2@macbook', agent => 'codex')`;
+  await card(sql, { stage: 'build', assignee: 'sv-B9@macbook' }); // a holder with no session row: no agent known
+  const by = Object.fromEntries((await state(sup)).sessions.map((x: any) => [x.actor, x.agent]));
+  assert.deepEqual(by, { 'sv-B1@macbook': 'claude', 'sv-B2@macbook': 'codex', 'sv-B9@macbook': null });
+});
+
 test('a closing session cannot claim', async () => {
   const { sql, sup } = await setup();
   await card(sql, { stage: 'build' });

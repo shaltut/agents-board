@@ -112,6 +112,28 @@ test('squad_set refuses each invalid repos squad with the field named', async ()
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('qhs', ${sql.json(s)}, 'ahmed')`, re);
 });
 
+// #4002: a repo-bound role's seats are "<repo>:<n>" (the home repo's too), as wantList counts them; project-wide roles
+// keep "1".."count", owners their area
+test('squad_set validates multi-repo seat keys (#4002)', async () => {
+  const sql = await setup();
+  const seats = { 'api:2': { model: 'opus', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }] } };
+  const saved = (await sql`select cb.squad_set('qhs', ${sql.json(mod((x) => { x.roles.builder.seats = seats; }))}, 'ahmed') as s`)[0].s;
+  assert.deepEqual(saved.roles.builder, { count: { api: 2, dashboard: 1 }, model: 'sonnet', machine: 'macbook', seats });
+  for (const k of ['api:3', 'web:1', '1', 'api'])
+    await assert.rejects(() => sql`select cb.squad_set('qhs', ${sql.json(mod((x) => { x.roles.builder.seats = { [k]: { model: 'opus' } }; }))}, 'ahmed')`,
+      new RegExp(`: builder seat ${k} is not one of its seats: api:1, api:2, dashboard:1$`), k);
+  await assert.rejects(() => sql`select cb.squad_set('qhs', ${sql.json(mod((x) => { x.roles.reviewer.seats = { 'dashboard:2': { model: 'sonnet' } }; }))}, 'ahmed')`,
+    /: reviewer seat dashboard:2 is not one of its seats: api:1, dashboard:1$/);
+  const wide = (await sql`select cb.squad_set('qhs', ${sql.json(mod((x) => { x.roles.qa.seats = { '1': { model: 'opus' } }; x.roles.owner.seats = { dashboard: { model: 'sonnet' } }; }))}, 'ahmed') as s`)[0].s;
+  assert.deepEqual([wide.roles.qa.seats, wide.roles.owner.seats], [{ '1': { model: 'opus' } }, { dashboard: { model: 'sonnet' } }]);
+  await assert.rejects(() => sql`select cb.squad_set('qhs', ${sql.json(mod((x) => { x.roles.qa.seats = { 'api:1': { model: 'opus' } }; }))}, 'ahmed')`,
+    /: qa seat api:1 is not one of its seats: 1$/);
+  // the QHS squad without seats still saves as before
+  const plain = (await sql`select cb.squad_set('qhs', ${sql.json(QHS)}, 'ahmed') as s`)[0].s;
+  assert.deepEqual(plain.roles, { ...QHS.roles, lead: { ...QHS.roles.lead, model: 'opus' }, owner: { ...QHS.roles.owner, model: 'opus' },
+                                  reviewer: { ...QHS.roles.reviewer, model: 'opus' }, qa: { ...QHS.roles.qa, model: 'sonnet' } });
+});
+
 test('iam --repo', async () => {
   const sql = await setup();
   await sql`select cb.iam('mac', 'p1', 'qhs-dashboard-B1@mac', 'qhs', role => 'builder', repo => 'dashboard')`;
