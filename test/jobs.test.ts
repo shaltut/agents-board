@@ -202,6 +202,23 @@ test('runner restart ends its running jobs and tells the requesters; queued jobs
   assert.equal((await sql`select state from cb.jobs where id = ${b.id}`)[0].state, 'queued');
 });
 
+// #3902 review I1: a claim whose reply is lost (the connection died after the commit) leaves a job running that no slot
+// holds. A restart (runner_hello) used to end it; a runner that survives the drop reconciles instead: its running jobs
+// that are not in its slots end, the requester is told, the ones it does run are untouched.
+test('runner_reconcile ends this runner\'s running jobs that no slot holds, and only those', async () => {
+  const { sql, add, runner, session } = await setup();
+  const a = await add('B1@mac'); const b = await add('B1@mac'); const c = await add('B1@mac');
+  await runner`select cb.job_claim('pc', false)`; await runner`select cb.job_claim('pc', false)`;
+  assert.equal((await runner`select cb.runner_reconcile('pc', ${[Number(a.id)]}::bigint[]) as n`)[0].n, 1);
+  const st = async (id: any) => (await sql`select state, summary from cb.jobs where id = ${id}`)[0];
+  assert.equal((await st(a.id)).state, 'running');
+  assert.deepEqual({ ...(await st(b.id)) }, { state: 'error', summary: 'error: the runner lost the board connection while claiming it' });
+  assert.equal((await st(c.id)).state, 'queued');
+  assert.equal((await sql`select count(*)::int n from cb.events where kind = 'message' and data->>'to' = 'B1@mac'`)[0].n, 1);
+  assert.equal((await runner`select cb.runner_reconcile('pc', ${[Number(a.id)]}::bigint[]) as n`)[0].n, 0, 'nothing left to end');
+  await assert.rejects(session`select cb.runner_reconcile('pc', '{}'::bigint[])`, /only the runner/);
+});
+
 test('the end survives a requester the board no longer knows', async () => {
   const { sql, add, runner } = await setup();
   const a = await add('B1@mac'); const b = await add('B1@mac');

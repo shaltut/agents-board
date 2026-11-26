@@ -20,6 +20,7 @@ import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
+import { offerSettled, type Work } from './settle.ts';
 
 const flag = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
 const SOCKET = process.env.CLAUDE_CODE_MESSAGING_SOCKET || '';
@@ -105,7 +106,12 @@ const ME = `${M.trim()}:${PANE.trim()}`;
 type Binding = { actor: string; project: string | null };
 let binding: (Binding & { at: number }) | undefined, bindGen = 0, pings = 0;
 const waiting = new Map<string, Binding & { gen: number }>(); // ping → the read it vouches for
-const forget = () => { binding = undefined; bindGen++; };
+// #4336: a Next offer is held SETTLE_MS before it is pushed (cli/settle.ts); on a rebind the held offers were for the
+// old binding, so they go (review M1). A relay restart inside the window drops a held offer too (in memory only).
+const SETTLE_MS = 8_000;
+const pendingWork = new Map<number, { t: Work; at: number }>();
+let settleTimer: ReturnType<typeof setTimeout> | undefined;
+const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -252,6 +258,14 @@ async function check() {
       // The inbox only marks `raw` for his own events; everything else keeps the indented, labelled format.
       const typed = i.messages.filter((m: any) => m.raw);
       i.messages = i.messages.filter((m: any) => !m.raw);
+      // #4336: a Next offer waits SETTLE_MS (the lead creates a card in Next, then assigns it seconds later), then goes
+      // out only if the board still has it open for this session; everything else is delivered at once
+      const settled = await offerSettled({ pending: pendingWork, offered: i.next_work ?? [], now: Date.now(), settleMs: SETTLE_MS,
+        actor: i.actor ?? null, log,
+        stillOpen: async (ids) => ((await sql`select cb.work_still_open(${ids}::bigint[], ${i.actor}) as ids`)[0]!.ids as any[]).map(Number) });
+      i.next_work = settled.work;
+      clearTimeout(settleTimer);
+      if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {

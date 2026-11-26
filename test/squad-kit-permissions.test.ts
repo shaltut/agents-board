@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
+// review M2: a new role file must not slip past these tests
+test('the role list here is exactly the files in kit/permissions', () => {
+  const files = readdirSync(new URL('../kit/permissions', import.meta.url)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5));
+  assert.deepEqual(files.sort(), [...ROLES].sort());
+});
 const READ_ONLY = ['reviewer', 'qa', 'investigator'];
 const load = (r: string) => JSON.parse(readFileSync(new URL(`../kit/permissions/${r}.json`, import.meta.url), 'utf8'));
 
@@ -146,6 +151,51 @@ test('push options that name no branch are denied, with twins; the git -* twins 
     const { deny } = load(r).permissions;
     for (const c of bad) assert.ok(denied(deny, c), `${r} must deny: ${c}`);
     for (const c of fine.filter((x) => !(READ_ONLY.includes(r) && x.startsWith('git push')))) assert.equal(denied(deny, c), false, `${r} must allow: ${c}`);
+  }
+});
+
+// #4346: the guard sees only Bash/PowerShell, so an MCP tool (a mail send, a SQL execute, a drive share...) was open
+// to any seat acting on an injected [GitHub · untrusted] line. No role's work uses MCP. Under bypassPermissions allow
+// rules do nothing and deny rules always hold, so the fence is a deny: mcp__* covers every server and also takes the
+// tools out of the session's context; disableClaudeAiConnectors stops the account's claude.ai connectors loading.
+// A role that one day needs a server gets a narrower deny, never an allow (it would be ignored).
+test('every role denies every MCP tool and loads no claude.ai connectors', () => {
+  for (const r of ROLES) {
+    const f = load(r);
+    assert.ok(f.permissions.deny.includes('mcp__*'), `${r}: mcp__*`);
+    assert.equal(f.disableClaudeAiConnectors, true, `${r}: disableClaudeAiConnectors`);
+    assert.equal(f.permissions.allow.some((a: string) => a.startsWith('mcp__')), false, `${r}: an MCP allow does nothing under bypass`);
+  }
+});
+
+// #4347: //** is "anywhere on the filesystem" (a cwd-relative **/ would miss the board checkout's deploy/.env or
+// ~/.pgpass). A Read deny also covers Grep/Glob (best effort), the Bash commands Claude can parse (cat, sed, a redirect
+// target) and Edit/Write of the same path. ! carve-outs cannot reopen // rules, so the real .env variants are listed
+// and .env.example/sample/template stay readable.
+const SECRETS = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.prod', '.env.development', '.env.dev',
+  '.env.staging', '.env.test', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.pgpass',
+  '.netrc', '.git-credentials', '.npmrc', '.pypirc', 'cb-seat-*.claude.json',
+  // review #6 I2: the closed list, widened (the guard's shell rule is a pattern; this list can only name files)
+  '.env.ci', '.env.uat', '.env.sit', '.env.qa', '.env.bak', '.env.old', '.env.backup', '.env.save', '.env.prod.local',
+  '.aws/credentials', '.kube/config', '.docker/config.json', '*.jks', '*.keystore', '*.tfvars', '.htpasswd',
+  'service-account*.json', '.claude/.credentials.json'];
+test('every role denies reading secret files anywhere, and keeps .env.example readable', () => {
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const s of SECRETS) assert.ok(deny.includes(`Read(//**/${s})`), `${r}: Read(//**/${s})`);
+    assert.equal(deny.some((d: string) => /^Read\(.*\.env\.(?:example|sample|template)\)$/.test(d) || d === 'Read(//**/.env.*)'), false, r);
+  }
+});
+
+// #4345: the seat's own fence. Edit rules cover every built-in file-editing tool; Write is listed too in case a
+// release narrows that. ~ is the home folder; //**/ is any absolute path, so a repo's .claude/settings*.json in a
+// worktree beside the session's folder is covered too (review #5 I4: **/ alone is relative to the session's folder).
+// The real proof is the live check at release (a seat's Edit of ~/.claude/settings.json is refused).
+const FENCE = ['~/.claude/settings*.json', '//**/.claude/settings*.json', '~/.claude-board/**'];
+test('every role denies editing the hook settings and ~/.claude-board (the guard, the runner config)', () => {
+  for (const r of ROLES) {
+    const { deny } = load(r).permissions;
+    for (const p of FENCE) for (const t of ['Edit', 'Write']) assert.ok(deny.includes(`${t}(${p})`), `${r}: ${t}(${p})`);
   }
 });
 

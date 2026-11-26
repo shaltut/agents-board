@@ -2,12 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
-import { claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
+import { checkRoleSettings, claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
@@ -38,8 +38,9 @@ test('seatKey: sha1 of lowercased machine and trimmed pane, 12 hex', () => {
   assert.notEqual(seatKey('testbox', 'p1'), seatKey('testbox', 'p2'));
 });
 
-test('registry: claude is registered; codex/opencode/agy are not installed yet; anything else is unknown', () => {
+test('registry: every agent kind has an adapter; only claude is installed; anything else is unknown', () => {
   assert.deepEqual([...AGENT_KINDS], ['claude', 'codex', 'opencode', 'agy']);
+  for (const k of AGENT_KINDS) assert.equal(ADAPTERS[k].kind, k);
   assert.equal(getAdapter('claude'), claudeAdapter);
   for (const k of ['codex', 'opencode', 'agy'] as const) assert.throws(() => getAdapter(k), new RegExp(`agent "${k}" is not installed yet \\(phase 1 supports claude only\\)`));
   assert.throws(() => getAdapter('grok' as any), /unknown agent "grok"/);
@@ -58,12 +59,31 @@ test("buildLaunch: today's claude args, trailing slashes stripped", () => {
   const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/work/board//', cwd: 'C:/work/x' };
   assert.deepEqual(claudeAdapter.buildLaunch(input), {
     kind: 'claude',
-    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/work/board/kit/permissions/builder.json'],
+    args: ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', 'C:/work/board/kit/permissions/builder.json',
+      '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'],
     env: {},
   });
   assert.deepEqual(claudeAdapter.buildLaunch({ ...input, board: '/Users/x/board', env: { CB_ROLE: 'builder' } }).env, { CB_ROLE: 'builder' });
   assert.equal(claudeAdapter.kind, 'claude');
   assert.equal(claudeAdapter.relayStart, 'session-hook');
+});
+
+// #4346 review I1: a bypassPermissions seat whose --settings file is missing or broken has no fence at all, so a seat
+// is never started on one. Checked on this checkout's copy (the seat's own path may be on another machine).
+test('buildLaunch refuses a role with no permission file, or one that is malformed or lacks the fence', () => {
+  const input: LaunchInput = { name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: '/b', cwd: '/x' };
+  assert.throws(() => claudeAdapter.buildLaunch({ ...input, role: 'no-such-role' }), /refusing to start a no-such-role seat: .*no-such-role\.json/);
+  const dir = join(tmpdir(), `cb-perm-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(join(dir, 'builder.json'), '{ "permissions": { "deny": [');
+    assert.throws(() => checkRoleSettings('builder', dir), /refusing to start a builder seat: .*not valid JSON/);
+    writeFileSync(join(dir, 'builder.json'), JSON.stringify({ permissions: { deny: ['PowerShell'], allow: [] } }));
+    assert.throws(() => checkRoleSettings('builder', dir), /refusing to start a builder seat: .*mcp__\*/);
+    writeFileSync(join(dir, 'builder.json'), JSON.stringify({ disableClaudeAiConnectors: true, permissions: { deny: ['PowerShell', 'mcp__*'], allow: [] } }));
+    assert.doesNotThrow(() => checkRoleSettings('builder', dir));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  for (const r of ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) assert.doesNotThrow(() => checkRoleSettings(r), r);
 });
 
 test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file left', () => {
@@ -325,4 +345,15 @@ test('static specs: guard, instructions, trust, disable-ask', () => {
   assert.equal(t.dialogHint, 'folder trust or bypass warning');
   assert.deepEqual(t.extraArgs, []);
   assert.deepEqual(claudeAdapter.disableAskSpec(), { toolName: 'AskUserQuestion', mechanism: 'hook', target: 'hooks/deny-ask.mjs' });
+});
+
+test('import order: the registry and every adapter load whichever module comes first (squad-up.ts imports the registry, the adapters import squad-up.ts)', () => {
+  const url = (f: string) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+  for (const first of ['cli/squad-up.ts', 'cli/supervise.ts', 'cli/agents/index.ts', 'cli/agents/claude.ts', 'cli/agents/codex.ts', 'cli/agents/opencode.ts', 'cli/agents/agy.ts']) {
+    const code = `await import(${url(first)}); const { ADAPTERS, getAdapter } = await import(${url('cli/agents/index.ts')});` +
+      ` console.log(Object.values(ADAPTERS).map((a) => a.kind).join(','), getAdapter('claude').kind);`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${first} first: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), 'claude,codex,opencode,agy claude', `${first} first`);
+  }
 });
