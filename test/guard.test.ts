@@ -250,7 +250,9 @@ test('role rules read a quoted string as a command only after a shell runner', (
   // ordinary quoted arguments are text for the role rules
   passes('builder', ['grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"', 'grep -rn "git push origin main" docs',
     "grep -n 'git push --force' docs"]);
-  for (const role of READ_ONLY_ROLES) passes(role, ['grep -n "git commit" README.md', 'grep -rn "git push" docs', 'rg "gh pr merge"']);
+  for (const role of READ_ONLY_ROLES) {
+    passes(role, ['grep -n "git commit" README.md', 'grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"']);
+  }
   // a shell runner's argument, or what the shell expands inside double quotes, is a command
   blocksByRole('builder', ['bash -c "git push origin feat/x --force"', 'echo x | xargs git push origin', "sh -lc 'git push'",
     'cmd /c "gh pr merge 12"', 'eval "git push origin main"', 'x="$(git push -f origin feat/x)"',
@@ -262,7 +264,9 @@ test('role rules read a quoted string as a command only after a shell runner', (
     'Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it');
 });
 
-// A fail-closed hook has one way left to fail open: running past its timeout. Every rule is linear in the command's length.
+// A fail-closed hook has one way left to fail open: running past its timeout. Each case below took seconds to minutes
+// before #4002's fix round 1; the rules it reaches are now linear in the command's length. (Not covered: the heredoc
+// search in stripMessages, still (headers x length) on quoted-delimiter heredocs with no end line.)
 test('long commands stay fast', () => {
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
   const cases: [string, () => unknown][] = [
@@ -276,6 +280,7 @@ test('long commands stay fast', () => {
     ['download piped to Invoke-Expression, 20,000 repeats', () => check('iwr '.repeat(20000))],
     ['git push --force main, 5,000 repeats', () => check('git push '.repeat(5000))],
     ['rm -rf / with 20,000 long options (was 2^n)', () => check('rm ' + '--a '.repeat(20000))],
+    ['rm -rf /, an rm start in each of 20,000 option words', () => check('-rm '.repeat(20000))],
     ['role scan, 20,000 quoted words after echo', () => evaluate({ tool: 'shell', command: 'echo ' + '"a b" '.repeat(20000), role: 'reviewer' })],
     ['role scan, 5,000 git pushes in one segment', () => evaluate({ tool: 'shell', command: 'git push origin feat/x '.repeat(5000), role: 'builder' })],
     ['role scan, gh -R 20,000 repeats', () => evaluate({ tool: 'shell', command: 'gh -R '.repeat(20000), role: 'builder' })],

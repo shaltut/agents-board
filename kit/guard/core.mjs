@@ -89,14 +89,26 @@ const DOWNLOAD_TO_IEX = { test: (text) => text.split(/[;&\n]/).some((seg) => {
   const parts = seg.split('|');
   return parts.some((part, k) => k + 1 < parts.length && TO_IEX.test(parts[k + 1]) && DOWNLOAD.test(part));
 }) };
+// rm, then its option words (each -[a-z-]+, read one way), one of them recursive, then a / ~ target. The base regex,
+// \brm[ \t]+(?:--?[a-z-]+[ \t]+)*(?:-[a-z]*r[a-z]*|--recursive)(?:[ \t]+--?[a-z-]+)*[ \t]+ then the target, read --a two
+// ways (rm --a --a ...: 2^n) and retried every rm inside an option run (-rm -rm ...: count x length). Here each run is
+// read once: an rm start inside it (-rm) ends at the same word with a subset of its flags, so it cannot match either.
+const RM_RUN = /\brm[ \t]+((?:-[a-z-]+[ \t]+)*)/gi;
+const RECURSIVE_WORD = /^(?:-[a-z]*r[a-z]*|--recursive)$/i;
+const ROOT_TARGET = /["']?(?:\/\*?|~(?:\/\.?\*)?\/?)(?=["'\s;&|)]|$)/iy;
+const RM_ROOT = { test: (text) => {
+  for (const m of text.matchAll(RM_RUN)) {
+    if (!m[1] || !m[1].split(/[ \t]+/).some((x) => RECURSIVE_WORD.test(x))) continue;
+    ROOT_TARGET.lastIndex = m.index + m[0].length;
+    if (ROOT_TARGET.test(text)) return true;
+  }
+  return false;
+} };
 
 const PATTERNS = [
   // recursive rm (any flag order, -r/-R/--recursive, with or without -f; a non-TTY rm -r never prompts);
   // the target is a bare / /* ~ ~/ ~/* ~/.* (also quoted), not ~/tmp/x
-  // (was \brm[ \t]+(?:--?[a-z-]+[ \t]+)*(?:-[a-z]*r[a-z]*|--recursive)(?:[ \t]+--?[a-z-]+)*[ \t]+ then the target: --?[a-z-]+
-  // reads --a two ways, so rm --a --a ... backtracked 2^n; now each option word reads one way, and a lookahead finds the
-  // recursive flag among them, the same words)
-  ['rm -rf /', String.raw`\brm[ \t]+(?=(?:-[a-z-]+[ \t]+)*?(?:-[a-z]*r[a-z]*|--recursive)[ \t])(?:-[a-z-]+[ \t]+)+["']?(?:/\*?|~(?:/\.?\*)?/?)(?=["'\s;&|)]|$)`],
+  ['rm -rf /', RM_ROOT],
   ['mkfs.', String.raw`\bmkfs\.`],
   ['dd of=/dev/', thenLater(LINES, String.raw`\bdd[ \t]+if=`, String.raw`\bof=/dev/`)], // was \bdd[ \t]+if=.*\bof=/dev/
   ['fork bomb', String.raw`:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`],
