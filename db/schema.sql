@@ -1683,7 +1683,9 @@ end $$;
 
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
-create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable as $$
+-- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
+-- every call's 2.3 s (2026-11-26; ~100 ms without). On tables this small JIT never pays back.
+create function cb.sessions_overview(project text default null) returns jsonb language plpgsql stable set jit = off as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project);
 begin
