@@ -327,6 +327,23 @@ test('work_still_open: a card assigned to someone else, or moved out of Next, si
   assert.deepEqual(none, []);
 });
 
+// #4343: a new seat in a reused herdr pane id inherits the old row (and its broadcast_seen), so it was pushed every
+// broadcast since, days old. Broadcasts now age out at 24 h, as messages, answers and huddle lines do.
+test('broadcasts older than 24 h are never pushed, so a reused pane gets no days-old backlog', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'ihop', title => 'x')`;
+  await sql`select cb.iam('pc', 'w8:p1', 'old-seat', 'ihop')`;
+  await sql`select cb.broadcast('four days old: stop all merges', 'ihop', 'orch')`;
+  await sql`select cb.broadcast('yesterday morning, 25 h ago', 'ihop', 'orch')`;
+  await sql`update cb.events set at = now() - interval '4 days' where kind = 'broadcast' and summary like 'four days%'`;
+  await sql`update cb.events set at = now() - interval '25 hours' where kind = 'broadcast' and summary like 'yesterday%'`;
+  await sql`select cb.broadcast('23 h ago, still in the window', 'ihop', 'orch')`;
+  await sql`update cb.events set at = now() - interval '23 hours' where kind = 'broadcast' and summary like '23 h%'`;
+  await sql`select cb.broadcast('fresh: relay is live', 'ihop', 'orch')`;
+  const [{ i }] = await sql`select cb.inbox('pc', 'w8:p1', 0) as i`;
+  assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['23 h ago, still in the window', 'fresh: relay is live']);
+});
+
 test('inbox: a task created for me, and new Next work when I am idle', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'ihop', title => 'seed')`;

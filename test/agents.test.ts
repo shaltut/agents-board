@@ -2,11 +2,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
 import { claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
@@ -38,8 +38,9 @@ test('seatKey: sha1 of lowercased machine and trimmed pane, 12 hex', () => {
   assert.notEqual(seatKey('testbox', 'p1'), seatKey('testbox', 'p2'));
 });
 
-test('registry: claude is registered; codex/opencode/agy are not installed yet; anything else is unknown', () => {
+test('registry: every agent kind has an adapter; only claude is installed; anything else is unknown', () => {
   assert.deepEqual([...AGENT_KINDS], ['claude', 'codex', 'opencode', 'agy']);
+  for (const k of AGENT_KINDS) assert.equal(ADAPTERS[k].kind, k);
   assert.equal(getAdapter('claude'), claudeAdapter);
   for (const k of ['codex', 'opencode', 'agy'] as const) assert.throws(() => getAdapter(k), new RegExp(`agent "${k}" is not installed yet \\(phase 1 supports claude only\\)`));
   assert.throws(() => getAdapter('grok' as any), /unknown agent "grok"/);
@@ -325,4 +326,15 @@ test('static specs: guard, instructions, trust, disable-ask', () => {
   assert.equal(t.dialogHint, 'folder trust or bypass warning');
   assert.deepEqual(t.extraArgs, []);
   assert.deepEqual(claudeAdapter.disableAskSpec(), { toolName: 'AskUserQuestion', mechanism: 'hook', target: 'hooks/deny-ask.mjs' });
+});
+
+test('import order: the registry and every adapter load whichever module comes first (squad-up.ts imports the registry, the adapters import squad-up.ts)', () => {
+  const url = (f: string) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+  for (const first of ['cli/squad-up.ts', 'cli/supervise.ts', 'cli/agents/index.ts', 'cli/agents/claude.ts', 'cli/agents/codex.ts', 'cli/agents/opencode.ts', 'cli/agents/agy.ts']) {
+    const code = `await import(${url(first)}); const { ADAPTERS, getAdapter } = await import(${url('cli/agents/index.ts')});` +
+      ` console.log(Object.values(ADAPTERS).map((a) => a.kind).join(','), getAdapter('claude').kind);`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `${first} first: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), 'claude,codex,opencode,agy claude', `${first} first`);
+  }
 });
