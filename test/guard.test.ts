@@ -210,12 +210,16 @@ const fenceWrites = [
   `python3 -c "open('/home/u/.claude/settings.json','w').write('{}')"`, `bash -c "echo x > ~/.claude/settings.json"`,
   `cd ~/.claude && echo '{}' > settings.json`, 'echo x > .claude/settings.json', 'echo x>~/.claude/settings.json',
   'node kit/guard/install.mjs', 'node kit/guard/install.mjs --target /tmp/g', String.raw`node kit\guard\install.mjs`,
+  'cd kit/guard && node install.mjs', 'node kit/guard/install.mjs --check; node kit/guard/install.mjs',
+  String.raw`[IO.File]::WriteAllText("$HOME\.claude\settings.json", "{}")`, 'vim ~/.claude/settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
   'ls ~/.claude-board/guard', 'cat ~/.claude/settings.json 2>/dev/null', 'node kit/guard/install.mjs --check',
   `cb log 4345 "blocked: echo x > ~/.claude/settings.json"`, `git commit -m "fence: no writes to ~/.claude/settings.json"`,
   'echo x > notes.claude.txt', 'cp a.json b.json', 'cat .claude.json',
+  // another project's installer is not the guard's
+  'node scripts/install.mjs', 'cd kit/guard && node install.mjs --check',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {

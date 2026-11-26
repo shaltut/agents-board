@@ -517,17 +517,23 @@ const FENCE_REDIRECT = /(?<!-)>(?!&|>?[ \t]*(?:\/dev\/null|\$null|nul)(?![\w/.\\
 const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
   'python', 'python3', 'py', 'node', 'deno', 'bun', 'ruby', 'set-content', 'sc', 'add-content', 'ac', 'out-file', 'new-item',
   'ni', 'remove-item', 'ri', 'del', 'erase', 'copy-item', 'cpi', 'copy', 'move-item', 'mi', 'move', 'rename-item', 'rni',
-  'ren', 'clear-content', 'clc', 'mklink', 'robocopy', 'xcopy', 'icacls', 'takeown', 'attrib'];
+  'ren', 'clear-content', 'clc', 'mklink', 'robocopy', 'xcopy', 'icacls', 'takeown', 'attrib',
+  // .NET from PowerShell ([IO.File]::WriteAllText(...)), and editors
+  'writealltext', 'writeallbytes', 'writealllines', 'appendalltext', 'appendalllines', 'delete', 'create', 'replace',
+  'vi', 'vim', 'nvim', 'nano', 'emacs', 'code', 'notepad'];
 const FENCE_WRITER = new RegExp(String.raw`(?<![\w.-])(?:${FENCE_WORDS.join('|')})(?![\w.-])`, 'i');
 const IN_PLACE = thenLater(SEGMENTS, String.raw`(?<![\w.-])(?:sed|perl)(?![\w.-])`, String.raw`[ \t](?:-[a-z]*i|--in-place)`);
-const GUARD_INSTALL = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
+// the guard's installer, not any project's install.mjs: the file named under a guard folder, or run from inside one
+const INSTALLER = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
+const GUARD_DIR = /(?:^|[\s"'\\/])guard(?=[\\/\s"';&|)]|$)/i;
+const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && GUARD_DIR.test(s) };
 const FENCE = 'the fence (#4345): ~/.claude/settings*.json, a repo\'s .claude/settings*.json and ~/.claude-board (the guard, the runner config) are Ahmed\'s, and a squad seat never writes them or runs the guard installer. Reading them is fine (cat, Get-Content, grep, without a redirection). A change there is his: cb ask';
 // Stripping only removes text, so a raw command naming neither a fence path nor the installer cannot name one stripped:
 // skip the second stripMessages (the costly step on big heredocs) for nearly every command.
 function fenceWrite(command) {
   if (!FENCE_PATH.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command);
-  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !GUARD_INSTALL.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
+  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!FENCE_PATH.test(text)) return null;
   return FENCE_REDIRECT.test(text) || FENCE_WRITER.test(text) || IN_PLACE.test(text) ? FENCE : null;
 }
