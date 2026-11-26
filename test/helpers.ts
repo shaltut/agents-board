@@ -6,6 +6,13 @@ export const TEST_URL = `postgres://cb@127.0.0.1:5434/${process.env.CB_TEST_DB ?
 // freshDb truncates every table: never anything but a test database (a VPS agent's CB_TEST_DB=claude_board would wipe the board)
 if (!/^claude_board_test\w*$/.test(process.env.CB_TEST_DB ?? 'claude_board_test')) throw new Error(`CB_TEST_DB must start with claude_board_test, not "${process.env.CB_TEST_DB}"`);
 process.env.CB_DATABASE_URL = TEST_URL;
+// #4400: the servers the tests start read who counts as this PC from the env on each request (server/main.ts
+// trustLocal). The deploy image sets HOST=0.0.0.0 and CB_TRUST_LOCAL=0, so a run there (or in any shell with either set)
+// made every local test request a stranger: about 50 tests failed with 401. Pin the default the tests are written for;
+// a test about these settings (auth.test.ts) sets and clears its own.
+process.env.HOST = '127.0.0.1';
+delete process.env.CB_TRUST_LOCAL;
+delete process.env.CB_BEHIND_CLOUDFLARE;
 
 let ready = false;
 
