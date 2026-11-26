@@ -109,8 +109,8 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       };
     },
 
-    // agy never reads CLAUDE.md. AGENTS.md and GEMINI.md load from the launch folder up to the repo root; iHop's AGENTS.md
-    // is a bootstrap that points at CLAUDE.md.
+    // agy never reads CLAUDE.md. AGENTS.md and GEMINI.md load from the launch folder up to the repo root; a repo's AGENTS.md
+    // can be a bootstrap that points at CLAUDE.md.
     instructionMapping() {
       return {
         nativeFiles: ['AGENTS.md', 'GEMINI.md', '.agents/rules/*.md', '~/.gemini/AGENTS.md', '~/.gemini/config/rules/*.md'],
@@ -120,7 +120,7 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       };
     },
 
-    // trustedWorkspaces holds native Windows paths (this PC's settings.json: ["C:\\Users\\Fast_"]); never written here.
+    // trustedWorkspaces holds native Windows paths (e.g. the user's home folder); never written here.
     trustSpec() {
       return { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] };
     },

@@ -8,13 +8,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import {
-  OPENCODE_MODEL, clearOpencodeEndpoint, freellmRefusal, makeOpencodeAdapter, newestSession, normalizeAbs, opencodeAdapter,
+  OPENCODE_MODEL, clearOpencodeEndpoint, freellmRefusal, loadFreellmRule, makeOpencodeAdapter, newestSession, normalizeAbs, opencodeAdapter,
   opencodeEndpointPath, readOpencodeEndpoint, writeOpencodeEndpoint, type FreellmRule,
 } from '../cli/agents/opencode.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
 // The folder rule with git stubbed (not a repo): launch tests do not need real folders. Real-git cases use a temp root below.
-const NO_REPO: FreellmRule = { root: 'F:\\Work', allowed: ['F:\\Work\\TactiAI', 'F:\\Work\\arabcomputers'], git: () => ({ ok: true, notRepo: true }) };
+const NO_REPO: FreellmRule = { root: 'X:\\Work', allowed: ['X:\\Work\\alpha', 'X:\\Work\\beta'], git: () => ({ ok: true, notRepo: true }) };
 const A = makeOpencodeAdapter(undefined, undefined, NO_REPO);
 const M = 'testbox';
 let n = 0;
@@ -62,19 +62,19 @@ test('buildLaunch: needs port and password; refuses client folders for the free 
   assert.throws(() => A.buildLaunch(input({ env: { OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
   assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '80', OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
   assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234' } })), /OPENCODE_SERVER_PASSWORD/);
-  assert.throws(() => A.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\iHop-Platform' })), /freellmapi refused/);
-  assert.throws(() => A.buildLaunch(input({ cwd: 'f:/work/QHS/x' })), /freellmapi refused/);
-  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'F:\\Work\\TactiAI\\app' })));
+  assert.throws(() => A.buildLaunch(input({ cwd: 'X:\\Work\\acme\\app' })), /freellmapi refused/);
+  assert.throws(() => A.buildLaunch(input({ cwd: 'x:/work/zed/x' })), /freellmapi refused/);
+  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'X:\\Work\\alpha\\app' })));
   assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'C:/w/outside-and-not-a-repo' })));
   // other providers are not checked (owner decision, see the design note)
-  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'F:\\Work\\Tawuniya\\x', model: 'anthropic/claude-sonnet-4' })));
-  assert.match(freellmRefusal('F:\\Work\\wiki', NO_REPO)!, /refused/);
+  assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'X:\\Work\\acme\\x', model: 'anthropic/claude-sonnet-4' })));
+  assert.match(freellmRefusal('X:\\Work\\wiki', NO_REPO)!, /refused/);
 });
 
 test('buildLaunch: no model means the config default (freellmapi/auto): no -m, and the folder rule still applies', () => {
   const s = A.buildLaunch(input({ model: '' }));
   assert.ok(!s.args.includes('-m'));
-  assert.throws(() => A.buildLaunch(input({ model: '', cwd: 'F:\\Work\\QHS' })), /freellmapi refused/);
+  assert.throws(() => A.buildLaunch(input({ model: '', cwd: 'X:\\Work\\zed' })), /freellmapi refused/);
 });
 
 test('buildLaunch: the cwd must be absolute and is passed normalised (never a flag)', () => {
@@ -83,31 +83,50 @@ test('buildLaunch: the cwd must be absolute and is passed normalised (never a fl
 });
 
 test('normalizeAbs: GetFullPath-like forms', () => {
-  assert.equal(normalizeAbs('F:\\Work\\TactiAI\\..\\Tawuniya\\x'), 'F:/Work/Tawuniya/x');
-  assert.equal(normalizeAbs('\\\\?\\F:\\Work\\QHS'), 'F:/Work/QHS');
-  assert.equal(normalizeAbs('//?/F:/Work/QHS'), 'F:/Work/QHS');
-  assert.equal(normalizeAbs('/f/work/qhs'), 'f:/work/qhs');
-  assert.equal(normalizeAbs('F:'), 'F:/');
+  assert.equal(normalizeAbs('X:\\Work\\alpha\\..\\acme\\x'), 'X:/Work/acme/x');
+  assert.equal(normalizeAbs('\\\\?\\X:\\Work\\zed'), 'X:/Work/zed');
+  assert.equal(normalizeAbs('//?/X:/Work/zed'), 'X:/Work/zed');
+  assert.equal(normalizeAbs('/x/work/zed'), 'x:/work/zed');
+  assert.equal(normalizeAbs('X:'), 'X:/');
   assert.equal(normalizeAbs('/home/x/'), '/home/x');
   for (const bad of ['', 'rel', '..', undefined, 5, 'a\0b']) assert.equal(normalizeAbs(bad), null, String(bad));
 });
 
 test('freellmRefusal: dot-dot, device and Git Bash forms of a protected folder are refused', () => {
-  for (const c of ['F:/Work/TactiAI/../Tawuniya/x', '//?/F:/Work/QHS', '\\\\?\\F:\\Work\\QHS', '/f/work/qhs', 'f:\\WORK\\Tawuniya', 'F:\\Work\\TactiAI2']) {
+  for (const c of ['X:/Work/alpha/../acme/x', '//?/X:/Work/zed', '\\\\?\\X:\\Work\\zed', '/x/work/zed', 'x:\\WORK\\acme', 'X:\\Work\\alpha2']) {
     assert.match(freellmRefusal(c, NO_REPO)!, /refused/, c);
   }
-  for (const c of ['', 'rel/path', 'F:Work']) assert.match(freellmRefusal(c, NO_REPO)!, /refused/, c);
-  for (const c of ['F:/Work/TactiAI', 'F:\\Work\\arabcomputers\\a\\b', 'D:/anything', 'F:/Workshop/x']) assert.equal(freellmRefusal(c, NO_REPO), null, c);
+  for (const c of ['', 'rel/path', 'X:Work']) assert.match(freellmRefusal(c, NO_REPO)!, /refused/, c);
+  for (const c of ['X:/Work/alpha', 'X:\\Work\\beta\\a\\b', 'D:/anything', 'X:/Workshop/x']) assert.equal(freellmRefusal(c, NO_REPO), null, c);
 });
 
 test('freellmRefusal: git failure refuses; a bad git path refuses; the common dir is judged', () => {
   const rule = (git: FreellmRule['git']): FreellmRule => ({ ...NO_REPO, git });
   assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: false })))!, /git could not say/);
   assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: '' })))!, /no usable repository path/);
-  assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'F:/Work/Tawuniya/iHop-Platform/.git' })))!, /under F:\\Work/);
-  assert.equal(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'F:/Work/TactiAI/app/.git' }))), null);
+  assert.match(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'X:/Work/acme/app/.git' })))!, /under X:\\Work/);
+  assert.equal(freellmRefusal('C:/w/x', rule(() => ({ ok: true, dir: 'X:/Work/alpha/app/.git' }))), null);
   assert.match(freellmRefusal('C:/w/x', { ...NO_REPO, root: 'rel' })!, /protected root/);
   assert.match(freellmRefusal('C:/w/x', { ...NO_REPO, allowed: ['rel'] })!, /allowed folder/);
+});
+
+test('folder rule comes from a local file; missing or malformed refuses every free-router launch', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'oc-rule-'));
+  try {
+    const f = join(tmp, 'freellm-rule.json');
+    assert.equal(loadFreellmRule(f), null, 'missing file');
+    for (const bad of ['{not json', 'null', '[]', '{"root":"","allowed":[]}', '{"root":"X:/Work"}', '{"root":"X:/Work","allowed":["ok",""]}', '{"root":"X:/Work","allowed":[1]}']) {
+      writeFileSync(f, bad);
+      assert.equal(loadFreellmRule(f), null, bad);
+    }
+    writeFileSync(f, JSON.stringify({ root: 'X:\\Work', allowed: ['X:\\Work\\alpha'] }));
+    assert.deepEqual(loadFreellmRule(f), { root: 'X:\\Work', allowed: ['X:\\Work\\alpha'] });
+    assert.match(freellmRefusal('D:/anything', null)!, /no folder rule/);
+    const noRule = makeOpencodeAdapter(undefined, undefined, null);
+    assert.throws(() => noRule.buildLaunch(input({ cwd: 'D:/anything' })), /no folder rule/);
+    assert.throws(() => noRule.buildLaunch(input({ cwd: 'D:/anything', model: '' })), /no folder rule/);
+    assert.doesNotThrow(() => noRule.buildLaunch(input({ cwd: 'D:/anything', model: 'anthropic/claude-sonnet-4' })), 'other providers are not judged');
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('freellmRefusal with real git: a worktree outside the protected root belongs to its repo', () => {

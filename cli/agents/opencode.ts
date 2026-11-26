@@ -3,7 +3,7 @@
 // the pane starts the agent, like Claude's. The password lives only in that file and the pane env: never logged, never in argv.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { seatKey } from '../bridge.ts';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
@@ -47,10 +47,25 @@ export function clearOpencodeEndpoint(machine: string, pane: string): void {
 }
 
 export type FreellmRule = { root: string; allowed: string[]; git?: (cwd: string) => { ok: boolean; notRepo?: boolean; dir?: string } };
-const DEFAULT_RULE: FreellmRule = { root: 'F:\\Work', allowed: ['F:\\Work\\TactiAI', 'F:\\Work\\arabcomputers'] };
 
-/** An absolute, normalised path (forward slashes), or null when empty, relative or unresolvable. Handles `\\?\F:\..`, `/f/work/..`
- *  (Git Bash) and `..` segments, like [IO.Path]::GetFullPath in freellm.ps1 (which this cannot call from here). */
+/** The folder rule lives on each machine, outside the repo: `~/.claude-board/freellm-rule.json` (or the file CB_FREELLM_RULE
+ *  names) = `{ "root": "<protected folder>", "allowed": ["<folder>", ...] }`. Missing or malformed = null, and freellmRefusal()
+ *  then refuses (fail closed): a machine without the file never sends code to the free router. */
+export function loadFreellmRule(path = process.env.CB_FREELLM_RULE || join(homedir(), '.claude-board', 'freellm-rule.json')): FreellmRule | null {
+  try {
+    const o = JSON.parse(readFileSync(path, 'utf8')) as { root?: unknown; allowed?: unknown } | null;
+    if (!o || typeof o !== 'object') return null;
+    const { root, allowed } = o;
+    if (typeof root !== 'string' || !root.trim()) return null;
+    if (!Array.isArray(allowed) || !allowed.every((a): a is string => typeof a === 'string' && a.trim() !== '')) return null;
+    return { root, allowed };
+  } catch {
+    return null;
+  }
+}
+
+/** An absolute, normalised path (forward slashes), or null when empty, relative or unresolvable. Handles `\\?\X:\..`, `/x/work/..`
+ *  (Git Bash) and `..` segments, like [IO.Path]::GetFullPath in the freellm wrapper (which this cannot call from here). */
 export function normalizeAbs(p: unknown): string | null {
   if (typeof p !== 'string' || !p.trim()) return null;
   let s = p.trim().replace(/\\/g, '/');
@@ -71,12 +86,13 @@ function realGit(cwd: string) {
   return /not a git repository/i.test(String(r.stderr)) ? { ok: true, notRepo: true } : { ok: false };
 }
 
-/** The folder rule of ~/.local/bin/freellm.ps1, mirrored and fail closed: the free router may train on what it sees, so under
- *  the protected root (F:\Work) only the allowed folders (TactiAI, arabcomputers). Judged on the cwd AND on the repo's git common
- *  dir (a worktree elsewhere belongs to its repo). Null when allowed, else the refusal. An empty, relative or unresolvable cwd,
- *  or a git failure inside a repo, refuses (the wrapper itself ignores a git error). */
-export function freellmRefusal(cwd: string, rule: FreellmRule = DEFAULT_RULE): string | null {
+/** The local freellm wrapper's folder rule, mirrored and fail closed: the free router may train on what it sees, so under the
+ *  protected root only the allowed folders. Judged on the cwd AND on the repo's git common dir (a worktree elsewhere belongs to
+ *  its repo). Null when allowed, else the refusal. No rule on this machine, an empty, relative or unresolvable cwd, or a git
+ *  failure inside a repo, refuses (the wrapper itself ignores a git error). */
+export function freellmRefusal(cwd: string, rule: FreellmRule | null = loadFreellmRule()): string | null {
   const refuse = (why: string) => `freellmapi refused for ${JSON.stringify(cwd)}: ${why}`;
+  if (!rule) return refuse('this machine has no folder rule (~/.claude-board/freellm-rule.json), so free providers stay off');
   const here = normalizeAbs(cwd), root = normalizeAbs(rule.root);
   if (!here) return refuse('the folder is empty, relative or cannot be resolved');
   if (!root) return refuse('the protected root cannot be resolved');
@@ -133,7 +149,7 @@ export function newestSession(body: unknown): string | null {
   return best?.id ?? null;
 }
 
-export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: typeof readOpencodeEndpoint = readOpencodeEndpoint, rule: FreellmRule = DEFAULT_RULE): AgentAdapter {
+export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: typeof readOpencodeEndpoint = readOpencodeEndpoint, rule?: FreellmRule | null): AgentAdapter {
   // redirect 'error': the Authorization header never follows a redirect
   const call = (ep: OpencodeEndpoint, path: string, init: RequestInit = {}) =>
     f(base(ep) + path, { ...init, redirect: 'error', headers: { authorization: auth(ep), 'content-type': 'application/json', ...(init.headers as object) }, signal: AbortSignal.timeout(TIMEOUT) });
@@ -143,7 +159,8 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
     relayStart: 'pane-prestart',
 
     // Through `herdr agent start <name> --kind opencode --pane <p> -- <args>`: herdr runs the bare `opencode` executable, so the
-    // freellm.ps1 wrapper (folder guard) is NOT in this path; freellmRefusal() re-applies its folder rule here, and the env
+    // freellm wrapper (folder guard) is NOT in this path; freellmRefusal() re-applies its folder rule here (read from this
+    // machine's rule file at each launch unless one was injected), and the env
     // sets what the wrapper sets. The caller must supply CB_OPENCODE_PORT and OPENCODE_SERVER_PASSWORD in `env` (the same
     // pair it wrote with writeOpencodeEndpoint): a seat nobody can reach is not started.
     // FREELLMAPI_URL and FREELLMAPI_API_KEY come from the pane's own env and are never copied into a LaunchSpec. The folder rule
@@ -153,7 +170,7 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
       if (model && !OPENCODE_MODEL.test(model)) throw new Error(`opencode model must be provider/model (got ${JSON.stringify(l.model)})`);
       const cwd = normalizeAbs(l.cwd);
       if (!cwd) throw new Error(`opencode launch needs an absolute cwd (got ${JSON.stringify(l.cwd)})`);
-      if (!model || model.startsWith('freellmapi/')) { const r = freellmRefusal(cwd, rule); if (r) throw new Error(r); }
+      if (!model || model.startsWith('freellmapi/')) { const r = freellmRefusal(cwd, rule === undefined ? loadFreellmRule() : rule); if (r) throw new Error(r); }
       const env = opencodeEnv(l.env);
       const port = Number(env.CB_OPENCODE_PORT);
       if (!validPort(port)) throw new Error('opencode launch needs env CB_OPENCODE_PORT (1024-65535)');
@@ -231,7 +248,7 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
         nativeFiles: ['AGENTS.md', 'CLAUDE.md (project, fallback only)', '~/.config/opencode/AGENTS.md'],
         extraArgs: [],
         env: { OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1' },
-        note: '~/.config/opencode/AGENTS.md exists on purpose so OpenCode never falls back to ~/.claude/CLAUDE.md; the env flag is what freellm.ps1 sets',
+        note: '~/.config/opencode/AGENTS.md exists on purpose so OpenCode never falls back to ~/.claude/CLAUDE.md; the env flag is what the freellm wrapper sets',
       };
     },
 
