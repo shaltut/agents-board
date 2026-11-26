@@ -11,6 +11,7 @@ import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
 import { planTick, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
+import { withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
 
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
@@ -280,11 +281,12 @@ if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
   const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/claude.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
-  const app = `cb-supervisor/${version}`, sql = connect(undefined, { app, max: 1 });
+  const app = `cb-supervisor/${version}`;
+  let sql = connect(undefined, { app, max: 1 });
   // A dry run writes nothing, so it takes no lock (it may preview while a supervisor runs). Checked every tick, before
   // anything acts: re-entrant (true); board unreachable: the tick fails and the next one tries again
-  const lock = dryRun ? null : lockClient(app);
-  const isLocked = async () => !lock || await locked(lock);
+  let lock = dryRun ? null : lockClient(app);
+  const isLocked = async () => !lock || await withDeadline(locked(lock), 30_000, 'the supervisor lock check');
   if (!(await isLocked())) { console.log('another supervisor is running'); process.exit(1); }
   const home = process.env.CB_SUPERVISOR_HOME || join(homedir(), '.claude-board', 'supervisor');
   const say = (line: string) => {
@@ -304,11 +306,21 @@ if (import.meta.main) {
   for (;;) {
     try {
       if (!(await isLocked())) { say('another supervisor is running'); process.exit(1); }
-      const now = ((await sql`select now() as t`)[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
+      const now = ((await withDeadline(sql`select now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
-      for (const line of await tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe })) say(line);
+      for (const line of await withDeadline(tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe }), 300_000, 'the tick')) say(line);
       code = 0;
-    } catch (e) { say(`tick failed: ${msg(e)}`); code = 1; }
+    } catch (e) {
+      say(`tick failed: ${msg(e)}`); code = 1;
+      // #4261: a hung query means a dead connection that may never error: drop both clients and start fresh (the lock
+      // goes with its connection; the next check takes it again, or finds another supervisor and exits)
+      if (/did not answer within/.test(msg(e))) {
+        const old = [sql, lock];
+        sql = connect(undefined, { app, max: 1 });
+        if (lock) lock = lockClient(app);
+        for (const c of old) c?.end({ timeout: 0 }).catch(() => {});
+      }
+    }
     if (dryRun || once) break;
     await new Promise((r) => setTimeout(r, 60_000));
   }
