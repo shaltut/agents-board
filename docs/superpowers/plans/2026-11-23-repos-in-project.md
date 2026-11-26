@@ -22,7 +22,7 @@
   `CB_TEST_DB=claude_board_test_repos NODE_OPTIONS=--max-old-space-size=4096 node --test --test-concurrency=1 --test-force-exit test/<file>.test.ts`.
   Run only the files the task names plus the existing files it touches. Never run the full suite (the controller does, once).
 - Never touch the live board, the live runner, `~/.claude-board/runner.json`, or herdr agents. Never dispatch subagents.
-- Commits: conventional, ending `(#3703)`, last two lines `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_01VedgXTSz9j8Fqn7VTmyGUB`. Never bypass hooks, never push.
+- Commits: conventional, ending `(#3703)`, last line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never bypass hooks, never push.
 - `cli/help.ts` changes with the code that makes it false (`test/help.test.ts` pins it); every new flag is documented in the task that adds it.
 
 ## Review Focus
