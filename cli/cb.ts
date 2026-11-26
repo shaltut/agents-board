@@ -9,6 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
+import { withConnectRetry, neverSent } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -78,6 +79,11 @@ if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
   }
+const boardHost = new URL(databaseUrl()).hostname;
+const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost);
+// #4337: a remote board that is briefly unreachable is retried for ~10 s, one statement at a time and only when it never
+// left this machine (connect-retry.ts). A local board that refuses is started instead (main()), with no wait first.
+if (!localBoard) sql = withConnectRetry(sql);
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -966,12 +972,14 @@ async function main() {
   } catch (e: any) {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
-    const host = new URL(databaseUrl()).hostname;
-    const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host);
     const network = ['ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND'].includes(e?.code);
     if (!network) throw e;
-    // A remote board (another machine) can't be started from here: say so and let the session carry on.
-    if (!local) throw new Error(`board unreachable at ${host} (${e.code}). The board machine may be asleep: keep working and register this later.`);
+    // A remote board (another machine) can't be started from here: say so and let the session carry on. Whether the
+    // failed call ran is said plainly (#4337): a resend of one that may have run can do it twice.
+    const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
+    const ran = neverSent(e) ? 'the call that failed never reached it, so it did not run'
+      : 'the call that failed may have reached it: check with cb before running it again';
+    if (!localBoard) throw new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`);
     if (e.code !== 'ECONNREFUSED') throw e;
     (await import('../db/pg.ts')).ensurePg();
     r = await run();
