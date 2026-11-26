@@ -93,6 +93,9 @@ create table if not exists cb.events (
   data        jsonb not null default '{}'
 );
 create index if not exists events_actor_at on cb.events (actor, at desc);
+-- "An actor's latest event" (sessions_overview's `last`, order by id desc limit 1): without it the planner walks events_pkey
+-- backwards and, for an actor with no events (a fresh squad session), reads the whole table: 25 s per call, 504s on every page (2026-11-26).
+create index if not exists events_actor_id on cb.events (actor, id desc);
 alter table cb.events drop constraint if exists events_kind_check;
 alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor'));
 
