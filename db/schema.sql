@@ -260,6 +260,7 @@ drop function if exists cb.task_move cascade;
 drop function if exists cb.task_update cascade;
 drop function if exists cb.task_done cascade;
 drop function if exists cb.log cascade;
+drop function if exists cb.guest_text cascade;
 drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb.iam cascade;
@@ -324,6 +325,20 @@ drop function if exists cb.goals_list cascade;
 -- ponytail: a deterrent, not auth. Known bypasses: PGAPPNAME=cb-web (or set application_name) on any
 -- psql/postgres connection, and a local POST to /api/rpc with a forged same-host Origin header. It stops
 -- accidents and prompt-injected sessions, not a determined local process. Real auth = a Postgres role per client.
+-- #4356: what a guest (a member) writes reaches sessions, so the invisible format characters (Unicode Cf: zero-width,
+-- bidi overrides, tag characters) come out where it is written: answers, send-back notes, log lines. The class is every
+-- Cf code point of Unicode 17, written as \u escapes so it can be read and diffed (Postgres regexes have no \p{};
+-- test/guest-text.test.ts pins it and checks it against Node's). Cf only, by design: other invisible or confusable
+-- letters and marks (Hangul fillers, U+034F, variation selectors, braille blank) are ordinary text and stay.
+-- Control characters go too (review I2: a terminal acts on an ESC sequence, \r, a backspace): a line break of any
+-- kind (\r\n, \r, U+0085) becomes \n, which the relay indents; the other C0 and C1 controls but \n and \t are removed.
+-- The owner's and admins' text stays as typed (a right-to-left mark, an emoji joiner).
+create function cb.guest_text(actor text, t text) returns text language sql stable as $$
+  select case when t is not null and exists (select 1 from cb.users u where lower(u.name) = lower(trim(coalesce(actor, ''))) and u.role = 'member')
+    then regexp_replace(regexp_replace(regexp_replace(t, '\r\n?|\u0085', E'\n', 'g'),
+           '[\u0001-\u0008\u000b-\u001f\u007f-\u009f]', '', 'g'),
+           '[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g')
+    else t end $$;
 create function cb.ahmed_like(a text) returns boolean language sql immutable as $$ select coalesce(a, '') ~* '\mahmed\M' $$;
 create function cb.not_ahmed(a text) returns void language plpgsql as $$
 begin
@@ -822,6 +837,7 @@ returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
 begin
+  summary := cb.guest_text(a, summary);
   if coalesce(trim(summary), '') = '' then raise exception 'summary is required'; end if;
   insert into cb.events (actor, project, task_id, kind, summary, data)
   values (a, p, case when task_id is null then null else cb.norm_id(task_id) end, 'note', trim(summary), coalesce(data, '{}'))
@@ -1107,6 +1123,7 @@ begin
     if stale then raise exception 'M% is past its review date: renew it on the Memory page first', rid; end if;
     if rp is not null and rp <> qp then raise exception 'M% is in %, not %: only a global entry or one in Q%''s project', rid, rp, qp, qid; end if;
   end if;
+  answer := cb.guest_text(a, answer);
   if coalesce(trim(answer), '') = '' then raise exception 'answer is required'; end if;
   if cur = 'withdrawn' then raise exception 'question Q% is already withdrawn', qid; end if;
   if cur = 'delivered' then
@@ -1307,7 +1324,7 @@ returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
         r text := lower(trim(coalesce(reason, '')));
-        n text := nullif(trim(regexp_replace(coalesce(note, ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
+        n text := nullif(trim(regexp_replace(coalesce(cb.guest_text(a, note), ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
 begin
   perform cb.dashboard_only('Today');
   perform cb._approval_guard(qid);
