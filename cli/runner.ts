@@ -10,10 +10,12 @@ import { connect, machine } from '../server/db.ts';
 import { freeLane, loadConfig, published, type RunnerConfig } from './recipes.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob } from './runner-job.ts';
-import { survive } from './survive.ts';
+import { isNetworkError, survive } from './survive.ts';
 
 const say = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
-survive(say); // #3902: a dropped board connection is logged and outlived, not an exit (anything else still exits)
+// #3902: once up, a dropped board connection is logged and outlived, not an exit (anything else still exits); before
+// ready() (runner_hello, listen) it still exits, so the supervisor restarts the runner
+const survival = survive(say);
 const CONFIG = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
 const HOME = process.env.CB_RUNNER_HOME || join(homedir(), '.claude-board', 'runner');
 const LOGS = join(HOME, 'logs');
@@ -99,6 +101,7 @@ function start(slot: number, j: any, lane: number | undefined) {
     .then(async (r) => {
       if (!r) return say(`job #${j.id} cancelled`);
       const done = await finish(sql, NAME, Number(j.id), r, say);
+      if (done === 'gave-up') lostClaim = true; // its end did not reach the board: the next claim loop ends it (I1)
       say(`job #${j.id} ${r.state}${r.exit_code === null ? '' : ` (exit ${r.exit_code})`}${done === 'gone' ? '; the job had already ended on the board' : done === 'gave-up' ? '; the board did not take its end, the next start ends it' : ''}`);
     })
     .catch((e) => say(`job #${j.id}: ${e?.message ?? e}`))
@@ -106,11 +109,17 @@ function start(slot: number, j: any, lane: number | undefined) {
 }
 
 // One claim loop at a time: a notice, the beat and a job's end can all ask at once.
-let claiming = false, again = false;
+let claiming = false, again = false, lostClaim = false;
 async function claim() {
   if (claiming) { again = true; return; }
   claiming = true;
   try {
+    // a claim that failed on the network may have committed: end what no slot holds (review I1), before claiming more
+    if (lostClaim) {
+      const n = (await sql`select cb.runner_reconcile(${NAME}, ${[...slots.values()].map((s) => s.id)}::bigint[]) as n`)[0]!.n;
+      lostClaim = false;
+      if (n) say(`${n} job(s) claimed while the board connection dropped ended: no slot was running them`);
+    }
     do {
       again = false;
       for (;;) {
@@ -124,6 +133,7 @@ async function claim() {
     } while (again);
   } catch (e: any) {
     say(`claim failed: ${e?.message ?? e}`); // the next notice or beat retries
+    if (isNetworkError(e)) lostClaim = true;
   } finally {
     claiming = false;
   }
@@ -148,3 +158,4 @@ setInterval(() => {
   tick();
 }, 30_000);
 say(`runner ${NAME} up (cb-runner/${VERSION}), logs on http://${cfg.log.host}:${cfg.log.port}`);
+survival.ready();

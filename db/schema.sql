@@ -5004,6 +5004,7 @@ drop function if exists cb.job_get cascade;
 drop function if exists cb.jobs_list cascade;
 drop function if exists cb.job_cancel cascade;
 drop function if exists cb.runner_hello cascade;
+drop function if exists cb.runner_reconcile cascade;
 drop function if exists cb.runner_beat cascade;
 drop function if exists cb.job_claim cascade;
 drop function if exists cb.job_finish cascade;
@@ -5125,6 +5126,22 @@ begin
   end loop;
   for j in update cb.jobs x set state = 'error', summary = 'error: runner restarted', finished_at = now()
            where x.runner = runner_hello.runner and x.state = 'running' returning x.* loop
+    n := n + 1;
+    perform cb._job_tell(j);
+  end loop;
+  return n;
+end $$;
+
+-- #3902 review I1: a claim whose reply was lost (the connection died after job_claim committed) leaves a job running
+-- that no slot of this runner holds. A restart used to end it (runner_hello); a runner that survives the drop calls this
+-- with the jobs its slots hold, from inside its one claim loop (so no claim is in flight), and the rest end.
+create function cb.runner_reconcile(runner text, running bigint[]) returns int language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; n int := 0;
+begin
+  perform cb._runner_only();
+  for j in update cb.jobs x set state = 'error', summary = 'error: the runner lost the board connection while claiming it', finished_at = now()
+           where x.runner = runner_reconcile.runner and x.state = 'running' and not (x.id = any(coalesce(running, '{}'))) returning x.* loop
     n := n + 1;
     perform cb._job_tell(j);
   end loop;

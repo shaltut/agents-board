@@ -21,11 +21,12 @@ test('isNetworkError: dropped, refused, unreachable and timed-out connections, a
 
 const child = (body: string) => spawnSync(process.execPath, ['--input-type=module', '-e', `
   import { survive } from ${JSON.stringify(new URL('../cli/survive.ts', import.meta.url).href)};
-  survive((l) => console.log(l));
+  const s = survive((l) => console.log(l));
   ${body}`], { encoding: 'utf8', timeout: 20_000 });
 
 test('survive: an uncaught or unhandled lost connection is logged and the process goes on', () => {
   const r = child(`
+    s.ready();
     setTimeout(() => { throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); }, 10);
     Promise.reject(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
     setTimeout(() => console.log('still running'), 200);`);
@@ -40,4 +41,17 @@ test('survive: any other uncaught error still ends the process, non-zero, with t
   assert.notEqual(r.status, 0);
   assert.doesNotMatch(r.stdout, /never/);
   assert.match(r.stdout + r.stderr, /cfg\.slots is undefined/);
+});
+
+// review C1: a network error BEFORE the runner is up (runner_hello, listen) used to exit 1 so the supervisor restarted
+// it; survived, the log server kept a runner alive that never beat or claimed, with its port held, so it was never
+// restarted. Until ready() a lost connection still ends the process.
+test('survive: a lost connection before ready() still ends the process, so the supervisor restarts it', () => {
+  const r = child(`
+    import('node:http').then((h) => h.default.createServer().listen(0));
+    setTimeout(() => Promise.reject(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })), 50);
+    setTimeout(() => console.log('zombie'), 1500);`);
+  assert.notEqual(r.status, 0);
+  assert.doesNotMatch(r.stdout, /zombie|carrying on/);
+  assert.match(r.stdout + r.stderr, /before the runner was up.*ECONNREFUSED/s);
 });

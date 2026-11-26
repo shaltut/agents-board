@@ -14,8 +14,15 @@ export function isNetworkError(e: unknown): boolean {
   return err.cause !== undefined && err.cause !== e && isNetworkError(err.cause);
 }
 
+// Until ready() a lost connection still ends the process (#3902 review C1): a runner that never got up (runner_hello or
+// listen failed) must exit so the supervisor restarts it, not linger with its log port held, never beating.
 export function survive(say: (line: string) => void) {
+  let up = false;
   const handle = (e: unknown) => {
+    if (isNetworkError(e) && !up) {
+      say(`fatal: lost the board connection before the runner was up: ${(e as Error).message} (${(e as any).code}); exiting so it is restarted`);
+      process.exit(1);
+    }
     if (isNetworkError(e)) {
       say(`lost the board connection: ${(e as Error).message} (${(e as any).code ?? 'network'}); carrying on, it reconnects on the next query`);
       return;
@@ -25,4 +32,5 @@ export function survive(say: (line: string) => void) {
   };
   process.on('uncaughtException', handle);
   process.on('unhandledRejection', handle);
+  return { ready: () => { up = true; } };
 }
