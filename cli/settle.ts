@@ -16,3 +16,20 @@ export function settleWork(pending: Map<number, { t: Work; at: number }>, offere
   }
   return { due, wait };
 }
+
+// The relay's whole step (review I3), pure so it is testable: settle what the inbox offers, re-check what is due with
+// stillOpen (cb.work_still_open), push only what the board still has open for this session. An unbound seat (no actor)
+// settles nothing, so an offer is not used up before the seat binds (M2). A re-check that throws (a board without the
+// function yet) offers what is due unchecked, as before, and never fails the relay's check.
+export async function offerSettled(o: {
+  pending: Map<number, { t: Work; at: number }>; offered: Work[]; now: number; settleMs: number; actor: string | null;
+  stillOpen: (ids: number[]) => Promise<number[]>; log: (line: string) => void;
+}): Promise<{ work: Work[]; wait: number | null }> {
+  if (!o.actor) return { work: [], wait: null };
+  const { due, wait } = settleWork(o.pending, o.offered, o.now, o.settleMs);
+  if (!due.length) return { work: [], wait };
+  let open: Set<number>;
+  try { open = new Set((await o.stillOpen(due.map((t) => Number(t.id)))).map(Number)); }
+  catch (e: any) { o.log(`next re-check failed (offered unchecked): ${e?.message ?? e}`); open = new Set(due.map((t) => Number(t.id))); }
+  return { work: due.filter((t) => open.has(Number(t.id))), wait };
+}

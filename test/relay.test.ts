@@ -308,6 +308,17 @@ test('work_still_open: a card assigned to someone else, or moved out of Next, si
   await sql`update cb.tasks set status = 'in_progress', assignee = 'B9' where id = ${moved}`;
   const [{ ids }] = await sql`select cb.work_still_open(${[free, taken, mine, moved, 999999]}::bigint[], 'W1') as ids`;
   assert.deepEqual(ids.map(Number).sort((a: number, b: number) => a - b), [free, mine]);
+  // review I1: holding a part in progress (#3703) is work in progress too, as in the inbox's next_work
+  const parts = await add('a parts card');
+  await sql`update cb.tasks set stage = 'build' where id = ${parts}`; // a part hold counts on a staged card
+  await sql`insert into cb.task_parts (task_id, repo, stage, status, assignee) values (${parts}, 'main', 'build', 'in_progress', 'W1')`;
+  const [{ part }] = await sql`select cb.work_still_open(${[free]}::bigint[], 'W1') as part`;
+  assert.deepEqual(part, []);
+  await sql`delete from cb.task_parts where task_id = ${parts}`;
+  // an unassigned bug outside a pipeline goes to triage, never offered (as the inbox)
+  const bug = Number((await sql`select cb.task_add(project => 'ihop', title => 'a bug', status => 'next', type => 'bug', actor => 'orch') as id`)[0].id);
+  const [{ b }] = await sql`select cb.work_still_open(${[free, bug]}::bigint[], 'W1') as b`;
+  assert.deepEqual(b.map(Number), [free]);
   // started something meanwhile: nothing is offered
   await sql`update cb.tasks set status = 'in_progress' where id = ${mine}`;
   const [{ busy }] = await sql`select cb.work_still_open(${[free]}::bigint[], 'W1') as busy`;
