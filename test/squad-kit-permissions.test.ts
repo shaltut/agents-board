@@ -149,6 +149,20 @@ test('push options that name no branch are denied, with twins; the git -* twins 
   }
 });
 
+// #4346: the guard sees only Bash/PowerShell, so an MCP tool (a mail send, a SQL execute, a drive share...) was open
+// to any seat acting on an injected [GitHub · untrusted] line. No role's work uses MCP. Under bypassPermissions allow
+// rules do nothing and deny rules always hold, so the fence is a deny: mcp__* covers every server and also takes the
+// tools out of the session's context; disableClaudeAiConnectors stops the account's claude.ai connectors loading.
+// A role that one day needs a server gets a narrower deny, never an allow (it would be ignored).
+test('every role denies every MCP tool and loads no claude.ai connectors', () => {
+  for (const r of ROLES) {
+    const f = load(r);
+    assert.ok(f.permissions.deny.includes('mcp__*'), `${r}: mcp__*`);
+    assert.equal(f.disableClaudeAiConnectors, true, `${r}: disableClaudeAiConnectors`);
+    assert.equal(f.permissions.allow.some((a: string) => a.startsWith('mcp__')), false, `${r}: an MCP allow does nothing under bypass`);
+  }
+});
+
 test('no role may use the PowerShell tool: squad sessions work through Bash', () => {
   for (const r of ROLES) assert.ok(load(r).permissions.deny.includes('PowerShell'), r);
 });

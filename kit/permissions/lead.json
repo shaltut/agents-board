@@ -1,5 +1,6 @@
 {
   "crossSessionInbound": "accept",
+  "disableClaudeAiConnectors": true,
   "permissions": {
     "deny": [
       "Bash(git push)",
@@ -74,7 +75,8 @@
       "Bash(git -* push --follow-tags)",
       "Bash(git push --atomic origin)",
       "Bash(git -* push --atomic origin)",
-      "PowerShell"
+      "PowerShell",
+      "mcp__*"
     ],
     "allow": [
       "Bash(cb *)",
