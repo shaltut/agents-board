@@ -248,8 +248,7 @@ test('role parity and evaluate(edit/ask)', () => {
 
 test('role rules read a quoted string as a command only after a shell runner', () => {
   // ordinary quoted arguments are text for the role rules
-  passes('builder', ['grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"', 'grep -rn "git push origin main" docs',
-    "grep -n 'git push --force' docs"]);
+  passes('builder', ['grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"', "grep -n 'git push --force' docs"]);
   for (const role of READ_ONLY_ROLES) {
     passes(role, ['grep -n "git commit" README.md', 'grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"']);
   }
@@ -264,12 +263,37 @@ test('role rules read a quoted string as a command only after a shell runner', (
     'Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it');
 });
 
+test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {
+  // main and master are protected like the protected-branch scan protects its list: every quoted string counts, so a
+  // mention of pushing main blocks too (accepted cost); other quoted git text is still text
+  blocksByRole('builder', ["echo 'git push origin main' | sh", 'grep -rn "git push origin main" docs']);
+  passes('builder', ['grep -rn "git push" docs']);
+  // one form per runner: quoted text piped into a shell or iex (earlier in the same pipeline), iex's or Invoke-Expression's
+  // argument, a bare powershell or pwsh script argument, su -c
+  const runs = (c: string) => [
+    `echo '${c}' | sh`, `echo '${c}' | bash -s`, `echo '${c}' | zsh`, `echo "${c}" | pwsh -Command -`, `echo "${c}" | powershell -`,
+    `echo "${c}" | cmd`, `echo '${c}' | sudo bash`, `printf '%s\\n' '${c}' | tee log.txt | sh`, `"${c}" | iex`,
+    `iex '${c}'`, `Invoke-Expression "${c}"`, `powershell "${c}"`, `pwsh '${c}'`, `su -c '${c}'`, `su root -c "${c}"`,
+  ];
+  blocksByRole('reviewer', runs('git commit -m x'));
+  blocksByRole('builder', runs('git push origin feat/x --force'));
+  // text no shell runs stays text: a redirect to a file, a pipe into something else, a stage after the shell, ||
+  passes('reviewer', ['echo "git commit" > notes.txt', "echo 'git commit -m x' | grep bash", "echo hi | sh | grep 'git commit -m x'",
+    "echo 'git commit -m x' || sh"]);
+});
+
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below took seconds to minutes
-// before #4002's fix round 1; the rules it reaches are now linear in the command's length. (Not covered: the heredoc
-// search in stripMessages, still (headers x length) on quoted-delimiter heredocs with no end line.)
+// before #4002's fix rounds 1 and 2; the rules it reaches are now linear in the command's length.
 test('long commands stay fast', () => {
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
+  const heredocThen600KB = "cat > notes.txt <<'EOF'\n" + 'a line of notes\n'.repeat(37500); // no end line
+  const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
+  const asBuilder = (command: string) => () => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: ['development'] });
   const cases: [string, () => unknown][] = [
+    ['an unterminated quoted heredoc header, then 600 KB', () => check(heredocThen600KB)],
+    ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
+    ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],
+    ['600 KB of unterminated quoted heredoc headers, as a builder', asBuilder(heredocHeaders600KB)],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],

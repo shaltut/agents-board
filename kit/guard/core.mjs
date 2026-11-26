@@ -16,8 +16,48 @@ const QUOTED = String.raw`"(?:\\.|[^"\\])*"|'[^']*'`;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
-// Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell.
-const HEREDOC = /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3[ \t]*(?=\n|$)/gm;
+// Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell. A header line holds <<'ID'
+// or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), never the line
+// right after the header. One pass (#4002): the regex form, /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3
+// [ \t]*(?=\n|$)/gm, searched to the end of the text again for every header without its end line ((headers x length):
+// 4 s on 156 KB through a role seat's six scans). Same matches: end lines are indexed once per word, a line's << are
+// tried last to first (the regex's greedy [^\n]*), and ^ and $ keep the m flag's line ends (\n, \r, U+2028, U+2029).
+const END_LINE = /\n[ \t]*(\w+)[ \t]*(?=\n|$)/gm; // a line holding only a word, from the \n before it
+const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
+const LINE_START = /^/gm;
+function replaceHeredocs(text, fn) {
+  const ends = new Map(); // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
+  for (const m of text.matchAll(END_LINE)) {
+    const e = ends.get(m[1]) ?? { at: [], k: 0 };
+    e.at.push([m.index, m.index + m[0].length]);
+    ends.set(m[1], e);
+  }
+  let out = '';
+  let pos = 0;
+  for (let s = 0; ;) {
+    const nl = text.indexOf('\n', s);
+    if (nl < 0) break;
+    const line = text.slice(s, nl);
+    let found = null;
+    for (let at = line.lastIndexOf('<<'); at >= 0 && !found; at = at > 0 ? line.lastIndexOf('<<', at - 1) : -1) {
+      HEADER_AT.lastIndex = at;
+      const h = HEADER_AT.exec(line);
+      const e = h && ends.get(h[2]);
+      if (!e) continue;
+      while (e.k < e.at.length && e.at[e.k][0] <= nl) e.k++; // its \n must come after the header's own
+      if (e.k < e.at.length) found = { id: h[2], end: e.at[e.k][1] };
+    }
+    // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
+    if (!found) { s = nl + 1; continue; }
+    out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id);
+    pos = found.end;
+    LINE_START.lastIndex = pos;
+    const next = LINE_START.exec(text);
+    if (!next) break;
+    s = next.index;
+  }
+  return out + text.slice(pos);
+}
 const TEXT_WRITER = /^[ \t]*(?:cb[ \t]|cat[ \t]*>>?[ \t]*\S|git[ \t]+commit\b.*-F[ \t]+-)/;
 const SUBST_CAT = /\$\([ \t]*cat[ \t]*$/;
 const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[^;&|\n]*"$`);
@@ -34,8 +74,7 @@ function writesText(line) {
 }
 
 export function stripMessages(cmd) {
-  return cmd
-    .replace(HEREDOC, (all, line, _q, id) => (writesText(line) ? `${line}\n${id}` : all))
+  return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
     .replace(MESSAGE_CMD, (_all, head, args) =>
       // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
       head + args.replace(new RegExp(QUOTED, 'g'), (q) =>
@@ -289,22 +328,30 @@ const globRe = (e) => new RegExp(`^${e.split('*').map(literal).join('.*')}$`);
 // own, so a push's arguments never run into the next block); words end at whitespace and ( ) { } outside quotes.
 const SEGMENT = KILL_SEGMENT;
 const WORD = new RegExp(String.raw`(?:${QUOTED}|\\.|[^\s(){}"'\\])+`, 'g');
-// one layer of quoting off, as the shell does: "..." (\" \\ \$ \` inside unescaped), '...' as is, \x outside quotes
-const unquote = (w) => w.replace(new RegExp(String.raw`"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)`, 'g'),
-  (_all, dq, sq, esc) => (dq !== undefined ? dq.replace(/\\(["\\$`])/g, '$1') : sq ?? esc));
+// one layer of quoting off, as the shell does: "..." (\" \\ \$ \` inside unescaped), '...' as is, \x outside quotes.
+// The regex is built once, and a word with no quote or backslash is returned as is (the replace would change nothing):
+// every scan unquotes every word, so this is most of a scan's cost on a long command.
+const UNQUOTE = new RegExp(String.raw`"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)`, 'g');
+const unquote = (w) => (/["'\\]/.test(w)
+  ? w.replace(UNQUOTE, (_all, dq, sq, esc) => (dq !== undefined ? dq.replace(/\\(["\\$`])/g, '$1') : sq ?? esc))
+  : w);
 
 // Which quoted words (holding a space or a separator) a scan reads as commands, one layer of quotes off.
-// EVERY_QUOTED, for the dangerous and protected-branch scans: all of them (fail closed: echo "git push origin
-// development" blocks). runnerArg, for the role rules (#4002): only a shell runner's argument (bash, sh or zsh -c;
-// pwsh or powershell -c or -Command; cmd /c or /k; anything after ssh, eval or xargs; a herdr prompt starting with !,
-// which runs there) and a double-quoted string the shell expands ("$(...)", `...`), so grep -rn "git push" docs and
-// git log --grep "git commit" are text to a reviewer or a builder.
+// EVERY_QUOTED, for the dangerous and protected-branch scans and the role rules' main/master check: all of them (fail
+// closed: echo "git push origin development" blocks). runnerArg, for the other role rules (#4002): only what a shell
+// runs, so grep -rn "git push" docs and git log --grep "git commit" are text to a reviewer or a builder:
+// - the argument of bash, sh, zsh or su -c; cmd /c or /k;
+// - anything after pwsh or powershell (-c, -Command or a positional script), ssh, eval, xargs, iex or Invoke-Expression;
+// - a herdr prompt starting with ! (it runs there);
+// - any quoted text in a pipeline stage whose output goes on to a shell or iex (| sh, | sudo bash, | pwsh -, | cmd, | iex);
+// - a double-quoted string the shell expands ("$(...)", `...`).
 // Each is built once per segment (the earlier words' names become prefix flags, so a long segment stays linear) and
 // answers for word i.
 const EVERY_QUOTED = () => () => true;
-const SHELL_C = new Set(['bash', 'sh', 'zsh', 'pwsh', 'powershell']);
-const RUNS_REST = new Set(['ssh', 'eval', 'xargs']);
-function runnerArg(raw, w, name) {
+const SHELL_C = new Set(['bash', 'sh', 'zsh', 'su']);
+const RUNS_REST = new Set(['ssh', 'eval', 'xargs', 'iex', 'invoke-expression', 'pwsh', 'powershell']);
+const PIPE_RUNNERS = new Set(['sh', 'bash', 'zsh', 'pwsh', 'powershell', 'cmd', 'iex', 'invoke-expression']);
+function runnerArg(raw, w, name, piped) {
   const seen = []; // seen[k]: which runners are among the names of words 0 .. k-1
   let s = { shellC: false, cmd: false, herdr: false, rest: false };
   for (const n of name) {
@@ -312,6 +359,7 @@ function runnerArg(raw, w, name) {
     s = { shellC: s.shellC || SHELL_C.has(n), cmd: s.cmd || n === 'cmd', herdr: s.herdr || n === 'herdr', rest: s.rest || RUNS_REST.has(n) };
   }
   return (i) => {
+    if (piped) return true;
     if (raw[i].includes('"') && /\$\(| \$ /.test(w[i])) return true; // " $ " is a backtick substitution (scanCommands)
     const flag = (w[i - 1] ?? '').toLowerCase();
     const before = seen[Math.max(0, i - 1)]; // the words before the flag
@@ -334,15 +382,24 @@ const MAX_COMMANDS_PER_SEGMENT = 16;
 // MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block).
 function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
   const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
-  for (const seg of text.match(SEGMENT) ?? []) {
-    const raw = seg.match(WORD) ?? [];
+  const segs = [...text.matchAll(SEGMENT)].map((m) => {
+    const raw = m[0].match(WORD) ?? [];
+    return { start: m.index, end: m.index + m[0].length, raw, name: raw.map(cmdName) };
+  });
+  // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs (sudo before it too)
+  const piped = segs.map(() => false);
+  for (let k = segs.length - 2; k >= 0; k--) {
+    if (!/^\|&?$/.test(text.slice(segs[k].end, segs[k + 1].start))) continue;
+    const [first, second] = segs[k + 1].name;
+    piped[k] = piped[k + 1] || PIPE_RUNNERS.has(first === 'sudo' ? second : first);
+  }
+  for (const [k, { raw, name }] of segs.entries()) {
     const w = raw.map(unquote);
-    const name = raw.map(cmdName);
     const hits = name.filter((n) => names.has(n)).length;
     if (hits > MAX_COMMANDS_PER_SEGMENT) {
       throw new Error(`${hits} ${[...names].join('/')} commands in one command segment are more than the guard reads (${MAX_COMMANDS_PER_SEGMENT}): split the command`);
     }
-    const isCommand = quoted(raw, w, name);
+    const isCommand = quoted(raw, w, name, piped[k]);
     for (let i = 0; i < w.length; i++) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
         const inner = scanCommands(w[i], names, fn, quoted);
@@ -386,9 +443,6 @@ const destination = (r, del) => { const s = r.replace(/^\+/, ''); return del || 
 // backticks) cannot be checked: that word is returned, so it blocks too. So is a wildcard destination (refs/heads/*,
 // develop*): it can write a protected branch.
 export function protectedPush(cmd, list) {
-  return pushTo(cmd, list, EVERY_QUOTED);
-}
-function pushTo(cmd, list, quoted) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
   return scanCommands(cmd, GIT, (w, i) => {
@@ -407,7 +461,7 @@ function pushTo(cmd, list, quoted) {
       if (hit(dst)) return dst;
     }
     return null;
-  }, quoted);
+  });
 }
 
 // The block reason for a protectedPush hit.
@@ -440,8 +494,9 @@ function pastOpts(w, j, valueOpt) {
 }
 
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
-// session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only as a
-// shell runner's argument (runnerArg).
+// session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
+// shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
+// a mention of pushing main (grep -rn "git push origin main" docs) blocks too.
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
@@ -462,7 +517,7 @@ export function checkRole(command, role) {
     return null;
   }, runnerArg);
   if (git) return git;
-  const branch = pushTo(command, ['main', 'master'], runnerArg);
+  const branch = protectedPush(command, ['main', 'master']);
   if (branch) return pushReason(branch);
   if (role === 'lead') return null;
   const gh = scanCommands(command, GH, (w, i) => {
