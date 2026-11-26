@@ -1633,19 +1633,15 @@ begin
     'next_work', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority)
                                             order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id)
                              from cb.tasks t
-                            where me is not null and proj is not null and t.project = proj and t.status = 'next'
-                              and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
-                              and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+                            where me is not null and proj is not null and t.project = proj and cb._offerable(t, me)
+                              and not (select cb._busy(me))  -- once per call, not per card
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')
                                                  -- a parts card (#3703) stays in Next while its parts move: its stage
                                                  -- changes, and changes to a part of my repo (sent back, freed), count
                                                  or (e.kind in ('updated', 'note') and exists (select 1 from cb.task_parts p where p.task_id = t.id)
-                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))
-                              and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
-                              -- a part in work (#3703) is work in progress too
-                              and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
+                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))), '[]'),
     -- Shared memory changes (#553), same audience as broadcasts: bound sessions on the entry's project, every bound
     -- session for a global one, only that machine's for a machine-scoped one. Live on add, Ahmed's confirm, a
     -- supersede (one line naming the replacement: its add is skipped), a retire with its why. Never a proposal, a
@@ -3490,6 +3486,9 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb.work_still_open cascade;
+drop function if exists cb._offerable cascade;
+drop function if exists cb._busy cascade;
 drop function if exists cb._repo_fits cascade;
 drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
@@ -4044,6 +4043,7 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
     end
 $$;
 
+
 -- Quiet staged cards (never approval, never unstaged ones such as investigations): a live holder is nudged after 30 minutes
 -- and loses the card after 90 if the nudge went unanswered; a hold (status next) whose live holder has gone 90 minutes
 -- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
@@ -4381,6 +4381,28 @@ $$;
 create function cb._held_parts() returns setof cb.task_parts language sql stable as $$
   select p.* from cb.task_parts p join cb.tasks t on t.id = p.task_id
    where nullif(trim(p.assignee), '') is not null and p.stage <> 'merged' and t.status not in ('done', 'cancelled') and t.stage is not null
+$$;
+
+-- #4336: may this card be offered to me as new Next work? Shared by the inbox's next_work and the relay's re-check
+-- (cb.work_still_open) so the two cannot drift (review I1): in Next, unassigned or mine, mine to claim, and not an
+-- unassigned bug outside a pipeline stage (triage gets those). Whether I am busy is cb._busy, kept apart on purpose:
+-- it does not depend on the card, and callers evaluate it once (an uncorrelated subquery), not once per card.
+create function cb._offerable(t cb.tasks, me text) returns boolean language sql stable as $$
+  select t.status = 'next' and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
+     and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+$$;
+
+-- I have something in progress: a card, or a part (#3703). New Next work is offered only while I have neither.
+create function cb._busy(me text) returns boolean language sql stable as $$
+  select exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
+      or exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')
+$$;
+
+-- #4336: the relay holds a "new work in Next" offer a few seconds (the lead creates a card in Next, then assigns it),
+-- then pushes only the cards this returns: those still offerable to me.
+create function cb.work_still_open(ids bigint[], actor text) returns bigint[] language sql stable as $$
+  select coalesce(array_agg(t.id order by t.id), '{}') from cb.tasks t
+   where t.id = any(ids) and cb._offerable(t, actor) and not (select cb._busy(actor))
 $$;
 
 -- A parts card in plain words (#3703): its stage, then each part in the design's repo order, e.g.
