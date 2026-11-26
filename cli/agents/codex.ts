@@ -1,0 +1,148 @@
+// The OpenAI Codex CLI adapter (#4002 phase 2). Pure: no database. Codex has no inbox socket, so delivery and liveness go
+// through herdr (`herdr agent prompt` / `herdr agent get`), and the board's relay is started by the pane, not a session hook.
+// Every flag below was read from `codex --help` and the installed binary (see docs/superpowers/specs/2026-11-26-codex-adapter-design.md).
+// Message text is never logged or put in an error message.
+import { classifyAgentGet, realRun } from '../squad-up.ts';
+import type { Runner } from '../squad-up.ts';
+import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
+
+/** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
+export const CLAUDE_MODEL_NAMES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
+const MODEL = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** The model problem, or null. An empty model means the squad names none: Codex then uses its own configured default. */
+export function codexModelProblem(model: string): string | null {
+  if (model === '') return null;
+  if ((CLAUDE_MODEL_NAMES as readonly string[]).includes(model.toLowerCase())) return `"${model}" is a Claude model name, not a Codex one`;
+  return MODEL.test(model) ? null : `"${model}" is not a Codex model name (letters, digits, dot, dash, underscore; at most 64)`;
+}
+
+/** Roles that must not change files: Codex's own sandbox backs the guard's role block. */
+const READ_ONLY_ROLES = ['reviewer', 'qa', 'investigator'];
+/** Claude-only secrets: the owner's standing rule is that a non-Claude seat never carries them. */
+const FORBIDDEN_ENV = /^(?:GITHUB_PERSONAL_ACCESS_TOKEN|CLAUDE_CODE_.*)$/i;
+/** The same names as a glob list for Codex's own `shell_environment_policy.exclude`: commands the model runs never see
+ *  them, even though the pane's env (set by herdr from the PC's) still holds them. TOML literal strings, so there are no
+ *  double quotes for a shell to lose. */
+const EXCLUDE = "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*']";
+
+const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
+// Real strings in the 0.166 binary (the apostrophe is the typographic one): "You’ve hit your usage limit. Upgrade to Pro ...",
+// "Your workspace is out of credits.", and the model switch notice "Automatically switched to <model> due to usage limits."
+const QUOTA = /You[’']ve hit your usage limit[^\n]*|Your workspace is out of credits[^\n]*|You hit your spend cap[^\n]*/i;
+const RATE = /exceeded retry limit, last status: 429|Automatically switched to [^\n]* due to usage limits/i;
+const RETRY_IN = /try again in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\b\s*,?\s*(?:and\s+)?)+)/i;
+const UNIT_SEC: Record<string, number> = { d: 86400, h: 3600, m: 60 };
+/** "try again in 2 hours 5 minutes" in seconds; undefined when the text names a clock time or nothing. */
+function retryAfterSec(text: string): number | undefined {
+  const m = RETRY_IN.exec(text);
+  if (!m) return undefined;
+  let total = 0;
+  for (const [, n, u] of m[1]!.matchAll(/(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)\b/gi)) total += Number(n) * (UNIT_SEC[u!.charAt(0).toLowerCase()] ?? 0);
+  return total > 0 ? total : undefined;
+}
+
+export function createCodexAdapter(run: Runner = realRun): AgentAdapter {
+  const adapter: AgentAdapter = {
+    kind: 'codex',
+    // No SessionStart hook hands the relay anything: the seat's relay is started by the pane before the agent runs.
+    relayStart: 'pane-prestart',
+
+    // `herdr agent start <name> --kind codex --pane <pane> -- <args>`. `--no-daemon` comes first, right after the program name.
+    buildLaunch(l: LaunchInput) {
+      const bad = codexModelProblem(l.model);
+      if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
+      const readOnly = READ_ONLY_ROLES.includes(l.role);
+      const env = Object.fromEntries(Object.entries(l.env ?? {}).filter(([k]) => !FORBIDDEN_ENV.test(k)));
+      return {
+        kind: 'codex',
+        args: [
+          '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
+          ...(l.model ? ['-m', l.model] : []),
+          '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
+          '-s', readOnly ? 'read-only' : 'workspace-write',
+          // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
+          ...(readOnly ? [] : ['-c', 'sandbox_workspace_write.network_access=true']),
+          '-c', EXCLUDE,
+          ...adapter.trustSpec([l.cwd], process.platform).extraArgs,
+          ...adapter.instructionMapping(l).extraArgs,
+        ],
+        env,
+      };
+    },
+
+    // herdr types the text and submits it; it refuses with agent_blocked before sending a byte while a dialog is open, and a
+    // busy turn takes it as a steer. Any failure throws, so the relay does not advance and the message retries.
+    async deliver(seat, text) {
+      if (!seat.herdrName) throw new Error('no herdr name for this codex seat');
+      const r = run(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, text], 15_000);
+      if (r.error || r.status !== 0) throw new Error(`herdr agent prompt failed (exit ${r.status}): ${String(r.error?.message ?? r.stderr ?? '').replace(/\s+/g, ' ').slice(0, 120)}`);
+    },
+
+    // The pane's agent is the only liveness signal Codex gives. Unknown outcomes count as alive (as for Claude), so a
+    // slow herdr never kills a healthy relay; only agent_not_found is dead.
+    async isAlive(seat) {
+      if (!seat.herdrName) return false;
+      return classifyAgentGet(run(seat.herdr ?? null, ['agent', 'get', seat.herdrName], 10_000)) !== 'absent';
+    },
+
+    // herdr 0.9.5 reads Codex's terminal title for the state. A startup dialog (update, hooks review, trust) reads as blocked.
+    async readStatus(_seat, herdrAgent) {
+      const s = herdrAgent?.agent_status ?? '';
+      const state: AgentState = STATES.has(s) ? (s as AgentState) : 'unknown';
+      return { state, safeToClose: state === 'idle' || state === 'done' };
+    },
+
+    // `/exit` is a Codex slash command ("Exit Codex" in the binary). A busy turn queues it, so the supervisor checks
+    // safeToClose first, as for Claude.
+    async close(seat, runner) {
+      if (!seat.herdrName) return 'failed';
+      const r = runner(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, '/exit'], 30_000);
+      return r.status === 0 && !r.error ? 'sent' : 'failed';
+    },
+
+    detectQuotaStop(_seat, _herdrAgent, paneTail): QuotaSignal | null {
+      if (!paneTail) return null;
+      const q = QUOTA.exec(paneTail);
+      if (q) return { kind: 'quota', raw: q[0].trim(), retryAfterSec: retryAfterSec(q[0]) };
+      const r = RATE.exec(paneTail);
+      return r ? { kind: 'rate_limit', raw: r[0].trim() } : null;
+    },
+
+    guardInstallSpec(boardDir) {
+      const match = '^(Bash|apply_patch|request_user_input)$'; // Codex hook matchers are regexes on the tool name
+      return {
+        targetPath: '~/.codex/hooks.json',
+        shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
+        matchers: { win32: match, darwin: match, linux: match },
+        notes: 'PreToolUse entry in ~/.codex/hooks.json beside herdr\'s SessionStart entry (never edit that one); [features] hooks = true is already set. A changed hooks.json makes Codex show "Hooks need review" at the next start: only Ahmed trusts it, the board never answers it.',
+      };
+    },
+
+    // Codex reads AGENTS.md natively (the closest one to the cwd wins); CLAUDE.md is the fallback where a folder has no AGENTS.md.
+    instructionMapping() {
+      return {
+        nativeFiles: ['AGENTS.md', '~/.codex/AGENTS.md'],
+        extraArgs: ['-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
+        env: {},
+        note: 'AGENTS.md first, CLAUDE.md as the fallback filename; the user-level file is ~/.codex/AGENTS.md (a CLAUDE.md in the home folder is not read)',
+      };
+    },
+
+    // Two startup dialogs in a row on 0.160+: "Update available" is pre-empted by the flag; "Hooks need review" is not,
+    // and is never answered by the board: the seat parks as agent_not_ready until a person trusts the hooks.
+    trustSpec() {
+      return {
+        dialogHint: '"Update available" (the launch already turns the update check off), then "Hooks need review": only a person trusts hooks; also the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml',
+        preseedPath: '~/.codex/config.toml',
+        extraArgs: ['-c', 'check_for_update_on_startup=false'],
+      };
+    },
+
+    disableAskSpec() {
+      return { toolName: 'request_user_input', mechanism: 'hook', target: 'kit/guard/shim-codex.mjs' };
+    },
+  };
+  return adapter;
+}
+
+export const codexAdapter: AgentAdapter = createCodexAdapter();

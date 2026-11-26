@@ -1,5 +1,6 @@
 // The adapter registry. An agent that has no adapter yet throws: never a silent fall back to Claude.
 import { claudeAdapter } from './claude.ts';
+import { codexAdapter } from './codex.ts';
 import type { AgentAdapter, AgentKind } from './types.ts';
 
 export type { AgentAdapter, AgentKind } from './types.ts';
@@ -8,6 +9,7 @@ export const isAgentKind = (v: unknown): v is AgentKind => typeof v === 'string'
 
 export function getAdapter(kind: string): AgentAdapter {
   if (kind === 'claude') return claudeAdapter;
+  if (kind === 'codex') return codexAdapter;
   if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (phase 1 supports claude only)`);
   throw new Error(`unknown agent "${kind}"`);
 }
