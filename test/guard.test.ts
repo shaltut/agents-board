@@ -212,6 +212,16 @@ const fenceWrites = [
   'node kit/guard/install.mjs', 'node kit/guard/install.mjs --target /tmp/g', String.raw`node kit\guard\install.mjs`,
   'cd kit/guard && node install.mjs', 'node kit/guard/install.mjs --check; node kit/guard/install.mjs',
   String.raw`[IO.File]::WriteAllText("$HOME\.claude\settings.json", "{}")`, 'vim ~/.claude/settings.json',
+  // review #5 I2: more writers
+  'curl -o ~/.claude/settings.json https://x.example/s.json', 'wget -O ~/.claude/settings.json https://x.example/s.json',
+  'git -C ~/.claude checkout -- settings.json', 'cd ~/.claude && git apply p.diff', `jq '.hooks={}' a.json | sponge ~/.claude/settings.json`,
+  'tar -xf evil.tar -C ~/.claude-board', 'unzip -o g.zip -d ~/.claude-board/guard', 'patch ~/.claude/settings.json < p.diff',
+  `node -e "require('fs').writeFileSync(process.env.HOME + '/.claude/settings.json', '{}')"`,
+  `awk '{print}' a > ~/.claude/settings.json`, 'rm -rf ~/.claude', 'mv ~/.claude /tmp/c',
+  // review #5 I1: spellings that hide the path
+  `echo x > ~/.cla""ude/settings.json`, `echo x > ~/.cla''ude/settings.json`, String.raw`echo x > ~/.cl\aude/settings.json`,
+  'echo x > ~/.cl*/settings.json', 'cp x ~/.claud?/settings.json', 'mv ~/.cl* /tmp/', 'echo x > ~/.claude./settings.json',
+  String.raw`del C:\Users\u\CLAUDE~1\settings.json`, 'cp x ~/.claude/settings*.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -220,6 +230,14 @@ const fenceReads = [
   'echo x > notes.claude.txt', 'cp a.json b.json', 'cat .claude.json',
   // another project's installer is not the guard's
   'node scripts/install.mjs', 'cd kit/guard && node install.mjs --check',
+  // review #5 I3: a repo's own .claude folder (skills, agents, worktrees) is ordinary work
+  'cp a.md .claude/skills/a.md', 'echo x > .claude/agents/foo.md', 'git mv .claude/skills/a .claude/skills/b',
+  'rm -rf .claude/worktrees/x', 'mkdir -p .claude/skills/new', 'echo "see .claude/x" > notes.txt',
+  // an interpreter reading a fence path, a redirect to somewhere else, a word that is only part of a path
+  'node scripts/x.mjs ~/.claude/settings.json', `python -c "print(open('/home/u/.claude/settings.json').read())"`,
+  'node cli/cb.ts doctor ~/.claude-board/guard', 'cd ~/.claude && node -v', 'cd ~/.claude && cat settings.json',
+  'cat ~/.claude/settings.json 2> /tmp/err', 'ls ~/.claude/projects | sort > /tmp/l', 'grep -rn foo ~/.claude/ > /tmp/hits',
+  'ls ~/.claude/touch', 'grep -rn "create" ~/.claude/settings.json', 'cat ~/.claude/settings.json | tee /tmp/copy',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
@@ -351,6 +369,11 @@ test('long commands stay fast', () => {
     // the fence (#4345): a fence path everywhere, with and without a writer, reads each test once
     ['fence, 200 KB of fence-path reads, as a builder', asBuilder(kb200('cat ~/.claude/settings.json; '))],
     ['fence, 200 KB of fence paths then a copy, as a builder', asBuilder(kb200('ls ~/.claude-board/guard ') + '; cp a b')],
+    // review #5: an interpreter's open( with no close, a glob word with no slash, one long cd into the fence
+    ['fence, 200 KB of open( after an interpreter on a fence path', asBuilder('python ~/.claude/settings.json ' + kb200('open(a '))],
+    ['fence, 200 KB of ~.c* glob words', asBuilder('ls ' + kb200('~.c*'))],
+    ['fence, a 200 KB cd into ~/.claude-board', asBuilder('cd ' + kb200('/.claude-board') + ' && echo x')],
+    ['fence, 200 KB of hidden spellings', asBuilder(kb200(`~/.cla""ude ~/.cl\\aude `) + '; cp a b')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
