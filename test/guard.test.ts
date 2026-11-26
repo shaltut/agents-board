@@ -246,6 +246,56 @@ test('role parity and evaluate(edit/ask)', () => {
   assert.equal(evaluate({ tool: 'shell', command: ['ls'] }).allow, false);
 });
 
+test('role rules read a quoted string as a command only after a shell runner', () => {
+  // ordinary quoted arguments are text for the role rules
+  passes('builder', ['grep -rn "git push" docs', 'git log --grep "git push"', 'rg "gh pr merge"', 'grep -rn "git push origin main" docs',
+    "grep -n 'git push --force' docs"]);
+  for (const role of READ_ONLY_ROLES) passes(role, ['grep -n "git commit" README.md', 'grep -rn "git push" docs', 'rg "gh pr merge"']);
+  // a shell runner's argument, or what the shell expands inside double quotes, is a command
+  blocksByRole('builder', ['bash -c "git push origin feat/x --force"', 'echo x | xargs git push origin', "sh -lc 'git push'",
+    'cmd /c "gh pr merge 12"', 'eval "git push origin main"', 'x="$(git push -f origin feat/x)"',
+    'powershell -NoProfile -Command "gh pr merge 12"']);
+  blocksByRole('reviewer', ['pwsh -Command "git commit -m x"', "ssh host 'git push origin feat/x'", 'herdr agent prompt w1 "!git commit -m x"']);
+  // the dangerous and protected-branch scans still read every quoted string (fail closed), with or without a role
+  assert.equal(check('grep -rn "git reset --hard" docs'), 'git reset --hard');
+  assert.equal(shell('grep -rn "git push origin development" docs', { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'development' }).reason,
+    'Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it');
+});
+
+// A fail-closed hook has one way left to fail open: running past its timeout. Every rule is linear in the command's length.
+test('long commands stay fast', () => {
+  const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
+  const cases: [string, () => unknown][] = [
+    ['a 200 KB ordinary command', () => check(big)],
+    ['a 200 KB ordinary command, as a builder with protected branches',
+      () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
+    ['mv to /dev/null, 40,000 repeats', () => check('mv '.repeat(40000))],
+    ['git reset --hard, 20,000 repeats', () => check('reset '.repeat(20000))],
+    ['dd of=/dev/, 20,000 repeats', () => check('dd if= '.repeat(20000))],
+    ['pipe to shell, 20,000 repeats', () => check('curl '.repeat(20000))],
+    ['download piped to Invoke-Expression, 20,000 repeats', () => check('iwr '.repeat(20000))],
+    ['git push --force main, 5,000 repeats', () => check('git push '.repeat(5000))],
+    ['rm -rf / with 20,000 long options (was 2^n)', () => check('rm ' + '--a '.repeat(20000))],
+    ['role scan, 20,000 quoted words after echo', () => evaluate({ tool: 'shell', command: 'echo ' + '"a b" '.repeat(20000), role: 'reviewer' })],
+    ['role scan, 5,000 git pushes in one segment', () => evaluate({ tool: 'shell', command: 'git push origin feat/x '.repeat(5000), role: 'builder' })],
+    ['role scan, gh -R 20,000 repeats', () => evaluate({ tool: 'shell', command: 'gh -R '.repeat(20000), role: 'builder' })],
+  ];
+  for (const [name, run] of cases) {
+    const t = performance.now();
+    run();
+    const ms = performance.now() - t;
+    assert.ok(ms < 1000, `${name} took ${Math.round(ms)} ms`);
+  }
+  // reading every git/gh/az word's arguments to the segment's end is (count x length): past 16 in one segment, block
+  passes('builder', ['echo ' + 'git '.repeat(16)]);
+  const many = evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17), role: 'builder' });
+  assert.equal(many.allow, false);
+  assert.match(String(many.reason), /^guard error \(17 git commands in one command segment .*split the command\)$/);
+  assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17), protectedBranches: ['development'] }).allow, false,
+    'the protected-branch scan blocks it too');
+  assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17) }).allow, true, 'no role and no protected branch: nothing to read');
+});
+
 test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically, and --check detects drift', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'cb-guard-install-'));
   const saved = Object.fromEntries(CB_ENV.map((k) => [k, process.env[k]]));

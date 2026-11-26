@@ -61,16 +61,50 @@ const DRIVE_ARG = String.raw`[ \t]["']?(?:[a-z]:(?:[/\\]\*?)?|\\\*)["']?(?=[\s)]
 const RECURSE = String.raw`[ \t](?:-[fvi]*r[fvi]*|-re(?:c(?:u(?:r(?:s(?:e)?)?)?)?)?|--recursive|/{1,2}s)(?::\$true)?(?=[\s)]|$)`;
 const SLASH_S = String.raw`[ \t]/{1,2}s(?=[\s)"']|$)`;
 
+// Linear forms of the base rules shaped /first[^;&|\n]*then/ (or /first.*then/, one line): the first match of first in
+// each piece, then one search for then after it. Same answer (a later match of first only sees less of its piece), but
+// such a regex rescans the piece from every match of first: 4 s on 40,000 "mv" words, minutes on "git push" repeated,
+// and a hook that runs past its timeout is the one way a fail-closed guard still fails open.
+const SEGMENTS = /[^;&|\n]+/g;
+const LINES = /.+/g; // the reach of .* : up to a line terminator
+const thenLater = (pieces, first, then) => {
+  const a = new RegExp(first, 'i');
+  const b = new RegExp(then, 'i');
+  return { test: (text) => (text.match(pieces) ?? []).some((s) => { const m = a.exec(s); return m !== null && b.test(s.slice(m.index + m[0].length)); }) };
+};
+// git ... push in one segment, then after that push main or master and a force flag (or a +refspec naming main/master)
+const MAIN_WORD = /\b(?:main|master)\b/i;
+const FORCE_FLAG = /--force|[ \t]-[a-z]*f[a-z]*\b/i;
+const forcesMain = (rest) => MAIN_WORD.test(rest)
+  && (FORCE_FLAG.test(rest) || rest.split(/\s+/).some((t) => t.includes('+') && MAIN_WORD.test(t.slice(t.indexOf('+') + 1))));
+const FORCE_PUSH_MAIN = { test: (text) => (text.match(SEGMENTS) ?? []).some((seg) => {
+  const g = /\bgit\b/i.exec(seg);
+  const p = g && /\bpush\b/i.exec(seg.slice(g.index + 3));
+  return !!p && forcesMain(seg.slice(g.index + 3 + p.index + 4));
+}) };
+// a download, the first | after it in its ; & newline segment, then iex: the parts between pipes
+const DOWNLOAD = /(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl|wget)\b/i;
+const TO_IEX = /^[ \t]*(?:Invoke-Expression|iex)\b/i;
+const DOWNLOAD_TO_IEX = { test: (text) => text.split(/[;&\n]/).some((seg) => {
+  const parts = seg.split('|');
+  return parts.some((part, k) => k + 1 < parts.length && TO_IEX.test(parts[k + 1]) && DOWNLOAD.test(part));
+}) };
+
 const PATTERNS = [
   // recursive rm (any flag order, -r/-R/--recursive, with or without -f; a non-TTY rm -r never prompts);
   // the target is a bare / /* ~ ~/ ~/* ~/.* (also quoted), not ~/tmp/x
-  ['rm -rf /', String.raw`\brm[ \t]+(?:--?[a-z-]+[ \t]+)*(?:-[a-z]*r[a-z]*|--recursive)(?:[ \t]+--?[a-z-]+)*[ \t]+["']?(?:/\*?|~(?:/\.?\*)?/?)(?=["'\s;&|)]|$)`],
+  // (was \brm[ \t]+(?:--?[a-z-]+[ \t]+)*(?:-[a-z]*r[a-z]*|--recursive)(?:[ \t]+--?[a-z-]+)*[ \t]+ then the target: --?[a-z-]+
+  // reads --a two ways, so rm --a --a ... backtracked 2^n; now each option word reads one way, and a lookahead finds the
+  // recursive flag among them, the same words)
+  ['rm -rf /', String.raw`\brm[ \t]+(?=(?:-[a-z-]+[ \t]+)*?(?:-[a-z]*r[a-z]*|--recursive)[ \t])(?:-[a-z-]+[ \t]+)+["']?(?:/\*?|~(?:/\.?\*)?/?)(?=["'\s;&|)]|$)`],
   ['mkfs.', String.raw`\bmkfs\.`],
-  ['dd of=/dev/', String.raw`\bdd[ \t]+if=.*\bof=/dev/`],
+  ['dd of=/dev/', thenLater(LINES, String.raw`\bdd[ \t]+if=`, String.raw`\bof=/dev/`)], // was \bdd[ \t]+if=.*\bof=/dev/
   ['fork bomb', String.raw`:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`],
   ['chmod -R 777 /', String.raw`\bchmod[ \t]+-R[ \t]+777[ \t]+/`],
-  ['mv to /dev/null', String.raw`\bmv[ \t][^;&|\n]*[ \t]/dev/null`], // one command segment: "git mv a b && x > /dev/null" is fine
-  ['pipe to shell', String.raw`\b(?:wget|curl)[ \t].*\|[ \t]*(?:sudo[ \t]+)?(?:ba)?sh\b`],
+  // one command segment: "git mv a b && x > /dev/null" is fine (was \bmv[ \t][^;&|\n]*[ \t]/dev/null)
+  ['mv to /dev/null', thenLater(SEGMENTS, String.raw`\bmv[ \t]`, String.raw`[ \t]/dev/null`)],
+  // was \b(?:wget|curl)[ \t].*\|[ \t]*(?:sudo[ \t]+)?(?:ba)?sh\b
+  ['pipe to shell', thenLater(LINES, String.raw`\b(?:wget|curl)[ \t]`, String.raw`\|[ \t]*(?:sudo[ \t]+)?(?:ba)?sh\b`)],
   // a power-off word as a command or argument, not inside a file name (graceful-shutdown.ts, shutdown.test.ts)
   // (a trailing dot is a file name unless it is .exe or .target: shutdown.exe, reboot.target)
   ['shutdown', String.raw`(?<![\w.-])shutdown(?![\w/-])(?!\.(?!(?:exe|target)\b))`],
@@ -78,8 +112,10 @@ const PATTERNS = [
   ['init 0/6', String.raw`\binit[ \t]+[06]\b`],
   ['format c:', String.raw`\bformat[ \t]+c:`],
   ['del c:', String.raw`\bdel[ \t]+/f[ \t]+/s[ \t]+/q[ \t]+c:`],
-  ['git push --force main', String.raw`\bgit\b[^;&|\n]*\bpush\b(?=[^;&|\n]*(?:--force|[ \t]-[a-z]*f[a-z]*\b|\+\S*\b(?:main|master)\b))(?=[^;&|\n]*\b(?:main|master)\b)`], // one segment only
-  ['git reset --hard', String.raw`\breset\b[^;&|\n]*--hard\b`],
+  // one segment only (was \bgit\b[^;&|\n]*\bpush\b(?=[^;&|\n]*(?:--force|[ \t]-[a-z]*f[a-z]*\b|\+\S*\b(?:main|master)\b))
+  // (?=[^;&|\n]*\b(?:main|master)\b))
+  ['git push --force main', FORCE_PUSH_MAIN],
+  ['git reset --hard', thenLater(SEGMENTS, String.raw`\breset\b`, String.raw`--hard\b`)], // was \breset\b[^;&|\n]*--hard\b
   ['> /dev/sda', String.raw`>[ \t]*/dev/sd[a-z]`],
   ['--no-preserve-root', String.raw`--no-preserve-root`],
   ['drop database', String.raw`\bdrop[ \t\n]+database\b`],
@@ -91,7 +127,8 @@ const PATTERNS = [
   ['Stop-Computer', String.raw`(?<![\w-])stop-computer(?![\w-])`],
   ['Restart-Computer', String.raw`(?<![\w-])restart-computer(?![\w-])`],
   ['disk wipe (Format-Volume, Clear-Disk, Initialize-Disk, Remove-Partition)', String.raw`(?<![\w-])(?:format-volume|clear-disk|initialize-disk|remove-partition)(?![\w-])`],
-  ['download piped to Invoke-Expression', String.raw`(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl|wget)\b[^;&|\n]*\|[ \t]*(?:Invoke-Expression|iex)\b`],
+  // was (?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl|wget)\b[^;&|\n]*\|[ \t]*(?:Invoke-Expression|iex)\b
+  ['download piped to Invoke-Expression', DOWNLOAD_TO_IEX],
 ].map(([name, re]) => [name, typeof re === 'string' ? new RegExp(re, 'i') : re]);
 
 // Returns the name of the matched pattern, or null when the command is fine.
@@ -244,20 +281,64 @@ const WORD = new RegExp(String.raw`(?:${QUOTED}|\\.|[^\s(){}"'\\])+`, 'g');
 const unquote = (w) => w.replace(new RegExp(String.raw`"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)`, 'g'),
   (_all, dq, sq, esc) => (dq !== undefined ? dq.replace(/\\(["\\$`])/g, '$1') : sq ?? esc));
 
+// Which quoted words (holding a space or a separator) a scan reads as commands, one layer of quotes off.
+// EVERY_QUOTED, for the dangerous and protected-branch scans: all of them (fail closed: echo "git push origin
+// development" blocks). runnerArg, for the role rules (#4002): only a shell runner's argument (bash, sh or zsh -c;
+// pwsh or powershell -c or -Command; cmd /c or /k; anything after ssh, eval or xargs; a herdr prompt starting with !,
+// which runs there) and a double-quoted string the shell expands ("$(...)", `...`), so grep -rn "git push" docs and
+// git log --grep "git commit" are text to a reviewer or a builder.
+// Each is built once per segment (the earlier words' names become prefix flags, so a long segment stays linear) and
+// answers for word i.
+const EVERY_QUOTED = () => () => true;
+const SHELL_C = new Set(['bash', 'sh', 'zsh', 'pwsh', 'powershell']);
+const RUNS_REST = new Set(['ssh', 'eval', 'xargs']);
+function runnerArg(raw, w, name) {
+  const seen = []; // seen[k]: which runners are among the names of words 0 .. k-1
+  let s = { shellC: false, cmd: false, herdr: false, rest: false };
+  for (const n of name) {
+    seen.push(s);
+    s = { shellC: s.shellC || SHELL_C.has(n), cmd: s.cmd || n === 'cmd', herdr: s.herdr || n === 'herdr', rest: s.rest || RUNS_REST.has(n) };
+  }
+  return (i) => {
+    if (raw[i].includes('"') && /\$\(| \$ /.test(w[i])) return true; // " $ " is a backtick substitution (scanCommands)
+    const flag = (w[i - 1] ?? '').toLowerCase();
+    const before = seen[Math.max(0, i - 1)]; // the words before the flag
+    if (/^-(?:[a-z]*c|co|com|comm|comma|comman|command)$/.test(flag) && before.shellC) return true;
+    if (/^\/\/?[ck]$/.test(flag) && before.cmd) return true;
+    if (/^["']!/.test(raw[i]) && seen[i].herdr) return true;
+    return seen[i].rest;
+  };
+}
+
+// A segment with more than this many words naming the scanned command (git, gh, az) is blocked, not read: each one's
+// arguments run to the segment's end, so reading them all costs (count x length), and a check that runs past the hook's
+// timeout lets the command through. No hand-typed command comes near it; the block tells the agent to split it.
+const MAX_COMMANDS_PER_SEGMENT = 16;
+
 // Calls fn(w, i) for every word i whose command name (cmdName of the raw word: C:\...\git.exe, GIT.EXE, !git) is in
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
-// command (bash -c "...", ssh host '...') is read as a command too, one layer of quotes off.
-function scanCommands(cmd, names, fn) {
+// command (bash -c "...", ssh host '...') is read as a command too when quoted says so. Throws past
+// MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block).
+function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
   const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   for (const seg of text.match(SEGMENT) ?? []) {
     const raw = seg.match(WORD) ?? [];
     const w = raw.map(unquote);
+    const name = raw.map(cmdName);
+    const hits = name.filter((n) => names.has(n)).length;
+    if (hits > MAX_COMMANDS_PER_SEGMENT) {
+      throw new Error(`${hits} ${[...names].join('/')} commands in one command segment are more than the guard reads (${MAX_COMMANDS_PER_SEGMENT}): split the command`);
+    }
+    const isCommand = quoted(raw, w, name);
     for (let i = 0; i < w.length; i++) {
-      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i])) { const inner = scanCommands(w[i], names, fn); if (inner) return inner; }
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
+        const inner = scanCommands(w[i], names, fn, quoted);
+        if (inner) return inner;
+      }
     }
     for (let i = 0; i < w.length; i++) {
-      if (!names.has(cmdName(raw[i]))) continue;
+      if (!names.has(name[i])) continue;
       const hit = fn(w, i);
       if (hit) return hit;
     }
@@ -293,6 +374,9 @@ const destination = (r, del) => { const s = r.replace(/^\+/, ''); return del || 
 // backticks) cannot be checked: that word is returned, so it blocks too. So is a wildcard destination (refs/heads/*,
 // develop*): it can write a protected branch.
 export function protectedPush(cmd, list) {
+  return pushTo(cmd, list, EVERY_QUOTED);
+}
+function pushTo(cmd, list, quoted) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
   return scanCommands(cmd, GIT, (w, i) => {
@@ -311,7 +395,7 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  });
+  }, quoted);
 }
 
 // The block reason for a protectedPush hit.
@@ -344,7 +428,8 @@ function pastOpts(w, j, valueOpt) {
 }
 
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
-// session); a role outside ROLES: blocked (evaluate checks that first).
+// session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only as a
+// shell runner's argument (runnerArg).
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
@@ -363,9 +448,9 @@ export function checkRole(command, role) {
     const head = words.slice(1).map((r) => destination(r, del)).find((d) => d === 'HEAD' || d === '@');
     if (head) return `git push to ${head} writes the current branch under its own name, maybe main: name the destination, e.g. git push origin HEAD:feat/my-card`;
     return null;
-  });
+  }, runnerArg);
   if (git) return git;
-  const branch = protectedPush(command, ['main', 'master']);
+  const branch = pushTo(command, ['main', 'master'], runnerArg);
   if (branch) return pushReason(branch);
   if (role === 'lead') return null;
   const gh = scanCommands(command, GH, (w, i) => {
@@ -373,7 +458,7 @@ export function checkRole(command, role) {
     if (w[j] !== 'pr') return null;
     j = pastOpts(w, j + 1, GH_OPT_ARG);
     return w[j] === 'merge' ? `gh pr merge: ${LEAD_MERGES}` : null;
-  });
+  }, runnerArg);
   if (gh) return gh;
   return scanCommands(command, AZ, (w, i) => {
     let j = pastOpts(w, i + 1, AZ_OPT_ARG);
@@ -384,7 +469,7 @@ export function checkRole(command, role) {
     if (w[j] !== 'update' && w[j] !== 'create') return null;
     return w.slice(j + 1).some(MERGES_PR)
       ? `az repos pr ${w[j]} with complete, auto-complete or bypass-policy merges the pull request: ${LEAD_MERGES}` : null;
-  });
+  }, runnerArg);
 }
 
 const ASK = `interactive ask-user tools (AskUserQuestion and the like) are disabled here: they stop this session until Ahmed answers, and he is often away.
