@@ -104,7 +104,11 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 **never copy it into `~/.claude/hooks/`**. Alone it blocks EVERY shell command on that machine.
 
 1. From the checkout, install: `node kit/guard/install.mjs`. It defaults to `~/.claude-board/guard` (`--target <dir>`
-   changes that). Then verify: `node kit/guard/install.mjs --check` exits 0 when the installed files match the checkout.
+   changes that). Then verify (after step 2): `node kit/guard/install.mjs --check` exits 0 when the installed files
+   match the checkout AND `~/.claude/settings.json` has a PreToolUse hook that runs the installed shim with an absolute
+   node that exists and a matcher covering Bash (and PowerShell on Windows), and the 6 probes pass through that exact
+   hook command (#4348). Each problem prints one `hook:` line saying what to change. A herdr seat whose wiring is off
+   hears one `Guard:` line at session start.
 2. In `~/.claude/settings.json`, point the PreToolUse hook command at
    `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`: the full home path, e.g. `C:/Users/<you>` on Windows, `/Users/<you>` on the Mac). On Windows, set that
    entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
@@ -127,8 +131,9 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
    must block, with a reason starting `Blocked by role (builder): git push to protected branch main`. The installed hook blocks these command lines when a Claude session runs them, so a session runs the
    checks from a small script that builds the command strings.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
-   treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
-   command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
+   treats that as **allow**: the fence silently disappears. So the hook command uses an absolute node path
+   (`command -v node` prints it; `--check` refuses a bare `node`), and from a fresh session confirm that a blocked
+   command is refused.
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 

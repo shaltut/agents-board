@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
-import { installGuard } from '../kit/guard/install.mjs';
+import { installGuard, checkWiring } from '../kit/guard/install.mjs';
 
 const GUARD = fileURLToPath(new URL('../kit/guard/', import.meta.url));
 const SHIM = join(GUARD, 'shim-claude.mjs');
@@ -362,6 +362,63 @@ test('long commands stay fast', () => {
   assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17), protectedBranches: ['development'] }).allow, false,
     'the protected-branch scan blocks it too');
   assert.equal(evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17) }).allow, true, 'no role and no protected branch: nothing to read');
+});
+
+// #4348: matching files prove nothing if the hook never runs them. --check also reads ~/.claude/settings.json (or
+// --settings): a PreToolUse entry must run the installed shim with an absolute node that exists (a bare node missing
+// from the hook shell's PATH exits 127, which Claude Code treats as allow), its matcher must cover Bash (and PowerShell
+// on Windows), and the 6 probes run through that exact command string, the way Claude Code runs it.
+test('checkWiring: the hook entry runs the installed shim, with an absolute node, the right matcher, and passes the probes', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-guard-wiring-'));
+  try {
+    const target = join(tmp, 'guard');
+    assert.equal(installGuard(GUARD, target).ok, true);
+    const shim = join(target, 'shim-claude.mjs');
+    const settings = (command: string, matcher = 'Bash|PowerShell', extra: any[] = []) => {
+      const f = join(tmp, `settings-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [...extra, { matcher, hooks: [{ type: 'command', command }] }] } }));
+      return f;
+    };
+    const good = `"${process.execPath}" "${shim}"`;
+    const ok = checkWiring(settings(good), target, { platform: 'win32' });
+    assert.deepEqual(ok.problems, []);
+    assert.equal(ok.ok, true);
+    assert.equal(ok.probes, 6);
+    // another tool's hook before ours is fine
+    assert.equal(checkWiring(settings(good, 'Bash', [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'echo hi' }] }]), target, { platform: 'darwin' }).ok, true);
+
+    const problems = (f: string, platform = 'linux') => checkWiring(f, target, { platform }).problems.join('\n');
+    assert.match(problems(settings(`node "${shim}"`)), /bare `node`.*127.*allow/s);
+    const gone = problems(settings(`"${join(tmp, 'no-such', 'node')}" "${shim}"`));
+    assert.match(gone, /does not exist/);
+    assert.match(gone, /probe .*exit 127/);
+    assert.match(problems(settings(good, 'Bash'), 'win32'), /matcher "Bash" misses PowerShell/);
+    assert.equal(problems(settings(good, 'Bash'), 'darwin'), '');
+    assert.match(problems(settings(good, 'Edit|Write')), /matcher "Edit\|Write" misses Bash/);
+    assert.match(problems(settings(`"${process.execPath}" ~/elsewhere/shim-claude.mjs`)), /no PreToolUse hook runs .*shim-claude\.mjs/);
+    const empty = join(tmp, 'empty.json'); writeFileSync(empty, '{}');
+    assert.match(problems(empty), /no PreToolUse hook runs/);
+    const broken = join(tmp, 'broken.json'); writeFileSync(broken, '{ not json');
+    assert.match(problems(broken), /cannot read .*broken\.json/);
+    assert.match(problems(join(tmp, 'missing.json')), /cannot read .*missing\.json/);
+    // the static form (SessionStart) runs no probes
+    const quick = checkWiring(settings(good), target, { platform: 'linux', probes: false });
+    assert.equal(quick.ok, true);
+    assert.equal(quick.probes, 0);
+
+    // the CLI: --check with --settings checks the wiring too; a bad one exits 1 and says what to change
+    const cli = (...args: string[]) => spawnSync(process.execPath, [join(GUARD, 'install.mjs'), ...args], { encoding: 'utf8', env: cleanEnv() });
+    const fine = cli('--check', '--target', target, '--settings', settings(good));
+    assert.equal(fine.status, 0, fine.stdout + fine.stderr);
+    assert.match(fine.stdout, /hook .*6 probes passed/);
+    const bare = cli('--check', '--target', target, '--settings', settings(`node "${shim}"`, 'Edit'));
+    assert.equal(bare.status, 1);
+    assert.match(bare.stdout + bare.stderr, /bare `node`/);
+    assert.match(bare.stdout + bare.stderr, /misses Bash/);
+    assert.equal(cli('--check', '--target', target, '--settings').status, 2);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically, and --check detects drift', () => {
