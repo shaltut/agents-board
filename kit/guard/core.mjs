@@ -47,9 +47,13 @@ export function stripMessages(cmd) {
 // -Recurse). The target is a whole word, quoted or not, so rm -rf *, Remove-Item -Recurse -Force dist, dist/ and
 // C:\w\dist pass. Each part is one linear test per segment: a lookahead per command word would be quadratic, and a
 // long command must not run past the hook's timeout.
+// A backslash before a newline (bash's line continuation) or before ; & | (bash's escaped character: find -exec rm
+// -rf {} \;) is the shell's, not a \ root: joined or replaced before the split, as is PowerShell's ` continuation. The
+// cost: a PowerShell \ root with more lines after it is not seen (a \ that ends the command still blocks).
+const SHELL_ESCAPES = (text) => text.replace(/[\\`]\r?\n/g, ' ').replace(/\\[;&|]/g, '_');
 const inOneSegment = (...parts) => {
   const res = parts.map((p) => new RegExp(p, 'i'));
-  return { test: (text) => text.split(/[;&|\n]/).some((seg) => res.every((re) => re.test(seg))) };
+  return { test: (text) => SHELL_ESCAPES(text).split(/[;&|\n]/).some((seg) => res.every((re) => re.test(seg))) };
 };
 const ROOT = String.raw`(?:[/\\]\*?|[a-z]:(?:[/\\]\*?)?|(?:~|\$home|\$env:userprofile)(?:[/\\]\*?)?)`;
 const ROOT_ARG = String.raw`[ \t,]["']?${ROOT}["']?(?=[\s,)]|$)`;
