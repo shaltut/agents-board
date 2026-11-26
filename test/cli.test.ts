@@ -48,6 +48,36 @@ test('ask captures pane', async () => {
   assert.equal(q.multi, true);
 });
 
+test('cb ask again while the same question is open returns it; any field that differs is a new question (#3331)', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'a')`;
+  await sql`select cb.task_add(project => 'demo', title => 'b')`;
+  const ask = (args: string[], input?: string, env: Record<string, string> = {}) => {
+    const r = spawnSync('node', ['cli/cb.ts', 'ask', 'demo', ...args], { encoding: 'utf8', input,
+      env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', ...env } });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const md = '## Which export?\n\n| Format | Size |\n|---|---|\n| CSV | 1 MB |\n';
+  assert.match(ask(['-', '-o', 'CSV', '-o', 'XLSX'], md), /^Q1 posted/);
+  assert.match(ask(['-', '-o', 'CSV', '-o', 'XLSX'], md), /^Q1 is already on the board/, 'a stdin body, resent');
+  assert.match(ask(['What is the sandbox URL?', '--free']), /^Q2 posted/);
+  assert.match(ask(['What is the sandbox URL?', '--free']), /^Q2 is already/, 'no options, resent');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '1', '--blocking']), /^Q3 posted/);
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '#1', '--blocking']), /^Q3 is already/);
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--blocking']), /^Q4 posted/, 'another card');
+  const [t] = await sql`select status, blocked_on from cb.tasks where id = 2`;
+  assert.deepEqual([t.status, t.blocked_on], ['blocked', '4'], 'and that card is blocked on it');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2']), /^Q5 posted/, 'not blocking');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '-c', 'see PR 9']), /^Q6 posted/, 'other context');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--reply-to', 'pc:w1:p2']), /^Q7 posted/, 'another reply pane');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2'], undefined, { CB_ACTOR: 'W2@test' }), /^Q8 posted/, 'another asker');
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'Yes']), /^Q9 posted as a follow-up to Q3/);
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'yes']), /^Q9 is already/, 'a follow-up, resent');
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'No']), /^Q10 posted/, 'another --if');
+  assert.equal((await sql`select count(*)::int as n from cb.questions`)[0].n, 10);
+});
+
 test('bad status exits 1 with message', async () => {
   await db();
   cb(['add', 'demo', 'T']);
