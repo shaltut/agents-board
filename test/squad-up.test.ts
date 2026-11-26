@@ -258,12 +258,12 @@ test('squad up: a quiet lead: no lead started, one line names it and how to fix 
   const quietRow = (min: number) => ({ actor: 'QO@shaltoot', project: 'demo', live: false, machine: 'shaltoot', role: 'lead', last_seen: ago(min) });
   const f = fake((c) => (c.args[1] === 'get' ? GONE : undefined));
   const out = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(10)]), f.run);
-  assert.match(out, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a new herdr tab, or cb iam <name> demo --role lead$/m);
+  assert.match(out, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude', or cb iam <name> demo --role lead$/m);
   assert.doesNotMatch(out, /start \S*orch/);
   assert.ok(!f.calls.some((c) => c.args[1] === 'get' && /orch/.test(c.args[2]!)));
   // squad up never starts it, so never gives it the protected list: the line says how (#3746)
   const prot = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'releases/*'] } : [quietRow(10)]), fake(() => GONE).run);
-  assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
+  assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude' --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
   assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
   const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
   assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);

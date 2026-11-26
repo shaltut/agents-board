@@ -275,9 +275,11 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const toStart = plan.start.filter((l) => !unknown.has(l.name));
   for (const l of plan.start) if (unknown.has(l.name)) lines.push(`skip ${l.name}: could not check herdr on ${l.machine}`);
   const q = plan.quietLead;
-  // neither squad up nor the supervisor starts it, so its pane never gets the protected list: the line says how (#3746).
+  // neither squad up nor the supervisor starts it, so its pane gets no env from them: the line says how (#3746, #4002): the
+  // role (the guard reads CB_ROLE), the agent (the lead role's, claude by default) and the protected list, in launchFor's order.
   // Single-quoted: no shell expands the * (zsh would refuse an unmatched glob); list entries never hold a quote
-  const how = squad.protected?.length ? `in a tab made with herdr tab create --env 'CB_PROTECTED_BRANCHES=${squad.protected.join(',')}'` : 'in a new herdr tab';
+  const envFlags = [`CB_ROLE=lead`, `CB_AGENT=${squad.roles.lead?.agent ?? 'claude'}`, ...(squad.protected?.length ? [`CB_PROTECTED_BRANCHES=${squad.protected.join(',')}`] : [])];
+  const how = `in a tab made with herdr tab create ${envFlags.map((e) => `--env '${e}'`).join(' ')}`;
   if (q) lines.push(`skip lead: ${q.actor} leads ${project} but is not live (last seen ${minsAgo(q.mins)}): restart it by hand ${how}, or cb iam <name> ${project} --role lead`);
   const herdrOnly = new Set(plan.herdrOnly.map((l) => l.name));
   for (const n of plan.skip) {

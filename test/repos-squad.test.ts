@@ -402,6 +402,6 @@ test('squad up on real session rows: a quiet lead-role session is named, no othe
   const run = (_m: string | null, args: string[]) => (args[1] === 'get'
     ? { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' } : { status: 0, stdout: '{"agents":[]}', stderr: '' });
   const out = await squadUp('qhs', true, async (fn, a) => (fn === 'squad_get' ? QHS : callFn(fn, a, sql)), run);
-  assert.match(out, /^skip lead: QO@shaltoot leads qhs but is not live \(last seen 10 min ago\): restart it by hand in a new herdr tab, or cb iam <name> qhs --role lead$/m);
+  assert.match(out, /^skip lead: QO@shaltoot leads qhs but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude', or cb iam <name> qhs --role lead$/m);
   assert.doesNotMatch(out, /start \S*orch/);
 });
