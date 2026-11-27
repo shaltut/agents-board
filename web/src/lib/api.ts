@@ -4,7 +4,8 @@ import type { Ask } from './asks'
 export type Status = 'backlog' | 'next' | 'in_progress' | 'blocked' | 'review' | 'done' | 'cancelled'
 
 export interface Project { slug: string; name: string; color: string | null; repo_path: string | null; pipeline: boolean; open_count: number; question_count: number
-  state: 'enabled' | 'disabled' | 'archived'; state_by: string | null; state_at: string | null } // #4559
+  state: 'enabled' | 'disabled' | 'archived'; state_by: string | null; state_at: string | null // #4559
+  in_progress_count: number; seats_live: number; cards_count: number } // the Projects page's row counts (#4559 slice 2)
 export type Stage = 'design' | 'approval' | 'build' | 'review' | 'merge' | 'qa'
 export const TASK_TYPES = ['task', 'bug', 'feature', 'change', 'chore', 'research'] as const
 export interface Task {
@@ -85,7 +86,7 @@ export async function get<T>(path: string): Promise<T> {
 /** Functions without an actor argument: rpc() must not add one (Postgres then finds no function by that name and
  *  arguments). test/settings-web.test.ts checks the list against db/schema.sql. */
 export const NO_ACTOR = new Set(['page_get', 'digest', 'seen', 'goal_opened', 'goal_preview', 'goal_propose',
-  'squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page'])
+  'squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page', 'project_state_preview'])
 
 /** Every write goes through the same cb.* SQL functions the agents use. The UI acts as "ahmed". */
 export async function rpc<T = unknown>(fn: string, args: Record<string, unknown>): Promise<T> {
@@ -107,12 +108,18 @@ const qs = (o: Record<string, string | undefined>) => {
 
 export const useUsers = () => useQuery({ queryKey: ['users'], queryFn: () => get<User[]>('/api/users') })
 export const useProjects = () => useQuery({ queryKey: ['projects'], queryFn: () => get<Project[]>('/api/projects') })
+/** The projects that get work (#4559): every "pick a project" list. Name, state and pipeline lookups use useProjects,
+ *  which has every project, so a link to a disabled one still finds its name. */
+export const useLiveProjects = () => liveOnly(useProjects().data ?? [])
+export const liveOnly = <P extends Pick<Project, 'state'>>(ps: readonly P[]) => ps.filter((p) => p.state === 'enabled')
 /** Is the squad pipeline on for this project? A card's stage chip and design page show only then (a switched-off project looks as before). */
 export const usePipeline = (slug: string) => !!useProjects().data?.find((p) => p.slug === slug)?.pipeline
 /** A card from the list: no description (the server leaves it off; useTask has it). */
 export type ListTask = Omit<Task, 'body'>
-export const useTasks = (project?: string, status?: Status) =>
-  useQuery({ queryKey: ['tasks', project, status], queryFn: () => get<ListTask[]>(`/api/tasks${qs({ project, status })}`) })
+/** live: leave out a disabled or archived project when none is chosen: only Board and Backlog ask (#4559). Card search and a
+ *  seat's page read every card. */
+export const useTasks = (project?: string, status?: Status, live?: boolean) =>
+  useQuery({ queryKey: ['tasks', project, status, !!live], queryFn: () => get<ListTask[]>(`/api/tasks${qs({ project, status, live: live ? '1' : undefined })}`) })
 export const useQuestions = (project?: string, status?: string) =>
   useQuery({ queryKey: ['questions', project, status], queryFn: () => get<Question[]>(`/api/questions${qs({ project, status })}`) })
 export const useTask = (id: number | null) =>

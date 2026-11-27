@@ -257,7 +257,7 @@ app.post('/api/rpc/:fn', async (c) => {
 // Admins and the local dashboard only: guests never reach a path the sign-in rule above does not list.
 app.get('/api/role-text-seeds', (c) => c.json(readRoleSeeds(join(ROOT, 'prompts', 'roles'))));
 app.get('/api/projects', async (c) => c.json(await q.projects()));
-app.get('/api/tasks', async (c) => c.json(await q.tasks(opt(c.req.query('project')), opt(c.req.query('status')))));
+app.get('/api/tasks', async (c) => c.json(await q.tasks(opt(c.req.query('project')), opt(c.req.query('status')), c.req.query('live') === '1')));
 app.get('/api/tasks/:id', async (c) => {
   const r = await q.task(Number(c.req.param('id')));
   return r ? c.json(r) : c.json({ ok: false, error: 'not found' }, 404);

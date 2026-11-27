@@ -27,7 +27,7 @@ test('every page has its own g letter and its own digit; every page is on the he
   assert.deepEqual(inGroup('team'), ['Sessions', 'Huddles', 'Users']);
   assert.deepEqual(inGroup('knowledge'), ['Memory', 'History']);
   assert.deepEqual(inGroup('machines'), ['Runners', 'Usage']);
-  assert.deepEqual(inGroup('settings'), ['Project settings']);
+  assert.deepEqual(inGroup('settings'), ['Projects']); // the Projects list since #4559; a chosen project opens its settings
 });
 
 test('owner: the PC screen and the admin ahmed; nobody else', () => {

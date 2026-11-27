@@ -29,7 +29,8 @@ export const PAGES: readonly Page[] = [
   { view: 'history', label: 'History', icon: History, group: 'knowledge', digit: '6', g: 'y' }, // h is Huddles
   { view: 'runners', label: 'Runners', icon: Server, group: 'machines', g: 'r' },
   { view: 'usage', label: 'Usage', icon: Gauge, group: 'machines', g: 'a', owner: true }, // u is Users, s Sessions
-  { view: 'settings', label: 'Project settings', icon: Settings, group: 'settings', g: 'p', owner: true },
+  // the Projects list (#4559), and a chosen project's settings as before
+  { view: 'settings', label: 'Projects', icon: Settings, group: 'settings', g: 'p', owner: true },
 ]
 
 /** The board's owner: the PC's own screen, or the admin named ahmed (the server's admin.name check, People.tsx). */
