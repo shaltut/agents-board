@@ -193,6 +193,54 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 
+### Codex, agy and OpenCode seats (#4609)
+
+Also only with Ahmed's yes, on each machine that runs those seats. A seat whose guard is not wired is refused by
+the seat prestart, so until this runs those seats do not start.
+
+```
+node kit/guard/install.mjs --agents codex,opencode                         # per machine
+node kit/guard/install.mjs --agents agy --seat <seat folder> [--seat ...]   # per agy seat folder
+node kit/guard/install.mjs --check --agents codex,agy,opencode --seat <seat folder>
+```
+
+Each agent's shim is copied into the installed guard folder beside `core.mjs` and probed there (ls passes;
+`git reset --hard`, a tool the shim does not know, and malformed input block) before anything is swapped in. The hooks
+run that installed copy, never the checkout, so a `git pull` does not change a live guard unprobed.
+
+- **Codex**: one `PreToolUse` entry in `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`), matcher `.*`, command
+  `<absolute node> <guard>/shim-codex.mjs`. Every other entry stays as it was, herdr's `SessionStart` included; an older
+  guard entry (one pointing at a checkout) is replaced. `config.toml` gets `hooks = true` under `[features]`. A
+  `hooks = false` there, or an inline `features = { ... }`, is refused: change it by hand, as is a file this installer
+  cannot read the same way Codex does (a `[features]` header it could not place the key under). The matcher is a
+  catch-all, so a tool Codex adds later still reaches the shim. Codex 0.160's one shell tool, `exec_command`, arrives as
+  `Bash`; there is no `unified_exec`; `write_stdin` fires no hook at all (#4618), so a seat may not open an interactive
+  session for it to type into (#4626).
+- **agy**: group `cb-guard` in `<seat>/.agents/hooks.json`, matcher `.*`, command `node <guard>/shim-agy.mjs`
+  (forward slashes, no quotes: agy runs hooks through `cmd /c` on Windows, so a guard path with a space is refused;
+  install it elsewhere with `--target`). Other groups stay. `/.agents/` goes into that repo's `info/exclude` (a worktree's
+  shared one). agy loads a folder's hooks only once agy trusts the folder: trust each seat folder in agy.
+- **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
+  `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
+  call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+
+**These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
+OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
+seat: the dangerous-command rules only. A tool the shim does not judge (Codex `update_plan`, `spawn_agent`, MCP tools;
+OpenCode `webfetch`, `websearch`, `task`, `todowrite`, `skill`, `lsp`) passes, as Claude's tools that never reach the
+guard do; no role, fence or secret rule applies; and a question follows `CB_ALLOW_ASK`, as Claude's `AskUserQuestion`
+does. In a board seat every tool the shim does not judge is denied, and a seat may not change `CB_ROLE` or `CB_AGENT`
+(PR 96 review r2): the seat prestart also refuses to start an agent in a pane where either is missing or names
+another agent.
+
+`--agents` also installs the whole guard folder: Claude's shim and `core.mjs` there are replaced with this checkout's,
+exactly as a plain install does, so every agent on the machine runs the same rules.
+
+A second run changes nothing. A rewritten `config.toml`, `hooks.json` or `info/exclude` keeps its line endings and file
+mode. `--check` with `--agents` also checks each wiring and runs the probes through its own command (for OpenCode: the
+plugin is exactly what this checkout writes). Seats never write these files: the fence keeps them out, and the installer
+itself refuses anything but `--check` when `CB_ROLE` or `CB_AGENT` is set.
+
 ## Usage ledger
 
 `hooks/usage-stop.mjs` (#4349) is a Claude Code **Stop** hook. At each Stop it sums the token usage of every assistant
@@ -549,6 +597,36 @@ The save gate's list is `cb._agents_main()` in `db/schema.sql`, the launch gate'
 - the guard installed for that CLI (`kit/guard/install.mjs`), which the seat prestart checks before the agent starts.
 
 An OpenCode seat's server port comes from its name (41000-48999, `CB_OPENCODE_PORT`).
+
+**No interactive sessions in a Codex seat (#4626).** Codex's `exec_command` can leave a process running, and
+`write_stdin` then types into it without any hook, so the guard never sees what a shell, REPL, database client, editor,
+pager or remote login opened that way runs next. In a Codex seat the guard therefore refuses a command that opens one
+(`bash`, `bash -s`, `sudo -s`, `python`, `node -i`, `psql`, `sqlite3 app.db`, `ssh host`, `ssh host bash`, `vim`,
+`less`, `tmux`, `docker exec -it c sh`, `kubectl exec -i pod -- sh`, `xargs`, `read`, `cat | sh`, `Read-Host`, ...),
+inside `bash -c "..."`, `$(...)` and the like too, whether or not Codex asked for a TTY. The one-shot forms stay
+allowed: `bash -c "..."`, `python x.py`, `python -c`, `psql -c`, `ssh -n host cmd`, `docker exec c ls`, or input from
+`< file`, a heredoc or a pipe. Codex sends no TTY or stdin field, so the rule reads the command text alone (PR 104
+review), and fails closed where it cannot read it:
+
+- A variable, `eval` or a substitution as the command word counts unless a literal assignment earlier in the same
+  command says what it runs (`X=python3; $X x.py` passes; `$SHELL`, `$(echo bash)` and `eval $cmd` do not).
+- `<&0`, `<&3` (any descriptor copy, since `exec 3<&0` makes one of the input) and `< /dev/stdin` read the seat's own
+  input, so they are no feed.
+- Editors, pagers and other full-screen programs count even when piped into (`ls | vim -`, `git log | less`, `fzf`), as
+  do git's interactive modes (`add -p`, `add -i`, `checkout -p`, `rebase -i`, `clean -i`, `commit --interactive`) and
+  `crontab -e`.
+- grep, sed, head, tail and cut given a file read that file, not the input (`grep foo file | awk` passes).
+
+Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
+handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every
+Codex, agy and OpenCode seat's pane also gets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR` and `VISUAL` set to
+`true`, `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` set to `cat`, `GH_PROMPT_DISABLED=1` and
+`GIT_TERMINAL_PROMPT=0` (`NO_PROMPT_ENV` in `cli/agents/env.ts`). An editor returns at once with the text git prepared
+(a conflicted `git rebase --continue` finishes; `git commit` or `git tag -a` with no `-m` fails on the empty message),
+and a pager only prints.
+Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
+allowed and `view_image` is a read with the secret-file rule; `spawn_agent` stays blocked until the live check (#4612)
+shows a sub-agent's own tools reach the hook.
 
 ## Squad file: protected branches
 

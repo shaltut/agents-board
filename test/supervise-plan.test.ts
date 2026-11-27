@@ -347,3 +347,37 @@ test('restarts: 2 a tick from the shared start budget, after starts; never the l
   const p = tick(state({ sessions: [lead, onHaiku('foo@macbook'), onHaiku('sv-B3@macbook')] }), { ...readyAll, pastSeats: past });
   assert.deepEqual([restarts(p), p.refused], [[], []]);
 });
+
+// #4593 review 100 F1: a card kept for an agent (for: label) counts only for seats of that agent. A seat of another agent
+// neither cancels it nor is kept open for it; the planner starts a seat of the agent named.
+const mixed = { ...squad, roles: { ...squad.roles, builder: { count: 2, model: 'sonnet', machine: 'macbook', seats: { '2': { agent: 'codex', model: 'gpt-5.1-codex' } } } } };
+const mixedState = (o: { waiting?: Record<string, any>; kept?: Record<string, any>; sessions?: Session[] }) =>
+  ({ ...state({ waiting: o.waiting, sessions: o.sessions }), squad: mixed as any, kept: { builder: {}, reviewer: {}, qa: {}, investigator: {}, architect: {}, owner: {}, ...o.kept } });
+
+test('F1: an idle Claude builder does not cancel a card kept for Codex: the Codex seat is started', () => {
+  const b1 = sess('sv-B1@macbook', 'builder', { agent: 'claude' });
+  const p = tick(mixedState({ waiting: { builder: { main: 1 } }, kept: { builder: { main: { codex: 1 } } }, sessions: [b1] }));
+  assert.deepEqual(names(p.start), ['sv-B2@macbook']);
+  assert.equal(p.start[0].agent, 'codex');
+});
+
+test('F1: with both builders down, only the seat of the agent named is started for a kept card', () => {
+  const p = tick(mixedState({ waiting: { builder: { main: 1 } }, kept: { builder: { main: { codex: 1 } } } }));
+  assert.deepEqual(names(p.start), ['sv-B2@macbook']);
+  const any = tick(mixedState({ waiting: { builder: { main: 2 } }, kept: { builder: { main: { codex: 1 } } } }));
+  assert.deepEqual(names(any.start).sort(), ['sv-B1@macbook', 'sv-B2@macbook'], 'one kept, one for anyone: both');
+});
+
+test('F1: a quiet Claude builder is closed though a card kept for Codex waits; the Codex seat stays for it', () => {
+  const b1 = sess('sv-B1@macbook', 'builder', { agent: 'claude', last_event: ago(30) });
+  const b2 = sess('sv-B2@macbook', 'builder', { agent: 'codex', last_event: ago(30) });
+  const p = tick(mixedState({ waiting: { builder: { main: 1 } }, kept: { builder: { main: { codex: 1 } } }, sessions: [b1, b2] }),
+    { safeToClose: { 'sv-B1@macbook': true, 'sv-B2@macbook': true } });
+  assert.deepEqual(p.close, ['sv-B1@macbook']);
+  assert.deepEqual(p.start, []);
+});
+
+test('F1: a card kept for several agents is cancelled by an idle seat of any of them', () => {
+  const b2 = sess('sv-B2@macbook', 'builder', { agent: 'codex' });
+  assert.deepEqual(tick(mixedState({ waiting: { builder: { main: 1 } }, kept: { builder: { main: { 'agy,codex': 1 } } }, sessions: [b2] })).start, []);
+});
