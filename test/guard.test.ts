@@ -650,6 +650,20 @@ test('role rules: hidden pushes, command-running git settings and gh extensions 
   }
   // an alias naming main says what it is, not "git push"
   assert.match(shell('git co main', { CB_ROLE: 'builder' }).reason!, /git co is not a git command.*git checkout main/);
+  // PR 111 r2 N1: a command-running value the shell fills in or decodes cannot be read, so it blocks
+  for (const role of ROLES) {
+    blocksByRole(role, [String.raw`git -c core.fsmonitor=$'git push origin HEAD:ma\x69n #' status`,
+      String.raw`git -c core.fsmonitor=$'git pu\x73h origin HEAD:main #' status`, 'git -c core.fsmonitor="`cat x.txt` #" status',
+      `X='git push origin main #'; git -c core.fsmonitor="$X" status`, String.raw`GIT_EXTERNAL_DIFF=$'git pu\x73h origin HEAD:main #' git diff`]);
+  }
+  assert.equal(shell(String.raw`git -c core.fsmonitor=$'git pu\x73h origin HEAD:develop #' status`,
+    { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'develop' }).decision, 'block');
+  // a $HOME/ path start is the home folder, unless the command sets HOME
+  for (const role of ['lead', 'builder']) {
+    passes(role, ['GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519" git fetch origin', 'GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/k" git pull']);
+    blocksByRole(role, [`HOME='x; git push origin main #'; GIT_SSH_COMMAND="ssh -i $HOME/k" git fetch`,
+      'GIT_SSH_COMMAND="ssh -i $HOMEDIR/k" git fetch']);
+  }
 });
 
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {

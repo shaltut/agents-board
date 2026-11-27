@@ -525,7 +525,8 @@ const destination = (r, del) => { const s = r.replace(/^\+/, ''); return del || 
 export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
-  return scanCommands(unbrace(cmd), GIT, (w, i) => {
+  const text = unbrace(cmd); // #4661: once, for both scans
+  return scanCommands(text, GIT, (w, i) => {
     const j = gitSub(w, i);
     if (w[j] !== 'push') return subtreePush(w, j, hit); // #4661 S1
     const { words, del } = pushArgs(w, j);
@@ -541,7 +542,7 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  }) ?? aliasPush(cmd, hit) ?? valuesPush(cmd, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
+  }) ?? hiddenPushes(text, hit, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
 }
 
 // The block reason for a protectedPush hit.
@@ -596,14 +597,14 @@ function configEnvAlias(x) {
   return (k === 'GIT_CONFIG' || k === 'GIT_CONFIG_GLOBAL' || k === 'GIT_CONFIG_SYSTEM') && !CONFIG_NULL.test(m[2]);
 }
 // git's words w, git at i, its subcommand at j: the reason this call gets past the rules, or null
-function gitHides(w, i, j, role) {
+function gitHides(w, i, j, role, text) {
   for (let k = 0; k < i; k++) if (configEnvAlias(w[k])) return `${w[k].split('=')[0]} before git: ${ALIASES}`;
   for (let k = i + 1; k < j; k++) {
     const o = w[k];
     const cfg = o === '-c' || o === '--config-env' ? (w[k + 1] ?? '') : /^--config-env=/.test(o) ? o.slice(13) : null;
     if (cfg !== null && ALIAS_KEY.test(cfg)) return `git ${o.split('=')[0]} ${cfg.split('=')[0]}: ${ALIASES}`;
   }
-  const runs = gitRuns(w, i, j, role); // #4661 L1: a setting or variable that runs a command
+  const runs = gitRuns(w, i, j, role, text); // #4661 L1: a setting or variable that runs a command
   if (runs) return runs;
   const sub = w[j];
   if (sub === undefined) return null;
@@ -691,8 +692,9 @@ function ghApiWrites(w, j) {
 // scans, or the brace ends the segment and hides the words after it (git ${S} origin main).
 // PR 111 review R1: a group bash and zsh expand ({main,}, {a,b}, {1..3}) is never unbraced: it becomes a word the shell
 // fills in ($BRACE_GROUP), so a push naming it blocks as a shell-filled branch, as git push origin $B does
-const unbrace = (t) => String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'),
-  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner));
+// (no brace: the text as it is, one cheap test instead of a pass over a long command)
+const unbrace = (t) => (!String(t ?? '').includes('{') ? String(t ?? '') : String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'),
+  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner)));
 // word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p)); after
 // any launcher or a shell that runs the rest (timeout 30 git, sudo -u x gh, cmd /c git, B2)
 const RUNS_REST_SHELL = new Set(['cmd', 'pwsh', 'powershell']);
@@ -712,15 +714,24 @@ function subtreePush(w, j, hit) {
 }
 // A git call where git is the command, whose subcommand the shell fills in or is no git command (an alias), naming a
 // protected branch later. Read where a shell runs it (runnerArg), not in every quoted string: echo "git is on main" is text.
-function aliasPush(cmd, hit) {
-  return scanCommands(unbrace(cmd), GIT, (w, i) => {
-    const j = gitSub(w, i), sub = w[j];
-    if (sub === undefined || !isCommandWord(w, i)) return null;
-    if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
-    // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
-    const words = stopArgs(w.slice(j + 1));
-    const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
-    return branch ? `${ALIAS_MARK}${sub}${ALIAS_MARK}${branch}` : null;
+function aliasPush(w, i, j, hit) {
+  const sub = w[j];
+  if (sub === undefined || !isCommandWord(w, i)) return null;
+  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
+  // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
+  const words = stopArgs(w.slice(j + 1));
+  const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
+  return branch ? `${ALIAS_MARK}${sub}${ALIAS_MARK}${branch}` : null;
+}
+// protectedPush's second scan (text already unbraced), where a shell runs it: aliasPush, then the commands of the call's
+// command-running settings (valuesPush). One pass for both, and none when no git word is in the text (PR 111 r2: a
+// 600 KB command took about six unbrace-and-scan passes, past the guard's time budget)
+const GIT_WORD = /git/i;
+function hiddenPushes(text, hit, list) {
+  if (!GIT_WORD.test(text)) return null;
+  return scanCommands(text, GIT, (w, i) => {
+    const j = gitSub(w, i);
+    return aliasPush(w, i, j, hit) ?? valuesPush(w, i, j, list, text);
   }, runnerArg);
 }
 const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
@@ -778,7 +789,21 @@ function runsValues(w, i, j) {
 }
 // git runs such a value through a shell (and a trailing # makes git's own arguments a comment), so the value is judged
 // as a command by the same rules: the branch rules for main/master, then the role's (B1: git pu""sh, an alias, $S)
-function valueRuns(setting, value, role) {
+// N1 (PR 111 r2): a value the shell fills in or decodes ($'...\x69...', $(...), $VAR, a backtick) cannot be read here
+// (a $HOME/ or $USERPROFILE\ path start is read as the home folder, unless the command sets HOME or USERPROFILE:
+// GIT_SSH_COMMAND="ssh -i $HOME/.ssh/key" passes)
+const HOME_SET = /(?:^|\W)(?:HOME|USERPROFILE)\s*=|env:(?:HOME|USERPROFILE)\b/i;
+// (the command is read for HOME= only when a value has such a path start, once per command: many values stay linear)
+let homeSetText = null, homeSetHit = false;
+function filledValue(value, text) {
+  if (!/[$`]/.test(value)) return false;
+  const rest = value.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/gi, '');
+  if (rest === value || /[$`]/.test(rest)) return true;
+  if (homeSetText !== text) { homeSetText = text; homeSetHit = HOME_SET.test(String(text ?? '')); }
+  return homeSetHit;
+}
+function valueRuns(setting, value, role, text) {
+  if (filledValue(value, text)) return `${setting} runs a command the shell fills in (${value.slice(0, 60)}), which the guard cannot read: write the command out`;
   const branch = protectedPush(value, ['main', 'master']);
   if (branch) return `${setting} runs a command git starts: ${pushReason(branch)}`;
   const why = checkRole(value, role);
@@ -786,10 +811,10 @@ function valueRuns(setting, value, role) {
 }
 // git's words w, git at i, its subcommand at j: why a setting or variable that runs a command (or a read-only role's
 // subtree write) may not run, or null
-function gitRuns(w, i, j, role) {
+function gitRuns(w, i, j, role, text) {
   const found = runsValues(w, i, j);
   for (const [setting, value] of found) {
-    const why = value && valueRuns(setting, value, role);
+    const why = value && valueRuns(setting, value, role, text);
     if (why) return why;
   }
   if (!READ_ONLY_ROLES.includes(role)) return null;
@@ -798,14 +823,13 @@ function gitRuns(w, i, j, role) {
   return write ? `git subtree ${write}: ${readsOnly(role)}` : null;
 }
 // protectedPush's test for those values (CB_PROTECTED_BRANCHES too): the protected branch a value's command pushes
-function valuesPush(cmd, list) {
-  return scanCommands(unbrace(cmd), GIT, (w, i) => {
-    for (const [, value] of runsValues(w, i, gitSub(w, i))) {
-      const branch = value && protectedPush(value, list);
-      if (branch) return branch;
-    }
-    return null;
-  }, runnerArg);
+// (a value the shell fills in is returned as such, so it blocks as a filled branch: N1)
+function valuesPush(w, i, j, list, text) {
+  for (const [, value] of runsValues(w, i, j)) {
+    const branch = value && (filledValue(value, text) ? value : protectedPush(value, list));
+    if (branch) return branch;
+  }
+  return null;
 }
 // the block reason for an aliasPush hit (PR 111 review: not "git push", which misleads for git co main)
 const ALIAS_MARK = '\u0001';
@@ -822,7 +846,8 @@ const GIT_CONFIG_WRITE = 'a write to a git config file (.git/config, ~/.gitconfi
 // config's own writes are gitHides'); the joined text is judged as well as the raw lines (rawAndJoined)
 function gitConfigFileWrite(raw) { return rawAndJoined(gitConfigFileWriteOne)(raw); }
 function gitConfigFileWriteOne(command) {
-  if (!/config/i.test(unhide(command))) return null;
+  // (config with quote pairs or backslashes inside, as unhide reads it; one cheap test, not an unhide pass per command)
+  if (!/c\W*o\W*n\W*f\W*i\W*g/i.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
   // the fence's spellings of a path: quote pairs and a backslash inside a word, ./ and seg/../ folded (.git/con""fig)
   const named = (t) => forms(t).some((f) => GIT_CONFIG_FILE.test(f));
@@ -1463,7 +1488,7 @@ export function checkRole(command, role) {
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(unbrace(command), GIT, (w, i) => {
     const j = gitSub(w, i);
-    const hides = gitHides(w, i, j, role); // #4638: aliases, push and commit plumbing, a read-only role's git ci
+    const hides = gitHides(w, i, j, role, command); // #4638: aliases, push and commit plumbing, a read-only role's git ci
     if (hides) return hides;
     if (w[j] !== 'push') return null;
     if (readOnly) return `git push: ${readsOnly(role)}`;

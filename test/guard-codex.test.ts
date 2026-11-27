@@ -217,7 +217,7 @@ const SESSIONS = [
   'kubectl exec -it pod -- sh', 'kubectl exec --stdin pod -- sh', 'kubectl attach pod -i',
   'vim notes.md', 'less log.txt', 'man git', 'nano x', 'ed x',
   'grep foo | sh', 'grep -e x | sh', 'grep foo - | sh', 'tr a b | sh', 'head -n 5 | sh', 'sed s/a/b/ | bash', 'cut -f1 | sh',
-  'cat | sh', 'cat | python', 'tee x | bash', 'head -c 9 | node', 'xargs git', "awk '{system($0)}'", 'read x; eval $x', 'select x in a b; do echo $x; done', 'echo $(python)', 'echo "$(bash)"', 'read -r cmd && git $cmd',
+  'cat | sh', 'cat | python', 'tee x | bash', 'head -c 9 | node', 'xargs git', "awk '{system($0)}'", 'read x; eval $x', 'select x in a b; do echo $x; done', 'echo $(python)', 'echo "$(bash)"',
   'Read-Host "cmd"', '$c = [Console]::ReadLine(); iex $c', 'foreach ($l in $input) { iex $l }', '$host.UI.ReadLine()',
   'env FOO=1 python', 'sudo bash', 'sudo -u web bash', 'nohup bash -i', 'FOO=1 node', 'timeout 60 python', 'cd /tmp && python', 'ls; bash', 'bash -c "python"', 'cat x.txt > /dev/tty',
   '/usr/bin/python3', 'C:\\Python311\\python.exe', '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"', 'if true; then bash; fi',
@@ -257,6 +257,10 @@ test('a board seat may not open an interactive session (shell, REPL, client, rem
     assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', c);
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /write_stdin/, c);
   }
+  // #4661 S1 runs first here (checkRole before the session rule): a git subcommand the shell fills in blocks on its own
+  const read = seat('read -r cmd && git $cmd').hookSpecificOutput;
+  assert.equal(read?.permissionDecision, 'deny');
+  assert.match(read.permissionDecisionReason, /write_stdin|a subcommand the shell fills in/);
 });
 
 test('one-shot commands, input redirects and plain text naming a shell stay allowed (#4626)', () => {
