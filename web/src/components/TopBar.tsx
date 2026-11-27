@@ -68,7 +68,7 @@ export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: 
           <ThemeToggle />
           <button onClick={onSearch} aria-label="Jump to a task, project or view"
             className="flex h-8 items-center gap-2 rounded-md border bg-card px-2 text-sm text-muted-foreground transition-colors hover:border-input hover:text-foreground sm:px-2.5">
-            <Search className="size-3.5" /> <span className="hidden lg:inline">Jump to…</span> <Kbd className="hidden sm:inline-flex">Ctrl&nbsp;K</Kbd>
+            <Search className="size-3.5" /> <span className="hidden 2xl:inline">Jump to…</span> <Kbd className="hidden sm:inline-flex">Ctrl&nbsp;K</Kbd>
           </button>
         </div>
       </div>

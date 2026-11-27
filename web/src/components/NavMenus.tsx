@@ -34,8 +34,9 @@ export function GroupMenus({ pages, route, counts }: { pages: readonly Page[]; r
     return (
       <DropdownMenu key={g.id} modal={false}>
         <DropdownMenuTrigger className={cn(tabClass(!!g.current), 'gap-1.5 aria-expanded:bg-raised aria-expanded:text-foreground')}>
-          {/* on a phone the button shows only the open page's name, so the row fits; screen readers still hear the group */}
-          {g.current ? <><span className="text-muted-foreground max-sm:sr-only">{g.label} ·</span>{g.current.label}</> : g.label}
+          {/* below 1536px the button shows only the open page's name, so all seven items fit a 1280px row once Runners,
+              Usage and Project settings land; screen readers still hear the group */}
+          {g.current ? <><span className="text-muted-foreground max-2xl:sr-only">{g.label} ·</span>{g.current.label}</> : g.label}
           {count > 0 && (
             <span className="text-[12px] font-semibold text-muted-foreground tabular-nums">
               {count}<span className="sr-only"> waiting for you</span>
