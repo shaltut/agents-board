@@ -353,3 +353,83 @@ test('Hand to: one tap gives the question to that person; only people on its pro
   await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to cai/.test(c.body.text) && !c.body.reply_markup.inline_keyboard.length), 'message closed');
   await until(() => calls('answerCallbackQuery').some((c) => c.body.text === 'Handed to Cai.'), 'toast');
 });
+
+test('a disabled project: its open questions are not sent; enabling the project sends them (#4559, Q3019)', async () => {
+  const sql = await paired();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.project_state('demo', 'disabled', 'ahmed')`;
+  // asked before the disable, never sent (asking now is refused): stored straight in the table
+  const [{ id }] = await sql`insert into cb.questions (project, asked_by, body) values ('demo', 'W1', 'Which parser?') returning id`;
+  const other = Number((await sql`select cb.ask(project => 'zed', body => 'still live?', actor => 'W1') as id`)[0].id); // another project: proves the pass ran
+  await until(() => sentFor(other).length, 'the live question');
+  assert.equal(sentFor(Number(id)).length, 0, 'held while disabled');
+  await sql`select cb.project_state('demo', 'enabled', 'ahmed')`;
+  await until(() => sentFor(Number(id)).length, 'sent on enable');
+});
+
+test('a question already on Telegram when its project is disabled loses its buttons, refuses a tap, and gets them back on enable (#4559, I1)', async () => {
+  const sql = await paired();
+  const id = await ask(sql, 'Which cache?', { options: ['Redis', 'Memory'] });
+  await until(() => sentFor(id).length, 'sent');
+  const msg = await msgOf(sql, id);
+  const edits = () => calls('editMessageText').filter((c) => c.body.message_id === msg);
+  await sql`select cb.project_state('demo', 'disabled', 'ahmed')`;
+  await until(() => edits().length, 'edited on disable');
+  assert.match(edits()[0].body.text, /Waiting: this project is disabled/);
+  assert.deepEqual(edits()[0].body.reply_markup.inline_keyboard, [], 'no buttons');
+  assert.equal((await sql`select state from cb.telegram_messages where question_id = ${id}`)[0].state, 'waiting');
+  press(msg, `o:${id}:0`);
+  await until(() => calls('answerCallbackQuery').some((c) => /waits: its project is disabled/.test(c.body.text)), 'tap refused');
+  text('Redis', AHMED, msg);
+  await until(() => calls('sendMessage').some((c) => /waits: its project is disabled/.test(c.body.text ?? '')), 'reply refused');
+  assert.equal((await status(sql, id)).status, 'open', 'still open, unanswered');
+  await sql`select cb.project_state('demo', 'enabled', 'ahmed')`;
+  await until(() => edits().length === 2, 'restored on enable');
+  assert.ok(edits()[1].body.reply_markup.inline_keyboard.some((r: any) => r[0]?.callback_data === `o:${id}:0`), 'its buttons again');
+  assert.equal(sentFor(id).filter((c) => c.body.reply_markup).length, 1, 'the same message, not a second one');
+  press(msg, `o:${id}:0`);
+  await until(async () => (await status(sql, id)).status === 'answered', 'answered once enabled');
+});
+
+// #4591: a send that failed once (27 Nov 14:30Z, "telegram sendMessage: 0 network error") waited for the next board
+// change to be tried again; on a quiet board that never came and Ahmed saw no question.
+test('a question whose send fails once is sent again on its own, once, with no other change on the board (#4591)', async () => {
+  const sql = await paired();
+  const logged: string[] = [], orig = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(' ')); };
+  try {
+    // every send drops until the board is quiet (asking fires more than one change, each a pass), then the API is back
+    // and nothing on the board changes again: only the poller's own retry can send it now
+    fake.drop.dropped.length = 0;
+    fake.drop.next = 99;
+    const id = await ask(sql, 'Ship it?', { options: ['Yes', 'No'] });
+    await until(() => fake.drop.dropped.length >= 1, 'the first send dropped');
+    await new Promise((r) => setTimeout(r, 400));
+    fake.drop.next = 0;
+    await until(() => sentFor(id).length, 'sent again with nothing else changing', 6000);
+    assert.ok(logged.some((l) => new RegExp(`telegram: sending Q${id}: telegram sendMessage: 0 network error`).test(l)), 'the drop is logged');
+    assert.ok(logged.some((l) => /telegram: \d+ question\(s\) not sent; trying again in \d+s/.test(l)), 'the retry is logged');
+    await new Promise((r) => setTimeout(r, 2500)); // past the next retry gap: a sent question is not sent twice
+    assert.equal(sentFor(id).length, 1);
+    assert.ok(logged.every((l) => !l.includes('123:test')), 'the token never reaches a log line');
+  } finally { console.error = orig; fake.drop.next = 0; }
+});
+
+test('an API that keeps failing a send is tried again with growing gaps, not hammered (#4591)', async () => {
+  const sql = await paired();
+  fake.drop.dropped.length = 0;
+  fake.drop.next = 99;
+  try {
+    const id = await ask(sql, 'Again?', { options: ['Yes', 'No'] });
+    // asking fires more than one change, each an immediate pass: judge only the tries after the board goes quiet
+    await until(() => fake.drop.dropped.length >= 1, 'the first send dropped');
+    await new Promise((r) => setTimeout(r, 400));
+    const quiet = fake.drop.dropped.length;
+    await until(() => fake.drop.dropped.length >= quiet + 2, 'two retries on its own', 8000);
+    const [a, b, c] = fake.drop.dropped.slice(quiet - 1);
+    assert.ok(b - a >= 800, `a gap before the first retry: ${b - a} ms`);
+    assert.ok(c - b >= 1.5 * (b - a) - 200, `the gap grows: ${b - a} ms then ${c - b} ms`);
+    fake.drop.next = 0; // the API is back: the next try sends it
+    await until(() => sentFor(id).length, 'sent once the API is back', 8000);
+  } finally { fake.drop.next = 0; }
+});

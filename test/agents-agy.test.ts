@@ -21,18 +21,19 @@ function fake(res: { status: number | null; stderr?: string; stdout?: string; er
 
 test('registry: agy is registered and is the adapter this file builds', () => {
   assert.equal(ADAPTERS.agy, agyAdapter);
-  assert.throws(() => getAdapter('agy'), /agent "agy" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('agy', { env: {} }), /agent "agy" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('agy', { env: { CB_MCP_GATE_OK: 'agy' } }), ADAPTERS.agy);
   assert.ok(AGENT_KINDS.includes('agy'));
   assert.equal(agyAdapter.kind, 'agy');
   assert.equal(agyAdapter.relayStart, 'pane-prestart');
   assert.equal(defaultModelFor('agy', 'builder'), null); // cb._role_model returns null for a non-Claude agent
 });
 
-test('buildLaunch: --mode auto, this session only settings, the model; never --dangerously-skip-permissions', () => {
+test('buildLaunch (Q3023): no sandbox and no asking like a Claude seat, this session only settings, the model', () => {
   const l = agyAdapter.buildLaunch(input());
-  assert.deepEqual(l.args, ['--mode', 'auto', '--settings', 'C:/w/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh']);
+  assert.deepEqual(l.args, ['--dangerously-skip-permissions', '--settings', 'C:/w/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh']);
   assert.equal(l.kind, 'agy');
-  assert.ok(!l.args.includes('--dangerously-skip-permissions'));
+  assert.ok(!l.args.includes('--sandbox') && !l.args.includes('--mode'));
   assert.deepEqual(l.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 

@@ -25,7 +25,10 @@ export const claudePreseed: TrustPreseed = {
 
 // [projects.'<path>'] or [projects."<path>"] alone on a line; the next [ starts another table
 const CODEX_HEADER = /^[ \t]*\[[ \t]*projects[ \t]*\.[ \t]*(?:'([^'\r\n]*)'|"((?:[^"\\\r\n]|\\.)*)")[ \t]*\][ \t]*(?:#.*)?\r?$/;
-const CODEX_QUOTED = /'([^'\r\n]*)'|"((?:[^"\\\r\n]|\\.)*)"/g;
+const KEY = String.raw`(?:'([^'\r\n]*)'|"((?:[^"\\\r\n]|\\.)*)")`;
+const CODEX_INLINE = new RegExp(String.raw`^[ \t]*${KEY}[ \t]*[.=]`); // inside [projects]: '<path>' = { ... }
+const CODEX_DOTTED = new RegExp(String.raw`^[ \t]*projects[ \t]*\.[ \t]*${KEY}[ \t]*[.=]`); // projects.'<path>'.trust_level = ...
+const CODEX_SUB = new RegExp(String.raw`^[ \t]*\[[ \t]*projects[ \t]*\.[ \t]*${KEY}[ \t]*\.`); // [projects.'<path>'.<sub>]
 const CODEX_LEVEL =/^[ \t]*trust_level[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/;
 /** Codex: ~/.codex/config.toml [projects.'<path>'] trust_level = "trusted". On Windows Codex writes the path lower case
  *  with backslashes and matches it without case. Lines are added, never rewritten: no TOML library, no lost comments. */
@@ -50,9 +53,22 @@ export function codexPreseed(platform: NodeJS.Platform): TrustPreseed {
   };
   /** The folder named anywhere else as a quoted key (an inline [projects] entry, a dotted projects.'<path>'.trust_level):
    *  a second [projects.'<path>'] table beside it is a duplicate key, and Codex then refuses to start (review 89 L1). */
+  // Only where the folder is a projects key (review 89 S1), never any quoted string (a comment, an MCP server's cwd):
+  // a '<path>' = ... line inside [projects], a dotted projects.'<path>'... line, or a [projects.'<path>'.<sub>] table.
   const elsewhere = (text: string, path: string) => {
-    const want = key(path);
-    for (const m of text.matchAll(CODEX_QUOTED)) if (key(m[1] ?? m[2]!.replace(/\\(["\\])/g, '$1')) === want) return true;
+    const want = key(path), name = (m: RegExpExecArray) => key(m[1] ?? m[2]!.replace(/\\(["\\])/g, '$1'));
+    let table = '';
+    for (const line of text.split('\n')) {
+      const head = /^[ \t]*\[([^\]]*)\]/.exec(line);
+      if (head) {
+        table = head[1]!.replace(/[ \t]/g, '');
+        const sub = CODEX_SUB.exec(line);
+        if (sub && name(sub) === want) return true;
+        continue;
+      }
+      const m = (table === 'projects' ? CODEX_INLINE : CODEX_DOTTED).exec(line);
+      if (m && name(m) === want) return true;
+    }
     return false;
   };
   return {

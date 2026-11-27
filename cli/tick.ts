@@ -221,8 +221,9 @@ export async function tick(project: string, actor: string) {
     const rows = items.filter((i) => i.section === k);
     return rows.length ? [title, ...rows.flatMap((i) => [`  ${i.text}${i.cmd ? ` → ${i.cmd}` : ''}`, ...(i.detail ? [`    ${i.detail}`] : [])])] : [];
   });
+  if (b.disabled) out.unshift(`PROJECT DISABLED: ${b.disabled}.`); // #4559: only answers and my questions follow
   for (const s of gh.skipped) out.push(`GitHub checks skipped for ${s}`);
   const order = SECTIONS.map(([k]) => k);
   items.sort((x, y) => order.indexOf(x.section) - order.indexOf(y.section));
-  return { out: out.join('\n'), json: { project, actor, items, github: { checked: refs.length, skipped: gh.skipped } } };
+  return { out: out.join('\n'), json: { project, actor, items, github: { checked: refs.length, skipped: gh.skipped }, ...(b.disabled ? { disabled: b.disabled } : {}) } };
 }

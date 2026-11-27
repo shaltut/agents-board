@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, launchSpec, opencodePort, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
 import { squadShow } from '../cli/squad-show.ts';
 import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
 import { help } from '../cli/help.ts';
@@ -554,6 +554,101 @@ test('startOne: any other start error is not retried', () => {
   assert.match(r.line, /model_missing/);
 });
 
+// #4576: a seat CLI that exits at start (codex 0.160 dropped --full-auto: 'unexpected argument', then exit) left herdr
+// waiting out its whole timeout, and squad up said only "timed out waiting for agent startup". The pane is read before
+// it is closed, and the CLI's own last lines go in the failure, with values cut.
+const TIMEOUT = { status: 1, stderr: '{"error":{"code":"agent_start_timeout","message":"timed out waiting for agent startup"}}' };
+const paneText = (text: string) => ({ status: 0, stdout: text, stderr: '' });
+const CODEX_EXIT = "PS C:\\w\\sq-board> codex --no-daemon --full-auto\nerror: unexpected argument '--full-auto' found\n\n  tip: to pass '--full-auto' as a value, use '-- --full-auto'\n\nUsage: codex [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.\nPS C:\\w\\sq-board> \n";
+
+test('startOne: a CLI that exits at start: the failure carries its error lines, read before the pane closes (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[0] === 'pane' && c.args[1] === 'read') return paneText(CODEX_EXIT);
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /timed out waiting for agent startup/);
+  assert.match(r.line, /the CLI said: error: unexpected argument '--full-auto' found/);
+  assert.match(r.line, /Usage: codex \[OPTIONS\] \[PROMPT\]/);
+  // only lines that look like a CLI error: the prompt line with the folder, the tip and the blank lines are dropped
+  assert.doesNotMatch(r.line, /sq-board|PS C:|tip:/);
+  const i = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'read');
+  const j = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'close');
+  assert.ok(i >= 0 && j > i, 'read, then close');
+  assert.deepEqual(f.calls[i].args.slice(0, 3), ['pane', 'read', 'w5:p1']);
+  assert.deepEqual(f.calls[j].args, ['pane', 'close', 'w5:p1']);
+});
+
+// PR 93 review M2: the flag name is the point, however long
+test('startOne: a flag name in an error line is kept whole, a flag\'s value is not (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: invalid value for --config=sandbox_workspace_write.network_access=true\n");
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.match(r.line, /'--dangerously-bypass-hook-trust'/);
+  assert.match(r.line, /invalid value for --config=…/);
+  assert.doesNotMatch(r.line, /sandbox_workspace_write|network_access/);
+});
+
+// PR 93 review M1: the line goes to squad up's output and the supervisor log, so nothing that may be a value survives
+test('startOne: no value survives in the pane lines: env sets, tokens, passwords, user:pass@host, keys, e-mails, paths (#4576)', () => {
+  const SECRETS = [
+    "error: $env:OPENAI_API_KEY = 'sk-live-abc'", 'error: OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789',
+    'error: auth failed: Authorization: Bearer abc123', 'error: unauthorized, Bearer qwertyuiop',
+    'error: bad config {"password": "hunter2"}', 'error: invalid --token hunter2', 'error: invalid --api-key=hunter3',
+    'error: cannot reach https://alice:s3cret@git.example.com/repo', 'error: bad key dGhpcyBpcyBh/c2VjcmV0+dG9rZW4=',
+    'error: AWS key AKIAIOSFODNN7EXAMPLE rejected', 'error: account someone@example.com is not allowed',
+    'error: no such file C:\\Users\\jdoe\\ClientCo\\notes.txt', 'error: no such file /Users/jdoe/ClientCo/notes.txt',
+    'error: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345', 'error: password hunter4 is wrong', 'error: secret: hunter5',
+  ];
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(0, 8).join('\n') + '\n\u001b[31merror: exit 1\u001b[0m\n');
+  });
+  const g = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(8).join('\n'));
+  });
+  const line = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line + ' ' + startOne(wsLaunch('orch@shaltoot'), g.run, {}, () => {}).line;
+  for (const v of ['sk-live', 'sk-proj', 'abc123', 'qwertyuiop', 'hunter2', 'hunter3', 'hunter4', 'hunter5', 'alice', 's3cret', 'git.example.com', 'dGhpcyBp', 'c2VjcmV0',
+    'AKIAIOSFODNN7EXAMPLE', 'someone', 'example.com', 'jdoe', 'ClientCo', 'notes.txt', 'ghp_', '\u001b']) {
+    assert.ok(!line.includes(v), `"${v}" leaked: ${line}`);
+  }
+  // the words that say what went wrong stay
+  assert.match(line, /error: auth failed/);
+  assert.match(line, /--token …/);
+  assert.match(line, /error: no such file …/);
+});
+
+test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
+  const unreadable = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return { status: 1, stderr: 'pane gone' };
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), unreadable.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /^failed orch@shaltoot: .*timed out waiting for agent startup/);
+  assert.doesNotMatch(r.line, /the CLI said/);
+  assert.ok(has(unreadable.calls, 'pane', 'close', 'w5:p1'));
+
+  const long = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(Array.from({ length: 40 }, (_, k) => `error: line ${k} ${'word '.repeat(60)}`).join('\n'));
+  });
+  const l = startOne(wsLaunch('orch@shaltoot'), long.run, {}, () => {}).line;
+  assert.match(l, /error: line …/);
+  assert.equal(l.split(' | ').length, 8, 'the last 8 error lines');
+  assert.ok(l.length < 1200, `short enough to read: ${l.length}`);
+});
+
 test('startOne: busy, then a startup dialog: the split is kept as blocked and counts toward its tab', () => {
   let starts = 0;
   const f = fake((c) => {
@@ -636,7 +731,7 @@ test('launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude',
   }
 });
 
-// synthetic: cb.squad_set refuses a non-Claude primary seat in phase 1, so this squad never comes from the board
+// synthetic: cb.squad_set refuses a non-Claude primary seat outside cb._agents_projects() (#4585), so a demo squad never holds one
 const MIXED: any = { ...squad, roles: { ...squad.roles,
   builder: { count: 3, model: 'sonnet', machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }],
     seats: { '2': { model: 'opus' }, '3': { agent: 'codex', model: 'gpt-6.1-sol', fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] } } },
@@ -738,14 +833,49 @@ test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as b
   assert.match(out, /^start demo-B1@macbook \(builder, sonnet\) on macbook$/m);
 });
 
-test('startOne refuses an unimplemented agent before creating a pane', () => {
+// #4585: one builder each of claude, codex, agy and opencode on the PC (synthetic paths)
+const FOUR: any = {
+  machines: { pc: { herdr: null, repo: 'C:/work/demo', board: 'C:/work/board' } },
+  roles: { lead: { count: 1, model: 'opus', machine: 'pc' }, builder: { count: 4, model: 'sonnet', machine: 'pc', seats: {
+    '2': { agent: 'codex', model: 'gpt-6.1-sol' }, '3': { agent: 'agy', model: 'gemini-4-neon-xhigh' }, '4': { agent: 'opencode', model: 'anthropic/claude-opus-5-5' } } } },
+  areas: [],
+};
+const CODEX_BUILDER_SANDBOX = 'danger-full-access'; // Q3023
+const AGY_ARGS = ['--dangerously-skip-permissions', '--settings', 'C:/work/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh'];
+test('squad up --dry-run (#4585): four builders, one per agent, plan four launches; without CB_MCP_GATE_OK the three others say would fail', async () => {
+  const up = () => squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? FOUR : []), fake((c) => (c.args[1] === 'get' ? GONE : undefined)).run);
+  const starts = ['start demo-B1@pc (builder, sonnet) on pc', 'start demo-B2@pc (builder, codex/gpt-6.1-sol) on pc',
+    'start demo-B3@pc (builder, agy/gemini-4-neon-xhigh) on pc', 'start demo-B4@pc (builder, opencode/anthropic/claude-opus-5-5) on pc'];
+  const shut = (await up()).split('\n');
+  for (const s of starts) assert.ok(shut.includes(s), s);
+  for (const k of ['codex', 'agy', 'opencode']) assert.ok(shut.some((l) => l.startsWith(`  would fail: agent "${k}" cannot start a seat with MCP off for one run`)), k);
+  assert.equal(shut.filter((l) => l.startsWith('  would fail')).length, 3);
+  process.env.CB_MCP_GATE_OK = 'codex,opencode,agy';
+  try {
+    assert.deepEqual((await up()).split('\n'), ['start orch@pc (lead, opus) on pc', ...starts]);
+    const spec = (n: string) => launchSpec(launchFor('demo', FOUR, wantList('demo', FOUR).find((w) => w.name === n)!)).spec;
+    const b1 = spec('demo-B1@pc'), b2 = spec('demo-B2@pc'), b3 = spec('demo-B3@pc'), b4 = spec('demo-B4@pc'), port = String(opencodePort('demo-B4@pc'));
+    assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
+      '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
+    assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+    assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
+      ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+    // the port is the seat's own, stable across restarts, in range
+    assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
+  } finally { delete process.env.CB_MCP_GATE_OK; }
+});
+
+test('startOne refuses an agent whose MCP check is not confirmed here (or an unknown one) before creating a pane', () => {
   const b3 = launchFor('demo', MIXED, mixedWant('demo-B3@macbook'));
   const each: Record<string, { pane: string; panes: number }>[] = [{}, { macbook: { pane: 'w4:p1', panes: 1 } }];
   for (const tabs of each) { // a new tab, or a split of this run's tab
     const f = fake((c) => (c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
     const r = startOne(b3, f.run, tabs);
     assert.equal(r.ok, false);
-    assert.equal(r.line, 'failed demo-B3@macbook: agent "codex" is not installed yet (phase 1 supports claude only)');
+    assert.match(r.line, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off for one run: .*set CB_MCP_GATE_OK=codex /);
     assert.equal(r.pane, undefined);
     assert.deepEqual(f.calls, [], 'no herdr call: no pane, never a Claude start in its place');
   }
@@ -754,10 +884,10 @@ test('startOne refuses an unimplemented agent before creating a pane', () => {
   assert.equal(f.calls.length, 0);
 });
 
-test('squad up starts the Claude seats and refuses the codex one without touching a pane for it', async () => {
+test('squad up starts the Claude seats and refuses the codex one (its MCP check not confirmed here) without touching a pane for it', async () => {
   const f = fake((c) => (c.args[1] === 'get' ? GONE : c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
   const out = await squadUp('demo', false, async (fn: string) => (fn === 'squad_get' ? MIXED : []), f.run);
-  assert.match(out, /^failed demo-B3@macbook: agent "codex" is not installed yet/m);
+  assert.match(out, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off/m);
   assert.match(out, /^started demo-B2@macbook$/m);
   assert.ok(f.calls.filter((c) => c.args.includes('demo-b3-macbook')).every((c) => c.args[1] === 'get'), 'only herdr agent get for the codex seat');
   assert.ok(!f.calls.some((c) => c.args.includes('demo-B3@macbook')), 'no tab labelled for it');
@@ -779,4 +909,12 @@ test('squadShow: Claude roles exactly as before; another agent in brackets, a fa
     'reviewer  1 × opus on macbook',
     '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
     'areas: claims'].join('\n'));
+});
+
+test('squad up: a disabled project starts nothing and says so (#4559)', async () => {
+  const f = fake(() => OK);
+  const off = async (fn: string) => fn === 'squad_get' ? squad
+    : fn === 'project_state_preview' ? { state: 'disabled', words: 'Demo is disabled by Ahmed: no work is handed out there' } : [];
+  await assert.rejects(squadUp('demo', false, off, f.run), /Demo is disabled by Ahmed: no work is handed out there; Ahmed enables it on Projects first, then cb squad up demo$/);
+  assert.deepEqual(f.calls, [], 'herdr is never asked');
 });

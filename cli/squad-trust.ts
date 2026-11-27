@@ -95,6 +95,10 @@ export function seatFolder(path: string, home: string, platform: NodeJS.Platform
   try { h = realpathSync.native(home); } catch {}
   const r = norm(real), hn = norm(h), sep = win ? '\\' : '/';
   if (hn === r || hn.startsWith(r + sep)) return { why: 'it is the home folder or holds it' };
+  // review 89 S2: a broad folder (F:/Work, AppData) would pass the checks above, and Claude takes a trusted folder as
+  // trust for everything under it outside git. A seat folder is a repo's top folder: .git there (a folder, or a
+  // worktree's file). A folder inside a work tree has none.
+  if (!existsSync(join(real, '.git'))) return { why: 'it is not the top folder of a git work tree' };
   return { real };
 }
 

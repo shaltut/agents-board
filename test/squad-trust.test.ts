@@ -97,7 +97,7 @@ test('squadTrust: writes each agent\'s entry once under the given home; a second
     put(h, CODEX, 'model = "gpt"\n');
     // the seat folder: a real one (the squad file's path is resolved to its real folder before anything is written)
     const repo = join(h, 'Work', 'demo');
-    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(repo, '.git'), { recursive: true }); // a git work tree's top folder (review 89 S2)
     const real = realpathSync.native(repo), key = real.replace(/\\/g, '/');
     const sq = { ...SQUAD, machines: { ...SQUAD.machines, pc: { herdr: null, repo: `${repo}/`, board: 'C:/b' } } };
     // agy never ran here: its file is missing, so it is named, not made
@@ -166,8 +166,10 @@ test('squadTrust: only a real seat folder is trusted; roots, shares, home and it
   try {
     put(h, CLAUDE, JSON.stringify({ projects: {} }, null, 2));
     const ok = join(h, 'Work', 'demo');
-    mkdirSync(ok, { recursive: true });
-    const bad = [process.platform === 'win32' ? 'C:/' : '/', '//srv/share', `${ok}/../demo`, `${ok}/./x`, h, dirname(h), join(h, 'missing')];
+    mkdirSync(join(ok, '.git'), { recursive: true });
+    const notTop = join(ok, 'src'), plain = join(h, 'Plain');
+    mkdirSync(notTop); mkdirSync(plain); // review 89 S2: a folder under a work tree, a folder with no git
+    const bad = [process.platform === 'win32' ? 'C:/' : '/', '//srv/share', `${ok}/../demo`, `${ok}/./x`, h, dirname(h), join(h, 'missing'), notTop, plain];
     const sq = { machines: { pc: { herdr: null, board: '/b' } }, repos: Object.fromEntries([ok, ...bad].map((p, i) => [`r${i}`, { home: i === 0, paths: { pc: p } }])),
       roles: { builder: { count: 1, model: 'sonnet', machine: 'pc' } }, areas: [] };
     const out = await squadTrust('demo', { home: h, platform: process.platform, env: {}, thisMachine: 'pc', callFn: async () => sq });
@@ -182,6 +184,12 @@ test('codex: a folder written by hand as an inline or dotted entry is left alone
   for (const text of [`[projects]\n'c:\\w\\x' = { trust_level = "trusted" }\n`, `projects.'c:\\w\\x'.trust_level = "trusted"\n`]) {
     assert.equal(w.state(text, 'C:/w/x'), 'other', text);
     assert.throws(() => w.add(text, 'C:/w/x'), /by hand/);
+  }
+  assert.equal(w.state(`[projects.'c:\\w\\x'.extra]\nk = 1\n`, 'C:/w/x'), 'other');
+  // review 89 S1: the folder in any other quoted string (a comment, an MCP server's cwd) is not a [projects] key
+  for (const text of [`# trusted 'c:\\w\\x' by hand once\n`, `[mcp_servers.x]\ncwd = 'c:\\w\\x'\n`, `[projects]\n# 'c:\\w\\x' = { trust_level = "trusted" }\n`]) {
+    assert.equal(w.state(text, 'C:/w/x'), 'absent', text);
+    assert.match(w.add(text, 'C:/w/x'), /\[projects\.'c:\\w\\x'\]\ntrust_level = "trusted"\n$/);
   }
 });
 

@@ -38,15 +38,17 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     // No session hook can hand a relay anything (agy has no inbox socket), so the relay is started with the pane.
     relayStart: 'pane-prestart',
 
-    // `herdr agent start <name> --kind agy --pane <pane> -- <args>`. --mode auto = OS sandbox plus a reviewer for what
-    // leaves it (never --dangerously-skip-permissions: the owner's classifier denied it). --settings is this session only.
+    // `herdr agent start <name> --kind agy --pane <pane> -- <args>`. Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat
+    // (Claude seats run bypassPermissions), no CLI sandbox, the board guard is the fence: --dangerously-skip-permissions
+    // approves every tool without asking, and --sandbox stays off. This replaces --mode auto (its OS sandbox blocked
+    // the board connection, #4583) and the earlier denial of this flag. --settings is this session only.
     buildLaunch(l: LaunchInput) {
       checkAgyModel(l.model);
       const env = stripClaudeOnly(l.env);
       env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true'; // a pinned version: herdr's screen rules are tuned per version
       return {
         kind: 'agy',
-        args: ['--mode', 'auto', '--settings', `${trimSlash(l.board)}/kit/agy/settings.json`, ...(l.model ? ['--model', l.model] : [])],
+        args: ['--dangerously-skip-permissions', '--settings', `${trimSlash(l.board)}/kit/agy/settings.json`, ...(l.model ? ['--model', l.model] : [])],
         env,
         // #4002: drops the Claude-only env from the pane's shell (agy has no exclude list: its shell saw them in the live
         // check) and refuses the seat unless the workspace hook is in place and agy trusts the folder (no trust, no hooks)
