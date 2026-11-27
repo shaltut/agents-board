@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse, resolve } from 'node:path';
-import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, missingPaths, published, relPaths } from '../cli/recipes.ts';
+import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, missingPaths, published, relPaths, withBoard } from '../cli/recipes.ts';
 
 const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'utf8'));
 
@@ -164,6 +164,21 @@ test('dbLanes: 1 by default, 1-9, never above slots', () => {
   assert.equal(loadConfig(cfgWith({ steps: [['a']], db: true, env: dbEnv }, lanes(9, { slots: 10 }))).dbLanes, 9);
   for (const dbLanes of [0, 10, 1.5, '2']) assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 10, dbLanes, laneEnv })), /dbLanes/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, lanes(3, { slots: 2 }))), /dbLanes: is above slots/);
+});
+test('the board\'s slot setting (#4527): over runner.json, past the old cap of 10; lanes 1-9; a setting the file cannot take keeps the file\'s', () => {
+  const text = cfgWith({ steps: [['a']], db: true, env: dbEnv }, lanes(2, { slots: 4 }));
+  const file = loadConfig(text), said: string[] = [], say = (m: string) => said.push(m);
+  assert.equal(withBoard(text, file, {}, say), file, 'no setting: runner.json as it is');
+  assert.deepEqual([withBoard(text, file, { slots: 24 }, say).slots, withBoard(text, file, { slots: 24 }, say).dbLanes], [24, 2]);
+  assert.deepEqual([withBoard(text, file, { slots: 1 }, say).slots, withBoard(text, file, { slots: 1 }, say).dbLanes], [1, 1], 'lanes cut to the slots');
+  assert.equal(withBoard(text, file, { slots: 12, dbLanes: 6 }, say).dbLanes, 6);
+  assert.deepEqual(said, []);
+  assert.equal(withBoard(text, file, { slots: 4, dbLanes: 10 }, say), file);
+  assert.match(said.pop()!, /DB lanes: must be an integer 1-9.*running 4 slots and 2 DB lane\(s\) from runner\.json/);
+  // more lanes on a file written for one shared stack: two DB jobs would share it, so the file's count is kept
+  const shared = cfgWith({ steps: [['a']], db: true, env: { TEST_STACK_PROJECT: 'it', TEST_STACK_PG_PORT: '55432' } }, { slots: 4 });
+  assert.equal(withBoard(shared, loadConfig(shared), { dbLanes: 2 }, say).dbLanes, 1);
+  assert.match(said.pop()!, /laneEnv: must name/);
 });
 test('dbLanes above 1 needs laneEnv, and each DB recipe holds {lane} in every laneEnv value', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], db: true, env: dbEnv }, { dbLanes: 2 })), /^Error: laneEnv: must name/);

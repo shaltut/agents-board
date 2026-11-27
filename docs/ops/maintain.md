@@ -343,6 +343,9 @@ Set up, once, on the PC:
    and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
+   - Ahmed's slot and lane numbers on the board's Runners page (#4527) win over these two when set: the runner reads
+     them at start (a higher number takes the next restart, and a new slot's first job clones fresh; a lower one applies
+     at the next claim). Clearing them there falls back to this file.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
      lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "2544{lane}"`,

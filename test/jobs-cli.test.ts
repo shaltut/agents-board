@@ -162,6 +162,30 @@ test('cb job cancel and cb jobs', async () => {
   assert.doesNotMatch(show, /untrusted/); // the board wrote this summary, not the job
 });
 
+test('a lead\'s cb job retry, move, hold and release (#4527); cb run says when the runner is paused', async () => {
+  const { sql } = await setup();
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p4','L1@pc','demo','lead')`;
+  const lead = { CB_ACTOR: 'L1@pc', CB_MACHINE: 'pc' };
+  cb(['run', 'test', '--sha', 'abc1234', '--files', 'a.test.ts', '--project', 'demo']);
+  cb(['run', 'test', '--sha', 'abc1234', '--files', 'b.test.ts', '--project', 'demo']);
+  const m = cb(['job', 'move', '2', 'next'], lead);
+  assert.equal(m.code, 0, m.err);
+  assert.match(m.out, /job #2 moved next/);
+  assert.equal((await sql`select cb.runner_queue() as q`)[0].q.waiting[0].id, 2);
+  assert.notEqual(cb(['job', 'move', '1', 'next']).code, 0, 'the asker is no lead');
+  assert.match(cb(['job', 'move', '1', 'sideways'], lead).err, /next\|up\|down\|back/);
+  const h = cb(['job', 'hold', 'demo'], lead);
+  assert.equal(h.code, 0, h.err);
+  assert.match(cb(['run', 'test', '--sha', 'abc1234', '--files', 'c.test.ts', '--project', 'demo']).out, /demo's jobs are held/);
+  assert.equal(cb(['job', 'release', 'demo'], lead).code, 0);
+  cb(['job', 'cancel', '1']);
+  const r = cb(['job', 'retry', '1'], lead);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /queued \(\d+ ahead\), again for job #1/);
+  await sql`select cb.runner_set('pc', 'paused', 'ahmed')`;
+  assert.match(cb(['run', 'test', '--sha', 'abc1234', '--files', 'd.test.ts', '--project', 'demo']).out, /the runner is paused/);
+});
+
 test('cb job log reads from the runner, 403 and a dead runner say why', async () => {
   let status = 200; let seen = '';
   const srv = createServer((req, res) => { seen = req.url ?? ''; res.statusCode = status; res.end(status === 200 ? 'line one\nline two\n' : 'no'); });

@@ -557,6 +557,22 @@ test('a job that empties .git/HEAD does not fault the slot: the next job starts 
   assert.match(logOf(id), /git clone/); // git could not read the clone: it was cloned again
 });
 
+test('the runner reports its slots, and at start runs Ahmed\'s board setting over runner.json, beyond the old cap (#4527)', async () => {
+  const row = async () => ({ ...(await sql`select slots, db_lanes from cb.runners where name = ${NAME}`)[0] });
+  assert.deepEqual(await row(), { slots: 2, db_lanes: 1 }, 'runner.json\'s counts, reported');
+  await sql`select cb.runner_limits_set(${NAME}, 12, null, 'ahmed')`;
+  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
+  else runner.child.kill('SIGKILL');
+  await runner.exited;
+  runner = startRunner();
+  await up(runner);
+  assert.deepEqual(await row(), { slots: 12, db_lanes: 1 });
+  assert.match(runner.out, /12 slots and 1 DB lane\(s\) \(the board's setting\)/);
+  const j = await ended(await add('ok'));
+  assert.equal(j.state, 'passed', j.summary);
+  await sql`select cb.runner_limits_set(${NAME}, null, null, 'ahmed')`;
+});
+
 // runJob in this process, with its own home and slot folders: no board, no daemon
 const DHOME = join(TMP, 'dhome');
 const direct = (name: string, gitUrl: string, id: number, sha = MAIN, lockfile = 'lock.txt') => {

@@ -5434,6 +5434,31 @@ do $$ begin
     alter table cb.runner_recipes drop constraint runner_recipes_pkey, add primary key (runner, project, repo, recipe);
   end if;
 end $$;
+-- The runner queue page (#4527). pos: a job's place once someone moved it (null = its id). A move only hands out keys
+-- the moved jobs already held (cb.job_move), so every key is the id of a job that already exists: a job queued later
+-- always goes after. retry_of: "Run again" makes a new job and never revives the old one.
+alter table cb.jobs add column if not exists pos bigint;
+alter table cb.jobs add column if not exists retry_of bigint references cb.jobs(id) on delete set null;
+create index if not exists jobs_finished_idx on cb.jobs (finished_at desc) where finished_at is not null;
+-- mode: on, paused (stays until resumed) or draining (a pause before a restart: runner_hello ends it). slots/db_lanes:
+-- what the runner reported at start (null: a runner from before #4527). slots_set/lanes_set: Ahmed's board setting, the
+-- one source the runner reads at start (null: its runner.json); cb.job_claim applies a lower one at once.
+alter table cb.runners add column if not exists mode text not null default 'on';
+alter table cb.runners add column if not exists mode_by text;
+alter table cb.runners add column if not exists mode_at timestamptz;
+alter table cb.runners add column if not exists slots int;
+alter table cb.runners add column if not exists db_lanes int;
+alter table cb.runners add column if not exists slots_set int;
+alter table cb.runners add column if not exists lanes_set int;
+alter table cb.runners add column if not exists set_by text;
+alter table cb.runners add column if not exists set_at timestamptz;
+alter table cb.runners drop constraint if exists runners_mode_check;
+alter table cb.runners add constraint runners_mode_check check (mode in ('on', 'paused', 'draining'));
+-- A project's lead (or Ahmed) holds that project's waiting jobs; the shared runner keeps serving every other project.
+create table if not exists cb.job_holds (
+  project text primary key references cb.projects(slug) on update cascade on delete cascade,
+  held_by text not null, held_at timestamptz not null default now()
+);
 
 drop function if exists cb._is_runner cascade;
 drop function if exists cb._runner_only cascade;
@@ -5447,6 +5472,19 @@ drop function if exists cb.runner_reconcile cascade;
 drop function if exists cb.runner_beat cascade;
 drop function if exists cb.job_claim cascade;
 drop function if exists cb.job_finish cascade;
+drop function if exists cb._job_check cascade;
+drop function if exists cb._job_reply cascade;
+drop function if exists cb._lead_by_role cascade;
+drop function if exists cb._is_owner cascade;
+drop function if exists cb._queue_manager cascade;
+drop function if exists cb._supervisor_up cascade;
+drop function if exists cb.runner_queue cascade;
+drop function if exists cb.job_retry cascade;
+drop function if exists cb.job_move cascade;
+drop function if exists cb.job_hold cascade;
+drop function if exists cb.runner_set cascade;
+drop function if exists cb.runner_limits_set cascade;
+drop function if exists cb.queue_notify cascade;
 
 create function cb._is_runner() returns boolean language sql stable as $$ select current_setting('application_name') like 'cb-runner%' $$;
 create function cb._runner_only() returns void language plpgsql stable as $$
@@ -5468,25 +5506,13 @@ begin
 exception when others then null;
 end $$;
 
--- repo null: cb._repo of the actor in this project (its latest session there, else the project's home repo).
+-- The recipe and parameter checks a new job passes (job_add, and job_retry against the recipe as it is now).
 -- A repo no runner offers for the project is refused, naming the ones they have: no fallback to another repo (#3703).
-create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null,
-                           repo text default null)
-returns jsonb language plpgsql as $$
+create function cb._job_check(p text, r text, recipe text, params jsonb) returns void language plpgsql stable as $$
 #variable_conflict use_variable
-declare
-  a text := cb.set_actor(actor); p text := cb.read_project(project); rp jsonb; k text; spec jsonb; vals jsonb; ev jsonb;
-  new_id bigint; ahead int; lo int; hi int; r text; has text[];
+declare rp jsonb; k text; spec jsonb; vals jsonb; ev jsonb; lo int; hi int; has text[];
 begin
-  if p is null then raise exception 'project is required'; end if;
-  if not cb._is_dashboard() and not exists (select 1 from cb.sessions s where s.actor = a and s.project = p and s.last_seen > now() - interval '1 day') then
-    raise exception '% has no bound session on % in the last day: only a session of the project, or Ahmed, can queue a job', a, p;
-  end if;
-  sha := lower(trim(coalesce(sha, '')));
-  if sha !~ '^[0-9a-f]{7,40}$' then raise exception 'sha must be 7 to 40 hex characters'; end if;
-  params := coalesce(params, '{}'::jsonb);
   if jsonb_typeof(params) is distinct from 'object' then raise exception 'params must be an object of lists'; end if;
-  r := coalesce(nullif(trim(repo), ''), cb._repo(a, p));
   has := array(select distinct rr.repo from cb.runner_recipes rr where rr.project = p order by rr.repo);
   if cardinality(has) > 0 and r <> all(has) then raise exception 'the runner has no repo % for %: it has %', r, p, array_to_string(has, ', '); end if;
   select rr.params into rp from cb.runner_recipes rr where rr.project = p and rr.repo = r and rr.recipe = recipe order by rr.runner limit 1;
@@ -5509,11 +5535,40 @@ begin
       end if;
     end loop;
   end loop;
+end $$;
+
+-- What a new job is told about the queue (#4527): how many wait ahead of it in claim order (cb.job_claim: the lowest
+-- coalesce(pos, id), then id), and whether nothing will start it for now: every runner that offers it is paused or
+-- draining, or its project's jobs are held.
+create function cb._job_reply(j cb.jobs) returns jsonb language sql stable as $$
+  select jsonb_build_object('id', j.id,
+    'ahead', (select count(*)::int from cb.jobs x where x.state = 'queued' and (coalesce(x.pos, x.id), x.id) < (coalesce(j.pos, j.id), j.id)),
+    'runner_paused', exists (select 1 from cb.runner_recipes rr where rr.project = j.project and rr.repo = j.repo and rr.recipe = j.recipe)
+                     and not exists (select 1 from cb.runner_recipes rr join cb.runners r on r.name = rr.runner
+                                     where rr.project = j.project and rr.repo = j.repo and rr.recipe = j.recipe and r.mode = 'on'),
+    'held', exists (select 1 from cb.job_holds h where h.project = j.project))
+$$;
+
+-- repo null: cb._repo of the actor in this project (its latest session there, else the project's home repo).
+create function cb.job_add(project text, recipe text, sha text, params jsonb default '{}', task_id bigint default null, actor text default null,
+                           repo text default null)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); p text := cb.read_project(project); r text; j cb.jobs;
+begin
+  if p is null then raise exception 'project is required'; end if;
+  if not cb._is_dashboard() and not exists (select 1 from cb.sessions s where s.actor = a and s.project = p and s.last_seen > now() - interval '1 day') then
+    raise exception '% has no bound session on % in the last day: only a session of the project, or Ahmed, can queue a job', a, p;
+  end if;
+  sha := lower(trim(coalesce(sha, '')));
+  if sha !~ '^[0-9a-f]{7,40}$' then raise exception 'sha must be 7 to 40 hex characters'; end if;
+  params := coalesce(params, '{}'::jsonb);
+  r := coalesce(nullif(trim(repo), ''), cb._repo(a, p));
+  perform cb._job_check(p, r, recipe, params);
   insert into cb.jobs (project, repo, recipe, params, sha, requester, task_id) values (p, r, recipe, params, sha, a, task_id)
-  returning cb.jobs.id into new_id;
-  select count(*)::int into ahead from cb.jobs j where j.state = 'queued' and j.id < new_id;
-  perform pg_notify('cb_jobs', new_id::text);
-  return jsonb_build_object('id', new_id, 'ahead', ahead);
+  returning * into j;
+  perform pg_notify('cb_jobs', j.id::text);
+  return cb._job_reply(j);
 end $$;
 
 create function cb.job_get(id bigint) returns jsonb language sql stable as $$
@@ -5525,7 +5580,7 @@ create function cb.jobs_list(project text default null) returns jsonb language p
 declare p text := cb.read_project(project);
 begin
   return jsonb_build_object(
-    'jobs', coalesce((select jsonb_agg(to_jsonb(j) order by j.id) from cb.jobs j
+    'jobs', coalesce((select jsonb_agg(to_jsonb(j) order by coalesce(j.pos, j.id), j.id) from cb.jobs j -- claim order (#4527)
                       where j.state in ('queued','running') and (p is null or j.project = p)), '[]'::jsonb),
     'runners', coalesce((select jsonb_agg(jsonb_build_object('name', r.name, 'last_seen', r.last_seen, 'recipes',
                   coalesce((select jsonb_agg(jsonb_build_object('project', rr.project, 'repo', rr.repo, 'recipe', rr.recipe, 'params', rr.params, 'db', rr.db)
@@ -5539,7 +5594,8 @@ declare a text := cb.set_actor(actor); j cb.jobs;
 begin
   select * into j from cb.jobs x where x.id = id for update;
   if not found then raise exception 'no job #%', id; end if;
-  if not cb._is_dashboard() and j.requester <> a
+  -- #4527: from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this function)
+  if not (cb._is_dashboard() and a = 'ahmed') and j.requester <> a
      and not cb._is_lead(a, j.project) then  -- the lead of the job's project
     raise exception 'only the requester, the project''s lead or Ahmed can cancel job #%', id;
   end if;
@@ -5550,14 +5606,21 @@ begin
   if j.requester is distinct from a then perform cb._job_tell(j); end if;
 end $$;
 
-create function cb.runner_hello(runner text, log_url text, recipes jsonb) returns int language plpgsql as $$
+-- slots, db_lanes (#4527): what this runner runs at once, as it started (the board setting, else runner.json); a runner
+-- from before passes neither and the page says "not reported yet". A restart ends a drain; a pause stays (Q2983).
+create function cb.runner_hello(runner text, log_url text, recipes jsonb, slots int default null, db_lanes int default null)
+returns int language plpgsql as $$
 #variable_conflict use_variable
 declare j cb.jobs; n int := 0; r jsonb;
 begin
   perform cb._runner_only();
   if jsonb_typeof(coalesce(recipes, '[]'::jsonb)) is distinct from 'array' then raise exception 'recipes must be a list'; end if;
-  insert into cb.runners (name, log_url, started_at, last_seen) values (runner, log_url, now(), now())
-  on conflict (name) do update set log_url = excluded.log_url, started_at = now(), last_seen = now();
+  insert into cb.runners (name, log_url, started_at, last_seen, slots, db_lanes) values (runner, log_url, now(), now(), slots, db_lanes)
+  on conflict (name) do update set log_url = excluded.log_url, started_at = now(), last_seen = now(),
+    slots = excluded.slots, db_lanes = excluded.db_lanes,
+    mode = case when cb.runners.mode = 'draining' then 'on' else cb.runners.mode end,
+    mode_by = case when cb.runners.mode = 'draining' then null else cb.runners.mode_by end,
+    mode_at = case when cb.runners.mode = 'draining' then now() else cb.runners.mode_at end;
   delete from cb.runner_recipes rr where rr.runner = runner_hello.runner;
   for r in select jsonb_array_elements(coalesce(recipes, '[]'::jsonb)) loop
     insert into cb.runner_recipes (runner, project, repo, recipe, params, db)
@@ -5593,14 +5656,28 @@ begin
   update cb.runners r set last_seen = now() where r.name = runner_beat.runner;
 end $$;
 
+-- #4527: nothing while the runner is paused or draining; nothing past Ahmed's slot setting, and no DB job past his lane
+-- setting, counted from this runner's running jobs (a lower setting applies here at once; a higher one needs the runner
+-- to restart, as it read its slots at start); never a held project's job; the lowest key first (a moved job's pos).
+-- A DB job at the front is still passed over while no lane is free, and the plain jobs behind it start.
 create function cb.job_claim(runner text, allow_db boolean) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
-declare j cb.jobs; jid bigint; d boolean;
+declare j cb.jobs; jid bigint; d boolean; rn cb.runners; busy int; busy_db int;
 begin
   perform cb._runner_only();
+  select * into rn from cb.runners r where r.name = job_claim.runner;
+  if found and rn.mode <> 'on' then return null; end if;
+  if rn.slots_set is not null or rn.lanes_set is not null then
+    select count(*)::int, count(*) filter (where rr.db)::int into busy, busy_db from cb.jobs x
+    left join cb.runner_recipes rr on rr.runner = x.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
+    where x.runner = job_claim.runner and x.state = 'running';
+    if busy >= coalesce(rn.slots_set, busy + 1) then return null; end if;
+    if busy_db >= coalesce(rn.lanes_set, busy_db + 1) then allow_db := false; end if;
+  end if;
   select x.id, rr.db into jid, d from cb.jobs x
   join cb.runner_recipes rr on rr.runner = job_claim.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
-  where x.state = 'queued' and (allow_db or not rr.db) order by x.id limit 1 for update of x skip locked;
+  where x.state = 'queued' and (allow_db or not rr.db) and not exists (select 1 from cb.job_holds h where h.project = x.project)
+  order by coalesce(x.pos, x.id), x.id limit 1 for update of x skip locked;
   if not found then return null; end if;
   update cb.jobs x set state = 'running', runner = job_claim.runner, started_at = now() where x.id = jid returning x.* into j;
   return to_jsonb(j) || jsonb_build_object('db', d);
@@ -5621,6 +5698,208 @@ begin
   perform cb._job_tell(j, true);
   return true;
 end $$;
+
+-- The runner queue page (#4527). Who manages the queue (Q2982): Ahmed, from his dashboard, and each project's lead for
+-- that project's jobs only, by its session's role (never by the name orch: cb._is_lead's fallback is not used here).
+-- Runner-wide state (pause, drain, slots) is Ahmed's alone: the runner serves every project. Deterrents like the rest.
+create function cb._lead_by_role(a text, proj text) returns boolean language sql stable as $$
+  select exists (select 1 from (select s.project, s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1) s
+                  where s.project = proj and s.role = 'lead')
+$$;
+-- exactly ahmed from the dashboard: not cb.ahmed_like, which takes any name holding the word
+create function cb._is_owner(a text) returns boolean language sql stable as $$ select cb._is_dashboard() and a = 'ahmed' $$;
+create function cb._queue_manager(a text, proj text) returns boolean language sql stable as $$
+  select cb._is_owner(a) or cb._lead_by_role(a, proj)
+$$;
+-- The supervisor holds the session advisory lock hashtext('cb-supervisor') while it runs (cli/supervise.ts); pg_locks
+-- shows it to every role. A bigint key is split into classid (high 32 bits) and objid (low 32 bits), objsubid 1.
+create function cb._supervisor_up() returns boolean language sql stable as $$
+  select exists (select 1 from pg_locks l where l.locktype = 'advisory' and l.granted and l.objsubid = 1
+    and l.database = (select d.oid from pg_database d where d.datname = current_database())
+    and l.classid::bigint = ((hashtext('cb-supervisor')::bigint >> 32) & 4294967295)
+    and l.objid::bigint = (hashtext('cb-supervisor')::bigint & 4294967295))
+$$;
+
+-- Everything the Runners page shows, in one read. project narrows the job lists only: the runners, the counts of the
+-- whole queue and every place number stay the machine's, so a wait still makes sense. why: the first reason that stops
+-- the job, over the runners that offer it, the least stopped one counted: held, no runner, not answering (3 minutes
+-- without a beat, the supervisor's threshold), paused or draining, no DB lane free, no slot free; else it starts next.
+-- A slot or lane count is the lower of what the runner reported and Ahmed's setting (either may be unknown).
+create function cb.runner_queue(project text default null, hours int default 24) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); h int := least(greatest(coalesce(hours, 24), 1), 168);
+begin
+  return (
+    with run as (
+      select x.runner, count(*)::int as busy, count(*) filter (where rr.db)::int as busy_db from cb.jobs x
+      left join cb.runner_recipes rr on rr.runner = x.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
+      where x.state = 'running' group by x.runner
+    ), rs as (
+      select r.name, r.last_seen, r.started_at, r.mode, r.mode_by, r.mode_at, r.slots, r.db_lanes, r.slots_set, r.lanes_set, r.set_by, r.set_at,
+        r.last_seen > now() - interval '3 minutes' as alive, coalesce(run.busy, 0) as busy, coalesce(run.busy_db, 0) as busy_db,
+        least(r.slots, r.slots_set) as cap, least(r.db_lanes, r.lanes_set) as lanes
+      from cb.runners r left join run on run.runner = r.name
+    ), q as (
+      select x.*, row_number() over (order by coalesce(x.pos, x.id), x.id)::int as place,
+        exists (select 1 from cb.runner_recipes rr where rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe and rr.db) as db
+      from cb.jobs x where x.state = 'queued'
+    ), w as (
+      select q.*, coalesce(
+        (select jsonb_build_object('reason', 'held', 'by', hd.held_by, 'at', hd.held_at) from cb.job_holds hd where hd.project = q.project),
+        (select why from (
+           select case when not rs.alive then 5 when rs.mode <> 'on' then 4 when q.db and rs.busy_db >= rs.lanes then 3
+                       when rs.busy >= rs.cap then 2 else 1 end as rank,
+                  case when not rs.alive then jsonb_build_object('reason', 'down', 'runner', rs.name, 'since', rs.last_seen)
+                       when rs.mode <> 'on' then jsonb_build_object('reason', rs.mode, 'runner', rs.name, 'by', rs.mode_by, 'at', rs.mode_at)
+                       when q.db and rs.busy_db >= rs.lanes then jsonb_build_object('reason', 'lane', 'busy', rs.busy_db, 'of', rs.lanes)
+                       when rs.busy >= rs.cap then jsonb_build_object('reason', 'slot', 'busy', rs.busy, 'of', rs.cap)
+                       else jsonb_build_object('reason', 'next') end as why
+           from rs join cb.runner_recipes rr on rr.runner = rs.name and rr.project = q.project and rr.repo = q.repo and rr.recipe = q.recipe
+           order by 1 limit 1) best),
+        jsonb_build_object('reason', 'no_runner')) as why
+      from q
+    )
+    select jsonb_build_object(
+      'now', now(), 'project', p, 'hours', h, 'supervisor', cb._supervisor_up(),
+      'runners', coalesce((select jsonb_agg(to_jsonb(rs) order by rs.name) from rs), '[]'::jsonb),
+      'holds', coalesce((select jsonb_agg(to_jsonb(hd) order by hd.project) from cb.job_holds hd), '[]'::jsonb),
+      'counts', jsonb_build_object(
+        'waiting', (select count(*)::int from q), 'running', (select coalesce(sum(busy), 0)::int from run),
+        'waiting_here', (select count(*)::int from q where p is null or q.project = p),
+        'running_here', (select count(*)::int from cb.jobs x where x.state = 'running' and (p is null or x.project = p)),
+        'passed_hour', (select count(*)::int from cb.jobs x where x.state = 'passed' and x.finished_at > now() - interval '1 hour' and (p is null or x.project = p)),
+        'failed_hour', (select count(*)::int from cb.jobs x where x.state in ('failed', 'error') and x.finished_at > now() - interval '1 hour' and (p is null or x.project = p))),
+      'running', coalesce((select jsonb_agg(to_jsonb(x) - 'exit_code' - 'pos' || jsonb_build_object('db', coalesce(rr.db, false)) order by x.started_at, x.id)
+                 from cb.jobs x left join cb.runner_recipes rr on rr.runner = x.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
+                 where x.state = 'running' and (p is null or x.project = p)), '[]'::jsonb),
+      'waiting', coalesce((select jsonb_agg(to_jsonb(w) - 'exit_code' - 'pos' order by w.place) from w where p is null or w.project = p), '[]'::jsonb),
+      'finished', coalesce((select jsonb_agg(t.f order by t.finished_at desc, t.id desc) from (
+                   select x.finished_at, x.id, to_jsonb(x) - 'exit_code' - 'pos' as f from cb.jobs x
+                   where x.finished_at > now() - make_interval(hours => h) and (p is null or x.project = p)
+                   order by x.finished_at desc, x.id desc limit 200) t), '[]'::jsonb)));
+end $$;
+
+-- "Run again" (#4527): a new job with the old one's project, repo, recipe, sha, parameters, card and requester (its
+-- result reaches the session that waited), linked by retry_of. The recipe is checked as it is now. One of the same
+-- check already waiting or running is refused, so a double tap queues one.
+create function cb.job_retry(id bigint, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); j cb.jobs; n cb.jobs; dup bigint;
+begin
+  select * into j from cb.jobs x where x.id = id;
+  if not found then raise exception 'no job #%', id; end if;
+  if j.requester <> a and not cb._queue_manager(a, j.project) then
+    raise exception 'only the requester, the lead of % or Ahmed can run job #% again', j.project, id;
+  end if;
+  if j.state in ('queued', 'running') then raise exception 'job #% has not ended: stop it first, or wait for it', id; end if;
+  perform pg_advisory_xact_lock(hashtext('cb-job-queue'));
+  select x.id into dup from cb.jobs x where x.state in ('queued', 'running') and x.project = j.project and x.repo = j.repo
+    and x.recipe = j.recipe and x.sha = j.sha and x.params = j.params order by x.id limit 1;
+  if found then raise exception 'the same check is already waiting or running as job #%', dup; end if;
+  perform cb._job_check(j.project, j.repo, j.recipe, j.params);
+  insert into cb.jobs (project, repo, recipe, params, sha, requester, task_id, retry_of)
+  values (j.project, j.repo, j.recipe, j.params, j.sha, j.requester, j.task_id, j.id) returning * into n;
+  perform pg_notify('cb_jobs', n.id::text);
+  return cb._job_reply(n);
+end $$;
+
+-- Move a waiting job (#4527): next, up, down or back. The moved jobs swap the keys they already hold, so no other job's
+-- place changes and a job queued later still goes after them. Ahmed moves over the whole queue; a project's lead only
+-- among its own project's waiting jobs (Q2982: a lead's move never puts its jobs ahead of another project's). Which
+-- lane a DB job gets is still decided at claim time: a moved DB job starts when a lane frees.
+create function cb.job_move(id bigint, place text, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); j cb.jobs; own boolean; ids bigint[]; ks bigint[]; i int; k int; n int;
+begin
+  if place is null or place not in ('next', 'up', 'down', 'back') then raise exception 'place must be next, up, down or back'; end if;
+  perform pg_advisory_xact_lock(hashtext('cb-job-queue'));
+  select * into j from cb.jobs x where x.id = id;
+  if not found then raise exception 'no job #%', id; end if;
+  own := cb._is_owner(a);
+  if not own and not cb._lead_by_role(a, j.project) then
+    raise exception 'only Ahmed or the lead of % can move its jobs in the queue', j.project;
+  end if;
+  if j.state <> 'queued' then raise exception 'job #% is not waiting any more: it started or ended', id; end if;
+  select array_agg(x.id order by coalesce(x.pos, x.id), x.id), array_agg(coalesce(x.pos, x.id) order by coalesce(x.pos, x.id), x.id)
+    into ids, ks from cb.jobs x where x.state = 'queued' and (own or x.project = j.project);
+  n := cardinality(ids); i := array_position(ids, j.id);
+  k := case place when 'next' then 1 when 'back' then n when 'up' then greatest(i - 1, 1) else least(i + 1, n) end;
+  if k <> i then
+    ids := array_remove(ids, j.id);
+    ids := ids[1:k - 1] || j.id || ids[k:];
+    for t in 1..n loop
+      update cb.jobs x set pos = ks[t] where x.id = ids[t] and coalesce(x.pos, x.id) <> ks[t];
+    end loop;
+  end if;
+  return jsonb_build_object('id', j.id, 'moved', k <> i);
+end $$;
+
+-- Hold or release a project's waiting jobs (#4527): Ahmed or the project's lead. Running jobs carry on; the runner keeps
+-- serving every other project. A hold stays until someone releases it.
+create function cb.job_hold(project text, held boolean, actor text default null) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); p text := cb.read_project(project);
+begin
+  if p is null then raise exception 'project is required'; end if;
+  if not cb._queue_manager(a, p) then raise exception 'only Ahmed or the lead of % can hold its jobs', p; end if;
+  if held then
+    insert into cb.job_holds (project, held_by) values (p, a) on conflict on constraint job_holds_pkey do nothing;
+  else
+    delete from cb.job_holds hd where hd.project = p;
+    perform pg_notify('cb_jobs', '0'); -- the runner fills its slots now, not at its next 30 s tick
+  end if;
+  return held;
+end $$;
+
+-- Pause, drain or resume a runner (#4527, Q2983): Ahmed's alone. A pause stays until resumed (a restart keeps it); a
+-- drain is a pause before a restart and ends when the runner comes back (runner_hello). Running jobs carry on.
+create function cb.runner_set(runner text, mode text, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); r cb.runners;
+begin
+  if not cb._is_owner(a) then raise exception 'only Ahmed can pause, drain or resume a runner: it serves every project'; end if;
+  if mode is null or mode not in ('on', 'paused', 'draining') then raise exception 'mode must be on, paused or draining'; end if;
+  update cb.runners x set mode = runner_set.mode, mode_by = a, mode_at = now() where x.name = runner returning x.* into r;
+  if not found then raise exception 'no runner %: see cb jobs', runner; end if;
+  if mode = 'on' then perform pg_notify('cb_jobs', '0'); end if;
+  return jsonb_build_object('name', r.name, 'mode', r.mode);
+end $$;
+
+-- How many jobs a runner runs at once, and how many of them may be DB jobs (#4527, Q2984): Ahmed's alone, any number up
+-- or down, beyond the old code cap. Null = the runner's runner.json. The runner reads it at start (cli/runner.ts): a
+-- lower number applies at the next claim (cb.job_claim), a higher one when the runner restarts and reports it. A lane
+-- is one digit in its test stack's ports (docs/ops/maintain.md), so 1-9 lanes, never more than the slots.
+create function cb.runner_limits_set(runner text, slots int default null, db_lanes int default null, actor text default null)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); r cb.runners;
+begin
+  if not cb._is_owner(a) then raise exception 'only Ahmed can change how many jobs a runner runs at once'; end if;
+  if slots is not null and (slots < 1 or slots > 64) then raise exception 'slots must be 1 to 64'; end if;
+  if db_lanes is not null and (db_lanes < 1 or db_lanes > 9) then raise exception 'database lanes must be 1 to 9'; end if;
+  select * into r from cb.runners x where x.name = runner for update;
+  if not found then raise exception 'no runner %: see cb jobs', runner; end if;
+  if db_lanes is not null and db_lanes > coalesce(slots, r.slots, db_lanes) then
+    raise exception 'database lanes (%) cannot be more than slots (%)', db_lanes, coalesce(slots, r.slots);
+  end if;
+  update cb.runners x set slots_set = slots, lanes_set = db_lanes, set_by = a, set_at = now() where x.name = runner returning x.* into r;
+  perform pg_notify('cb_jobs', '0');
+  return jsonb_build_object('name', r.name, 'slots_set', r.slots_set, 'lanes_set', r.lanes_set);
+end $$;
+
+-- The page's live refresh (#4527): its own channel, so a job's start or end neither wakes every open page (channel cb)
+-- nor the runner (cb_jobs). Never on the 30 s beat (last_seen).
+create function cb.queue_notify() returns trigger language plpgsql as $$
+begin
+  perform pg_notify('cb_queue', tg_table_name);
+  return null;
+end $$;
+create or replace trigger jobs_queue_notify after insert or update or delete on cb.jobs
+  for each statement execute function cb.queue_notify();
+create or replace trigger runners_queue_notify after insert or delete or update of mode, slots, db_lanes, slots_set, lanes_set on cb.runners
+  for each statement execute function cb.queue_notify();
+create or replace trigger job_holds_queue_notify after insert or update or delete on cb.job_holds
+  for each statement execute function cb.queue_notify();
 
 
 -- The supervisor (#3601): a PC daemon (application name 'cb-supervisor/<version>') that starts and closes squad sessions

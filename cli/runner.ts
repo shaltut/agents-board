@@ -7,7 +7,7 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmS
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
-import { freeLane, loadConfig, published, type RunnerConfig } from './recipes.ts';
+import { freeLane, loadConfig, published, withBoard, type RunnerConfig } from './recipes.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob } from './runner-job.ts';
 import { isNetworkError, survive } from './survive.ts';
@@ -21,8 +21,8 @@ const HOME = process.env.CB_RUNNER_HOME || join(homedir(), '.claude-board', 'run
 const LOGS = join(HOME, 'logs');
 const KEEP_MS = 7 * 86_400_000;
 
-let cfg: RunnerConfig;
-try { cfg = loadConfig(readFileSync(CONFIG, 'utf8')); } catch (e: any) {
+let cfg: RunnerConfig, configText = '';
+try { configText = readFileSync(CONFIG, 'utf8'); cfg = loadConfig(configText); } catch (e: any) {
   console.error(`runner config ${CONFIG}: ${e?.message ?? e}`);
   process.exit(1);
 }
@@ -77,7 +77,12 @@ const VERSION = createHash('sha1')
   .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
   .digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-runner/${VERSION}`, max: 4 });
-const [hello] = await sql`select cb.runner_hello(${NAME}, ${`http://${cfg.log.host}:${cfg.log.port}`}, ${sql.json(published(cfg) as any)}) as n`;
+// #4527: Ahmed's slot setting on the board wins over runner.json's, read once here: a higher one takes this restart (a new
+// slot's first job clones it fresh); a lower one cb.job_claim applies at once. The counts run go back in runner_hello.
+const [board] = await sql`select slots_set, lanes_set from cb.runners where name = ${NAME}`;
+cfg = withBoard(configText, cfg, { slots: board?.slots_set, dbLanes: board?.lanes_set }, say);
+const fromBoard = board?.slots_set != null || board?.lanes_set != null;
+const [hello] = await sql`select cb.runner_hello(${NAME}, ${`http://${cfg.log.host}:${cfg.log.port}`}, ${sql.json(published(cfg) as any)}, ${cfg.slots}, ${cfg.dbLanes}) as n`;
 if (hello!.n) say(`${hello!.n} job(s) left running by the last run ended as runner restarted`);
 
 const prune = () => {
@@ -157,5 +162,5 @@ setInterval(() => {
   sql`select cb.runner_beat(${NAME})`.catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
   tick();
 }, 30_000);
-say(`runner ${NAME} up (cb-runner/${VERSION}), logs on http://${cfg.log.host}:${cfg.log.port}`);
+say(`runner ${NAME} up (cb-runner/${VERSION}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, logs on http://${cfg.log.host}:${cfg.log.port}`);
 survival.ready();

@@ -23,6 +23,8 @@ export const TABLE_KEYS: Record<string, string[]> = {
   users: ['users', 'people', 'sessions', 'whoami'],
   user_projects: ['users', 'people'],
   memories: ['memories'],
+  // the Runners page (#4527): the stream's own queue event (channel cb_queue), never a change event; a hidden tab waits
+  jobs: ['runners'],
 }
 
 /** The query keys to re-fetch for a batch of changed tables, or 'all' ('listen' = the stream reconnected). */

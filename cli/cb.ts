@@ -831,7 +831,7 @@ ${body}`, json: pg };
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');
-      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail);
+      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'runner.ts')], { stdio: 'inherit' });

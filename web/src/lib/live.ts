@@ -19,6 +19,7 @@ export function useLive(): 'live' | 'reconnecting' {
     document.addEventListener('visibilitychange', onVisible)
     es.addEventListener('hello', () => setState('live'))
     es.addEventListener('change', (e) => r.change((e as MessageEvent).data)) // data: the table that changed
+    es.addEventListener('queue', () => r.change('jobs')) // a job queued, started, moved or ended (#4527): the Runners page
     es.onerror = () => setState('reconnecting')
     es.onopen = () => { setState('live'); r.change('listen') } // what changed while disconnected: everything
     return () => { r.stop(); document.removeEventListener('visibilitychange', onVisible); es.close() }

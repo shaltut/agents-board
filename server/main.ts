@@ -215,7 +215,13 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
 // also lets the lead's cb squad set through; the rest are dashboard_only): this narrows only which signed-in admin may
 // call them. The pipeline switch and the reminders keep their guard (any admin, as on Board and Backlog).
 const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
-const ownerRule = (admin: Who, fn: string) => OWNER_ONLY.has(fn) && admin.name !== 'ahmed' ? 'Only Ahmed changes project settings.' : null;
+// The Runners page (#4527) is for every admin to read (Q2978); managing the queue is Ahmed's and each project's lead's
+// (Q2982), and a lead is a session (cb job ...), never a signed-in admin. The SQL checks the same (cb._is_owner: exactly
+// ahmed on the dashboard; cb._lead_by_role); this refuses another admin before the database is asked.
+const QUEUE_OWNER = new Set(['job_cancel', 'job_retry', 'job_move', 'job_hold', 'runner_set', 'runner_limits_set']);
+const ownerRule = (admin: Who, fn: string) => admin.name === 'ahmed' ? null
+  : OWNER_ONLY.has(fn) ? 'Only Ahmed changes project settings.'
+  : QUEUE_OWNER.has(fn) ? 'Only Ahmed manages the runner queue on the board; a project\'s lead uses cb job.' : null;
 
 app.post('/api/rpc/:fn', async (c) => {
   try {
@@ -293,6 +299,8 @@ app.post('/api/telegram/connect', async (c) => {
 });
 app.post('/api/telegram/disconnect', async (c) => pageOnly(c) ?? (await telegramDisconnect(), c.json({ ok: true })));
 app.get('/api/sessions', async (c) => c.json(await q.sessions(opt(c.req.query('project')))));
+// The Runners page (#4527): every admin and the PC's own screen (guests never get here: default-deny above).
+app.get('/api/runners', async (c) => c.json(await q.runners(opt(c.req.query('project')))));
 app.get('/api/huddles', async (c) => c.json(await q.huddles(opt(c.req.query('project')))));
 app.get('/api/epics', async (c) => c.json(await q.epics(opt(c.req.query('project')))));
 // Shared memory (#167): live and proposed entries (all=1 adds superseded and retired). No project = every project.
@@ -337,14 +345,22 @@ app.get('/healthz', async (c) => {
 app.route('/', releaseApp);
 
 // Live updates: one LISTEN connection fanned out to every open page.
-type Client = (table: string) => void;
+type Client = (table: string, event?: 'change' | 'queue') => void;
 const clients = new Set<Client>();
 let listening: Promise<unknown> | null = null, retry: ReturnType<typeof setTimeout> | null = null, wait = 1000;
 const fan = (table: string) => clients.forEach((send) => send(table));
+// cb_queue (#4527): a job queued, started, moved or ended, or a runner paused or resized. At most one event a second,
+// named queue: a page on an older bundle listens for change only, where an unknown table would re-fetch everything.
+let queueTimer: ReturnType<typeof setTimeout> | null = null;
+export const fanQueue = (every = 1000) => {
+  if (queueTimer) return;
+  queueTimer = setTimeout(() => { queueTimer = null; clients.forEach((send) => send('jobs', 'queue')); }, every);
+  queueTimer.unref?.();
+};
 /** Never rejects: a failed LISTEN (the DB down at boot) is logged and retried with backoff, not cached, so the
  *  server stays up without live updates until it connects. 'listen' fans out on every (re)connect: what changed
  *  while the connection was down is caught up. listen is injectable for the test. */
-export function ensureListen(listen = () => sql.listen('cb', fan, () => fan('listen'))) {
+export function ensureListen(listen = () => Promise.all([sql.listen('cb', fan, () => fan('listen')), sql.listen('cb_queue', () => fanQueue())])) {
   listening ??= listen().then((r) => { wait = 1000; return r; }, (e: any) => {
     listening = null;
     console.error(`live updates: LISTEN failed (${e?.message ?? e}); retrying in ${wait / 1000}s`);
@@ -359,7 +375,7 @@ app.get('/api/stream', async (c) => {
   await ensureListen();
   c.header('X-Accel-Buffering', 'no'); // nginx (the VPS's proxy) would otherwise hold the events back
   return streamSSE(c, async (stream) => {
-    const send: Client = (table) => { stream.writeSSE({ event: 'change', data: table }).catch(() => {}); };
+    const send: Client = (table, event = 'change') => { stream.writeSSE({ event, data: table }).catch(() => {}); };
     clients.add(send);
     stream.onAbort(() => clients.delete(send));
     await stream.writeSSE({ event: 'hello', data: 'ok' });

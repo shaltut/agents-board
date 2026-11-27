@@ -59,7 +59,9 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
     if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}${o.repo ? ` (${o.repo})` : ''}. Recipes: ${await known()}`);
     throw e;
   }
-  const queued = `job #${added.id} queued (${added.ahead} ahead)`;
+  // #4527: nothing starts it for now: say so, or cb run --wait sits silent for its 30 minutes
+  const queued = `job #${added.id} queued (${added.ahead} ahead)${added.runner_paused ? '; the runner is paused: it starts when Ahmed resumes it'
+    : added.held ? `; ${o.project}'s jobs are held: it starts when its lead or Ahmed releases them (cb job release ${o.project})` : ''}`;
   if (!o.wait) return { out: queued, json: added, code: 0 };
   if (!o.json) console.log(queued);
   // cb.job_finish sends no pg_notify, so poll: LISTEN alone would miss the end
@@ -88,10 +90,25 @@ export async function jobsCmd(sql: any, project: string | null): Promise<Result>
   return { out: lines.join('\n'), json: l, code: 0 };
 }
 
-export async function jobCmd(sql: any, sub: string | undefined, id: string | undefined, actor: string, tail?: string): Promise<Result> {
-  const usage = 'usage: cb job show|cancel|log <id> [--tail <lines>]';
-  if (!/^\d+$/.test(id ?? '') || !['show', 'cancel', 'log'].includes(sub ?? '')) throw new Error(usage);
+export async function jobCmd(sql: any, sub: string | undefined, id: string | undefined, actor: string, tail?: string, place?: string): Promise<Result> {
+  const usage = 'usage: cb job show|cancel|log|retry <id> [--tail <lines>] · cb job move <id> next|up|down|back · cb job hold|release <project>';
+  // #4527: a project's lead (or Ahmed) holds and releases its project's waiting jobs
+  if (sub === 'hold' || sub === 'release') {
+    if (!id) throw new Error(usage);
+    await sql`select cb.job_hold(${id}, ${sub === 'hold'}, ${actor})`;
+    return { out: sub === 'hold' ? `${id}'s waiting jobs are held: running ones carry on (cb job release ${id})` : `${id}'s jobs start again`, json: { project: id, held: sub === 'hold' }, code: 0 };
+  }
+  if (!/^\d+$/.test(id ?? '') || !['show', 'cancel', 'log', 'retry', 'move'].includes(sub ?? '')) throw new Error(usage);
   if (sub === 'cancel') { await sql`select cb.job_cancel(${id!}::bigint, ${actor})`; return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
+  if (sub === 'retry') {
+    const [{ r }] = await sql`select cb.job_retry(${id!}::bigint, ${actor}) as r`;
+    return { out: `job #${r.id} queued (${r.ahead} ahead), again for job #${id}`, json: r, code: 0 };
+  }
+  if (sub === 'move') {
+    if (!['next', 'up', 'down', 'back'].includes(place ?? '')) throw new Error('usage: cb job move <id> next|up|down|back');
+    const [{ r }] = await sql`select cb.job_move(${id!}::bigint, ${place!}, ${actor}) as r`;
+    return { out: r.moved ? `job #${id} moved ${place}` : `job #${id} is already ${place === 'up' || place === 'next' ? 'first' : 'last'}`, json: r, code: 0 };
+  }
   const [{ j }] = await sql`select cb.job_get(${id!}::bigint) as j`;
   if (!j) throw new Error(`no job #${id}`);
   if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: markedJson(j), code: 0 };
