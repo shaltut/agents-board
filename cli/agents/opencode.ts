@@ -234,7 +234,7 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
     },
 
     guardInstallSpec(boardDir) {
-      const t = 'bash|powershell|edit|write|patch|apply_patch|multiedit|question';
+      const t = 'bash|powershell|edit|write|patch|apply_patch|multiedit|read|grep|glob|list|question';
       return {
         targetPath: '~/.config/opencode/plugins/cb-guard.js',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-opencode.mjs`,
