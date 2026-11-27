@@ -1,5 +1,5 @@
 // Starts the private Postgres 16 cluster in .pgdata if it isn't running; creates it if missing.
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -7,6 +7,19 @@ const ROOT = join(import.meta.dirname, '..');
 const PGDATA = join(ROOT, '.pgdata');
 const BIN = process.env.CB_PG_BIN ?? 'C:/Program Files/PostgreSQL/16/bin';
 const pgCtl = join(BIN, 'pg_ctl.exe');
+
+/** #4482: spawnSync with a deadline: a stalled child (initdb, pg_ctl, the port probe) throws in words instead of
+ *  leaving a test run silent. A timed-out child throws, never returns: its null status read
+ *  through `.status === 0` would be "not running" and start a second cluster. Windows ends only the direct child: a
+ *  postmaster that pg_ctl started keeps running (node db/setup.ts --test --stop stops a worktree's). */
+export function spawnWithin(cmd: string, args: string[], opts: SpawnSyncOptions, ms: number, what: string) {
+  const r = spawnSync(cmd, args, { windowsHide: true, ...opts, timeout: ms }); // #4491: no console flash from a caller with none
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error(`${what} did not finish within ${ms / 1000} s`);
+  return r;
+}
+// pg_ctl -w gives up by itself after 60 s (PGCTLTIMEOUT); initdb syncs every file it writes, slow on a busy disk
+const QUICK = 30_000, START = 120_000, INITDB = 180_000;
+const running = (dir: string) => spawnWithin(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }, QUICK, `pg_ctl status in ${dir}`).status === 0;
 
 /** The private cluster is this repo's Windows Postgres: a board on Linux (the VPS's container) or pointed at another
  *  machine's database (CB_DATABASE_URL) has nothing to start. */
@@ -20,7 +33,8 @@ export function ownsPg(url: string): boolean {
 export function ensurePg(dir = PGDATA, port = 5434, adopt = true): void {
   if (adopt && answers(port)) return;
   if (!existsSync(join(dir, 'PG_VERSION'))) {
-    const i = spawnSync(join(BIN, 'initdb.exe'), ['-D', dir, '-U', 'cb', '--auth=trust', '-E', 'UTF8'], { stdio: 'pipe', encoding: 'utf8' });
+    const i = spawnWithin(join(BIN, 'initdb.exe'), ['-D', dir, '-U', 'cb', '--auth=trust', '-E', 'UTF8'], { stdio: 'pipe', encoding: 'utf8' },
+      INITDB, `initdb in ${dir} (delete that folder before the next try)`);
     // #4401: an initdb that never started has no output: say why, and where it was looked for
     if (i.status !== 0) {
       const hint = (i.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? ` (no initdb.exe in ${BIN}: set CB_PG_BIN to PostgreSQL's bin folder)` : '';
@@ -28,17 +42,39 @@ export function ensurePg(dir = PGDATA, port = 5434, adopt = true): void {
       throw new Error(`could not create Postgres cluster in ${dir}: ${why}`);
     }
   }
-  if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status === 0) return;
+  if (running(dir)) return;
   // stdio 'ignore': the postmaster inherits pg_ctl's handles, so a pipe here never closes and spawnSync hangs.
   const log = join(dir, 'server.log');
   // A worktree's cluster listens on 127.0.0.1 only (the test URL's host): with the default 'localhost', a port another
   // program held on 127.0.0.1 still "started" on ::1, and the tests reached that program (#4413).
   const opts = adopt ? `-p ${port}` : `-p ${port} -c listen_addresses=127.0.0.1`;
-  const r = spawnSync(pgCtl, ['-D', dir, '-o', opts, '-l', log, '-w', 'start'], { stdio: 'ignore' });
-  if (r.status !== 0) throw new Error(`could not start Postgres in ${dir}; see ${log}`);
+  // #4491: the 5434 dev cluster too (setup, seed, the server, cb): a piped command that started it held its pipe
+  const r = startInheritingNothing(['-D', dir, '-o', opts, '-l', log, '-w', 'start'], `pg_ctl start in ${dir} (its log: ${log})`);
+  // #4491 M2: PowerShell that did not run is said as such, never as a Postgres failure with nothing in its log
+  if (r.error) throw new Error(`could not start Postgres in ${dir}: ${POWERSHELL} did not run (${r.error.message})`);
+  // judged by pg_ctl status: PowerShell's exit code for a quickly ended process can read 0
+  if (r.status !== 0 || !running(dir)) throw new Error(`could not start Postgres in ${dir}; see ${log}`);
 }
 
-const answers = (port: number) => spawnSync(join(BIN, 'pg_isready.exe'), ['-h', '127.0.0.1', '-p', String(port)], { stdio: 'ignore' }).status === 0;
+// #4491 M2: by full path, never from PATH (a stripped env has none): Windows PowerShell 5.1 is in every Windows 10/11
+const POWERSHELL = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+/** #4482: every process on the way to the postmaster (node, pg_ctl, cmd) is created with handle inheritance on, so the
+ *  postmaster also holds every inheritable handle above it. Run from a Git Bash pipeline (`node --test ... | tail`) that
+ *  includes the pipe the shell reads: the run that started a worktree's test cluster never returned, its tests long
+ *  done, until the cluster stopped; a rerun (cluster already up) passed. Start-Process (ShellExecute) creates pg_ctl
+ *  with no inherited handle. Every start goes this way (#4491): the worktree test clusters and the 5434 dev cluster. */
+function startInheritingNothing(args: string[], what: string) {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const line = args.map((a) => `"${a}"`).join(' ');
+  // $p.Handle: read before the exit, so ExitCode is kept; never -Wait, which waits for the postmaster too
+  const ps = `$p = Start-Process -FilePath ${q(pgCtl)} -ArgumentList ${q(line)} -WindowStyle Hidden -PassThru; $null = $p.Handle; $p.WaitForExit(); exit $p.ExitCode`;
+  return spawnWithin(POWERSHELL, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')],
+    { stdio: 'ignore' }, START, what);
+}
+
+const answers = (port: number) =>
+  spawnWithin(join(BIN, 'pg_isready.exe'), ['-h', '127.0.0.1', '-p', String(port)], { stdio: 'ignore' }, QUICK, `pg_isready on port ${port}`).status === 0;
 
 /** #4413: a Windows worktree tests against its own cluster (its .pgdata, its own port). All worktrees used to share
  *  127.0.0.1:5434, served by whichever worktree's cluster started first: eight parallel runs ran out of its 100
@@ -72,13 +108,14 @@ const binds = (p) => new Promise((r) => { const v = net.createServer(); v.once('
 export function testPgPort(root = ROOT, platform = process.platform): number {
   if (!ownTestPg(root, platform)) return 5434;
   const dir = join(root, '.pgdata');
-  if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status === 0) {
+  if (running(dir)) {
     const port = Number(readFileSync(join(dir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[3]);
     if (port > 0) return port;
   }
   if (root === ROOT && Number(process.env.CB_TEST_PG_PORT) > 0) return Number(process.env.CB_TEST_PG_PORT);
   const start = testPortStart(root);
-  const port = Number(spawnSync(process.execPath, ['-e', FIRST_FREE, String(start), '20'], { encoding: 'utf8' }).stdout);
+  // 20 ports at up to 3 s each
+  const port = Number(spawnWithin(process.execPath, ['-e', FIRST_FREE, String(start), '20'], { encoding: 'utf8' }, START, `the free-port search from ${start}`).stdout);
   if (port > 0) return port;
   throw new Error(`no free port for this worktree's test Postgres in ${start}-${start + 19}: other programs hold all of them`);
 }
@@ -98,7 +135,7 @@ export function ensureTestPg(url: string, root = ROOT): void {
 export function stopTestPg(root = ROOT): { ok: boolean; message: string } {
   if (!ownTestPg(root)) return { ok: true, message: 'no test cluster of its own here (not a Windows worktree)' };
   const dir = join(root, '.pgdata');
-  if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status !== 0) return { ok: true, message: `no test cluster running in ${dir}` };
-  const r = spawnSync(pgCtl, ['-D', dir, 'stop', '-w'], { encoding: 'utf8' });
+  if (!running(dir)) return { ok: true, message: `no test cluster running in ${dir}` };
+  const r = spawnWithin(pgCtl, ['-D', dir, 'stop', '-w'], { encoding: 'utf8' }, START, `pg_ctl stop in ${dir}`);
   return { ok: r.status === 0, message: (r.stdout || r.stderr || r.error?.message || '').trim() };
 }

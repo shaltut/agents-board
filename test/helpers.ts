@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { testDbUrl } from '../db/pg.ts';
 
@@ -18,17 +19,36 @@ delete process.env.CB_TRUST_LOCAL;
 delete process.env.CB_BEHIND_CLOUDFLARE;
 
 let ready = false;
+// #4482: setup (cluster start, database, schema) took ~40 s on a loaded PC; past this it fails, in words, with what to
+// run, instead of leaving the run silent (db/pg.ts gives each step its own deadline).
+const SETUP_MS = 300_000;
+
+function setupTestDb() {
+  try {
+    execFileSync('node', ['db/setup.ts', '--test'], { stdio: 'pipe', timeout: SETUP_MS });
+  } catch (e: any) {
+    const stalled = e?.code === 'ETIMEDOUT' ? `node db/setup.ts --test did not finish within ${SETUP_MS / 1000} s`
+      : /(?:^|\n)Error: ([^\n]* did not finish within [^\n]*)/.exec(String(e?.stderr ?? ''))?.[1];
+    if (!stalled) throw e;
+    throw new Error(`the test database is not ready: ${stalled}. Stop this checkout's test cluster with node db/setup.ts --test --stop `
+      + `and run the tests again (on Windows the cluster's log is ${join(import.meta.dirname, '..', '.pgdata', 'server.log')})`);
+  }
+}
 
 /** Applies setup to the test DB (once per process) and wipes all cb tables. */
 export async function freshDb() {
   if (!ready) {
-    execFileSync('node', ['db/setup.ts', '--test'], { stdio: 'pipe' });
+    setupTestDb();
     ready = true;
   }
   // tests seed as Ahmed too: they connect as his dashboard does (sessions can't act as ahmed)
   const sql = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'cb-web' } });
   const tables = await sql`select tablename from pg_tables where schemaname = 'cb' and tablename <> 'role_texts'`; // role_texts is filled by setup, not by tests
-  if (tables.length) await sql.unsafe(`truncate ${tables.map((t) => 'cb.' + t.tablename).join(', ')} restart identity cascade`);
+  // #4482: a lock held by a connection left from an earlier test fails the wipe in a minute instead of waiting forever
+  if (tables.length) await sql.begin(async (tx: any) => {
+    await tx`set local lock_timeout = '60s'`;
+    await tx.unsafe(`truncate ${tables.map((t) => 'cb.' + t.tablename).join(', ')} restart identity cascade`);
+  });
   return sql;
 }
 

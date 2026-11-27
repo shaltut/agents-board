@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import postgres from 'postgres';
-import { ensurePg, ensureTestPg, testPgPort, testPortStart } from '../db/pg.ts';
+import { ensurePg, ensureTestPg, spawnWithin, testPgPort, testPortStart } from '../db/pg.ts';
 
 // the private cluster is Windows-only (initdb.exe, pg_ctl.exe; db/pg.ts): elsewhere Postgres is started by hand (#4401)
 test('ensurePg creates the cluster when .pgdata is missing', { timeout: 120_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
@@ -98,3 +98,67 @@ test('setup --stop without --test refuses and touches no database', () => {
   assert.match(r.stderr, /--stop only stops a worktree's test cluster: run node db\/setup\.ts --test --stop/);
   assert.doesNotMatch(r.stderr, /ECONNREFUSED/, 'it never tried to connect');
 });
+
+// #4482 hardening: every child the test cluster's start waits on (initdb, pg_ctl, the port probe) has a deadline, and a
+// timed-out child throws in words: it never returns a null status that a caller's `.status === 0` would read as "not
+// running" (and start a second cluster).
+test('spawnWithin: a child that never exits fails fast in words; one that exits in time passes through', () => {
+  const t0 = Date.now();
+  assert.throws(() => spawnWithin(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }, 500, 'the fake pg_ctl start'),
+    /^Error: the fake pg_ctl start did not finish within 0\.5 s$/);
+  assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0} ms`);
+  const ok = spawnWithin(process.execPath, ['-e', 'console.log(7); process.exit(3)'], { encoding: 'utf8' }, 30_000, 'x');
+  assert.deepEqual([ok.status, String(ok.stdout).trim()], [3, '7']);
+});
+
+// #4482 root cause: the postmaster holds every inheritable handle in the chain that starts it. Run from an agent's Git
+// Bash with output piped (node --test ... | tail), that included the pipe the shell reads: the run that started a
+// worktree's cluster never returned, its tests long done, until the cluster stopped; a rerun (cluster up) passed. Here a
+// stray inheritable pipe (cmd.exe's fd 3) sits above the start: it must close when the start ends, the cluster still up.
+// #4491: the 5434 dev cluster's start (adopt) too, on a scratch folder and a free port: never the PC's own 5434.
+for (const adopt of [false, true]) test(`${adopt ? 'the dev cluster' : 'a worktree cluster'} holds no handle of the run that started it`, { timeout: 240_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
+  const tree = join(tmp, 'tree'), dir = join(tree, '.pgdata').replace(/\\/g, '/');
+  mkdirSync(tree); writeFileSync(join(tree, '.git'), 'gitdir: elsewhere\n');
+  const port = testPgPort(tree, 'win32');
+  const pgCtl = join(process.env.CB_PG_BIN ?? 'C:/Program Files/PostgreSQL/16/bin', 'pg_ctl.exe');
+  const js = `import('${new URL('../db/pg.ts', import.meta.url).href}').then((m) => { m.ensurePg('${dir}', ${port}, ${adopt}); console.log('started'); })`;
+  try {
+    const c = spawn('cmd.exe', ['/d', '/s', '/c', `node -e "${js}"`], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], windowsVerbatimArguments: true });
+    let out = '';
+    c.stdout!.on('data', (d) => { out += d; }); c.stderr!.on('data', (d) => { out += d; }); c.stdio[3]!.on('data', () => {});
+    const closed = new Promise<boolean>((r) => c.stdio[3]!.on('close', () => r(true)));
+    await new Promise((r) => c.on('exit', r));
+    assert.match(out, /started/);
+    assert.equal(await Promise.race([closed, new Promise<boolean>((r) => setTimeout(() => r(false), 10_000))]), true,
+      'the postmaster still holds a pipe of the run that started it');
+    assert.equal(spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status, 0, 'the cluster is still up');
+    if (adopt) { // a dev cluster already up is adopted as it is, never restarted
+      const pid = () => readFileSync(join(dir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[0];
+      const before = pid();
+      ensurePg(dir, port, true);
+      assert.equal(pid(), before);
+    }
+  } finally {
+    spawnSync(pgCtl, ['-D', dir, 'stop', '-m', 'immediate', '-w'], { stdio: 'ignore' });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// #4491 M2: a PowerShell that cannot run read as "could not start Postgres ...; see server.log", a log with nothing in
+// it about that. PowerShell is called by its full System32 path; here SystemRoot names a folder with none.
+test('a start with no PowerShell to run says so, with the reason', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
+  const dir = join(tmp, '.pgdata').replace(/\\/g, '/'), noWindows = join(tmp, 'no-windows').replace(/\\/g, '/');
+  mkdirSync(dir); writeFileSync(join(dir, 'PG_VERSION'), '16\n'); // looks made: no initdb, pg_ctl status says not running
+  try {
+    // set inside the child: Node itself cannot start without the real SystemRoot
+    const js = `process.env.SystemRoot = '${noWindows}'; import('./db/pg.ts').then((m) => m.ensurePg('${dir}', ${testPortStart(tmp)}, false)).catch((e) => console.log(e.message))`;
+    const r = spawnSync(process.execPath, ['-e', js], { encoding: 'utf8', timeout: 60_000 });
+    assert.match(r.stdout, /could not start Postgres in .*: .*no-windows.*powershell\.exe did not run \(.*ENOENT/s, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /see .*server\.log/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
