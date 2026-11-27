@@ -11,6 +11,7 @@ import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
 import { mayBeLeaving, pastSeatNames, planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
+import { homeTrust, type TrustCheck } from './squad-trust.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
 
@@ -26,18 +27,23 @@ const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC:
 // restartTried (#4332): per seat, the setting this run closed it to restart on, or refused: planTick's restartTried
 export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
   closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; restartTried: Map<string, string>;
+  trustRefusedAt: Map<string, number>; // #4602: restarts refused for an untrusted folder, by when
   runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
   // #4261: aborted when the loop gives up on this tick (its deadline): checked before every step that acts
   signal?: AbortSignal;
+  // #4602: the cb squad trust check squad up applies (#4575). Omitted: this machine's agent configs with the real herdr,
+  // none with a fake one (tests); null: none
+  trust?: TrustCheck | null;
 };
 const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
 
 /** One tick. Returns the lines to print. Dry run: herdr is only read (agent list), the board is never written. */
 export async function tick(d: Deps): Promise<string[]> {
   const { sql, run, dryRun, now, memory } = d;
+  const trust = d.trust !== undefined ? d.trust : run === realRun ? homeTrust() : null;
   const out: string[] = [];
   const log = async (project: string | null, what: string, session: string, note?: string) => {
     try { await sql`select cb.supervise_log(${project}, ${what}, ${session}, ${note ?? null})`; } catch (e) { out.push(`could not log ${what} ${session}: ${msg(e)}`); }
@@ -91,6 +97,9 @@ export async function tick(d: Deps): Promise<string[]> {
     }
   }
 
+  // a restart refused for an untrusted folder is not refused for good, as a setting this machine cannot start is: after
+  // 10 minutes it is planned again, so a folder trusted since (cb squad trust) gets its restart (review 94 L1)
+  for (const [n, at] of memory.trustRefusedAt) if (now - at >= 10 * 60_000) { memory.trustRefusedAt.delete(n); memory.restartTried.delete(n); }
   for (const state of states) {
     d.signal?.throwIfAborted();
     try {
@@ -100,11 +109,19 @@ export async function tick(d: Deps): Promise<string[]> {
       const pastSeats = mayBeLeaving(state, herdrLive) ? pastSeatNames(state.project, (await sql`select e.data -> 'squad' as squad from cb.events e
         where e.project = ${state.project} and e.kind = 'updated' and e.summary = 'squad updated' order by e.id desc limit 20`).map((r: any) => r.squad)) : new Set<string>();
       const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats,
-        restartTried: memory.restartTried, startProblem });
+        restartTried: memory.restartTried,
+        // a restart is refused, the seat kept running, when the new setting's agent does not trust the folder (#4602)
+        startProblem: (l) => {
+          const p = startProblem(l);
+          if (p) return p;
+          const t = trust?.(l, state.project) ?? null;
+          if (t) memory.trustRefusedAt.set(l.name, now); // asked again in 10 minutes: cb squad trust fixes it (review 94 L1)
+          return t;
+        } });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length + plan.restart.length; // a restart's close frees its own Mac slot: macLive stays
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
-      await act(d, state, plan, out, log);
+      await act(d, state, plan, out, log, trust);
     } catch (e) {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
     }
@@ -141,12 +158,20 @@ const shortWhy = (why: string) => why.split(/[:(]/)[0]!.trim().slice(0, 100);
 // the live session bound to the project in the lead role, whatever its name
 const leadOf = (s: State) => s.sessions.find((x) => x.role === 'lead' && x.live)?.actor;
 
-async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Log) {
+async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Log, trust: TrustCheck | null) {
   const { run, dryRun, now, memory } = d, project = state.project;
   const tabs: Record<string, { pane: string; panes: number }> = {};
   const launch = async (what: 'restore' | 'start', l: Launch) => {
     const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
     if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); return; }
+    // #4602: an untrusted folder would park the seat at the trust dialog: no pane, failed (retried after RETRY_AFTER)
+    const untrusted = trust?.(l, project) ?? null;
+    if (untrusted) {
+      out.push(`failed ${l.name}: ${untrusted}`);
+      memory.failedAt.set(l.name, now);
+      await log(project, 'failed', l.name, 'folder not trusted: cb squad trust');
+      return;
+    }
     const r = startOne(l, run, tabs);
     out.push(what === 'restore' ? r.line.replace(/^started /, 'restored ') : r.line);
     if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
@@ -372,7 +397,7 @@ if (import.meta.main) {
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
-    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map() };
+    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), trustRefusedAt: new Map() };
   let code = 0;
   for (;;) {
     try {
