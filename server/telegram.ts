@@ -121,9 +121,10 @@ let running: Promise<void> | null = null, again = false, everyone = false;
 //  - sent: Telegram took it but its row did not save. Only the row is retried: never a second copy.
 //  - refused: Telegram said 4xx other than 429 (chat not found, bot blocked, too long). Neither the timer nor a change
 //    tries it again; a rewrite (a new asked_at), a new pairing, a restart, or (a 403) the paired chat writing in does.
-//  - hold: a 429 stops every send until its retry_after, however long: flood control is the bot's, not a message's.
+//  - hold: a 429 stops every send until its retry_after (flood control is the bot's, not a message's), up to HOLD_MAX:
+//    the reply is wire input (TELEGRAM_API may be a proxy), and one absurd value must not silence the bot for a day.
 // Memory only: a restart tries each open question once more.
-const RETRY_MIN = 1000, RETRY_MAX = 5 * 60_000;
+const RETRY_MIN = 1000, RETRY_MAX = 5 * 60_000, HOLD_MAX = 3600; // HOLD_MAX in seconds
 type Try = { gap: number; due: number; sent?: number; refused?: number };
 const tries = new Map<string, Try>(); // by question, the asking it is (asked_at) and the chat
 let hold = 0;
@@ -156,12 +157,14 @@ function run(timer: boolean): Promise<void> {
     // a pass that threw (the database, say) left its tries untouched, some past due: its own doubling gap, never a spin
     if (threw) at = Date.now() + failWait;
     failWait = threw ? Math.min(failWait * 2, RETRY_MAX) : RETRY_MIN;
-    const ms = Math.max(at - Date.now(), 100);
+    const wait = Math.max(at - Date.now(), 100);
+    // the timer wakes at least every RETRY_MAX and re-holds if it must: a delay past setTimeout's ~24.8 days would fire in 1 ms
+    const ms = Math.min(wait, RETRY_MAX);
     // counts only: the token and the chat id never reach a log line
     if (unsent || unrecorded || threw || refused > refusedLogged) {
       const said = [unsent && `${unsent} question(s) not sent`, unrecorded && `${unrecorded} sent but not recorded`,
         refused && `${refused} not reached Telegram (refused: not tried again)`].filter(Boolean).join(', ');
-      console.error(`telegram: ${said || 'the pass failed'}${at < Infinity ? `; trying again in ${Math.round(ms / 1000)}s` : ''}`);
+      console.error(`telegram: ${said || 'the pass failed'}${at < Infinity ? `; trying again in ${Math.round(wait / 1000)}s` : ''}`);
     }
     refusedLogged = refused;
     if (at === Infinity) return;
@@ -185,7 +188,8 @@ function failed(key: string, t: Try | undefined, early: boolean, id: number, e: 
     console.error(`telegram: Q${id} not reached Telegram: ${e.message}; not tried again until it is rewritten or the chat writes to the bot`);
     return;
   }
-  const wait = status === 429 ? e.retryAfter * 1000 : 0;
+  if (status === 429 && e.retryAfter > HOLD_MAX) console.error(`telegram: a 429 asked to wait ${e.retryAfter}s; waiting ${HOLD_MAX}s`);
+  const wait = status === 429 ? Math.min(e.retryAfter, HOLD_MAX) * 1000 : 0;
   if (wait) hold = Math.max(hold, Date.now() + wait);
   tries.set(key, later(t, early, wait));
   console.error(`telegram: sending Q${id}: ${e.message}`);
@@ -412,7 +416,10 @@ export async function stopTelegram() {
 // The dashboard's side (server/main.ts routes, page-only).
 export async function telegramStatus() {
   const [s] = await sql`select value from cb.settings where key = 'telegram_chat'`;
-  return { configured: !!cfg, bot, paired: !!s, paired_at: s?.value?.paired_at ?? null };
+  // #4629: what did not reach Telegram, for the dashboard's card (the server log has the detail)
+  let refused = 0, unrecorded = 0;
+  for (const t of tries.values()) if (t.refused) refused++; else if (t.sent !== undefined) unrecorded++;
+  return { configured: !!cfg, bot, paired: !!s, paired_at: s?.value?.paired_at ?? null, refused, unrecorded };
 }
 export function telegramConnect() {
   if (!cfg || !bot) throw new Error(cfg ? 'the bot has not reached Telegram yet: try again in a minute' : 'TELEGRAM_BOT_TOKEN is not set');

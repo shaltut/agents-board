@@ -34,7 +34,11 @@ const press = (message_id: number, data: string, chat = AHMED) =>
 
 /** A fresh board with Ahmed's chat paired through the dashboard's code. */
 async function paired() {
+  // the bot stops while the board is wiped: a retry pass that ran into the wipe could deadlock it and hang the file
+  await tg.stopTelegram();
   const sql = await freshDb(); clients.push(sql);
+  tg.startTelegram({ token: '123:test', api: fake.url });
+  await until(async () => (await tg.telegramStatus()).bot, 'the bot back');
   fake.calls.length = 0;
   const r = await app.request('/api/telegram/connect', { method: 'POST', headers: PAGE });
   const { link } = await r.json();
@@ -298,6 +302,7 @@ test('handed to a guest and back: the message says so, then gets its buttons bac
   const back = await until(() => calls('editMessageText').find((c) => c.body.message_id === msg && c.body.reply_markup.inline_keyboard.length), 'buttons back');
   assert.equal(back.body.reply_markup.inline_keyboard[0][0].callback_data, `o:${id}:0`);
   assert.equal(sentFor(id).length, 1, 'the same message, not a new one');
+  await until(async () => (await sql`select state from cb.telegram_messages where question_id = ${id}`)[0].state === 'open', 'the row open again'); // the edit lands first
   press(msg, `o:${id}:1`);
   await until(async () => (await status(sql, id)).answer === 'You', 'answerable again');
 });
@@ -379,7 +384,9 @@ test('a question already on Telegram when its project is disabled loses its butt
   await until(() => edits().length, 'edited on disable');
   assert.match(edits()[0].body.text, /Waiting: this project is disabled/);
   assert.deepEqual(edits()[0].body.reply_markup.inline_keyboard, [], 'no buttons');
-  assert.equal((await sql`select state from cb.telegram_messages where question_id = ${id}`)[0].state, 'waiting');
+  // the edit lands before the row's state is written: wait for the row (read at once, it raced)
+  const state = async () => (await sql`select state from cb.telegram_messages where question_id = ${id}`)[0].state;
+  await until(async () => (await state()) === 'waiting', 'the row waiting');
   press(msg, `o:${id}:0`);
   await until(() => calls('answerCallbackQuery').some((c) => /waits: its project is disabled/.test(c.body.text)), 'tap refused');
   text('Redis', AHMED, msg);
@@ -389,6 +396,7 @@ test('a question already on Telegram when its project is disabled loses its butt
   await until(() => edits().length === 2, 'restored on enable');
   assert.ok(edits()[1].body.reply_markup.inline_keyboard.some((r: any) => r[0]?.callback_data === `o:${id}:0`), 'its buttons again');
   assert.equal(sentFor(id).filter((c) => c.body.reply_markup).length, 1, 'the same message, not a second one');
+  await until(async () => (await state()) === 'open', 'the row open again'); // a tap before it is refused as waiting
   press(msg, `o:${id}:0`);
   await until(async () => (await status(sql, id)).status === 'answered', 'answered once enabled');
 });
@@ -444,6 +452,7 @@ function capture() {
   console.error = (...a: unknown[]) => { logged.push(a.join(' ')); };
   return { logged, restore: () => { console.error = orig; } };
 }
+const board = async () => (await app.request('/api/telegram', { headers: PAGE })).json(); // the dashboard's Telegram card reads this
 const clean = (logged: string[]) => logged.every((l) => !l.includes('123:test') && !l.includes(String(AHMED)));
 
 test('a send Telegram accepted whose row will not save is not sent again: only the row is retried (#4629 m1)', async () => {
@@ -459,9 +468,11 @@ test('a send Telegram accepted whose row will not save is not sent again: only t
     assert.equal(sentFor(id).length, 1, 'Telegram got it once: only the row is retried');
     assert.ok(logged.some((l) => l.includes(`Q${id} `) && /sent, not recorded/.test(l)), 'logged as sent, not as a failed send');
     assert.ok(logged.some((l) => /1 sent but not recorded; trying again in \d+s/.test(l)), 'the count says sent, not unsent');
+    assert.equal((await board()).unrecorded, 1, 'the dashboard can say so');
     await sql`drop trigger test_refuse_row on cb.telegram_messages`;
     assert.equal(await msgOf(sql, id, 9000), sentFor(id)[0]!.message_id, 'the row holds the message Telegram took');
     assert.equal(sentFor(id).length, 1);
+    assert.equal((await board()).unrecorded, 0);
     assert.ok(clean(logged), 'no token or chat id in a log line');
   } finally {
     restore();
@@ -481,6 +492,7 @@ test('a send Telegram refuses (403/400) is not tried again and is logged as not 
     assert.equal(triesFor(id).length, 1, 'refused once: not tried again');
     assert.ok(logged.some((l) => new RegExp(`Q${id} not reached Telegram: telegram sendMessage: 403`).test(l)), 'the refusal is logged');
     assert.ok(logged.some((l) => /1 not reached Telegram/.test(l)), 'and counted');
+    assert.equal((await board()).refused, 1, 'the dashboard can say so');
     const other = await ask(sql, 'Fine?'); // a change on the board sends the next question, and leaves the refused one
     await until(() => sentFor(other).length, 'another question still goes');
     await pause(300);
@@ -488,6 +500,7 @@ test('a send Telegram refuses (403/400) is not tried again and is logged as not 
     fake.hook.send = null; // unblocked: Ahmed starts the bot again, and the chat writes in
     text('/start');
     await until(() => sentFor(id).length, 'sent once the chat writes to the bot');
+    await until(async () => (await board()).refused === 0, 'no longer counted');
     assert.ok(clean(logged), 'no token or chat id in a log line');
   } finally { restore(); fake.hook.send = null; }
 });
@@ -507,11 +520,7 @@ test('one question that keeps failing does not slow a new one: each question has
     assert.ok(triesFor(stuck).length > before, 'a board change still tries every waiting question at once, inside its gap');
     briefOk = true;
     await until(() => sentFor(brief).length, 'retried on its own 1 s gap, not the stuck one\'s (8 s by now)', 5000);
-  } finally { // no retry timer left for the next test (a pass during its wipe can deadlock): restart and let it go
-    fake.hook.send = null;
-    await tg.stopTelegram(); tg.startTelegram({ token: '123:test', api: fake.url });
-    await until(() => calls('sendMessage').some((c) => /Stuck\?/.test(c.body.text)), 'the stuck one sent after the restart');
-  }
+  } finally { fake.hook.send = null; }
 });
 
 test('a 429 waits at least its retry_after, even over 30 s, and holds the other sends meanwhile (#4629 m4)', async () => {
@@ -554,8 +563,25 @@ test('a pass that fails outright (the database) waits its own growing gap, never
   } finally {
     restore(); fake.hook.send = null;
     await sql`alter table if exists cb.telegram_messages_away rename to telegram_messages`;
-    // nothing left unsent: the next run's first pass would send it during that run's first wipe (a deadlock)
-    await tg.stopTelegram(); tg.startTelegram({ token: '123:test', api: fake.url });
-    await until(async () => (await sql`select 1 from cb.telegram_messages m join cb.questions q on q.id = m.question_id where q.body = 'Down?'`).length, 'Down? sent and recorded');
   }
+});
+
+test('a 429 retry_after is capped at an hour, and a huge one never spins the retry timer (#4629 review I1)', async () => {
+  const sql = await paired();
+  const { logged, restore } = capture();
+  const warnings: string[] = [], onWarn = (w: Error) => { warnings.push(w.name); };
+  process.on('warning', onWarn);
+  // past setTimeout's ~24.8 days a delay fires in 1 ms: uncapped, this was a pass every millisecond
+  fake.hook.send = () => ({ status: 429, description: 'Too Many Requests', retry_after: 3_000_000 });
+  try {
+    const id = await ask(sql, 'Huge?');
+    await until(() => triesFor(id).length, 'tried');
+    await pause(2000);
+    const passes = logged.filter((l) => /trying again in/.test(l)).length;
+    assert.ok(passes <= 4, `${passes} retry passes in 2 s`);
+    assert.equal(triesFor(id).length, 1, 'not sent again');
+    assert.ok(logged.some((l) => /a 429 asked to wait 3000000s; waiting 3600s/.test(l)), 'the cap is logged');
+    assert.ok(logged.some((l) => /not sent; trying again in 3600s/.test(l)), 'the hold is the cap, not 35 days');
+    assert.deepEqual(warnings.filter((w) => w === 'TimeoutOverflowWarning'), []);
+  } finally { process.off('warning', onWarn); restore(); fake.hook.send = null; }
 });
