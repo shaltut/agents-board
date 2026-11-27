@@ -525,9 +525,9 @@ const destination = (r, del) => { const s = r.replace(/^\+/, ''); return del || 
 export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
-  return scanCommands(cmd, GIT, (w, i) => {
+  return scanCommands(unbrace(cmd), GIT, (w, i) => {
     const j = gitSub(w, i);
-    if (w[j] !== 'push') return null;
+    if (w[j] !== 'push') return hiddenPush(w, i, j, hit); // #4661 S1: git $S / an alias / subtree push
     const { words, del } = pushArgs(w, j);
     // the shell fills in a $ word: the branch is unknown here. The remote too: an unquoted $R can split into two words
     const filled = words.find((x) => x.includes('$'));
@@ -601,6 +601,8 @@ function gitHides(w, i, j, role) {
     const cfg = o === '-c' || o === '--config-env' ? (w[k + 1] ?? '') : /^--config-env=/.test(o) ? o.slice(13) : null;
     if (cfg !== null && ALIAS_KEY.test(cfg)) return `git ${o.split('=')[0]} ${cfg.split('=')[0]}: ${ALIASES}`;
   }
+  const runs = gitRuns(w, i, j, role); // #4661 L1: a setting or variable that runs a command
+  if (runs) return runs;
   const sub = w[j];
   if (sub === undefined) return null;
   if (sub === 'config') {
@@ -667,6 +669,117 @@ function ghApiWrites(w, j) {
       || w.slice(j + 1).some((x) => /\bmutation\b/i.test(x));
   }
   return method !== null ? !/^(?:get|head)$/i.test(method) : body;
+}
+
+// #4661 (PR 107 review S1, L1, L2): more ways past the push, commit and merge rules.
+// - S1, every role: a git call whose subcommand the shell fills in (S=push; git $S origin main) or that is no git command
+//   (an alias already in a config file: git p origin main) and that names main/master or a protected branch later; git
+//   subtree push to one; and any write to a git config file (.git/config, a worktree's config, ~/.gitconfig,
+//   ~/.config/git/config, /etc/gitconfig), which can add an alias. A git setting or variable that runs a command which
+//   pushes (git -c core.pager='git push origin HEAD:main' log) too.
+// - L1, read-only roles: no git setting or variable that runs a command (core.pager and pager.* other than a plain pager
+//   or a switch, core.sshCommand, core.editor, diff.external, textconv, filter, credential.helper, gpg.program, merge
+//   drivers, fsmonitor, hooksPath; GIT_PAGER/PAGER other than a plain pager, GIT_EXEC_PATH, GIT_SSH*, GIT_EXTERNAL_DIFF,
+//   GIT_EDITOR, EDITOR ...; --exec-path=<dir>), and no git subtree push, add, merge or pull.
+// - L2, every role but the lead: gh extension install / upgrade / exec, a gh word that is no gh command (an installed
+//   extension or an alias runs its own code: gh merge 5), gh repo sync <repo> (moves a branch on GitHub), gh workflow run.
+// A brace group with no space in it outside quotes (${S}, gh's {owner}) is read without its braces by the git and gh
+// scans, or the brace ends the segment and hides the words after it (git ${S} origin main).
+const unbrace = (t) => String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
+// word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p))
+const isCommandWord = (w, i) => w.slice(0, i).every((x) => ASSIGNMENT.test(x) || LAUNCHERS.has(cmdName(x)) || SHELL_KEYWORD.has(x))
+  || /(?:^|=)\$$/.test(w[i - 1] ?? '');
+// protectedPush's test for a call that is not git push: the protected branch it names, or null
+function hiddenPush(w, i, j, hit) {
+  const sub = w[j];
+  if (sub === undefined) return null;
+  let from;
+  if (sub === 'subtree') {
+    from = w.indexOf('push', j + 1) + 1;
+    if (from === 0) return null;
+    const filled = w.slice(from).find((x) => x.includes('$'));
+    if (filled) return filled;
+  } else if ((isFilled(sub) || /[$`%]/.test(sub) || !GIT_COMMANDS.has(sub.toLowerCase())) && isCommandWord(w, i)) from = j + 1;
+  else return null;
+  for (const x of stopArgs(w.slice(from))) {
+    if (x.startsWith('-')) continue;
+    const to = destination(x, false).replace(/^(?:refs\/)?heads\//, '');
+    if (hit(to)) return to;
+  }
+  return null;
+}
+const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
+const SWITCH = /^(?:true|false|yes|no|on|off|[01])?$/i;
+// a config key whose value git runs as a command (alias and include are gitHides' own)
+function keyRuns(key, value, isEnv) {
+  if (/^core\.pager$/i.test(key)) return isEnv || !PAGER_OK.test(value);
+  if (/^pager\./i.test(key)) return isEnv || !(PAGER_OK.test(value) || SWITCH.test(value));
+  return !ALIAS_KEY.test(key) && (GIT_RUNS_KEY.test(key) || /\.driver$/i.test(key));
+}
+// git's words w, git at i, its subcommand at j: why a setting or variable that runs a command (or a read-only role's
+// subtree write) may not run, or null
+function gitRuns(w, i, j, role) {
+  const found = []; // [setting, its value]
+  for (let k = 0; k < i; k++) {
+    const m = RUNS_ENV.exec(w[k]);
+    if (m && !(/PAGER$/i.test(m[1]) && PAGER_OK.test(m[2]))) found.push([m[1], m[2]]);
+  }
+  for (let k = i + 1; k < j; k++) {
+    const o = w[k];
+    if (/^--exec-path=/i.test(o)) found.push(['--exec-path', o.slice(12)]);
+    const isEnv = o === '--config-env' || /^--config-env=/.test(o);
+    const cfg = o === '-c' || o === '--config-env' ? (w[k + 1] ?? '') : /^--config-env=/.test(o) ? o.slice(13) : null;
+    if (cfg === null) continue;
+    const eq = cfg.indexOf('='), key = eq < 0 ? cfg : cfg.slice(0, eq), value = eq < 0 ? '' : cfg.slice(eq + 1);
+    if (keyRuns(key, value, isEnv)) found.push([key, isEnv ? '' : value]);
+  }
+  const push = found.find(([, v]) => /\bpush\b/i.test(v));
+  if (push) return `${push[0]} runs a command that pushes, past the branch rules: push with git push, ${NAME_IT}`;
+  if (!READ_ONLY_ROLES.includes(role)) return null;
+  if (found.length) return `${found[0][0]} makes git run a command: ${readsOnly(role)}`;
+  const write = w[j] === 'subtree' && w.slice(j + 1).find((x) => /^(?:push|add|merge|pull)$/.test(x));
+  return write ? `git subtree ${write}: ${readsOnly(role)}` : null;
+}
+// a git config file as a path, any separator
+const GIT_CONFIG_FILE = /(?:^|[\s"'=:(\\/~<>])(?:\.git[\\/]+(?:(?:worktrees|modules)[\\/]+[^\s"';&|)>]+[\\/]+)?config(?:\.worktree)?|\.gitconfig|\.config[\\/]+git[\\/]+config|gitconfig)(?=[\s"';&|)>`]|$)/i;
+const GIT_CONFIG_WRITE = 'a write to a git config file (.git/config, ~/.gitconfig and the like) can add an alias or include that renames a git subcommand past the commit, push and merge rules: change a setting with git config (never alias.* or include.*); one that needs the file itself: cb ask';
+// per segment, like the fence: the segment names a git config file and redirects into it or has a writer (not git: git
+// config's own writes are gitHides'); the joined text is judged as well as the raw lines (rawAndJoined)
+function gitConfigFileWrite(raw) { return rawAndJoined(gitConfigFileWriteOne)(raw); }
+function gitConfigFileWriteOne(command) {
+  if (!/config/i.test(command)) return null;
+  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
+  for (const seg of text.match(SEGMENTS) ?? []) {
+    if (!GIT_CONFIG_FILE.test(seg)) continue;
+    for (const m of seg.matchAll(REDIRECT_TARGET)) if (GIT_CONFIG_FILE.test(` ${m[1] ?? ''}`)) return GIT_CONFIG_WRITE;
+    if (FENCE_WRITER.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg))) return GIT_CONFIG_WRITE;
+  }
+  return null;
+}
+// gh's own commands (gh help), its extension command's names and the built-in alias co
+const GH_COMMANDS = new Set(['auth', 'browse', 'codespace', 'discussion', 'gist', 'issue', 'org', 'pr', 'project', 'release', 'repo',
+  'skill', 'cache', 'run', 'workflow', 'co', 'agent-task', 'alias', 'api', 'attestation', 'completion', 'config', 'copilot',
+  'extension', 'extensions', 'ext', 'gpg-key', 'label', 'licenses', 'preview', 'ruleset', 'search', 'secret', 'ssh-key', 'status',
+  'variable', 'help', 'version', 'accessibility', 'actions', 'environment']);
+const GH_SYNC_VALUE = /^(?:-b|--branch|-s|--source)$/;
+// gh's words w, gh at i, its command at j: why a non-lead role may not run it, or null
+function ghRuns(w, i, j) {
+  const sub = w[j];
+  if (sub === undefined) return null;
+  const s = sub.toLowerCase();
+  const at = pastOpts(w, j + 1, GH_OPT_ARG), next = w[at] ?? '';
+  if (/^(?:extensions?|ext)$/.test(s) && /^(?:install|upgrade|exec)$/.test(next)) {
+    return `gh extension ${next} runs code that is not gh's as a gh command, past the merge rule: an extension is Ahmed's to add (cb ask)`;
+  }
+  if (s === 'workflow' && next === 'run') return `gh workflow run starts a workflow, which can merge or deploy: ${LEAD_MERGES}`;
+  const rest = stopArgs(w.slice(at + 1));
+  if (s === 'repo' && next === 'sync' && pastOpts(rest, 0, GH_SYNC_VALUE) < rest.length) {
+    return `gh repo sync <repo> moves a branch on GitHub: sync your local checkout with plain gh repo sync, and ${LEAD_MERGES}`;
+  }
+  if (isCommandWord(w, i) && !GH_COMMANDS.has(s)) {
+    return `gh ${sub} is not a gh command (an extension or an alias runs its own code, past the merge rule): use gh's own commands; a new one is Ahmed's (cb ask)`;
+  }
+  return null;
 }
 
 // Secret files (#4347). What a seat reads goes to the model provider, and the board holds client work, so no role
@@ -1152,10 +1265,12 @@ export function checkRole(command, role) {
   if (secret) return secret;
   const fence = fenceWrite(String(command ?? ''));
   if (fence) return fence;
+  const gitConfig = gitConfigFileWrite(String(command ?? '')); // #4661 S1
+  if (gitConfig) return gitConfig;
   const trust = squadTrustRun(command);
   if (trust) return trust;
   const readOnly = READ_ONLY_ROLES.includes(role);
-  const git = scanCommands(command, GIT, (w, i) => {
+  const git = scanCommands(unbrace(command), GIT, (w, i) => {
     const j = gitSub(w, i);
     const hides = gitHides(w, i, j, role); // #4638: aliases, push and commit plumbing, a read-only role's git ci
     if (hides) return hides;
@@ -1178,9 +1293,10 @@ export function checkRole(command, role) {
   // #4638: a brace group with no space in it outside quotes (gh's {owner}, {repo}, {branch}; ${OWNER}, ${env:X}) read
   // without its braces, or the braces end the segment and hide the rest of a gh api call (gh api
   // repos/{owner}/{repo}/pulls/5/merge -X PUT)
-  const unbraced = String(command ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
-  const gh = scanCommands(unbraced, GH, (w, i) => {
+  const gh = scanCommands(unbrace(command), GH, (w, i) => {
     let j = pastOpts(w, i + 1, GH_OPT_ARG);
+    const runs = ghRuns(w, i, j); // #4661 L2
+    if (runs) return runs;
     if (w[j] === 'api') return ghApiWrites(w, j) ? GH_WRITES : null; // #4638
     if (w[j] === 'alias' && /^(?:set|import)$/.test(w[pastOpts(w, j + 1, GH_OPT_ARG)] ?? '')) return `gh alias ${w[pastOpts(w, j + 1, GH_OPT_ARG)]} renames a gh command past the merge rule: ${LEAD_MERGES}`;
     if (w[j] !== 'pr') return null;

@@ -492,6 +492,69 @@ test('role rules: aliases, write plumbing and gh api writes do not get past the 
   assert.match(shell('gh api -X PUT repos/o/r/pulls/5/merge', { CB_ROLE: 'builder' }).reason!, /gh pr comment/);
 });
 
+// #4661 (PR 107 review S1, L1, L2): the push, commit and merge rules past a filled or unknown subcommand, git subtree,
+// an alias written to a config file, a config key or variable that runs a command, and gh extensions, repo sync, workflows
+test('role rules: hidden pushes, command-running git settings and gh extensions do not get past the rules (#4661)', () => {
+  // S1, every role (the lead too): main is pushed by no spelling
+  const mainPushes = ['S=push; git $S origin main', 'git $S origin main', 'git ${S} origin master', 'git p origin main',
+    'git p origin HEAD:main', 'git p origin +main', 'sudo git p origin refs/heads/main', 'x=$(git p origin main)',
+    'git subtree push --prefix x origin main', 'git subtree push -P x origin master', 'git subtree push --prefix=x origin refs/heads/main',
+    'git -C wt subtree push -P x origin HEAD:main',
+    // an alias written to a config file renames a subcommand for every later call
+    "printf '[alias]\\n p = push\\n' >> .git/config", 'echo "[alias] p = push" > .git/config', 'tee -a .git/config < a.cfg',
+    'cp evil.cfg .git/config', 'Add-Content .git/config "[alias]"', "sed -i 's/x/y/' .git/config", 'echo x >> ~/.gitconfig',
+    'echo x >> .git/worktrees/w/config.worktree', 'echo x >> ~/.config/git/config', String.raw`Add-Content $HOME\.gitconfig x`,
+    'echo x >>.git/config', 'git config --local alias.p push', 'git config --file .git/config alias.p push',
+    'git config -f .git/config include.path /tmp/a.cfg',
+    // a command-running setting whose command pushes
+    "git -c core.pager='git push origin HEAD:main' log", "GIT_PAGER='git push origin HEAD:main' git log"];
+  for (const role of ROLES) blocksByRole(role, mainPushes);
+  // a protected branch from CB_PROTECTED_BRANCHES, the same way
+  for (const c of ['git p origin develop', 'git $S origin develop', 'git subtree push -P x origin develop']) {
+    assert.equal(shell(c, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'develop' }).decision, 'block', c);
+  }
+
+  // L1 and S1, read-only roles: no subtree write, and no git setting or variable that runs a command
+  const readOnlyRuns = ['git subtree push -P x origin feat/x', 'git subtree add -P x origin feat/x', 'git subtree pull -P x origin feat/x',
+    'git subtree merge -P x feat/x', "git -c core.pager='git commit -am x' log", 'git -c core.sshCommand="sh -c x" fetch',
+    'git -c diff.external=/tmp/x diff', "git -c credential.helper='!sh -c x' fetch", 'git -c gpg.program=/tmp/x log --show-signature',
+    'git -c core.editor=/tmp/x tag -a v1', 'git -c filter.x.clean=/tmp/x status', 'git -c diff.x.textconv=/tmp/x diff',
+    'git -c core.fsmonitor=/tmp/x status', 'git -c core.hooksPath=/tmp/h status', 'git -c sequence.editor=/tmp/x status',
+    'git -c pager.log=/tmp/x log', 'git -c merge.x.driver=/tmp/x status', 'git --config-env=core.pager=P log',
+    "GIT_PAGER='git commit -am x' git log", 'GIT_EXEC_PATH=/tmp/evil git status', 'GIT_SSH_COMMAND=/tmp/x git fetch',
+    'GIT_EXTERNAL_DIFF=/tmp/x git diff', 'GIT_EDITOR=/tmp/x git tag -a v1', 'git --exec-path=/tmp/evil status'];
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, readOnlyRuns);
+    passes(role, ['git -c core.pager=cat log', 'git -c core.pager="less -R" log', 'GIT_PAGER=cat git log', 'PAGER= git log',
+      'git -c pager.branch=false branch', 'git -c color.ui=always log', 'git -c core.autocrlf=false status', 'git subtree split -P x',
+      'git --exec-path', 'git -c core.pager=cat log main', 'git config -f .git/config --get remote.origin.url', 'git --no-pager log']);
+  }
+  // everyday git: no false blocks, any role
+  for (const role of ROLES) {
+    passes(role, ['git checkout main', 'git log main', 'git diff main...HEAD', 'git rebase origin/main', 'git merge-base main HEAD',
+      'git fetch origin main', 'git pull origin main', 'grep -rn git docs main', 'echo git p main', 'cat .git/config',
+      'grep alias .git/config', 'cb log 1 "echo x >> .git/config"', 'git config --get-regexp alias', 'git config --get alias.c',
+      'git subtree split -P x', 'git status', 'git show main:README.md']);
+  }
+  for (const role of ['builder', 'architect', 'owner', 'lead']) {
+    passes(role, ['git subtree push -P x origin feat/x', 'git subtree split -P x -b split-x', 'git -c core.pager=less log',
+      'git p origin feat/x', 'git config user.email b@example.com']);
+  }
+
+  // L2, every role but the lead: gh extensions (an installed one runs as any gh word), unknown gh commands, a fork sync
+  // that moves a remote branch, a workflow run
+  const ghRuns = ['gh extension install o/gh-merge', 'gh ext install o/gh-merge', 'gh extensions upgrade --all',
+    'gh extension exec merge 5', 'gh merge 5', 'gh -R o/r merge 5', 'gh repo sync o/fork -b main --source u/r --force', 'gh repo sync o/fork',
+    'gh workflow run merge.yml', 'gh workflow run merge.yml -f pr=5', 'bash -c "gh merge 5"'];
+  for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ghRuns);
+  passes('lead', ['gh extension install o/x', 'gh workflow run merge.yml', 'gh repo sync o/fork', 'gh merge 5']);
+  for (const role of ROLES) {
+    passes(role, ['gh extension list', 'gh co 5', 'gh pr checkout 5', 'gh run rerun 5', 'gh run view 5', 'gh workflow list',
+      'gh workflow view merge.yml', 'gh repo sync', 'gh repo view o/r', 'gh copilot suggest x', 'gh status', 'gh issue list',
+      'gh search prs x', 'echo gh merge 5', 'which gh', 'gh --version', 'gh help', 'gh auth status', 'rg "gh merge" docs']);
+  }
+});
+
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {
   // main and master are protected like the protected-branch scan protects its list: every quoted string counts, so a
   // mention of pushing main blocks too (accepted cost); other quoted git text is still text

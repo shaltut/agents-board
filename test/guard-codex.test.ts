@@ -56,8 +56,11 @@ test('role blocks: a builder cannot push to main or merge; a reviewer cannot com
   assert.match(run(bash('gh pr merge 12'), { CB_ROLE: 'builder' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(builder\): /);
   // #4638: an alias, commit plumbing and a gh api merge are judged in the Codex seat the same way
   assert.match(run(bash('gh api -X PUT repos/o/r/pulls/5/merge'), { CB_ROLE: 'builder' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(builder\): /);
+  assert.match(run(bash('S=push; git $S origin main'), { CB_ROLE: 'lead' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(lead\): /);
   for (const cmd of ['git commit -m x', 'git push origin feat/x', 'git -c alias.c=commit c -m x', 'git commit-tree HEAD^{tree} -m x',
-    'git update-ref refs/heads/x HEAD', 'gh api -X PUT repos/o/r/pulls/5/merge']) {
+    'git update-ref refs/heads/x HEAD', 'gh api -X PUT repos/o/r/pulls/5/merge',
+    // #4661
+    'git subtree push -P x origin feat/x', 'GIT_EXEC_PATH=/tmp/evil git status', 'gh merge 5']) {
     for (const role of ['reviewer', 'qa', 'investigator']) {
       assert.match(run(bash(cmd), { CB_ROLE: role }).out.hookSpecificOutput.permissionDecisionReason, new RegExp(`^Blocked by role \\(${role}\\): `), `${role} ${cmd}`);
     }
