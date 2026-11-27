@@ -541,11 +541,12 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  }) ?? aliasPush(cmd, hit); // #4661 S1: git $S / an alias naming the branch
+  }) ?? aliasPush(cmd, hit) ?? valuesPush(cmd, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
 }
 
 // The block reason for a protectedPush hit.
 function pushReason(branch) {
+  if (branch.startsWith(ALIAS_MARK)) return aliasReason(branch); // #4661
   return branch.includes('$')
     ? `git push to a branch the shell fills in (${branch}) while branches are protected: name the branch literally, e.g. git push -u origin feat/my-card`
     : branch.includes('*')
@@ -587,9 +588,10 @@ const ALIASES = 'an alias renames a git subcommand past the commit, push and mer
 // an assignment before git that sets an alias or include for the call: GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS naming
 // one, or GIT_CONFIG / _GLOBAL / _SYSTEM pointing at a config file (other than the null device), which can hold one
 function configEnvAlias(x) {
-  const m = /^(GIT_CONFIG\w*)=(.*)$/is.exec(x);
+  const m = /^(GIT_CONFIG\w*|XDG_CONFIG_HOME)=(.*)$/is.exec(x);
   if (!m) return false;
   const k = m[1].toUpperCase();
+  if (k === 'XDG_CONFIG_HOME') return true; // #4661 B3: git reads $XDG_CONFIG_HOME/git/config, which can hold an alias
   if (k === 'GIT_CONFIG_PARAMETERS' || /^GIT_CONFIG_KEY_\d+$/.test(k)) return /(?:^|['"\s])(?:alias|include|includeif)\./i.test(m[2]);
   return (k === 'GIT_CONFIG' || k === 'GIT_CONFIG_GLOBAL' || k === 'GIT_CONFIG_SYSTEM') && !CONFIG_NULL.test(m[2]);
 }
@@ -687,10 +689,15 @@ function ghApiWrites(w, j) {
 //   extension or an alias runs its own code: gh merge 5), gh repo sync <repo> (moves a branch on GitHub), gh workflow run.
 // A brace group with no space in it outside quotes (${S}, gh's {owner}) is read without its braces by the git and gh
 // scans, or the brace ends the segment and hides the words after it (git ${S} origin main).
-const unbrace = (t) => String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
-// word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p))
+// PR 111 review R1: a group bash and zsh expand ({main,}, {a,b}, {1..3}) is never unbraced: it becomes a word the shell
+// fills in ($BRACE_GROUP), so a push naming it blocks as a shell-filled branch, as git push origin $B does
+const unbrace = (t) => String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'),
+  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner));
+// word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p)); after
+// any launcher or a shell that runs the rest (timeout 30 git, sudo -u x gh, cmd /c git, B2)
+const RUNS_REST_SHELL = new Set(['cmd', 'pwsh', 'powershell']);
 const isCommandWord = (w, i) => w.slice(0, i).every((x) => ASSIGNMENT.test(x) || LAUNCHERS.has(cmdName(x)) || SHELL_KEYWORD.has(x))
-  || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).some((x) => LAUNCHERS.has(cmdName(x))); // timeout 30 git, sudo -u x gh
+  || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).some((x) => LAUNCHERS.has(cmdName(x)) || RUNS_REST_SHELL.has(cmdName(x)));
 // the protected branch one of words names (src:dst's dst, +, refs/heads/ dropped), or null
 const namesBranch = (words, hit) => words.filter((x) => !x.startsWith('-'))
   .map((x) => destination(x, false).replace(/^(?:refs\/)?heads\//, '')).find(hit) ?? null;
@@ -710,7 +717,10 @@ function aliasPush(cmd, hit) {
     const j = gitSub(w, i), sub = w[j];
     if (sub === undefined || !isCommandWord(w, i)) return null;
     if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
-    return namesBranch(stopArgs(w.slice(j + 1)), hit);
+    // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
+    const words = stopArgs(w.slice(j + 1));
+    const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
+    return branch ? `${ALIAS_MARK}${sub}${ALIAS_MARK}${branch}` : null;
   }, runnerArg);
 }
 const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
@@ -740,10 +750,11 @@ function configEnvPairs(before) {
   }
   return out;
 }
-// git's words w, git at i, its subcommand at j: why a setting or variable that runs a command (or a read-only role's
-// subtree write) may not run, or null
-function gitRuns(w, i, j, role) {
-  const found = []; // [setting, its value]
+// git's words w, git at i, its subcommand at j: the settings and variables of this call whose value git runs as a
+// command, [setting, value] each: assignments before git, GIT_CONFIG_* pairs, -c / --config-env (an env value unknown:
+// ''), --exec-path=, and (PR 111 review B1, L1-persist) a key git config writes for every later call
+function runsValues(w, i, j) {
+  const found = [];
   for (let k = 0; k < i; k++) {
     const m = RUNS_ENV.exec(w[k]);
     if (m && !(/PAGER$/i.test(m[1]) && PAGER_OK.test(m[2]))) found.push([m[1], m[2]]);
@@ -758,12 +769,50 @@ function gitRuns(w, i, j, role) {
     const eq = cfg.indexOf('='), key = eq < 0 ? cfg : cfg.slice(0, eq), value = eq < 0 ? '' : cfg.slice(eq + 1);
     if (keyRuns(key, value, isEnv)) found.push([key, isEnv ? '' : value]);
   }
-  const push = found.find(([, v]) => /\bpush\b/i.test(v));
-  if (push) return `${push[0]} runs a command that pushes, past the branch rules: push with git push, ${NAME_IT}`;
+  if (w[j] === 'config') {
+    // git config [--global] <key> <value>, git config set <key> <value>: a key followed by a value is a write
+    const pos = stopArgs(w.slice(j + 1)).filter((x) => !x.startsWith('-'));
+    for (let k = 0; k + 1 < pos.length; k++) if (keyRuns(pos[k], pos[k + 1], false)) found.push([`git config ${pos[k]}`, pos[k + 1]]);
+  }
+  return found;
+}
+// git runs such a value through a shell (and a trailing # makes git's own arguments a comment), so the value is judged
+// as a command by the same rules: the branch rules for main/master, then the role's (B1: git pu""sh, an alias, $S)
+function valueRuns(setting, value, role) {
+  const branch = protectedPush(value, ['main', 'master']);
+  if (branch) return `${setting} runs a command git starts: ${pushReason(branch)}`;
+  const why = checkRole(value, role);
+  return why ? `${setting} runs a command git starts: ${why}` : null;
+}
+// git's words w, git at i, its subcommand at j: why a setting or variable that runs a command (or a read-only role's
+// subtree write) may not run, or null
+function gitRuns(w, i, j, role) {
+  const found = runsValues(w, i, j);
+  for (const [setting, value] of found) {
+    const why = value && valueRuns(setting, value, role);
+    if (why) return why;
+  }
   if (!READ_ONLY_ROLES.includes(role)) return null;
   if (found.length) return `${found[0][0]} makes git run a command: ${readsOnly(role)}`;
   const write = w[j] === 'subtree' && w.slice(j + 1).find((x) => /^(?:push|add|merge|pull)$/.test(x));
   return write ? `git subtree ${write}: ${readsOnly(role)}` : null;
+}
+// protectedPush's test for those values (CB_PROTECTED_BRANCHES too): the protected branch a value's command pushes
+function valuesPush(cmd, list) {
+  return scanCommands(unbrace(cmd), GIT, (w, i) => {
+    for (const [, value] of runsValues(w, i, gitSub(w, i))) {
+      const branch = value && protectedPush(value, list);
+      if (branch) return branch;
+    }
+    return null;
+  }, runnerArg);
+}
+// the block reason for an aliasPush hit (PR 111 review: not "git push", which misleads for git co main)
+const ALIAS_MARK = '\u0001';
+function aliasReason(hitText) {
+  const [, sub, branch] = hitText.split(ALIAS_MARK);
+  const what = branch.includes('$') ? `a branch the shell fills in (${branch})` : `protected branch ${branch}`;
+  return `git ${sub} is not a git command (an alias, or a word the shell fills in) and names ${what}; an alias can push it past the branch rules: run the git command by its own name, e.g. git checkout ${branch.includes('$') ? 'main' : branch}`;
 }
 // a git config file as a path, any separator (one worktree or module folder name, with no separator in it, so a long
 // path is read once from each start)

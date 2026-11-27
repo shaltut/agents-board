@@ -569,6 +569,33 @@ test('role rules: hidden pushes, command-running git settings and gh extensions 
     passes(role, ['git -c core.fsmonitor=false status', 'git -c credential.helper= fetch']);
   }
   passes('builder', ['git subtree push -P x origin feat/x 2>$null']);
+
+  // PR 111 review. R1: a brace group bash and zsh expand ({a,b}, {1..3}) is a word the shell fills in, never unbraced.
+  // B1: a command-running setting's value is judged as the command git runs (git runs it through a shell; # ends git's
+  // own arguments), set with -c, a variable or git config. B2: cmd /c runs git. B3: XDG_CONFIG_HOME points git at another
+  // config. B4: an alias naming a branch the shell fills in
+  for (const role of ROLES) {
+    blocksByRole(role, ['git push origin {main,}', 'git push origin {feat/x,main}', 'git push {-f,} origin feat/x',
+      'git p origin {main,}', 'git push origin HEAD:{main,}', 'git push origin ma{i,}n', 'git push origin {1..2}',
+      `git -c core.fsmonitor='git pu""sh -q origin HEAD:main #' status`, `git -c diff.external='git pu""sh -q origin HEAD:main #' diff`,
+      `git -c core.fsmonitor='S=pu; git \${S}sh origin HEAD:main #' status`, `git -c core.fsmonitor='git p origin main #' status`,
+      `git -c core.fsmonitor='git $S origin main #' status`, `GIT_EXTERNAL_DIFF='git pu""sh -q origin HEAD:main #' git diff`,
+      `git config core.fsmonitor 'git p origin main'`, `git config --global diff.external 'git pu""sh origin HEAD:main #'`,
+      'cmd /c git p origin main', 'cmd.exe /c git p origin main', 'cmd /k git p origin main', 'cmd /s /c git p origin main',
+      'XDG_CONFIG_HOME=/tmp/x git st', 'B=main; git p origin $B', 'git p origin ${B}']);
+    passes(role, ['git log --format=%H -- src/{a,b}.ts', 'git -C ${WT} log', 'gh api repos/{owner}/{repo}/pulls/111']);
+  }
+  for (const role of ['builder', 'lead']) {
+    passes(role, [`git -c core.fsmonitor='git pu""sh -q origin HEAD:feat/x #' status`, 'git config core.fsmonitor false',
+      'git push origin feat/x', 'git co feat/x', 'git lg', 'git lg --all', 'git lg HEAD']);
+  }
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, ['git config core.fsmonitor /tmp/x.sh', 'git config diff.external /tmp/x', 'git config set core.hooksPath /tmp/h',
+      'git config --global core.sshCommand /tmp/x']);
+    passes(role, ['git config core.fsmonitor', 'git config --get core.hooksPath', 'git config core.fsmonitor false']);
+  }
+  // an alias naming main says what it is, not "git push"
+  assert.match(shell('git co main', { CB_ROLE: 'builder' }).reason!, /git co is not a git command.*git checkout main/);
 });
 
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {
