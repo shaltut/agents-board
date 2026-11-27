@@ -460,7 +460,11 @@ test('role rules: aliases, write plumbing and gh api writes do not get past the 
     `gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }'`,
     'gh api graphql -F query=@m.graphql', 'gh api graphql --input q.json', 'gh api graphql -f query="$Q"',
     'gh api -f base=main -q graphql repos/o/r/merges', 'bash -c "gh api -X PUT repos/o/r/pulls/5/merge"',
-    'gh alias set m "pr merge"', 'gh alias import aliases.yml'];
+    'gh alias set m "pr merge"', 'gh alias import aliases.yml',
+    // pflag bundles short flags; ${VAR} braces end a segment like gh's placeholders; an unknown option fails closed
+    'gh api -iX PUT repos/o/r/pulls/5/merge', 'gh api -iXPUT repos/o/r/pulls/5/merge', 'gh api -X=PUT repos/o/r/pulls/5/merge',
+    'gh api -if base=main repos/o/r/merges', 'gh api repos/${OWNER}/${REPO}/pulls/5/merge -X PUT', 'gh api --foo x -X PUT repos/o/r/pulls/5/merge',
+    'gh api graphql -f owner=o'];
   for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ghWrites);
   passes('lead', ['gh api -X PUT repos/o/r/pulls/5/merge', 'gh api -X DELETE repos/o/r/git/refs/heads/feat/x']);
   for (const role of ROLES) {
@@ -468,7 +472,9 @@ test('role rules: aliases, write plumbing and gh api writes do not get past the 
       'gh api --method get repos/o/r/pulls -F per_page=100', `gh api graphql -f query='query { viewer { login } }'`,
       `gh api repos/o/r/pulls --paginate -q '.[].number'`, 'gh api repos/o/r/contents/a.md -H "Accept: application/vnd.github.raw"',
       'rg "gh api -X PUT"', 'gh pr view 5', 'gh pr diff 5', 'gh pr list', 'gh pr review 5 --comment --body "x"',
-      'cb log 4638 "gh api -X PUT repos/o/r/pulls/5/merge is blocked"', 'gh alias list']);
+      'cb log 4638 "gh api -X PUT repos/o/r/pulls/5/merge is blocked"', 'gh alias list',
+      'gh api -i repos/o/r/pulls/5', 'gh api repos/${OWNER}/${REPO}/pulls/5', "gh api graphql -f query='{viewer{login}}'",
+      'gh api -H "Accept: application/json" -i repos/o/r/pulls', 'git config --get alias.c 2>/dev/null']);
   }
   assert.match(shell('gh api -X PUT repos/o/r/pulls/5/merge', { CB_ROLE: 'builder' }).reason!, /gh pr comment/);
 });

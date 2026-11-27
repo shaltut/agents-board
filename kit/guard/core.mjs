@@ -605,7 +605,7 @@ function gitHides(w, i, j, role) {
   if (sub === undefined) return null;
   if (sub === 'config') {
     // git config [--global] alias.x <value>, git config set alias.x <value>: a key followed by a value is a write
-    const pos = w.slice(j + 1).filter((x) => !x.startsWith('-'));
+    const pos = stopArgs(w.slice(j + 1)).filter((x) => !x.startsWith('-')); // to a redirection: --get alias.c 2>/dev/null reads
     if (pos.some((x, k) => ALIAS_KEY.test(x) && pos[k + 1] !== undefined)) return `git config writing an alias or include: ${ALIASES}`;
   }
   if (sub === 'send-pack' || sub === 'http-push') return `git ${sub} pushes past the branch rules: push with git push, ${NAME_IT}`;
@@ -623,27 +623,47 @@ function gitHides(w, i, j, role) {
 // --raw-field, --input make gh send POST), merges (pulls/<n>/merge, merges), moves refs (git/refs) or commits (contents,
 // update-branch) past gh pr merge: every role but the lead. A graphql query given inline with no mutation in it is a read.
 // gh alias set / import renames a command (gh m for pr merge) the same way.
-const GH_API_VALUE = /^(?:-H|--header|-q|--jq|-t|--template|--hostname|--cache|-p|--preview)$/;
+// gh api's options: the long ones taking a value, the boolean ones; a short flag bundles as pflag reads it (-iX PUT,
+// -iXPUT, -X=PUT). An option it does not know is judged a write (fail closed: it may take a value and shift the endpoint).
+const GH_API_LONG_VALUE = new Set(['--header', '--jq', '--template', '--hostname', '--cache', '--preview']);
+const GH_API_LONG_BOOL = new Set(['--paginate', '--slurp', '--include', '--silent', '--verbose', '--allow-escape-sequences', '--help']);
 const GH_WRITES = 'gh api that writes (a method other than GET, or -f/-F/--input fields, which make gh POST) can merge, move a branch or commit past the merge rule: read with GET, comment with gh pr comment or gh pr review, and ' + LEAD_MERGES;
 function ghApiWrites(w, j) {
   let method = null, body = false, unseen = false, endpoint = null;
   const fields = [];
   for (let k = j + 1; k < w.length; k++) {
     const x = w[k];
-    let m;
-    if (x === '-X' || x === '--method') { method = w[++k] ?? ''; continue; }
-    if ((m = /^(?:-X=?|--method=)(.+)$/.exec(x))) { method = m[1]; continue; }
-    if (/^(?:-f|-F|--raw-field|--field)$/.test(x)) { body = true; fields.push(w[++k] ?? ''); continue; }
-    if ((m = /^(?:-[fF]|--(?:raw-)?field=)(.+)$/.exec(x))) { body = true; fields.push(m[1]); continue; }
-    if (x === '--input' || /^--input=/.test(x)) { body = true; unseen = true; if (x === '--input') k++; continue; }
-    if (GH_API_VALUE.test(x)) { k++; continue; }
-    if (x.startsWith('-') || /^\d*[<>]/.test(x)) continue;
+    if (/^\d*[<>]/.test(x)) continue; // a redirection
+    if (x.startsWith('--')) {
+      const eq = x.indexOf('='), name = eq < 0 ? x : x.slice(0, eq);
+      const val = () => (eq < 0 ? (w[++k] ?? '') : x.slice(eq + 1));
+      if (name === '--method') method = val();
+      else if (name === '--field' || name === '--raw-field') { body = true; fields.push(val()); }
+      else if (name === '--input') { body = true; unseen = true; val(); }
+      else if (GH_API_LONG_VALUE.has(name)) val();
+      else if (!GH_API_LONG_BOOL.has(name)) return true;
+      continue;
+    }
+    if (x.startsWith('-') && x.length > 1) {
+      for (let c = 1; c < x.length; c++) {
+        const letter = x[c];
+        if (letter === 'i') continue; // --include, the one boolean short flag
+        const rest = x.slice(c + 1).replace(/^=/, '');
+        const val = rest !== '' ? rest : (w[++k] ?? '');
+        if (letter === 'X') method = val;
+        else if (letter === 'f' || letter === 'F') { body = true; fields.push(val); }
+        else if (!'Hqtp'.includes(letter)) return true;
+        break;
+      }
+      continue;
+    }
     endpoint ??= x;
   }
   if (/^(?:https?:\/\/[^/]+(?:\/api)?)?\/?graphql$/i.test(endpoint ?? '')) {
-    // the query must be readable here: not from a file or stdin, not a value the shell fills in (no { in it)
+    // a read only with its query readable here: given inline (not a file or stdin), not a value the shell fills in (no
+    // { in it), and no mutation anywhere
     const query = fields.filter((f) => /^query=/i.test(f));
-    return unseen || fields.some((f) => /=@/.test(f)) || query.some((f) => !f.includes('{'))
+    return unseen || query.length === 0 || fields.some((f) => /=@/.test(f)) || query.some((f) => !f.includes('{'))
       || w.slice(j + 1).some((x) => /\bmutation\b/i.test(x));
   }
   return method !== null ? !/^(?:get|head)$/i.test(method) : body;
@@ -1148,9 +1168,11 @@ export function checkRole(command, role) {
   const branch = protectedPush(command, ['main', 'master']);
   if (branch) return pushReason(branch);
   if (role === 'lead') return null;
-  // #4638: gh's placeholders ({owner}, {repo}, {branch}) as plain words, or their braces end the segment and hide the rest
-  // of a gh api call (gh api repos/{owner}/{repo}/pulls/5/merge -X PUT)
-  const gh = scanCommands(String(command ?? '').replace(/\{(owner|repo|branch)\}/g, '$1'), GH, (w, i) => {
+  // #4638: a brace group with no space in it outside quotes (gh's {owner}, {repo}, {branch}; ${OWNER}, ${env:X}) read
+  // without its braces, or the braces end the segment and hide the rest of a gh api call (gh api
+  // repos/{owner}/{repo}/pulls/5/merge -X PUT)
+  const unbraced = String(command ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
+  const gh = scanCommands(unbraced, GH, (w, i) => {
     let j = pastOpts(w, i + 1, GH_OPT_ARG);
     if (w[j] === 'api') return ghApiWrites(w, j) ? GH_WRITES : null; // #4638
     if (w[j] === 'alias' && /^(?:set|import)$/.test(w[pastOpts(w, j + 1, GH_OPT_ARG)] ?? '')) return `gh alias ${w[pastOpts(w, j + 1, GH_OPT_ARG)]} renames a gh command past the merge rule: ${LEAD_MERGES}`;
