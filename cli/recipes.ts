@@ -218,16 +218,18 @@ export function relPaths(recipe: Recipe, params: Record<string, string[]>): Reco
 
 /** #4338: the path values that name nothing tracked in the job's folder at the sha. tracked is git's file list there,
  *  relative to that folder (the working tree would pass node_modules and, on Windows, a wrong-case name). A value counts
- *  when a tracked file is it, ends with it, or sits inside it, cut only at a / (review C1: a tool that runs from a
- *  package folder, pnpm --filter ... exec vitest, takes names relative to that package, so an existing runner.json keeps
- *  working unchanged). That proves each name matches a real file or folder; it proves the named tests ran only for a
- *  tool that loads exactly what it is given (node --test). Checked after checkParams: each value is a plain path. */
+ *  when it is a tracked file or folder from the job's folder, or from a package folder under it (one with a tracked
+ *  package.json: where pnpm --filter ... exec runs a tool, which then takes names relative to it; #16 review C1). Not a
+ *  tail of any deeper path (review 2, I1): node --test drops a name that matches nothing whenever another name matches,
+ *  so e2e/tests/x.test.ts must not let tests/x.test.ts pass. Checked after checkParams: each value is a plain path. */
 export function missingPaths(tracked: string[], recipe: Recipe, params: Record<string, string[]>): string[] {
-  const files = tracked.map((f) => `/${f}/`);
+  const have = new Set<string>();
+  for (const f of tracked) for (let k = f.indexOf('/'); ; k = f.indexOf('/', k + 1)) { have.add(k < 0 ? f : f.slice(0, k)); if (k < 0) break; }
+  const bases = ['', ...tracked.filter((f) => f.endsWith('/package.json')).map((f) => f.slice(0, -'package.json'.length))];
   return Object.entries(recipe.params).filter(([, spec]) => spec.paths)
     .flatMap(([n]) => (Object.hasOwn(params, n) ? params[n]! : []).filter((v) => {
-      const seg = `/${v.replace(/^(?:\.\/)+|\/+$/g, '')}/`;
-      return seg === '//' ? false : !files.some((f) => f.includes(seg));
+      const name = v.replace(/^(?:\.\/)+|\/+$/g, '');
+      return !name || !bases.some((b) => have.has(b + name));
     }));
 }
 

@@ -61,6 +61,8 @@ const MAIN = commit('main', {
   'lock.txt': 'v1\n',
   'sub/ok.mjs': "console.log('ok in sub');\n",
   'sub/pkg/t.mjs': '\n',
+  'sub/pkg/package.json': '{}\n',
+  'sub/deep/t2.mjs': '\n',
 });
 git('push', '-q', 'origin', 'main');
 const PR_ONLY = commit('pr'); git('push', '-q', 'origin', 'HEAD:refs/pull/1/head');
@@ -83,7 +85,7 @@ const recipes = {
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
   named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
-  insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
+  insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 4 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
   multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
@@ -285,13 +287,14 @@ test('a file named in a path parameter that is not there at the sha fails the jo
   assert.equal((await ended(await add('named', MAIN, { files: ['ok.mjs'] }))).state, 'passed');
 });
 
-// review I1/C1: in a recipe whose folder is sub, names are read from sub (sub/x from the repo root is taken too) and may
-// be the tail of a deeper file (a tool run from a package folder); a file only outside the folder is not found
-test('a path parameter is checked in the recipe folder at the sha: from the folder, from the root, or a tail of a file', async () => {
-  for (const files of [['sub/ok.mjs'], ['ok.mjs'], ['pkg/t.mjs', 't.mjs']])
+// #4338 review: in a recipe whose folder is sub, a name is read from sub (sub/x from the repo root is taken too) or from a
+// package folder under it (sub/pkg has a package.json, as pnpm --filter ... exec runs there); a tail of a deeper path
+// is not the file (node --test drops it when another name matches, and the job would pass), nor is a file outside sub
+test('a path parameter is checked in the recipe folder at the sha: from the folder, from the root, or from a package folder', async () => {
+  for (const files of [['sub/ok.mjs'], ['ok.mjs'], ['pkg/t.mjs', 't.mjs'], ['deep/t2.mjs']])
     assert.equal((await ended(await add('insub', MAIN, { files }))).state, 'passed', files.join(' '));
-  const j = await ended(await add('insub', MAIN, { files: ['sub/nope.mjs', 'fail.mjs'] }));
-  assert.equal(j.summary, `error: not in the repo at ${MAIN.slice(0, 12)}: nope.mjs, fail.mjs (paths are relative to the recipe's folder, sub)`);
+  const j = await ended(await add('insub', MAIN, { files: ['sub/nope.mjs', 'fail.mjs', 't2.mjs', 'ok.mjs'] }));
+  assert.equal(j.summary, `error: not in the repo at ${MAIN.slice(0, 12)}: nope.mjs, fail.mjs, t2.mjs (paths are relative to the recipe's folder, sub)`);
 });
 
 test('a row written around job_add is refused', async () => {
