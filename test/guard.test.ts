@@ -410,14 +410,66 @@ const freshEnvFine = [
   `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
   'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
 ];
+// N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
+const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
+  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
 test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
-  for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) assert.equal(evaluate({ tool: 'shell', command: c, role }).kind, 'role', `${role}: ${c}`);
+  for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) {
+    if (role === 'lead' && leadKeeps.includes(c)) continue;
+    assert.equal(evaluate({ tool: 'shell', command: c, role }).kind, 'role', `${role}: ${c}`);
+  }
   blocksByRole('builder', [...seatVarR3.slice(0, 4), ...freshEnv.slice(0, 4), 'tmux new -d "codex exec x"', 'herdr pane run w1:p2 "codex exec x"']);
   for (const c of [...seatVarR3Fine, ...freshEnvFine]) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   passes('builder', ['tmux ls', 'sudo --version', 'ssh -T git@github.com']);
   // outside a seat none of this is the guard's business (the variables are not set there)
   for (const c of ['sudo codex exec x', 'tmux new -d codex', 'ssh localhost x']) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: null }), { allow: true }, c);
   assert.match(evaluate({ tool: 'shell', command: 'sudo codex', role: 'builder' }).reason, /fresh environment/);
+});
+
+// PR 116 review I1: an assigner and a $x= count only when the $x= is the assigner's own argument, in its segment (eval:
+// anywhere in its words, since it runs them). An export earlier and an echo "$k=$v" later are not an assignment.
+test('#4669 I1: a $name= that is not an assigner\'s argument passes; one that is stays blocked', () => {
+  const kv = { 'kv.sh': 'f() { local k=$1 v=$2; echo "$k=$v"; }\nf a b\n', 'kv2.sh': 'local k=$1; echo "$k=$v"\n' };
+  const readScript = (p: string) => kv[p.replace(/^.*[\\/]/, '') as keyof typeof kv] ?? null;
+  for (const c of ['export A=1; echo "url=$BASE=ok"', 'local x; echo "$k=$v"', 'bash kv2.sh', 'bash kv.sh', 'git log --format="$x=" && export Y=1',
+    'export NODE_ENV=test; helm upgrade x --set "$k=$v"', 'declare -A m; m[$k]=1', 'export A=1 B="$k=$v"', 'helm upgrade x --set "$k=$v" && export KUBECONFIG=k']) {
+    assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder', readScript }), { allow: true }, c);
+  }
+  passes('builder', ['export A=1; echo "url=$BASE=ok"', 'local x; echo "$k=$v"']);
+  const through = ['x=CB_ROLE; export "$x="; codex', 'x=CB_ROLE; declare -gx $x=; codex', 'n=CB_ROLE; let $n=0', `bash -c 'x=CB_ROLE; export $x='`,
+    'x=CB_AGENT; readonly ${x}=; codex', 'x=CB_ROLE; local a=1 $x=', 'x=CB_ROLE; eval echo hi "$x="', 'eval "true; $x= codex exec x"', 'local -r ${n}=v', 'readonly $n+=x'];
+  for (const c of through) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
+  blocksByRole('builder', through.slice(0, 2));
+});
+
+// PR 116 review I2: herdr's global options and their values are skipped before its subcommand is read
+test('#4669 I2: herdr --machine <m> / -m <m> before a pane run or send-keys is still a pane launch', () => {
+  const blocked = ['herdr --machine macbook pane run w1:p1 "codex exec x"', 'herdr -m macbook pane send-keys w1:p1 codex Enter',
+    'herdr --machine=macbook pane run w1 x', 'herdr --session s pane run w1 x'];
+  for (const role of ROLES) for (const c of blocked) {
+    if (role === 'lead' && leadKeeps.includes(c)) continue; // the lead keeps pane send-keys (N1)
+    assert.equal(evaluate({ tool: 'shell', command: c, role }).kind, 'role', `${role}: ${c}`);
+  }
+  blocksByRole('builder', blocked.slice(0, 2));
+  for (const c of ['herdr --machine macbook agent list', 'herdr -m macbook pane read w1:p1 --lines 20', 'herdr --machine macbook machine status']) {
+    assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  }
+});
+
+// N1 (the lead's ruling on #4669): a lead seat keeps herdr agent prompt, herdr pane send-keys and ssh to the deploy VPS
+// (deploy/copy-to-vps.sh); every other role is blocked from them, and the lead is not exempt from the rest
+test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the deploy ssh; other roles are blocked', () => {
+  const deploy = readFileSync(fileURLToPath(new URL('../deploy/copy-to-vps.sh', import.meta.url)), 'utf8');
+  const readScript = (p: string) => (p.replace(/^.*[\\/]/, '') === 'copy-to-vps.sh' ? deploy : null);
+  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript });
+  for (const c of [...leadKeeps, 'bash deploy/copy-to-vps.sh', 'VPS=vps2 deploy/copy-to-vps.sh']) {
+    assert.deepEqual(ev(c, 'lead'), { allow: true }, `lead: ${c}`);
+    for (const role of ROLES.filter((r) => r !== 'lead')) assert.equal(ev(c, role).kind, 'role', `${role}: ${c}`);
+  }
+  passes('lead', leadKeeps.slice(0, 2));
+  blocksByRole('builder', leadKeeps.slice(0, 2));
+  for (const c of ['ssh localhost x', 'ssh "$HOSTNAME" x', 'ssh $(hostname) x', 'ssh `hostname` x', 'ssh "$COMPUTERNAME" x', 'herdr pane run w1 "codex exec x"', 'herdr agent start x',
+    'tmux new -d codex', 'sudo codex', 'mosh "$VPS"']) assert.equal(ev(c, 'lead').kind, 'role', `lead: ${c}`);
 });
 
 // #4669: a shell script the seat wrote (or found) and then runs is judged for the same two rules, from its text: the
@@ -781,6 +833,8 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of nohup then tmux, as a builder', asBuilder(kb200('nohup ') + 'tmux ls')],
     ['#4669, 200 KB of ssh -p words, as a builder', asBuilder(kb200('ssh -p '))],
     ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
+    ['#4669 I1, 200 KB of local x; echo "$k=$v"; as a builder', asBuilder(kb200('local x; echo "$k=$v"; '))],
+    ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
   ];

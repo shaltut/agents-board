@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ArrowLeft } from 'lucide-react'
@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 
 export interface SessionRow {
   actor: string; project: string | null; machine: string | null; pane: string | null; last_seen: string | null; live: boolean
+  lead?: boolean // leads its project (by role, #3746, #3771)
   doing: { id: number; title: string; priority: Task['priority']; status: Task['status'] }[]
   queued: number; done_24h: number; open_questions: number
   last: { at: string; kind: string; summary: string; task_id: number | null } | null
@@ -22,6 +23,12 @@ export interface SessionRow {
 // last_seen moves every time the session's relay checks in, so poll to keep the live dots honest.
 export const useSessions = (project?: string) =>
   useQuery({ queryKey: ['sessions', project], queryFn: () => get<SessionRow[]>(`/api/sessions${qs({ project })}`), refetchInterval: 30_000 })
+
+/** The names that lead their project (sessions_overview's lead, by role: #3746, #3779), for actorLabel. undefined until read. */
+export function useLeads(): ReadonlySet<string> | undefined {
+  const { data } = useSessions()
+  return useMemo(() => data && new Set(data.filter((s) => s.lead).map((s) => s.actor)), [data])
+}
 
 export function Sessions({ route }: { route: Route }) {
   const { data = [], isLoading } = useSessions(route.project)

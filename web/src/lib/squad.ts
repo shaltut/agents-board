@@ -81,7 +81,9 @@ export function restoredHerdr(key: string, before: Record<string, string>, used:
 }
 /** Who did something, in words: Ahmed, the lead or another session (the session name goes in a tooltip), or a signed-in
  *  admin by name. */
-export const actorLabel = (a: string) => (a === 'ahmed' ? 'Ahmed' : /(^|-)orch@/.test(a) ? 'The lead' : a.includes('@') ? 'A session' : a)
+// #3779: leads (useLeads: sessions_overview's lead, by role) says who leads, whatever the name; not read yet, the old orch@ name
+export const actorLabel = (a: string, leads?: ReadonlySet<string>) =>
+  (a === 'ahmed' ? 'Ahmed' : (leads ? leads.has(a) : /(^|-)orch@/.test(a)) ? 'The lead' : a.includes('@') ? 'A session' : a)
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
 // ---------------------------------------------------------------- shape helpers

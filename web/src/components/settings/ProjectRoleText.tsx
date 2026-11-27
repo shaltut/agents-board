@@ -10,11 +10,13 @@ import {
   ADDITION_CAP, actorLabel, additionState, askFirstLabel, askFirstUnknown, askFirstOf, askFirstOk, askFirstValue, saveError, type AskFirst, type ProjectRolePage,
 } from '@/lib/squad'
 import { NativeSelect, Notice, fieldClass } from './bits'
+import { useLeads } from '@/views/Sessions'
 
 /** One project's addition to the role texts (Q2992) and who its stuck seats ask first (Q2994), #4525. Seats read both
  *  after the shared texts, the next time they read their role. */
 export function ProjectRoleText({ project, name }: { project: string; name: string }) {
   const qc = useQueryClient()
+  const leads = useLeads()
   const { data, isLoading, isError, error } = useQuery({ queryKey: ['project-role', project], queryFn: () => rpc<ProjectRolePage>('project_role_page', { project }) })
   const [addition, setAddition] = useState<string | null>(null) // null: as saved
   const [ask, setAsk] = useState<AskFirst | null>(null)
@@ -50,7 +52,7 @@ export function ProjectRoleText({ project, name }: { project: string; name: stri
       <div className="flex flex-wrap items-baseline gap-x-2">
         <h3 className="font-medium">For {name} only</h3>
         <span className="text-xs text-muted-foreground">
-          {data.updated_by ? `changed by ${actorLabel(data.updated_by)} ${ago(data.updated_at!)}` : 'not set yet: no extra rules, and seats ask the lead first'}
+          {data.updated_by ? `changed by ${actorLabel(data.updated_by, leads)} ${ago(data.updated_at!)}` : 'not set yet: no extra rules, and seats ask the lead first'}
         </span>
       </div>
       <label className="block space-y-1">

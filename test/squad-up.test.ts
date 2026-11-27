@@ -272,6 +272,8 @@ test('squad up: a quiet lead: no lead started, one line names it and how to fix 
   const prot = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'releases/*'] } : [quietRow(10)]), fake(() => GONE).run);
   assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude' --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
   assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
+  // #3779: the board's clock ahead of this one: never "last seen -3 min ago"
+  assert.match(await squadUp('demo', true, callFn([quietRow(-3)]), fake(() => GONE).run), /\(last seen 0 min ago\)/);
   const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
   assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
   assert.doesNotMatch(old, /skip lead/);
@@ -931,11 +933,11 @@ test('squad up --dry-run (#4585): four builders, one per agent, plan four launch
     assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
       '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
     assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
-      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
     assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
-    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
     assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
-      ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+      ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
     // the port is the seat's own, stable across restarts, in range
     assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
   } finally { delete process.env.CB_MCP_GATE_OK; }
@@ -982,6 +984,8 @@ test('squadShow: Claude roles exactly as before; another agent in brackets, a fa
     'reviewer  1 × opus on macbook',
     '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
     'areas: claims'].join('\n'));
+  // #3779: the protected branches print too, not only with --json
+  assert.equal(squadShow({ ...plain, protected: ['development', 'releases/*'] }), 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nareas: none\nprotected: development, releases/*');
 });
 
 test('squad up: a disabled project starts nothing and says so (#4559)', async () => {

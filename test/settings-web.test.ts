@@ -8,7 +8,7 @@ import {
   ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstUnknown, askFirstValue, handEdited, seedChanges,
   CLAUDE_MODELS, OWNER_ONLY_MESSAGE, ROLES, ROLE_TEXT_CAP, RX, STALE_PREFIX, agentLabel, checkSquad, diffSquads, historyLines,
   modelLabel, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
-  charCount, restoredHerdr, seatName, setSupervise,
+  actorLabel, charCount, restoredHerdr, seatName, setSupervise,
   type Seat, type Squad, type SquadPage,
 } from '../web/src/lib/squad.ts';
 import { PAGES, visiblePages } from '../web/src/lib/route.ts';
@@ -294,4 +294,16 @@ test('the saved document: lowering a count drops seats that no longer exist; ver
   const back = toDocument({ ...squad(), version: 4, changed: true } as Squad);
   assert.ok(!('version' in back) && !('changed' in back));
   assert.deepEqual(Object.keys(back).sort(), ['areas', 'machines', 'repos', 'roles', 'supervise'], 'every other key is carried');
+});
+
+// #3779 (PR 113 follow-up): "The lead" is the project's lead by role (sessions_overview's lead), whatever its name; with no
+// sessions to go by, the old orch@ name still reads as the lead
+test('actorLabel: the lead by the sessions\' lead flag, not the orch@ name', () => {
+  const leads = new Set(['SQUAD@pc']);
+  assert.equal(actorLabel('SQUAD@pc', leads), 'The lead');
+  assert.equal(actorLabel('orch@pc', leads), 'A session', 'an orch@ name that does not lead is a session');
+  assert.equal(actorLabel('W1@pc', leads), 'A session');
+  assert.equal(actorLabel('ahmed', leads), 'Ahmed');
+  assert.equal(actorLabel('orch@pc'), 'The lead', 'no sessions read yet: the old name rule');
+  assert.equal(actorLabel('board', leads), 'board');
 });
