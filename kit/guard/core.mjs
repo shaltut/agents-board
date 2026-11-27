@@ -657,9 +657,15 @@ const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
 const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex\.*|codex~\d|\.opencode\.*|openco~\d)(?:[\\/]|$)/i;
 const IS_HOME_AGENT_DIR = new RegExp(HOME + String.raw`(?:\.gemini\.*|gemini~\d|\.config\.*[\\/]+opencode\.*)(?:[\\/]|$)`, 'i');
 // #4590: the cd's redirects go first (cd ~/.claude 2>/dev/null still enters the fence)
+// #4595: the whole argument and each word on its own: an option after the target (Set-Location $HOME\.claude -PassThru,
+// sl ~/.claude -ea 0, cd ~/.claude --) hid it from the end-anchored tests. Any word, not the first non-option one: which
+// options take a value is not known here (-ErrorAction 0 ~/.claude), so fail closed. -Path:<dir> names its value too.
+const CD_WORD = /"[^"]*"|'[^']*'|\S+/g;
+const isFenceDir = (a) => forms(a).some((f) => IN_BOARD_DIR.test(f) || IS_CLAUDE_DIR.test(f) || IS_AGENT_DIR.test(f) || IS_HOME_AGENT_DIR.test(f));
 const fenceDir = (seg) => {
-  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim().replace(/^["']|["']$/g, '');
-  return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
+  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim();
+  if (isFenceDir(arg.replace(/^["']|["']$/g, ''))) return true;
+  return (arg.match(CD_WORD) ?? []).some((w) => isFenceDir(w.replace(/^-[\w-]+:/, '').replace(/^["']|["']$/g, '')));
 };
 const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
 // a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device

@@ -246,6 +246,12 @@ const fenceWrites = [
   'Set-Location C:\\tmp\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'Set-Location C:\\tmp\\\r\nCopy-Item evil.json $HOME\\.claude\\settings.json',
   'Get-ChildItem C:\\work\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'cd C:\\tmp\\\nSet-Content $HOME\\.claude\\settings.json x',
   'echo a\\\ncp x ~/.claude/settings.json', 'ls # x\\\ncp evil.json ~/.claude/settings.json',
+  // #4595: an option after the cd target (or a valued option before it) does not hide that the cd enters the fence
+  String.raw`Set-Location $HOME\.claude -PassThru; Set-Content settings.json x`, 'sl ~/.claude -ea 0; echo x > settings.json',
+  'cd ~/.claude -- && echo x > settings.json', String.raw`Set-Location -Path $HOME\.claude -PassThru; Set-Content settings.json x`,
+  String.raw`Set-Location -LiteralPath $HOME\.claude -ErrorAction Stop; Set-Content settings.json x`,
+  String.raw`Set-Location -Path:$HOME\.claude; Set-Content settings.json x`, String.raw`Set-Location -ErrorAction 0 $HOME\.claude; Set-Content settings.json x`,
+  'cd "/Users/my name/.claude" -P; echo x > settings.json', 'pushd ~/.claude-board -n; echo x > runner.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -270,6 +276,9 @@ const fenceReads = [
   'cd ~/.claude && cat settings.json',
   // #4587: a continued read stays a read
   'cat \\\n  ~/.claude/settings.json', 'git diff \\\n  -- opencode.json', 'cp a.json \\\n  b.json',
+  // #4595: an option after a cd into the fence that only reads, and options after a cd elsewhere
+  String.raw`Set-Location $HOME\.claude -PassThru; Get-Content settings.json`, 'cd /tmp -P; echo x > settings.json',
+  'sl ~/work -ea 0; echo x > notes.txt', 'cd ~/.claude -- && cat settings.json',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
