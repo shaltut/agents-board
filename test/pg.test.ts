@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import postgres from 'postgres';
-import { ensurePg } from '../db/pg.ts';
+import { ensurePg, testPgPort } from '../db/pg.ts';
 
 // the private cluster is Windows-only (initdb.exe, pg_ctl.exe; db/pg.ts): elsewhere Postgres is started by hand (#4401)
 test('ensurePg creates the cluster when .pgdata is missing', { timeout: 120_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
@@ -31,4 +31,24 @@ test('ensurePg says why it could not create the cluster and what to set', () => 
   rmSync(join(dir, '..'), { recursive: true, force: true });
   assert.match(r.stdout, /could not create Postgres cluster in .*: .*ENOENT.*CB_PG_BIN/s);
   assert.doesNotMatch(r.stdout, /undefined/);
+});
+
+// #4413: every Windows worktree tested on 127.0.0.1:5434, served by whichever worktree's cluster started first; eight
+// parallel runs exhausted its 100 connections and failed when it was in crash recovery. A worktree gets its own port.
+test('a Windows worktree tests on its own port; the main checkout and other platforms keep 5434', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
+  const tree = join(tmp, 'tree'), main = join(tmp, 'main');
+  try {
+    mkdirSync(tree); writeFileSync(join(tree, '.git'), 'gitdir: elsewhere\n'); // a worktree's .git is a file
+    mkdirSync(join(main, '.git'), { recursive: true });
+    const port = testPgPort(tree, 'win32');
+    assert.notEqual(port, 5434);
+    assert.ok(port >= 15435 && port < 16455, `port ${port} in the worktree range`);
+    assert.equal(testPgPort(tree, 'win32'), port, 'the same worktree gets the same port');
+    assert.equal(testPgPort(main, 'win32'), 5434, 'the main checkout');
+    assert.equal(testPgPort(tree, 'darwin'), 5434, 'the Mac: Postgres started by hand on 5434');
+    assert.equal(testPgPort(tree, 'linux'), 5434);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
