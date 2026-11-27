@@ -352,7 +352,8 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   a hand-started name or a leaving seat; one idle 20 minutes with no waiting work is simply closed. Each restart is a
   `restart` board event (`restart <seat> (opus to sonnet)`). A setting its machine cannot start (an agent not installed,
   a model its adapter refuses) is refused once per setting per supervisor run, logged, and the seat keeps running; a
-  seat restarted once for a setting is not restarted again for it in that run;
+  seat restarted once for a setting is not restarted again for it until it has been seen running it (no loop when a
+  model name never reads as matching);
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.

@@ -176,7 +176,9 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
     if (dryRun) out.push(`would close ${name}`);
     else out.push((await closeOne(d, state, name, log)).line);
   }
-  // #4332 (Q2970): a seat on an old agent or model whose new one this machine cannot start: kept, said once (restartTried)
+  // #4332 (Q2970): a seat seen on its seat's setting again is forgotten; one on an old agent or model whose new one this
+  // machine cannot start is kept, said once (restartTried)
+  if (!dryRun) for (const n of plan.settled) memory.restartTried.delete(n);
   for (const r of plan.refused) {
     if (dryRun) { out.push(`would not restart ${r.session} on ${r.to}: ${r.why}`); continue; }
     memory.restartTried.set(r.session, r.to);

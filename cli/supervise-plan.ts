@@ -27,11 +27,12 @@ export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Rec
 export type Leaving = { session: string; why: 'busy' | 'down' | 'machine' | 'empty' };
 // restart (#4332, Q2970): an idle seat on an old agent or model, closed then started on its seat's setting (launch).
 // from/to: what it runs and what the squad names, in runsOn words. refused: a seat on an old setting whose new one this
-// machine cannot start (why): kept as it is, said once
+// machine cannot start (why): kept as it is, said once. settled: seats restartTried names that now run their seat's
+// setting (bound again on it, by the restart or by hand): forgotten, so a later change back to that setting is acted on
 export type Restart = { launch: Launch; from: string; to: string };
 export type Refused = { session: string; to: string; why: string };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[]; leaving: Leaving[];
-  restart: Restart[]; refused: Refused[] };
+  restart: Restart[]; refused: Refused[]; settled: string[] };
 
 /** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
 export const READY = new Set(['idle', 'done']);
@@ -66,7 +67,7 @@ export function mayBeLeaving(state: State, herdrLive: Set<string>): boolean {
 
 export function planTick(i: TickInput): TickPlan {
   const { state, herdrLive, herdrDown, now } = i;
-  const plan: TickPlan = { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [] };
+  const plan: TickPlan = { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [], settled: [] };
   if (!state.supervised) return plan;
   const { squad, project } = state;
   const by = new Map(state.sessions.map((s) => [s.actor, s]));
@@ -153,14 +154,15 @@ export function planTick(i: TickInput): TickPlan {
   // lead (the supervisor never starts one), a hand-started name or a leaving seat. After restores and starts, so waiting
   // work comes first; a seat this tick closes anyway gets the new setting at its next start. A setting this machine
   // cannot start is refused (said at once, busy or not), and a seat already restarted or refused for this setting is
-  // left alone (restartTried)
+  // left alone (restartTried) until it is seen on its seat's setting (settled)
   let restartsLeft = RESTARTS;
   const closing = new Set(plan.close);
   for (const w of wanted) {
     const s = by.get(w.name);
-    if (!s?.live || closing.has(w.name)) continue;
+    if (!s?.live) continue;
     const spec = seatSpec(squad, w), to = runsOn(spec);
-    if (!onOldSetting(s, spec) || i.restartTried?.get(w.name) === to) continue;
+    if (!onOldSetting(s, spec)) { if (i.restartTried?.has(w.name)) plan.settled.push(w.name); continue; }
+    if (closing.has(w.name) || i.restartTried?.get(w.name) === to) continue;
     const l = launchFor(project, squad, w), why = i.startProblem?.(l) ?? null;
     if (why) { plan.refused.push({ session: w.name, to, why }); continue; }
     if (restartsLeft <= 0 || startsLeft <= 0 || !idle(s) || !safe(w.name) || !ok(w.name) || i.launched.has(w.name)

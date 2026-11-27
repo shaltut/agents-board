@@ -24,7 +24,7 @@ const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, he
 const names = (l: { name: string }[]) => l.map((x) => x.name);
 
 test('not supervised: empty plan', () => {
-  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [] });
+  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [], settled: [] });
 });
 
 test('starts up to the count', () => {
@@ -103,7 +103,7 @@ test('restore, down_again, herdr down, and no reuse of a holding name', () => {
   assert.deepEqual([again.restore, again.notes], [[], [{ what: 'down_again', session: 'sv-B1@macbook' }]]);
   assert.deepEqual(tick(state({ sessions: [{ ...down, last_restore: ago(10), down_again_logged: true }] })).notes, []);
   assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(31) }] })).restore.length, 1);
-  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [] });
+  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [], settled: [] });
   const quiet = sess('sv-B2@macbook', 'builder', { last_event: ago(21) });
   const idleB2 = { herdrStatus: { 'sv-b2-macbook': 'idle' } };
   assert.deepEqual(tick(state({ sessions: [quiet] }), { ...idleB2, herdrDown: new Set(['macbook']) }).close, []);
@@ -298,6 +298,12 @@ test('a seat on an old model restarts on the new one once idle 5 minutes; busy o
   // already restarted (or refused) for this setting in this run: never again; for an older setting: yes
   none({}, { ...readyAll, restartTried: new Map([['sv-B1@macbook', 'sonnet']]) });
   assert.deepEqual(restarts(tick(state({ sessions: [old] }), { ...readyAll, restartTried: new Map([['sv-B1@macbook', 'haiku']]) })), ['sv-B1@macbook']);
+  // seen on its seat's setting again (bound anew on sonnet): settled, so the supervisor forgets it and a later change
+  // back to a setting it was restarted for is acted on; still on the old one, or never tried: not settled
+  const tried = { ...readyAll, restartTried: new Map([['sv-B1@macbook', 'sonnet']]) };
+  assert.deepEqual(tick(state({ sessions: [{ ...old, model: 'sonnet' }] }), tried).settled, ['sv-B1@macbook']);
+  assert.deepEqual(tick(state({ sessions: [old] }), tried).settled, []);
+  assert.deepEqual(tick(state({ sessions: [{ ...old, model: 'sonnet' }] }), readyAll).settled, []);
   // idle 20 minutes with no waiting work: the idle close wins (its next start runs the new model); with work waiting it restarts
   const quiet = { ...old, last_event: ago(21) };
   const closed = tick(state({ sessions: [quiet] }), readyAll);
