@@ -36,5 +36,8 @@ test('dropLinks removes every link in the worktree but under .git and node_modul
     for (const p of ['node_modules/pkg', 'apps/a/node_modules/up', '.git/refs/linked']) assert.ok(lstatSync(join(slot, p)).isSymbolicLink(), p);
     assert.deepEqual(dropLinks(slot), [], 'nothing left to drop');
     assert.deepEqual(dropLinks(join(tmp, 'no-such-slot')), []);
+    // #4412: with an empty keep set the walk takes .git and node_modules too (the runner's check of a slot's .git)
+    assert.deepEqual(dropLinks(slot, new Set()).sort(), ['.git/refs/linked', 'apps/a/node_modules/up', 'node_modules/pkg']);
+    assert.ok(existsSync(join(outside, 'package.json')) && existsSync(join(slot, 'node_modules/.pnpm')));
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
