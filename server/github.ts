@@ -300,7 +300,8 @@ async function write(tx: any, f: Fetched, until: number, now: Date, task: number
            where key = ${key}`;
   if (!gs.length) return;
   const n = gs.length, more = n > MAX_GROUPS ? n - MAX_GROUPS : 0;
-  const mine = owner !== null && gs.some((g) => g.evs.some((e) => String(e.login ?? '').toLowerCase() === owner));
+  // his words: a failed run is GitHub's report (kept even for a muted login), not his, so it never marks the part
+  const mine = owner !== null && gs.some((g) => g.evs.some((e) => e.kind !== 'CI failure' && String(e.login ?? '').toLowerCase() === owner));
   const part = (mine ? MINE : '') + [`${LABEL} ${name}: ${n} update${n > 1 ? 's' : ''}`, ...lines.slice(0, MAX_GROUPS),
     ...(more ? [`  +${more} more: see the cards`] : [])].join('\n');
   // the outbox holds repo parts until flush tells them; a pile-up (tells failing) keeps the newest parts within 15

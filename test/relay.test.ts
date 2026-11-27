@@ -284,13 +284,19 @@ test('routine notices wait up to 10 min, then one push; anything important takes
     assert.notEqual(await held(), null);
     relay.kill();
     await exited;
-    await sql`update cb.sessions set hold_at = now() - interval '9 minutes 48 seconds' where pane = ${pane}`;
+    await sql`update cb.sessions set hold_at = now() - interval '9 minutes 48 seconds', code_sha = null where pane = ${pane}`;
     fs.writeFileSync(seatFiles(pane).lock, '');
     const restarted = Date.now();
     relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
     exited = new Promise((r) => relay.on('exit', r));
     await wait(2500);
     assert.equal(inbox.got.length, 2, 'the restarted relay keeps holding inside the window');
+    // #4352: a held read still reports the commit the relay's code is
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const code = async () => (await sql`select code_sha from cb.sessions where pane = ${pane}`)[0]?.code_sha;
+    for (const t = Date.now(); (await code()) !== head && Date.now() - t < 5000;) await wait(100);
+    assert.equal(await code(), head, 'code sha sent while holding');
+    assert.equal(inbox.got.length, 2, 'and still holding');
     assert.ok(await upTo(() => inbox.got.length > 2, 20_000), 'the restarted relay delivers when the window ends, on its own timer');
     assert.ok(Date.now() - restarted < 25_000, 'before the 30 s poll');
     await sql`select pg_notify('cb', 'test')`;

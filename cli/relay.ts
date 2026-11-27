@@ -183,7 +183,7 @@ const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
 // #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
 let holdTimer: ReturnType<typeof setTimeout> | undefined;
 // the messages and broadcasts of the read last held, and whose they were (review I1: a bind to another name, below)
-let heldFor: { actor: string; sid: string | null; messages: any[]; broadcasts: any[] } | undefined;
+let heldFor: { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[] } | undefined;
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -330,11 +330,12 @@ async function check() {
       // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
       // history): read again from the hold's cursor, so the held memory changes come back, once, before anything goes out
       if (i.hold && after !== Number(i.hold.from)) { after = Number(i.hold.from); again = true; continue; }
-      // #3221 review I1: the pane was bound to another name (cb.iam) while this relay held messages or broadcasts for the
-      // old one. The board returns those only to that name and from its mark, which such a takeover resets (and the hold
-      // with it), so they go now from this relay's copy; any the board still returns are left to it. Not after another
-      // session took the pane: that one starts clean (#4379). Memory comes back through `after`, as before.
-      if (heldFor && heldFor.actor !== i.actor) {
+      // #3221 review I1: the pane was bound to another name or project (cb.iam) while this relay held messages or
+      // broadcasts. The board returns those only to that name and project and from its mark, which a takeover by
+      // another name resets (and the hold with it), so they go now from this relay's copy; any the board still returns
+      // are left to it. Not after another session took the pane: that one starts clean (#4379). Memory comes back
+      // through `after`, as before.
+      if (heldFor && (heldFor.actor !== i.actor || heldFor.project !== i.project)) {
         const was = heldFor, has = (l: any[]) => new Set(l.map((x: any) => Number(x.id)));
         const ms = has(i.messages), bs = has(i.broadcasts);
         const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
@@ -369,8 +370,9 @@ async function check() {
           await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
           log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
         }
-        heldFor = { actor: i.actor, sid, messages: i.messages, broadcasts: i.broadcasts };
+        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts };
         holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
+        await sendCode(); // a held read still reports the code it runs (#4352)
         continue;
       }
       heldFor = undefined;

@@ -309,6 +309,14 @@ test("a line by Ahmed's own login (not muted) is marked urgent, so his relay nev
   };
   assert.equal(await urgentOf('shaltut'), 'true', 'his login, case-blind');
   assert.equal(await urgentOf('dev1'), null, 'anyone else: a routine notice');
+  // his login muted: his comment is dropped; a failed run he pushed is GitHub's report, kept, and not his words
+  const { sql, watch } = await board();
+  await sql`insert into cb.settings (key, value) values ('github-muted', ${sql.json(['shaltut'])})`;
+  const f = fakeGh({ [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', 'shaltut', 'OWNER')],
+                     [`repos/${R}/actions/runs`]: () => ({ pages: [{ total_count: 1, workflow_runs: [run({ name: 'Deploy', actor: { login: 'shaltut' } })] }] }) });
+  await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch, owner: 'shaltut' });
+  const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github'`;
+  assert.deepEqual(rows.map((r: any) => [r.summary.split('\n')[1], r.u]), [['  branch "main": 1 CI failure by shaltut', null]]);
 });
 
 
