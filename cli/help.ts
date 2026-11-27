@@ -39,7 +39,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
   }],
   ['TAKE WORK', {
     mine: { use: 'cb mine', topic: 'work',
-      does: 'Your open tasks. Without a relay, run it between steps: a task missing from it was reassigned, stop working on it.',
+      does: 'Your open tasks first. Then, under CLOSED OR MOVED OFF YOU IN THE LAST 24H, cards of yours closed or reassigned in the last day (shown so a cancel or a move is seen). Without a relay, run it between steps: a task that left your open tasks was closed or reassigned, stop working on it.',
       eg: 'cb mine' },
     show: { use: 'cb show <id>', topic: 'work',
       does: 'One task in full: its line, the goals it is in, its body, and its last 10 notes (cb log, cb done). Read-only; works for any project\'s task.',
@@ -296,7 +296,7 @@ Ids: before move/done/edit/log/tag, check the id against cb mine. A typo lands o
 a bound session is refused on another project's task. cb log 130 "..." means task #130, never a project.
 
 When a [Claude Board] message says Ahmed (or anyone) moved, cancelled or edited your task: obey it now.
-A task missing from cb mine was reassigned: stop working on it.
+A task gone from your open tasks in cb mine was closed or reassigned: stop working on it.
 Nothing at all can continue? Say so in one line and end your turn. Don't idle.
 
 Types     task (default) | bug | feature | change | chore | research. Set with --type on add/edit; filter with cb brief --type bug.
@@ -518,7 +518,7 @@ ${SNIPPET}`,
  2. One project per session: bind once (cb iam); never take or touch another project's tasks; check ids.
  3. Register before working: in-hand work -s in_progress, known next work -s next (backlog if not soon).
  4. Take work from the top of Next (cb next). Ahmed orders it; don't reorder.
- 5. Obey [Claude Board] moves, cancels and edits now. A task gone from cb mine was reassigned: stop it.
+ 5. Obey [Claude Board] moves, cancels and edits now. A task gone from your open tasks in cb mine was closed or reassigned: stop it.
  6. Report as you go: cb log for findings, cb move <id> review for Ahmed's eyes, cb done with a summary and --commit/--pr.
  7. Never AskUserQuestion; never stop and wait. cb ask with 2-4 options; --free only for a fact;
     --blocking -t <id> only when that task truly cannot continue. Then keep working.

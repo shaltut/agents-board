@@ -22,8 +22,8 @@ and Ahmed's view of what you do. Keep it true at all times. Use the `cb` command
    P3 = someday. Set it when you add work (`-p P1`); change it with `cb edit <id> --priority P1`.
    Don't inflate: if everything is P0, nothing is.
 9. When a [Claude Board] message says Ahmed moved, cancelled or edited one of your tasks, obey it now.
-   Without the relay, run `cb mine` between steps instead. If a task you were working on is missing
-   from `cb mine`, it was reassigned: stop working on it.
+   Without the relay, run `cb mine` between steps instead. If a task you were working on left your open
+   tasks in `cb mine` (it shows under CLOSED OR MOVED OFF YOU for a day), it was closed or reassigned: stop working on it.
 10. Report as you go:
     - `cb log <id> "<what happened>"`: findings worth reading in the morning
     - `cb move <id> review "<note>"`: when it needs Ahmed's eyes
