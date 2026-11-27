@@ -347,7 +347,7 @@ test('cb digest with no project and no bound session says which project', () => 
   const r = spawnSync('node', ['cli/cb.ts', 'digest'], { encoding: 'utf8',
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: '', HERDR_PANE_ID: '', CB_MACHINE: 'pc', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
   assert.notEqual(r.status, 0);
-  assert.ok((r.stderr + r.stdout).includes("no project: say which (cb digest ihop)"));
+  assert.ok((r.stderr + r.stdout).includes("no project: say which (cb digest iris)"));
 });
 
 // #4002: the model a session should run is its squad seat's, else its role's, else the role default; the seat key is the

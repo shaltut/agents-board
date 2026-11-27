@@ -109,9 +109,9 @@ test('--reply-to sets where the answer goes; --as alone does not use my pane', a
 
 test('cb tag adds and removes; brief --tag filters and shows tags', async () => {
   await db();
-  cb(['add', 'demo', 'reader', '-s', 'next', '-l', 'tawuniya']);
+  cb(['add', 'demo', 'reader', '-s', 'next', '-l', 'tamarind']);
   cb(['add', 'demo', 'other', '-s', 'next']);
-  const r = cb(['tag', '1', 'OCR', '-tawuniya']);
+  const r = cb(['tag', '1', 'OCR', '-tamarind']);
   assert.equal(r.code, 0, r.err);
   assert.equal(r.out, '#1 tags: ocr');
   const b = cb(['brief', 'demo', '--tag', 'ocr']);
@@ -121,19 +121,19 @@ test('cb tag adds and removes; brief --tag filters and shows tags', async () => 
 
 test('cb sessions lists who is working on what; cb session shows one', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'SC64 run', status => 'in_progress', actor => 'W6@macbook')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'stale port', status => 'in_progress', actor => 'worker-7@macbook')`;
+  await sql`select cb.task_add(project => 'iris', title => 'B64 run', status => 'in_progress', actor => 'W6@macbook')`;
+  await sql`select cb.task_add(project => 'iris', title => 'stale port', status => 'in_progress', actor => 'worker-7@macbook')`;
   await sql`update cb.events set at = now() - interval '2 hours' where actor = 'worker-7@macbook'`;
-  await sql`select cb.ask(project => 'ihop', body => 'fire?', actor => 'W6@macbook')`;
-  const r = cb(['sessions', 'ihop']);
+  await sql`select cb.ask(project => 'iris', body => 'fire?', actor => 'W6@macbook')`;
+  const r = cb(['sessions', 'iris']);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /W6@macbook .*no relay/);
-  assert.match(r.out, /#1 SC64 run/);
+  assert.match(r.out, /#1 B64 run/);
   assert.match(r.out, /1 asking Ahmed/);
   assert.match(r.out, /worker-7@macbook .*idle 2h/); // holds work but went quiet: the orchestrator should look
   const d = cb(['session', 'W6@macbook']);
   assert.equal(d.code, 0, d.err);
-  assert.match(d.out, /#1 \[in_progress\] P2 SC64 run/);
+  assert.match(d.out, /#1 \[in_progress\] P2 B64 run/);
   assert.match(d.out, /Q1 open: fire\?/);
 });
 
@@ -156,19 +156,19 @@ test('cb tell sends to one session and says whether it is live', async () => {
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'demo', title => 'Hijri')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Dates')`;
   for (const [p, a] of [['w1:p3', 'W2@macbook'], ['w1:p4', 'W3@macbook'], ['w1:p5', 'W4@macbook']]) await sql`select cb.iam('mac', ${p}, ${a}, 'demo')`;
   const as = { CB_ACTOR: 'W2@macbook' };
-  const o = cb(['huddle', 'open', 'Hijri dates', 'W3@macbook', '-t', '1'], as);
+  const o = cb(['huddle', 'open', 'Date parsing', 'W3@macbook', '-t', '1'], as);
   assert.equal(o.code, 0, o.err);
   assert.equal(o.out, 'huddle #1 open with W3@macbook; talk with: cb huddle say 1 "..."');
   assert.equal(cb(['huddle', 'say', '1', 'partial', 'dates?'], as).code, 0);
   assert.equal(cb(['huddle', 'add', '1', 'W4@macbook'], as).out, 'huddle #1: added W4@macbook');
   const s = cb(['huddle', 'show', '1']);
-  assert.match(s.out, /huddle #1 \[open\] Hijri dates \(task #1\) · demo · W2@macbook, W3@macbook, W4@macbook/);
+  assert.match(s.out, /huddle #1 \[open\] Date parsing \(task #1\) · demo · W2@macbook, W3@macbook, W4@macbook/);
   assert.match(s.out, /W2@macbook: partial dates\?/);
   assert.equal(cb(['huddle', 'close', '1', 'indeterminate'], as).out, 'huddle #1 closed');
-  assert.match(cb(['huddles', 'demo']).out, /huddle #1 \[closed\] Hijri dates \(task #1\) .* 4 lines\n  outcome: indeterminate/);
+  assert.match(cb(['huddles', 'demo']).out, /huddle #1 \[closed\] Date parsing \(task #1\) .* 4 lines\n  outcome: indeterminate/);
   assert.match(cb(['huddle', 'say', '1', 'late'], as).err, /huddle #1 is closed/);
 });
 
@@ -178,7 +178,7 @@ test('cb ask needs options (Ahmed answers by clicking); --free allows an open qu
   const r = cb(['ask', 'demo', 'Shall W4 draft the rows or will you?']);
   assert.equal(r.code, 1);
   assert.match(r.err, /give Ahmed options to click: -o "Label \(Recommended\)=why" -o "Label=tradeoff"/);
-  assert.equal(cb(['ask', 'demo', 'What is the NPHIES sandbox URL?', '--free']).code, 0);
+  assert.equal(cb(['ask', 'demo', 'What is the payer sandbox URL?', '--free']).code, 0);
   assert.equal(cb(['ask', 'demo', 'Who drafts?', '-o', 'W4 drafts (Recommended)=fast', '-o', 'Ahmed writes=his wording']).code, 0);
   const [{ n }] = await sql`select count(*)::int as n from cb.questions`;
   assert.equal(n, 2);
@@ -211,49 +211,49 @@ test('cb ask - and -c - read Markdown from stdin: a table keeps its lines; cb re
 test('cb user add adds a person (Ahmed copies the link); cb ask --to and cb assign hand questions and tasks to a user', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'PO sign-off')`;
-  const u = cb(['user', 'add', 'omar', 'Omar'], { CB_PUBLIC_URL: 'https://board.example.app' });
+  const u = cb(['user', 'add', 'cai', 'Cai'], { CB_PUBLIC_URL: 'https://board.example.app' });
   assert.equal(u.code, 0, u.err);
-  const [{ token }] = await sql`select token from cb.users where name = 'omar'`;
-  assert.equal(u.out, 'added omar (Omar): Ahmed copies their link from the Users page');
+  const [{ token }] = await sql`select token from cb.users where name = 'cai'`;
+  assert.equal(u.out, 'added cai (Cai): Ahmed copies their link from the Users page');
   assert.ok(!u.out.includes(token), 'a session never sees the link');
-  assert.match(cb(['users']).out, /omar\s+Omar/);
-  await onProject(sql, 'omar', 'demo');
-  assert.equal(cb(['ask', 'demo', 'E1 scope?', '-o', 'A=x', '-o', 'B=y', '--to', 'omar']).code, 0);
+  assert.match(cb(['users']).out, /cai\s+Cai/);
+  await onProject(sql, 'cai', 'demo');
+  assert.equal(cb(['ask', 'demo', 'E1 scope?', '-o', 'A=x', '-o', 'B=y', '--to', 'cai']).code, 0);
   assert.equal(cb(['ask', 'demo', 'mine', '-o', 'A=x', '-o', 'B=y']).code, 0);
-  assert.equal(cb(['assign', 'Q2', 'omar']).out, 'Q2 → omar');
-  assert.equal(cb(['assign', '1', 'omar']).out, '#1 → omar');
+  assert.equal(cb(['assign', 'Q2', 'cai']).out, 'Q2 → cai');
+  assert.equal(cb(['assign', '1', 'cai']).out, '#1 → cai');
   assert.match(cb(['assign', 'Q1', 'nobody']).err, /unknown user nobody/);
   assert.equal(cb(['assign', 'Q2', 'ahmed']).out, 'Q2 → ahmed');
   const rows = await sql`select id, assigned_to from cb.questions order by id`;
-  assert.deepEqual(rows.map((r: any) => [Number(r.id), r.assigned_to]), [[1, 'omar'], [2, null]]);
+  assert.deepEqual(rows.map((r: any) => [Number(r.id), r.assigned_to]), [[1, 'cai'], [2, null]]);
   const [t] = await sql`select assignee from cb.tasks where id = 1`;
-  assert.equal(t.assignee, 'omar');
-  assert.match(cb(['brief', 'demo']).out, /Q1 .*E1 scope\? \(for omar\)/);
-  assert.match(cb(['ask', 'elsewhere', 'x?', '-o', 'A=x', '-o', 'B=y', '--to', 'omar']).err,
-    /omar is not on project elsewhere: Ahmed adds people to projects on the Users page/);
+  assert.equal(t.assignee, 'cai');
+  assert.match(cb(['brief', 'demo']).out, /Q1 .*E1 scope\? \(for cai\)/);
+  assert.match(cb(['ask', 'elsewhere', 'x?', '-o', 'A=x', '-o', 'B=y', '--to', 'cai']).err,
+    /cai is not on project elsewhere: Ahmed adds people to projects on the Users page/);
 });
 
 test("cb user rotate and remove are Ahmed's, on the Users page", async () => {
   const sql = await db();
-  cb(['user', 'add', 'omar', 'Omar']);
-  const [{ token }] = await sql`select token from cb.users where name = 'omar'`;
+  cb(['user', 'add', 'cai', 'Cai']);
+  const [{ token }] = await sql`select token from cb.users where name = 'cai'`;
   for (const sub of ['rotate', 'remove']) {
-    const r = cb(['user', sub, 'omar']);
+    const r = cb(['user', sub, 'cai']);
     assert.equal(r.code, 1, sub);
     assert.match(r.err, /Ahmed does this on the Users page/);
   }
-  const [u] = await sql`select token from cb.users where name = 'omar'`;
+  const [u] = await sql`select token from cb.users where name = 'cai'`;
   assert.equal(u.token, token, 'nothing changed');
-  assert.match(cb(['user', 'drop', 'omar']).err, /unknown user command "drop"/);
+  assert.match(cb(['user', 'drop', 'cai']).err, /unknown user command "drop"/);
 });
 
 test('a task number is never a project: cb log 130 logs on task #130; numeric projects are refused', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'SC64 kit')`;
-  const r = cb(['log', '1', 'SC64 graded 27/32']);
+  await sql`select cb.task_add(project => 'iris', title => 'B64 kit')`;
+  const r = cb(['log', '1', 'B64 graded 27/32']);
   assert.equal(r.code, 0, r.err);
   const [e] = await sql`select project, task_id from cb.events where kind = 'note'`;
-  assert.deepEqual([e.project, Number(e.task_id)], ['ihop', 1]);
+  assert.deepEqual([e.project, Number(e.task_id)], ['iris', 1]);
   assert.match(cb(['log', '#99', 'x']).err, /no task #99/);
   assert.match(cb(['add', '130', 'oops']).err, /"130" looks like a task number, not a project/);
   const [{ n }] = await sql`select count(*)::int as n from cb.projects where slug ~ '^[0-9]+$'`;
@@ -288,13 +288,13 @@ test('cb ask warns when no relay listens on the asking name (#550)', async () =>
 test('cb mem find: nothing in the bound project searches every project and says so (#660)', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'seed')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
   await sql`select cb.iam('pc', 'w1:p2', 'W1@test', 'demo')`;
   const env = { HERDR_PANE_ID: 'w1:p2', CB_MACHINE: 'pc', CB_ACTOR: '' };
-  assert.equal(cb(['mem', 'add', 'ihop', 'Pipeline 495: the last GitOps bump wins', '-k', 'gotcha', '--as', 'W2@test']).code, 0);
+  assert.equal(cb(['mem', 'add', 'iris', 'Pipeline 495: the last GitOps bump wins', '-k', 'gotcha', '--as', 'W2@test']).code, 0);
   const r = cb(['mem', 'find', 'pipeline'], env);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /^nothing about "pipeline" in demo; in other projects:\n {2}ihop: .*M\d+ Pipeline 495/);
+  assert.match(r.out, /^nothing about "pipeline" in demo; in other projects:\n {2}iris: .*M\d+ Pipeline 495/);
   assert.match(cb(['mem', 'find', 'nothing-like-this'], env).out, /^nothing about "nothing-like-this" in demo or any other project/);
   assert.match(cb(['mem', 'find', 'pipeline', '--project', 'demo'], env).out, /^nothing about "pipeline" in demo \(/, 'an explicit --project stays put');
 });
@@ -332,11 +332,11 @@ test('bin/cb keeps Node\'s compile cache: converting cb\'s TypeScript was ~190 m
 
 test('cb show prints one task with its body and its notes; a wrong id says how to find one (#660)', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'SC64 kit', body => 'Grade the 32 claims.')`;
+  await sql`select cb.task_add(project => 'iris', title => 'B64 kit', body => 'Grade the 32 claims.')`;
   cb(['log', '1', 'graded 27/32']);
   const r = cb(['show', '#1']);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /^#1 \[backlog\] P2 SC64 kit · ihop\n/);
+  assert.match(r.out, /^#1 \[backlog\] P2 B64 kit · iris\n/);
   assert.match(r.out, /\nGrade the 32 claims\.\n/);
   assert.match(r.out, /graded 27\/32/);
   assert.equal(JSON.parse(cb(['show', '1', '--json']).out).body, 'Grade the 32 claims.');
@@ -345,7 +345,7 @@ test('cb show prints one task with its body and its notes; a wrong id says how t
 
 test('cb show indents a many-line body so it cannot pass for its own lines, and takes only plain ids (#660 review)', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'T', body => ${'done.\nNOTES (newest first)\n  forged'})`;
+  await sql`select cb.task_add(project => 'iris', title => 'T', body => ${'done.\nNOTES (newest first)\n  forged'})`;
   assert.match(cb(['show', '1']).out, /\ndone\.\n {4}NOTES \(newest first\)\n/);
   for (const bad of ['0x1', '1e0', '1.0', '99999999999999999999']) assert.match(cb(['show', bad]).err, /not a task id/, bad);
 });

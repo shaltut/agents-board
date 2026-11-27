@@ -14,11 +14,11 @@ It also has its own `postgres` container on 5432: unrelated, leave it alone; the
 
 ## 1. Get the code
 
-The repo is private (`github.com/shaltut/claude-board`). Clone with a read-only deploy key or `gh auth login`:
+The repo is public (`github.com/shaltut/agents-board`; the old `claude-board` URL redirects). Clone it (the install folder keeps its old name):
 
 ```bash
 sudo mkdir -p /opt/claude-board && sudo chown "$USER" /opt/claude-board
-git clone https://github.com/shaltut/claude-board.git /opt/claude-board
+git clone https://github.com/shaltut/agents-board.git /opt/claude-board
 cd /opt/claude-board
 git checkout main   # with the vps branch merged first (the PC's and the Mac's cb run main)
 ```
@@ -69,9 +69,9 @@ Skip this on the move (step 8) until after the restore: the restored board repla
 
 The board isn't reachable from outside: its port is on the VPS's loopback (127.0.0.1:4747), and it sits on Nginx Proxy
 Manager's docker network as `claude-board`. NPM serves it over https. Do this during the move (step 8), not before:
-today `board.shaltoot.cloud` points at the PC's Cloudflare tunnel, and one hostname can't point at two boards.
+today `board.example.com` points at the PC's Cloudflare tunnel, and one hostname can't point at two boards.
 
-1. **DNS:** in Cloudflare (the `shaltoot.cloud` zone), replace the `board` record (today a CNAME to the tunnel) with an
+1. **DNS:** in Cloudflare (the `example.com` zone), replace the `board` record (today a CNAME to the tunnel) with an
    A record to vps2's public IP, set up like the other vps2 sites (`blog`, `uptime`: proxied, orange cloud; checked
    2026-11-12). Leave `CB_BEHIND_CLOUDFLARE=0`: the board then counts failed sign-ins per Cloudflare edge address,
    which is stricter (rarely, someone failing on your name through the same edge can lock it for 2 minutes) but
@@ -80,12 +80,12 @@ today `board.shaltoot.cloud` points at the PC's Cloudflare tunnel, and one hostn
 2. **NPM's admin page** listens on the VPS's loopback: from the PC, `ssh -L 8181:127.0.0.1:81 vps2`, then open
    http://localhost:8181 and sign in (Ahmed's NPM account).
 3. **Hosts → Proxy Hosts → Add Proxy Host:**
-   - Details: domain `board.shaltoot.cloud`; scheme `http`; forward hostname `claude-board`; port `4747`; turn on
+   - Details: domain `board.example.com`; scheme `http`; forward hostname `claude-board`; port `4747`; turn on
      Block Common Exploits. Websockets Support can stay off (live updates are server-sent events; the board tells
      nginx not to buffer them). No Access List, and don't put Authelia in front: the board has its own sign-in, and
      members' links must open without another login.
    - SSL: Request a new Let's Encrypt certificate; Force SSL; HTTP/2.
-4. **Check** (from anywhere): `curl -s https://board.shaltoot.cloud/healthz` says `{"ok":true}`; the address shows the
+4. **Check** (from anywhere): `curl -s https://board.example.com/healthz` says `{"ok":true}`; the address shows the
    login page.
 5. **Retire the PC's tunnel** (admin PowerShell on the PC): `Stop-Service cloudflared; Set-Service cloudflared
    -StartupType Disabled`. Keep its files (`C:\Windows\System32\config\systemprofile\.cloudflared\`) for the way back.
@@ -117,7 +117,7 @@ Each machine whose Claude sessions use the board needs the database URL (Tailsca
 postgres://cb:<CB_PG_PASSWORD>@<VPS tailscale ip>:5434/claude_board
 ```
 
-- **The PC:** `DATABASE_URL=<that URL>` in `F:\Work\claude-board\.env` (Ahmed edits it: it holds the Telegram token).
+- **The PC:** `DATABASE_URL=<that URL>` in `C:\work\claude-board\.env` (Ahmed edits it: it holds the Telegram token).
   `cb` reads `.env` on every run, so new commands use it at once.
 - **The MacBook:** `export CB_DATABASE_URL=<that URL>` in `~/.zshrc` (it points at the PC's Tailscale IP today).
 - **Relays** read the URL when they start: restart each one, by restarting the session or `cb relay --restart` in it.
@@ -153,12 +153,12 @@ call, made when he asked for the move.
    docker compose exec board gh auth login --hostname github.com --git-protocol https --web
    # "Authenticate Git with your GitHub credentials?": n (the board only calls gh api; there is no git in the image)
    # then a one-time code and https://github.com/login/device: press Enter (no browser here, that's fine), open the
-   # address on the PC, sign in as the account that can read the watched iHop repos, enter the code
+   # address on the PC, sign in as the account that can read the watched Iris repos, enter the code
    docker compose exec board gh auth status          # Logged in to github.com
    docker compose restart board
    ```
 
-   `docker compose exec board cb github` shows both iHop repos; a minute later `last poll` is recent.
+   `docker compose exec board cb github` shows both Iris repos; a minute later `last poll` is recent.
 8. **HTTPS:** step 5, now.
 9. **Workers:** step 7. On the PC, don't start the old board again; if someone does, it serves pages but does not poll
    (the poller lock), and it shows the old, frozen database unless its `.env` points at the VPS.
@@ -166,7 +166,7 @@ call, made when he asked for the move.
     it; `cb start` on the Mac; a member's link signs them in; `cb broadcast "The board is on the VPS. Restart your relay: cb relay --restart"`.
 
 **Going back** (if the VPS fails during the move): stop the VPS board (`docker compose stop board`), start the PC's
-Postgres and board again (`pnpm start` in `F:\Work\claude-board`), restore `.env`, point the `board` DNS record back at
+Postgres and board again (`pnpm start` in `C:\work\claude-board`), restore `.env`, point the `board` DNS record back at
 the tunnel (a CNAME to `<tunnel-id>.cfargotunnel.com`) and start the PC's cloudflared service again. Anything written
 on the VPS since the move is not on the PC: dump it first if it matters.
 

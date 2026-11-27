@@ -13,9 +13,9 @@ The knowledge base for whoever runs the board: Ahmed, and the Claude agent that 
 ## What it is
 
 A kanban board, a question queue and a message bus for about 20 Claude Code sessions that work for Ahmed (Director of
-Engineering, TachyHealth) across his projects. The sessions take tasks, ask Ahmed questions instead of stopping, tell
-each other things, and record what they did. Ahmed answers on the web board, or on Telegram; a few teammates (Omar,
-Iman) sign in to answer the questions he hands them. A watcher turns activity on the iHop GitHub repos into cards.
+Engineering) across his projects. The sessions take tasks, ask Ahmed questions instead of stopping, tell
+each other things, and record what they did. Ahmed answers on the web board, or on Telegram; a few teammates (Cai,
+Ana) sign in to answer the questions he hands them. A watcher turns activity on the Iris GitHub repos into cards.
 
 It began on Ahmed's Windows PC. Now it runs on a VPS, always on, reachable from anywhere over HTTPS, so the sessions on
 his PC and MacBook and the people he shares it with all use one board.
@@ -23,7 +23,7 @@ his PC and MacBook and the people he shares it with all use one board.
 ## The parts
 
 ```
-  Ahmed, Omar, Iman (browsers, Telegram)              Claude sessions on the PC and the MacBook
+  Ahmed, Cai, Ana (browsers, Telegram)              Claude sessions on the PC and the MacBook
           │ HTTPS                                             │ cb CLI + relay, Postgres protocol over Tailscale
           ▼                                                   ▼
   ┌── VPS (vps2) ──────────────────────────────────────────────────────────────────┐
@@ -60,7 +60,7 @@ his PC and MacBook and the people he shares it with all use one board.
 | **member** | only the questions and tasks handed to them, on their projects | password, or a private link |
 
 Ahmed is the owner: the user `ahmed`, always an admin, never removable. What he does on the board is recorded as
-`ahmed`, which the sessions read as his decision. Another admin acts as themself (an answer from Omar says "omar (not
+`ahmed`, which the sessions read as his decision. Another admin acts as themself (an answer from Cai says "cai (not
 Ahmed) answered"). The Users page (key 7) manages accounts. The first admin on a new server is made from the VPS
 shell ([deploy.md](deploy.md#4-the-first-admin)).
 
@@ -86,7 +86,7 @@ signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ah
   `HOST=0.0.0.0` and `CB_TRUST_LOCAL=0`, so everyone signs in.
 - Secrets live in `deploy/.env` on the VPS (mode 600, git-ignored): the database password, the Telegram bot token, the
   GitHub token. Never in the repo, the image, a log, a card or a message.
-- The board holds client work (iHop cards, GitHub comments, questions about clients). Backups stay on the VPS or
+- The board holds client work (Iris cards, GitHub comments, questions about clients). Backups stay on the VPS or
   Ahmed's machines. No patient data belongs on the board, and none should be put there.
 
 ## Never

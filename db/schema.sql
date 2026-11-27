@@ -16,7 +16,7 @@ create table if not exists cb.projects (
 );
 
 
--- Old or alternative names for a project: "tawuniya" → ihop. New work through an alias gets its tags.
+-- Old or alternative names for a project: "tamarind" → iris. New work through an alias gets its tags.
 create table if not exists cb.project_aliases (
   alias text primary key,
   slug  text not null references cb.projects(slug) on update cascade on delete cascade,
@@ -440,7 +440,7 @@ create function cb.norm_tag(tag text) returns text language sql immutable as $$
   select regexp_replace(lower(trim(coalesce($1, ''))), '[[:space:]]+', '-', 'g')
 $$;
 
--- slug, then follow an alias: "OCR Arena" → ocr-arena → ihop.
+-- slug, then follow an alias: "OCR Arena" → ocr-arena → iris.
 create function cb.resolve(project text) returns text language sql stable as $$
   select coalesce((select a.slug from cb.project_aliases a where a.alias = cb.slug(project)), cb.slug(project))
 $$;
@@ -702,7 +702,7 @@ begin
   if sg = 'build' and cardinality(coalesce(cb._repo_list(repos), '{}')) = 0 and cb._multi_repo(p) then
     raise exception 'give the repos: --stage build --repo <repo> --why "<why>"';
   end if;
-  -- work added through an alias ("tawuniya") keeps that stream's tags
+  -- work added through an alias ("tamarind") keeps that stream's tags
   l := l || array(select g from cb.project_aliases pa, unnest(pa.tags) g where pa.alias = cb.slug(project) and g <> all(l));
   insert into cb.tasks (project, title, body, status, priority, labels, links, assignee, created_by, type, epic_id, stage, stage_since, repos)
   values (p, trim(title), coalesce(body, ''), st, cb.norm_priority(priority),
@@ -1692,7 +1692,7 @@ create function cb.broadcast_seen(machine text, pane text, upto bigint) returns 
    where s.machine = lower(trim($1)) and s.pane = $2
 $$;
 
--- Add and remove tags in one call (the orchestrator tags work streams: ocr, tawuniya, ...). Returns the new tags.
+-- Add and remove tags in one call (the orchestrator tags work streams: ocr, tamarind, ...). Returns the new tags.
 create function cb.task_tag(id text, add jsonb default '[]', remove jsonb default '[]', actor text default null)
 returns text[] language plpgsql as $$
 #variable_conflict use_variable
@@ -2001,12 +2001,12 @@ begin
    where (p is null or h.project = p) and (h.status = 'open' or h.closed_at > now() - interval '7 days')), '[]');
 end $$;
 
--- People who answer through a guest link (Omar, Iman). The link carries the token.
+-- People who answer through a guest link (Cai, Ana). The link carries the token.
 create function cb.user_add(name text, display text default null, actor text default null, role text default 'member') returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); n text := lower(trim(name)); r text := lower(trim(coalesce(role, 'member'))); t text; was text; now_d text; now_r text;
 begin
-  if n !~ '^[a-z][a-z0-9_-]*$' then raise exception 'user name: lowercase letters, digits, - or _ (e.g. omar)'; end if;
+  if n !~ '^[a-z][a-z0-9_-]*$' then raise exception 'user name: lowercase letters, digits, - or _ (e.g. cai)'; end if;
   if r not in ('admin', 'member') then raise exception 'role: admin or member'; end if;
   if n = 'ahmed' and r <> 'admin' then raise exception 'ahmed is the board owner: add him as admin (role => admin)'; end if;
   -- an "ahmed-m" would read as Ahmed in every answer and history line
@@ -4425,7 +4425,7 @@ create function cb.work_still_open(ids bigint[], actor text) returns bigint[] la
 $$;
 
 -- A parts card in plain words (#3703): its stage, then each part in the design's repo order, e.g.
--- "build: api done (PR #12), dashboard building (qhs-dashboard-B1@mac)". null: no parts, or the card is not past approval
+-- "build: api done (PR #12), dashboard building (zed-dashboard-B1@mac)". null: no parts, or the card is not past approval
 -- (parts sent back to design wait for re-approval).
 create function cb._parts_words(tid bigint) returns text language sql stable as $$
   select t.stage || ': ' || string_agg(p.repo || ' ' || case

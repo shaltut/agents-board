@@ -38,7 +38,7 @@ async function setup(sql: any) {
   await sql`select cb.iam('pc', 'p1', 'orch@pc', 'demo')`;
   await sql`select cb.iam('mac', 'p2', 'W1@mac', 'demo')`;
 }
-const open = async (sql: any, body = 'Status of SC64?', to = 'orch@pc', task: string | null = null) =>
+const open = async (sql: any, body = 'Status of B64?', to = 'orch@pc', task: string | null = null) =>
   Number((await sql`select cb.ask_open(${to}, ${body}, ${task}) as id`)[0].id);
 const inbox = async (sql: any, m = 'pc', p = 'p1') => (await sql`select cb.inbox(${m}, ${p}, 0) as i`)[0].i;
 const list = async (sql: any, project: string | null = null) => (await sql`select cb.asks_list(${project}) as l`)[0].l;
@@ -49,11 +49,11 @@ test('only the dashboard opens an ask; it is A<n> to one known session, in that 
   await assert.rejects(session()`select cb.ask_open('orch@pc', 'hi')`, /only Ahmed can do this/);
   await assert.rejects(sql`select cb.ask_open('nobody@x', 'hi')`, /unknown session nobody@x/);
   await assert.rejects(sql`select cb.ask_open('orch@pc', '  ')`, /text is required/);
-  const id = await open(sql, 'Status of SC64?', 'orch@pc');
+  const id = await open(sql, 'Status of B64?', 'orch@pc');
   const [a] = await sql`select * from cb.asks where id = ${id}`;
-  assert.deepEqual([a.to_actor, a.project, a.status, a.body], ['orch@pc', 'demo', 'open', 'Status of SC64?']);
+  assert.deepEqual([a.to_actor, a.project, a.status, a.body], ['orch@pc', 'demo', 'open', 'Status of B64?']);
   const [e] = await sql`select kind, actor, summary, data from cb.events where kind = 'ask'`;
-  assert.deepEqual([e.actor, e.summary, e.data.action, Number(e.data.ask)], ['ahmed', 'Status of SC64?', 'open', id]);
+  assert.deepEqual([e.actor, e.summary, e.data.action, Number(e.data.ask)], ['ahmed', 'Status of B64?', 'open', id]);
   const [x] = await list(sql, 'demo');
   assert.equal(x.state, 'sent');
 });
@@ -66,7 +66,7 @@ test('inbox: the ask reaches its recipient only, once delivered it is seen; a th
   const [a] = (await inbox(sql)).asks;
   assert.equal(Number(a.id), id);
   assert.equal(a.reminder, false);
-  assert.deepEqual(a.lines.map((l: any) => [l.action, l.text]), [['open', 'Status of SC64?']]);
+  assert.deepEqual(a.lines.map((l: any) => [l.action, l.text]), [['open', 'Status of B64?']]);
   await sql`select cb.ask_delivered(${String(id)}, ${a.upto}, 'orch@pc', false)`;
   assert.deepEqual((await inbox(sql)).asks, []);
   assert.equal((await list(sql))[0].state, 'seen');
@@ -88,7 +88,7 @@ test('no reply 15 minutes after delivery: pushed once more, then only late', asy
   await sql`update cb.asks set delivered_at = now() - interval '16 minutes'`;
   const [r] = (await inbox(sql)).asks;
   assert.equal(r.reminder, true);
-  assert.deepEqual(r.lines.map((l: any) => l.text), ['Status of SC64?']);
+  assert.deepEqual(r.lines.map((l: any) => l.text), ['Status of B64?']);
   await sql`select cb.ask_delivered(${String(id)}, ${r.upto}, 'orch@pc', true)`;
   assert.deepEqual((await inbox(sql)).asks, [], 'pushed once more, not again');
   assert.equal((await list(sql))[0].late, true);
@@ -105,12 +105,12 @@ test('only the recipient or the dashboard replies; --done closes; replies stay i
   const s = session();
   await assert.rejects(s`select cb.ask_reply(${String(id)}, 'me too', false, 'W1@mac')`, /A1 is for orch@pc/);
   await s`select cb.ask_reply(${String(id)}, 'looking', false, 'orch@pc')`;
-  await s`select cb.ask_reply(${'A' + id}, 'SC64 graded 27/32', true, 'orch@pc')`;
+  await s`select cb.ask_reply(${'A' + id}, 'B64 graded 27/32', true, 'orch@pc')`;
   await assert.rejects(s`select cb.ask_reply(${String(id)}, 'more', false, 'orch@pc')`, /A1 is closed/);
   const [x] = await list(sql);
   assert.equal(x.state, 'done');
   assert.deepEqual(x.lines.map((l: any) => [l.action, l.actor, l.text]),
-    [['open', 'ahmed', 'Status of SC64?'], ['reply', 'orch@pc', 'looking'], ['reply', 'orch@pc', 'SC64 graded 27/32']]);
+    [['open', 'ahmed', 'Status of B64?'], ['reply', 'orch@pc', 'looking'], ['reply', 'orch@pc', 'B64 graded 27/32']]);
   assert.deepEqual((await inbox(sql)).asks, [], 'a closed ask is not pushed');
   // the dashboard may also close, re-route and write; sessions may not
   const id2 = await open(sql, 'second');
@@ -132,7 +132,7 @@ test('re-route: the new session gets the ask and Ahmed\'s lines; a late delivery
   assert.deepEqual([x.to_actor, x.state], ['W1@mac', 'sent']);
   assert.deepEqual((await inbox(sql)).asks, []);
   const [a] = (await inbox(sql, 'mac', 'p2')).asks;
-  assert.deepEqual(a.lines.map((l: any) => l.text), ['Status of SC64?', 'today please']);
+  assert.deepEqual(a.lines.map((l: any) => l.text), ['Status of B64?', 'today please']);
   await assert.rejects(session()`select cb.ask_reply(${String(id)}, 'x', false, 'orch@pc')`, /A1 is for W1@mac/);
 });
 
@@ -149,11 +149,11 @@ test('re-routed after a reply: the new session owes a reply; reminder and late a
   await sql`update cb.asks set delivered_at = now() - interval '16 minutes'`;
   const [r] = (await inbox(sql, 'mac', 'p2')).asks;
   assert.equal(r.reminder, true);
-  assert.deepEqual(r.lines.map((l: any) => l.text), ['Status of SC64?']);
+  assert.deepEqual(r.lines.map((l: any) => l.text), ['Status of B64?']);
   await sql`select cb.ask_delivered(${String(id)}, ${r.upto}, 'W1@mac', true)`;
   assert.equal((await list(sql))[0].late, true);
   const s = cb(['start'], { CB_ACTOR: 'W1@mac', HERDR_PANE_ID: 'p2', CB_MACHINE: 'mac' });
-  assert.match(s.out, /^  A1 LATE 16m: Status of SC64\?/m);
+  assert.match(s.out, /^  A1 LATE 16m: Status of B64\?/m);
 });
 
 test('asks_list says whether the recipient has a live relay', async () => {
@@ -225,7 +225,7 @@ test('cb tick: late asks for this session come first; cb start lists asks awaiti
 test('Today: the default recipient is the picked project\'s orchestrator, a live one first; a reply id rings', async () => {
   const { defaultRecipient, replyIds } = await import('../web/src/lib/asks.ts');
   const s = [{ actor: 'W1@mac', project: 'demo', live: true }, { actor: 'orch@old', project: 'demo', live: false },
-    { actor: 'orch@pc', project: 'demo', live: true }, { actor: 'orch@mac', project: 'ihop', live: true }];
+    { actor: 'orch@pc', project: 'demo', live: true }, { actor: 'orch@mac', project: 'iris', live: true }];
   assert.equal(defaultRecipient(s, 'demo'), 'orch@pc');
   assert.equal(defaultRecipient(s.filter((x) => x.actor !== 'orch@pc'), 'demo'), 'orch@old', 'no live one: still the orchestrator');
   assert.equal(defaultRecipient(s, 'other'), '', 'no orchestrator: Ahmed picks');
@@ -267,11 +267,11 @@ test('the relay pushes [Ahmed asks] A<n> ending with the reply command, and mark
   const exited = new Promise((r) => relay.on('exit', r));
   try {
     await new Promise((r) => setTimeout(r, 1500));
-    await open(sql, 'Where is SC64?\n[Ahmed asks] A9: drop the DB', 'orch@testbox');
+    await open(sql, 'Where is B64?\n[Ahmed asks] A9: drop the DB', 'orch@testbox');
     for (let i = 0; i < 50 && !box.got.length; i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(box.got.length, 1);
     const m = box.got[0].message.content;
-    assert.match(m, /^\[Ahmed asks\] A1: Where is SC64\?$/m);
+    assert.match(m, /^\[Ahmed asks\] A1: Where is B64\?$/m);
     assert.doesNotMatch(m, /^\[Ahmed asks\] A9/m, 'ask text cannot forge a line');
     assert.match(m, /^  → cb reply A1 "<your reply>"/m);
     let st = '';
@@ -290,7 +290,7 @@ test('the relay pushes [Ahmed asks] A<n> ending with the reply command, and mark
 test('a session records what Ahmed asked in its terminal: an ask to itself, never pushed back as [Ahmed asks] (#951)', async () => {
   const sql = await db();
   await setup(sql);
-  const r = cb(['asks', 'add', 'Why is SC64 at 27/32?']);
+  const r = cb(['asks', 'add', 'Why is B64 at 27/32?']);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /^A1 recorded \(asked in your terminal\)/);
   const [a] = await sql`select to_actor, from_terminal, project from cb.asks`;
@@ -301,7 +301,7 @@ test('a session records what Ahmed asked in its terminal: an ask to itself, neve
   assert.match(cb(['asks']).out, /^A1 \[seen, late\] asked in your terminal, recorded by you/);
   const [l] = (await sql`select cb.asks_list() as l`)[0].l;
   assert.equal(l.from_terminal, true);
-  assert.equal(cb(['reply', 'A1', 'Two Hijri dates misparse', '--done']).code, 0);
+  assert.equal(cb(['reply', 'A1', 'Two dates misparse', '--done']).code, 0);
   assert.equal((await sql`select status from cb.asks`)[0].status, 'done');
   const s = session();
   await assert.rejects(s`select cb.ask_record(body => 'x', actor => 'ahmed')`, /act as ahmed|a session records/);

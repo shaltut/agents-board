@@ -10,19 +10,19 @@ const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'u
 const cfgWith = (recipe: object, extra: object = {}) =>
   JSON.stringify({
     slots: 2, log: { host: '100.64.0.1', port: 7000, peers: [] },
-    projects: { p: { git: 'g', base: 'C:/r', lockfile: 'l', install: ['x'], installTimeout: 10, recipes: { r: { timeout: 10, ...recipe } } } },
+    projects: { p: { git: 'g', base: 'C:/runs', lockfile: 'l', install: ['x'], installTimeout: 10, recipes: { r: { timeout: 10, ...recipe } } } },
     ...extra,
   });
 
-test('the iHop example loads and publishes names only', () => {
+test('the Iris example loads and publishes names only', () => {
   const cfg = example();
   const all = published(cfg);
-  const pub = all.filter((p) => p.project === 'ihop');
+  const pub = all.filter((p) => p.project === 'iris');
   assert.deepEqual(pub.map((p) => p.recipe).sort(), ['build', 'check', 'guards', 'install', 'itest', 'kbtest', 'lint', 'test', 'vitest']);
   assert.ok(pub.every((p) => p.repo === 'main'));
-  assert.deepEqual(pub.find((p) => p.recipe === 'check'), { project: 'ihop', repo: 'main', recipe: 'check', params: { ws: { min: 1, max: 6 } }, db: false });
+  assert.deepEqual(pub.find((p) => p.recipe === 'check'), { project: 'iris', repo: 'main', recipe: 'check', params: { ws: { min: 1, max: 6 } }, db: false });
   // the second project is in the repos shape (#3703)
-  assert.deepEqual(all.filter((p) => p.project === 'qhs').map((p) => `${p.repo}/${p.recipe}`), ['api/test', 'dashboard/build']);
+  assert.deepEqual(all.filter((p) => p.project === 'zed').map((p) => `${p.repo}/${p.recipe}`), ['api/test', 'dashboard/build']);
   assert.equal(pub.find((p) => p.recipe === 'itest')!.db, true);
   const s = JSON.stringify(all);
   for (const bad of ['pnpm', 'node', 'pattern', 'TEST_STACK']) assert.ok(!s.includes(bad), bad);
@@ -30,7 +30,7 @@ test('the iHop example loads and publishes names only', () => {
 
 // #4014 (Q2790, every pull request): guards runs the repo's script tests as its pre-push hook does
 test('the example guards recipe runs the hook script tests on every job', () => {
-  const guards = example().projects.ihop!.repos.main!.recipes.guards!;
+  const guards = example().projects.iris!.repos.main!.recipes.guards!;
   assert.deepEqual(guards.steps.at(-1), ['pnpm', 'exec', 'lefthook', 'run', 'pre-push', '--commands', 'program-script-tests', '--no-tty']);
 });
 
@@ -64,7 +64,7 @@ test('loadConfig refuses a misspelled key, an empty install and an optional cwd 
 });
 
 test('checkParams refuses flag- and path-shaped values and the pattern', () => {
-  const test_ = example().projects.ihop!.repos.main!.recipes.test!;
+  const test_ = example().projects.iris!.repos.main!.recipes.test!;
   const bad = (files: string[]) => checkParams(test_, { app: ['claims-api'], files });
   for (const v of ['-r', '../x', 'tests/../x.test.ts', 'C:/x', '/etc', 'a b', 'tests/a.ts', 'tests/a.integration.test.ts'])
     assert.match(bad([v])!, /^error: bad parameter files:/, v);
@@ -75,13 +75,13 @@ test('checkParams refuses flag- and path-shaped values and the pattern', () => {
 });
 
 test('expand repeats an element per value and drops empty params', () => {
-  assert.deepEqual(expand(['pnpm', '--filter={ws}', 'check'], { ws: ['@ihop/a', '@ihop/b'] }), ['pnpm', '--filter=@ihop/a', '--filter=@ihop/b', 'check']);
+  assert.deepEqual(expand(['pnpm', '--filter={ws}', 'check'], { ws: ['@iris/a', '@iris/b'] }), ['pnpm', '--filter=@iris/a', '--filter=@iris/b', 'check']);
   assert.deepEqual(expand(['node', '{files}'], { files: [] }), ['node']);
 });
 
 test('jobCwd stays inside the slot', () => {
-  const r = example().projects.ihop!.repos.main!.recipes.test!;
-  const slot = resolve('C:/r/ihop-1');
+  const r = example().projects.iris!.repos.main!.recipes.test!;
+  const slot = resolve('C:/runs/iris-1');
   assert.equal(jobCwd(slot, r, { app: ['claims-api'] }), resolve(slot, 'apps/claims-api'));
   assert.throws(() => jobCwd(slot, { ...r, cwd: '../x' }, {}), /outside/);
   // an absolute path on this machine (C:/elsewhere is one only on Windows: #4401)
@@ -91,7 +91,7 @@ test('jobCwd stays inside the slot', () => {
 
 test('jobEnv starts empty', () => {
   const cfg = example();
-  const recipe = { ...cfg.projects.ihop!.repos.main!.recipes.guards!, env: { A: '1' } };
+  const recipe = { ...cfg.projects.iris!.repos.main!.recipes.guards!, env: { A: '1' } };
   const from = { PATH: 'p', CB_DATABASE_URL: 'x', DATABASE_URL: 'y', SECRET: 's', TEMP: 't' };
   // NoDefaultCurrentDirectoryInExePath: Windows must not run a program from the cwd (a committed git.exe) before PATH
   assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', A: '1' });
@@ -101,9 +101,9 @@ test('jobEnv starts empty', () => {
 test('prototype names are not parameters', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{constructor}']] })), /steps\[0\].*constructor/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a', '{__proto__}']] })), /__proto__/);
-  const r = example().projects.ihop!.repos.main!.recipes.check!;
-  assert.equal(checkParams(r, { ws: ['@ihop/a'], constructor: ['x'] }), 'error: bad parameter constructor: unknown');
-  assert.equal(checkParams(r, JSON.parse('{"ws":["@ihop/a"],"__proto__":["-rf"]}')), 'error: bad parameter __proto__: unknown');
+  const r = example().projects.iris!.repos.main!.recipes.check!;
+  assert.equal(checkParams(r, { ws: ['@iris/a'], constructor: ['x'] }), 'error: bad parameter constructor: unknown');
+  assert.equal(checkParams(r, JSON.parse('{"ws":["@iris/a"],"__proto__":["-rf"]}')), 'error: bad parameter __proto__: unknown');
   assert.deepEqual(expand(['a', '{toString}'], {}), ['a']);
   assert.deepEqual(expand(['a', '{ws}'], JSON.parse('{"__proto__":["x"]}')), ['a']);
 });

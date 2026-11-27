@@ -56,7 +56,7 @@ test('memory: a session fact is live as team with a review date; a session rule 
   assert.match(rr.title, /other than the PR creator/, 'confirm can edit the title first');
 
   // the dashboard's own entries are Ahmed's and live at once
-  const a = await add(web, { title: 'Fixes reach SIT with the next promotion', kind: 'ruling', actor: 'ahmed' });
+  const a = await add(web, { title: 'Fixes reach STG with the next promotion', kind: 'ruling', actor: 'ahmed' });
   assert.equal(a.status, 'active');
   assert.equal(a.authority, 'ahmed');
 
@@ -101,14 +101,14 @@ test('memory review fixes: secrets in links, env-style credentials, ops addresse
 
   for (const bad of ['PGPASSWORD=hunter22', 'export DB_PASSWORD=S3cret!x', 'CLIENT_SECRET=abc123xyz9', '"password": "Sup3rS3cret"',
                      '--password hunter22', 'redis://:pa55word@cache:6379', 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123',
-                     'AccountKey=abc123def456==', 'ahmed@tachyhealth.com'])
+                     'AccountKey=abc123def456==', 'owner@example.com'])
     await assert.rejects(add(s, { title: 'x', kind: 'gotcha', body: bad }), /looks like/, bad);
-  for (const ok of ['postgres://cb@db.shaltoot.cloud:5434/claude_board', 'clone git@github.com:org/repo.git', 'ssh opc@vps2.example.com',
+  for (const ok of ['postgres://cb@db.example.com:5434/claude_board', 'clone git@github.com:org/repo.git', 'ssh opc@vps2.example.com',
                     'postgres password: none (trust auth)', 'the token: see the vault', 'ids overflow at 2147483647'])
     assert.equal((await add(s, { title: 'ok note', kind: 'gotcha', body: ok })).status, 'active', ok);
 
   // the question text may hold anything; the ruling keeps the answer
-  const [{ q }] = await s`select cb.ask('demo', 'Reply to ahmed@tachyhealth.com about claim 1023456789?', null, false, null, null, null, false, 'W1@pc') as q`;
+  const [{ q }] = await s`select cb.ask('demo', 'Reply to owner@example.com about claim 1023456789?', null, false, null, null, null, false, 'W1@pc') as q`;
   await web`select cb.answer(${String(q)}, 'No: client mail goes through the account manager', 'ahmed')`;
   const r = (await web`select cb.mem_rule(${String(q)}, null, 'ahmed') as m`)[0].m;
   assert.equal(r.body, 'No: client mail goes through the account manager');
@@ -251,9 +251,9 @@ test('memory: an answered question becomes a ruling (live from the dashboard, a 
   assert.equal(m.body, 'Merge now, owe the docs as a board task');
   await assert.rejects(s`select cb.mem_rule(${String(q1)}, null, 'orch@pc')`, /already M\d+/);
 
-  const [{ q2 }] = await s`select cb.ask('demo', 'Port to SIT now?', null, false, null, null, null, false, 'W1@pc') as q2`;
+  const [{ q2 }] = await s`select cb.ask('demo', 'Port to STG now?', null, false, null, null, null, false, 'W1@pc') as q2`;
   await web`select cb.answer(${String(q2)}, 'No, wait for the next promotion', 'ahmed')`;
-  const w = (await web`select cb.mem_rule(${String(q2)}, 'Fixes reach SIT with the next promotion; no direct ports', 'ahmed') as m`)[0].m;
+  const w = (await web`select cb.mem_rule(${String(q2)}, 'Fixes reach STG with the next promotion; no direct ports', 'ahmed') as m`)[0].m;
   assert.equal(w.status, 'active');
   assert.equal(w.authority, 'ahmed');
 });
@@ -376,7 +376,7 @@ test('memory push: a retire reason is checked, flattened, capped; an order-shape
 test('"Already ruled" with #472 follow-ups: an --if branch stays dormant and is skipped on delivery; one without --if opens', async () => {
   const web = await db();
   await web`select cb.ensure_project('demo')`;
-  const r = await add(web, { title: 'Fixes reach SIT with the next promotion', kind: 'ruling', actor: 'ahmed' });
+  const r = await add(web, { title: 'Fixes reach STG with the next promotion', kind: 'ruling', actor: 'ahmed' });
   await web`select cb.ask(project => 'demo', body => 'Port now?', options => ${web.json(['Yes', 'No'])}, actor => 'W1@pc')`;
   await web`select cb.ask(project => 'demo', body => 'Which env first?', parent => 'Q1', if_answer => 'Yes', actor => 'W1@pc')`;
   await web`select cb.ask(project => 'demo', body => 'Anything else?', parent => 'Q1', actor => 'W1@pc')`;
@@ -398,6 +398,6 @@ test('memory: --propose holds a session fact or gotcha for Ahmed instead of maki
   assert.equal((await add(s, { title: 'plain fact still goes live', kind: 'fact' })).status, 'active');
   await web`select cb.mem_confirm(${String(f.id)}, null, null, 'ahmed')`;
   assert.equal((await mem(web, f.id)).status, 'active', 'Ahmed confirms it like any proposal');
-  const out = cb(['mem', 'add', 'demo', 'UAT DB session time zone is Asia/Riyadh', '-k', 'fact', '--propose']);
+  const out = cb(['mem', 'add', 'demo', 'VAL DB session time zone is UTC', '-k', 'fact', '--propose']);
   assert.match(out.out, /proposed/);
 });

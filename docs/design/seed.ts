@@ -16,8 +16,8 @@ const core = 'claims-core', portal = 'reviewer-portal', ml = 'fraud-ml', board =
 const add = (project: string, title: string, o: Record<string, unknown> = {}) =>
   callFn('task_add', { project, title, actor: OR, ...o }) as Promise<number>;
 
-await callFn('user_add', { name: 'omar', display: 'Omar' }).catch(() => {});
-await sql`select cb.ensure_project(${portal}), cb.user_project_add('omar', ${portal}, 'ahmed')`; // people get work only on their projects (#315)
+await callFn('user_add', { name: 'cai', display: 'Cai' }).catch(() => {});
+await sql`select cb.ensure_project(${portal}), cb.user_project_add('cai', ${portal}, 'ahmed')`; // people get work only on their projects (#315)
 
 const T: Record<string, number> = {};
 const specs: [string, string, string, Record<string, unknown>][] = [
@@ -31,7 +31,7 @@ const specs: [string, string, string, Record<string, unknown>][] = [
   ['contract', core, 'Contract tests for the payer gateway', { status: 'backlog', priority: 'P1', labels: ['payer-gw', 'tests'] }],
   ['dedupe', core, 'Duplicate-claim check across resubmissions', { status: 'review', priority: 'P1', assignee: W3, labels: ['rules'], links: { pr: '#1184' } }],
   ['cent', core, 'Split payments total one cent short on odd amounts', { status: 'next', priority: 'P1', type: 'bug', labels: ['money'], body: 'Rounding each part before summing. Round once, put the remainder on the last part.' }],
-  ['pilot', portal, 'Pick the clinics for the reviewer pilot', { status: 'in_progress', priority: 'P1', assignee: 'omar', labels: ['pilot'], body: 'Two or three clinics for the first four weeks. Reviewers there should be willing to send feedback weekly.' }],
+  ['pilot', portal, 'Pick the clinics for the reviewer pilot', { status: 'in_progress', priority: 'P1', assignee: 'cai', labels: ['pilot'], body: 'Two or three clinics for the first four weeks. Reviewers there should be willing to send feedback weekly.' }],
   ['icd', core, 'Validate ICD-10 codes against the 2026 code set', { status: 'next', priority: 'P2', labels: ['rules', 'coding'] }],
   ['ocr-split', core, 'Split multi-claim PDFs before OCR', { status: 'blocked', priority: 'P1', assignee: W2, labels: ['ocr', 'attachments'] }],
   ['eligibility', core, 'Cache eligibility responses for 15 minutes', { status: 'backlog', priority: 'P2', labels: ['payer-gw', 'perf'] }],
@@ -119,14 +119,14 @@ const q9 = await ask({ project: portal, actor: R1, task_id: String(T.pilot), blo
   body: 'Start the reviewer pilot with two small clinics, or with one large hospital?',
   options: [{ label: 'Two small clinics (recommended)', description: 'Quicker feedback, less risk if something breaks.' },
             { label: 'One large hospital', description: 'More claims per week, but one site sets the whole picture.' }] });
-await callFn('question_assign', { id: String(q9), to_user: 'omar', actor: 'ahmed' }).catch(() => {});
+await callFn('question_assign', { id: String(q9), to_user: 'cai', actor: 'ahmed' }).catch(() => {});
 const q10 = await ask({ project: portal, actor: W2, body: 'Can the pilot reviewers get a short how-to video, or is a one-page guide enough?' });
-await callFn('question_assign', { id: String(q10), to_user: 'omar', actor: 'ahmed' }).catch(() => {});
+await callFn('question_assign', { id: String(q10), to_user: 'cai', actor: 'ahmed' }).catch(() => {});
 const q11 = await ask({ project: portal, actor: R1, body: 'Should reviewers see the claim amount before they open the attachments?',
   options: [{ label: 'Yes', description: null }, { label: 'No, after', description: null }] });
-await callFn('question_assign', { id: String(q11), to_user: 'omar', actor: 'ahmed' }).catch(() => {});
-await callFn('answer', { id: String(q11), answer: 'Yes', actor: 'omar' });
-await callFn('log', { project: portal, task_id: String(T.pilot), summary: 'Called both clinic managers; both are in for a four-week pilot.', actor: 'omar' });
+await callFn('question_assign', { id: String(q11), to_user: 'cai', actor: 'ahmed' }).catch(() => {});
+await callFn('answer', { id: String(q11), answer: 'Yes', actor: 'cai' });
+await callFn('log', { project: portal, task_id: String(T.pilot), summary: 'Called both clinic managers; both are in for a four-week pilot.', actor: 'cai' });
 
 const h = await callFn('huddle_open', { topic: 'Where should duplicate detection run: at intake or at adjudication?', members: [W3, W1, R1], task: String(T.dedupe), actor: W3, project: core });
 const say = (m: string, a: string) => callFn('huddle_say', { id: String(h), message: m, actor: a });

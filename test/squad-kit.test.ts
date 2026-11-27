@@ -98,7 +98,7 @@ test('cb resume ends with the role line in a pipeline project', async () => {
 });
 
 const SQUAD = {
-  machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' }, shaltoot: { herdr: null, repo: 'F:/Work/x', board: 'F:/Work/claude-board' } },
+  machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' }, shaltoot: { herdr: null, repo: 'C:/work/x', board: 'C:/work/claude-board' } },
   roles: { lead: { count: 1, model: 'opus', machine: 'shaltoot' }, builder: { count: 3, model: 'sonnet', machine: 'macbook' }, owner: { model: 'opus', machine: 'macbook' } },
   areas: ['claims', 'preauth'],
 };
@@ -150,7 +150,7 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.machines.macbook.workspace = 'x'.repeat(65); }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = 'a\nb'; }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = '   '; }), /machine macbook workspace must be a herdr workspace label/],
-    [mod((s) => { s.machines.macbook.workspace = 'iHop Squad '; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = 'Iris Squad '; }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = '--focus'; }), /machine macbook workspace must be a herdr workspace label/],
     // the Mac cap counts by the herdr label, whatever the machine key
     [mod((s) => { s.machines.mac = { ...s.machines.macbook }; s.roles.builder.machine = 'mac'; s.roles.builder.count = 7; s.roles.owner.machine = 'mac'; }), /macbook would run 9 sessions/],
@@ -164,9 +164,9 @@ test('squad_set refuses each invalid squad with the field named', async () => {
 test('squad_set keeps a machine workspace label (#3719)', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  const s = mod((x) => { x.machines.macbook.workspace = 'iHop Squad'; });
+  const s = mod((x) => { x.machines.macbook.workspace = 'Iris Squad'; });
   await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
-  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'iHop Squad');
+  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'Iris Squad');
 });
 
 test('squad_set keeps protected branches; a squad without them saves no protected key (#3746)', async () => {
@@ -225,7 +225,7 @@ test('squad_set refuses a protected entry the push hook can never match: refs/, 
 test('squad_set accepts absolute paths on both OS shapes', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  const s = mod((x) => { x.machines.shaltoot.repo = 'C:/Work/x'; x.machines.shaltoot.board = 'F:/Work/claude-board'; });
+  const s = mod((x) => { x.machines.shaltoot.repo = 'C:/Work/x'; x.machines.shaltoot.board = 'C:/work/claude-board'; });
   await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
 });
 

@@ -255,15 +255,15 @@ test('last_restore_failed: the latest restore did not start; a later restore tha
 });
 
 test('waiting and sessions per repo', async () => {
-  const QHS = {
+  const ZED = {
     machines: { macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
-    repos: { api: { home: true, paths: { macbook: '/Users/me/Work/QHS/api' } }, dashboard: { paths: { macbook: '/Users/me/Work/QHS/dashboard' } } },
+    repos: { api: { home: true, paths: { macbook: '/Users/me/Work/ZED/api' } }, dashboard: { paths: { macbook: '/Users/me/Work/ZED/dashboard' } } },
     areas: [{ name: 'api', repo: 'api' }, { name: 'dashboard', repo: 'dashboard' }],
     roles: { lead: { count: 1, machine: 'macbook' }, owner: { machine: 'macbook' },
              builder: { count: { api: 1, dashboard: 1 }, machine: 'macbook' }, reviewer: { count: { api: 1, dashboard: 1 }, machine: 'macbook' } },
     supervise: true,
   };
-  const { sql, sup } = await setup(QHS);
+  const { sql, sup } = await setup(ZED);
   await sql`update cb.sessions set repo = 'api' where actor = 'sv-B1@macbook'`; // sv-B2 bound before repos: the home repo
   await sql`insert into cb.sessions (machine, pane, actor, project, role, repo) values ('macbook','p3','sv-dashboard-B1@macbook','sv','builder','dashboard')`;
   const repos = async (id: number, r: string[] | null) => sql`update cb.tasks set repos = ${r} where id = ${id}`;
@@ -299,7 +299,7 @@ test('waiting and sessions per repo', async () => {
 test('a squad with one repo: a card with no repos named counts under it', async () => {
   const ONE = {
     machines: { macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board' } },
-    repos: { api: { paths: { macbook: '/Users/me/Work/QHS/api' } } },
+    repos: { api: { paths: { macbook: '/Users/me/Work/ZED/api' } } },
     roles: { builder: { count: { api: 2 }, machine: 'macbook' }, reviewer: { count: { api: 1 }, machine: 'macbook' } },
     supervise: true,
   };

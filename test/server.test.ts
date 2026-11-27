@@ -107,8 +107,8 @@ test('rpc booleans survive (blocking ask blocks task)', async () => {
 
 test('GET /api/sessions lists sessions for a project', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'run', status => 'in_progress', actor => 'W6@macbook')`;
-  const res = await app.request('/api/sessions?project=ihop');
+  await sql`select cb.task_add(project => 'iris', title => 'run', status => 'in_progress', actor => 'W6@macbook')`;
+  const res = await app.request('/api/sessions?project=iris');
   assert.equal(res.status, 200);
   const rows = await res.json();
   assert.deepEqual(rows.map((r: any) => [r.actor, r.doing.length]), [['W6@macbook', 1]]);
@@ -116,28 +116,28 @@ test('GET /api/sessions lists sessions for a project', async () => {
 
 test('GET /api/huddles lists huddles; /api/huddles/:id has the thread; Today leaves huddle chatter out', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
-  await sql`select cb.iam('pc', 'w2:p2', 'orch', 'ihop')`;
-  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'ihop')`;
-  await sql`select cb.huddle_open('Hijri dates', ${sql.json(['W2@macbook'])}, '1', 'orch')`;
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
+  await sql`select cb.iam('pc', 'w2:p2', 'orch', 'iris')`;
+  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'iris')`;
+  await sql`select cb.huddle_open('Date parsing', ${sql.json(['W2@macbook'])}, '1', 'orch')`;
   await sql`select cb.huddle_say('1', 'indeterminate?', 'W2@macbook')`;
-  const list = await (await app.request('/api/huddles?project=ihop')).json();
-  assert.deepEqual(list.map((h: any) => [h.id, h.topic, h.members]), [[1, 'Hijri dates', ['orch', 'W2@macbook']]]);
+  const list = await (await app.request('/api/huddles?project=iris')).json();
+  assert.deepEqual(list.map((h: any) => [h.id, h.topic, h.members]), [[1, 'Date parsing', ['orch', 'W2@macbook']]]);
   const one = await (await app.request('/api/huddles/1')).json();
-  assert.deepEqual(one.lines.map((l: any) => [l.actor, l.summary]), [['orch', 'opened: Hijri dates'], ['W2@macbook', 'indeterminate?']]);
+  assert.deepEqual(one.lines.map((l: any) => [l.actor, l.summary]), [['orch', 'opened: Date parsing'], ['W2@macbook', 'indeterminate?']]);
   assert.equal((await app.request('/api/huddles/99')).status, 404);
-  const today = await (await app.request('/api/today?project=ihop')).json();
+  const today = await (await app.request('/api/today?project=iris')).json();
   assert.equal(today.events.filter((e: any) => e.kind === 'huddle').length, 0);
 });
 
 test('the dashboard huddle flow over rpc: Ahmed opens, talks, turns a line into a linked task, closes', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
-  await sql`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'ihop')`;
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
+  await sql`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'iris')`;
   const ok = async (fn: string, args: object) => { const j = await (await rpc(fn, { actor: 'ahmed', ...args })).json(); assert.ok(j.ok, j.error); return j.result; };
-  const id = await ok('huddle_open', { topic: 'Rollout plan', members: ['orch@shaltoot'], task: null, project: 'ihop' });
+  const id = await ok('huddle_open', { topic: 'Rollout plan', members: ['orch@shaltoot'], task: null, project: 'iris' });
   await ok('huddle_say', { id, message: 'line one\nline two' });
-  const tid = await ok('task_add', { project: 'ihop', title: 'line one', body: 'from huddle', status: 'next', priority: 'P2', links: { huddle: `#${id}` } });
+  const tid = await ok('task_add', { project: 'iris', title: 'line one', body: 'from huddle', status: 'next', priority: 'P2', links: { huddle: `#${id}` } });
   await ok('huddle_say', { id, message: `created #${tid} from ahmed's line at 10:00` });
   await ok('huddle_close', { id, summary: 'ship Monday' });
   const h = await (await app.request(`/api/huddles/${id}`)).json();
@@ -168,21 +168,21 @@ test('through a tunnel, nothing is readable or writable without a user link', as
 
 test('a guest link sets a cookie; the guest sees and answers only what is assigned to them', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await sql`select cb.user_add('iman', 'Iman')`;
-  await onProject(sql, 'omar', 'ihop');
-  await onProject(sql, 'iman', 'ihop');
-  await sql`select cb.task_add(project => 'ihop', title => 'PO sign-off on E1-E12', assignee => 'omar')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'internal')`;
-  await sql`select cb.ask(project => 'ihop', body => 'E1 scope?', options => ${sql.json([{ label: 'A' }, { label: 'B' }])}, to_user => 'omar', actor => 'orch@shaltoot')`;
-  await sql`select cb.ask(project => 'ihop', body => 'for Ahmed', actor => 'orch@shaltoot')`;
-  await sql`select cb.ask(project => 'ihop', body => 'for Iman', to_user => 'iman', actor => 'orch@shaltoot')`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await sql`select cb.user_add('ana', 'Ana')`;
+  await onProject(sql, 'cai', 'iris');
+  await onProject(sql, 'ana', 'iris');
+  await sql`select cb.task_add(project => 'iris', title => 'PO sign-off on E1-E12', assignee => 'cai')`;
+  await sql`select cb.task_add(project => 'iris', title => 'internal')`;
+  await sql`select cb.ask(project => 'iris', body => 'E1 scope?', options => ${sql.json([{ label: 'A' }, { label: 'B' }])}, to_user => 'cai', actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'for Ahmed', actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'for Ana', to_user => 'ana', actor => 'orch@shaltoot')`;
 
   const land = await remote(`/?u=${token}`);
   assert.equal(land.status, 302);
   assert.match(land.headers.get('set-cookie') ?? '', /cb_user=[^;]+;.*HttpOnly/i);
   assert.equal((await remote('/api/tasks', { cookie: 'wrong' })).status, 401);
-  assert.deepEqual(await (await remote('/api/whoami', { cookie: token })).json(), { role: 'guest', user: { name: 'omar', display: 'Omar' } });
+  assert.deepEqual(await (await remote('/api/whoami', { cookie: token })).json(), { role: 'guest', user: { name: 'cai', display: 'Cai' } });
 
   const me = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(me.questions.map((q: any) => q.body), ['E1 scope?']);
@@ -191,21 +191,21 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
   assert.equal((await remote('/api/tasks', { cookie: token })).status, 403, 'guests get no board-wide reads');
 
   const rpc = (fn: string, args: object) => remote(`/api/rpc/${fn}`, { cookie: token, method: 'POST', body: JSON.stringify(args), headers: { 'content-type': 'application/json' } });
-  assert.equal((await rpc('answer', { id: '2', answer: 'x', actor: 'ahmed' })).status, 403, 'not assigned to omar');
-  assert.equal((await rpc('answer', { id: '3', answer: 'x' })).status, 403, "iman's question");
-  assert.equal((await rpc('task_add', { project: 'ihop', title: 'x' })).status, 403);
+  assert.equal((await rpc('answer', { id: '2', answer: 'x', actor: 'ahmed' })).status, 403, 'not assigned to cai');
+  assert.equal((await rpc('answer', { id: '3', answer: 'x' })).status, 403, "ana's question");
+  assert.equal((await rpc('task_add', { project: 'iris', title: 'x' })).status, 403);
   assert.equal((await remote('/api/memories', { cookie: token })).status, 403, 'shared memory is the team\'s, not a guest\'s');
-  assert.equal((await rpc('mem_add', { project: 'ihop', title: 'x', kind: 'fact' })).status, 403);
-  assert.equal((await rpc('log', { project: 'ihop', summary: 'x', task_id: '2' })).status, 403, 'not his task');
+  assert.equal((await rpc('mem_add', { project: 'iris', title: 'x', kind: 'fact' })).status, 403);
+  assert.equal((await rpc('log', { project: 'iris', summary: 'x', task_id: '2' })).status, 403, 'not his task');
   assert.equal((await rpc('answer', { id: '1', answer: 'A', actor: 'ahmed' })).status, 200);
-  assert.equal((await rpc('log', { project: 'ihop', summary: 'signed', task_id: '1', actor: 'ahmed' })).status, 200);
+  assert.equal((await rpc('log', { project: 'iris', summary: 'signed', task_id: '1', actor: 'ahmed' })).status, 200);
   const [q] = await sql`select status, answer, answered_by from cb.questions where id = 1`;
-  assert.deepEqual({ ...q }, { status: 'answered', answer: 'A', answered_by: 'omar' }, 'actor is the guest, whatever the body says');
+  assert.deepEqual({ ...q }, { status: 'answered', answer: 'A', answered_by: 'cai' }, 'actor is the guest, whatever the body says');
   const [e] = await sql`select actor from cb.events where kind = 'note'`;
-  assert.equal(e.actor, 'omar');
+  assert.equal(e.actor, 'cai');
 
   // his note shows back on his task (so it doesn't vanish), but session notes on it stay private
-  await sql`select cb.log(project => 'ihop', summary => 'internal session chatter', task_id => '1', actor => 'W2@macbook')`;
+  await sql`select cb.log(project => 'iris', summary => 'internal session chatter', task_id => '1', actor => 'W2@macbook')`;
   const after = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(after.tasks[0].my_notes.map((n: any) => n.summary), ['signed']);
   // an answered question is a one-line row (question, answer, Change): not its options or context, re-sent on every change
@@ -218,7 +218,7 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
   assert.deepEqual([full.body, full.answer, full.options.map((o: any) => o.label)], ['E1 scope?', 'A', ['A', 'B']]);
   assert.equal(full.answer_history, undefined, 'earlier answers are the board\'s');
   assert.equal(full.delivered_to, undefined);
-  await sql`select cb.ask(project => 'ihop', body => 'not his', actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'not his', actor => 'orch@shaltoot')`;
   const [{ id: other }] = await sql`select max(id)::int as id from cb.questions`;
   assert.equal((await remote(`/api/me/questions/${other}`, { cookie: token })).status, 404);
   assert.equal((await remote('/api/me/questions/x', { cookie: token })).status, 404);
@@ -226,30 +226,30 @@ test('a guest link sets a cookie; the guest sees and answers only what is assign
 
 test('a guest answers a follow-up once it opens, and sees what comes next on the parent', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await onProject(sql, 'omar', 'ihop');
-  await sql`select cb.ask(project => 'ihop', body => 'Ship today?', options => ${sql.json(['Yes', 'No'])}, to_user => 'omar', actor => 'orch@shaltoot')`;
-  await sql`select cb.ask(project => 'ihop', body => 'Which env first?', options => ${sql.json(['SIT', 'UAT'])}, parent => '1', if_answer => 'Yes', actor => 'orch@shaltoot')`;
-  await sql`select cb.ask(project => 'ihop', body => 'for Ahmed only', parent => '1', if_answer => 'No', to_user => null, actor => 'orch@shaltoot')`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await onProject(sql, 'cai', 'iris');
+  await sql`select cb.ask(project => 'iris', body => 'Ship today?', options => ${sql.json(['Yes', 'No'])}, to_user => 'cai', actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'Which env first?', options => ${sql.json(['STG', 'VAL'])}, parent => '1', if_answer => 'Yes', actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'for Ahmed only', parent => '1', if_answer => 'No', to_user => null, actor => 'orch@shaltoot')`;
   await sql`update cb.questions set assigned_to = null where id = 3`; // a branch for someone else stays out of the guest's view
   const rpc = (fn: string, args: object) => remote(`/api/rpc/${fn}`, { cookie: token, method: 'POST', body: JSON.stringify(args), headers: { 'content-type': 'application/json' } });
 
   let me = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(me.questions.map((q: any) => [q.id, q.status]), [[1, 'open']], 'the dormant follow-up is not on his page yet');
   assert.deepEqual(me.questions[0].branches, [{ id: 2, if_answer: 'Yes', body: 'Which env first?' }]);
-  assert.equal((await rpc('answer', { id: '2', answer: 'SIT' })).status, 400, 'dormant: not answerable yet');
+  assert.equal((await rpc('answer', { id: '2', answer: 'STG' })).status, 400, 'dormant: not answerable yet');
   assert.equal((await rpc('answer', { id: '1', answer: 'Yes' })).status, 200);
   me = await (await remote('/api/me', { cookie: token })).json();
   const f = me.questions.find((q: any) => q.id === 2);
   assert.deepEqual([f.status, f.parent_id, f.parent_answer], ['open', 1, 'Yes']);
-  assert.equal((await rpc('answer', { id: '2', answer: 'SIT' })).status, 200);
+  assert.equal((await rpc('answer', { id: '2', answer: 'STG' })).status, 200);
   const local = await (await app.request('/api/questions?status=answered')).json();
   assert.deepEqual(local.map((q: any) => [q.id, q.parent_answer ?? null]), [[1, null], [2, 'Yes']]);
 
   // a follow-up handed to him on a parent he never had: he does not see Ahmed's answer (or its note)
-  await sql`select cb.ask(project => 'ihop', body => 'Budget OK?', options => ${sql.json(['Yes', 'No'])}, actor => 'orch@shaltoot')`;
-  await sql`select cb.ask(project => 'ihop', body => 'Sign the PO?', options => ${sql.json(['Sign', 'Hold'])}, parent => '4', to_user => 'omar', actor => 'orch@shaltoot')`;
-  await sql`select cb.answer('4', 'Yes — but only 40k, the rest is for Tawuniya')`;
+  await sql`select cb.ask(project => 'iris', body => 'Budget OK?', options => ${sql.json(['Yes', 'No'])}, actor => 'orch@shaltoot')`;
+  await sql`select cb.ask(project => 'iris', body => 'Sign the PO?', options => ${sql.json(['Sign', 'Hold'])}, parent => '4', to_user => 'cai', actor => 'orch@shaltoot')`;
+  await sql`select cb.answer('4', 'Yes — but only 40k, the rest is for Tamarind')`;
   me = await (await remote('/api/me', { cookie: token })).json();
   const g = me.questions.find((q: any) => q.id === 5);
   assert.deepEqual([g.status, g.parent_id, g.parent_answer], ['open', 4, null]);
@@ -269,7 +269,7 @@ test('a web page on another site cannot drive the board through the browser (CSR
 
 test('a guest sending garbage gets a clean 400, not a server error', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
   const post = (body: string) => remote('/api/rpc/answer', { method: 'POST', cookie: token, body, headers: { 'content-type': 'application/json' } });
   assert.equal((await post('null')).status, 400);
   assert.equal((await post(JSON.stringify({ id: 'abc', answer: 'x' }))).status, 400);
@@ -321,9 +321,9 @@ test('the Memory page sees flagged proposals; a session reading /api/memories do
 test('"Already ruled": the dashboard answers with a live memory entry; the session gets the rule, the link is kept', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  const rule = (await (await rpc('mem_add', { project: 'demo', title: 'Fixes reach SIT with the next promotion', kind: 'ruling', body: 'No direct ports.' })).json()).result;
+  const rule = (await (await rpc('mem_add', { project: 'demo', title: 'Fixes reach STG with the next promotion', kind: 'ruling', body: 'No direct ports.' })).json()).result;
   const prop = (await (await rpc('mem_add', { project: 'demo', title: 'Maybe later', kind: 'rule', actor: 'W1@pc' }, { host: 'localhost:4747' })).json()).result;
-  await sql`select cb.ask(project => 'demo', body => 'Port this fix to SIT now?', actor => 'W1@pc')`;
+  await sql`select cb.ask(project => 'demo', body => 'Port this fix to STG now?', actor => 'W1@pc')`;
   await sql`select cb.ask(project => 'demo', body => 'and this one?', actor => 'W1@pc')`;
   const bad = await rpc('answer', { id: '1', ruled_by: `M${prop.id}` });
   assert.equal(bad.status, 400);
@@ -331,7 +331,7 @@ test('"Already ruled": the dashboard answers with a live memory entry; the sessi
   assert.equal((await rpc('answer', { id: '1', ruled_by: `M${rule.id}` })).status, 200);
   const [q] = await sql`select answer, ruled_by, answered_by from cb.questions where id = 1`;
   assert.deepEqual({ ...q, ruled_by: Number(q.ruled_by) },
-    { answer: `Already ruled: M${rule.id} Fixes reach SIT with the next promotion — No direct ports.`, ruled_by: rule.id, answered_by: 'ahmed' });
+    { answer: `Already ruled: M${rule.id} Fixes reach STG with the next promotion — No direct ports.`, ruled_by: rule.id, answered_by: 'ahmed' });
   // a typed change to the answer is no longer "already ruled"
   await rpc('answer', { id: '2', ruled_by: String(rule.id) });
   await rpc('answer', { id: '2', answer: 'Yes, port it' });
@@ -361,22 +361,22 @@ test('"Already ruled": the dashboard answers with a live memory entry; the sessi
 
 test('a guest changes a delivered answer only on their own question (#1346)', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await sql`select cb.user_add('iman', 'Iman')`;
-  await onProject(sql, 'omar', 'ihop');
-  await onProject(sql, 'iman', 'ihop');
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
-  for (const to of ['omar', 'iman']) {
-    await sql`select cb.ask(project => 'ihop', body => ${'E1 scope? ' + to}, to_user => ${to}, actor => 'orch@shaltoot')`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await sql`select cb.user_add('ana', 'Ana')`;
+  await onProject(sql, 'cai', 'iris');
+  await onProject(sql, 'ana', 'iris');
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
+  for (const to of ['cai', 'ana']) {
+    await sql`select cb.ask(project => 'iris', body => ${'E1 scope? ' + to}, to_user => ${to}, actor => 'orch@shaltoot')`;
   }
-  await sql`select cb.answer('1', 'A', 'omar'), cb.answer('2', 'A', 'iman')`;
+  await sql`select cb.answer('1', 'A', 'cai'), cb.answer('2', 'A', 'ana')`;
   await sql`select cb.answer_delivered('1', 'orch@shaltoot'), cb.answer_delivered('2', 'orch@shaltoot')`;
   const rpc = (args: object) => remote('/api/rpc/answer', { cookie: token, method: 'POST', body: JSON.stringify(args), headers: { 'content-type': 'application/json' } });
-  assert.equal((await rpc({ id: '2', answer: 'B' })).status, 403, "iman's question");
+  assert.equal((await rpc({ id: '2', answer: 'B' })).status, 403, "ana's question");
   const r = await rpc({ id: '1', answer: 'B' });
   assert.equal(r.status, 200, await r.text());
   const [q] = await sql`select status, answer, answered_by, answer_history -> 0 ->> 'answer' as was from cb.questions where id = 1`;
-  assert.deepEqual({ ...q }, { status: 'answered', answer: 'B', answered_by: 'omar', was: 'A' });
+  assert.deepEqual({ ...q }, { status: 'answered', answer: 'B', answered_by: 'cai', was: 'A' });
   assert.equal((await sql`select status from cb.questions where id = 2`)[0].status, 'delivered');
   // the guest's own page carries neither the earlier answers nor who they were delivered to
   const me = await (await remote('/api/me', { cookie: token })).json();
@@ -386,10 +386,10 @@ test('a guest changes a delivered answer only on their own question (#1346)', as
 
 test('a guest answer ignores ruled_by in its body', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await onProject(sql, 'omar', 'demo');
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await onProject(sql, 'cai', 'demo');
   const rule = (await sql`select cb.mem_add(project => 'demo', title => 'A ruling', kind => 'ruling', actor => 'ahmed') as m`)[0].m;
-  await sql`select cb.ask(project => 'demo', body => 'scope?', to_user => 'omar', actor => 'orch@pc')`;
+  await sql`select cb.ask(project => 'demo', body => 'scope?', to_user => 'cai', actor => 'orch@pc')`;
   const r = await remote('/api/rpc/answer', { cookie: token, method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ id: '1', answer: 'A', ruled_by: `M${rule.id}` }) });
   assert.equal(r.status, 200);
@@ -421,7 +421,7 @@ test('memory stats: the weekly metric and the Today counts; owner only', async (
   assert.deepEqual(await stats('?project=demo'), { proposed: 1, past_review: 1, live_facts: 3, stale_pct: 33, already_ruled: 1, corrections: 3 });
   assert.equal((await stats()).live_facts, 4, 'no project = every project');
   assert.equal((await stats('?project=other')).already_ruled, 0);
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
   assert.equal((await remote('/api/memory/stats', { cookie: token })).status, 403);
   const bad = await app.request('/api/memory/stats?project=nope');
   assert.equal(bad.status, 400);

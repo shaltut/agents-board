@@ -91,21 +91,21 @@ test('cb start, no herdr pane: act with --as / CB_ACTOR and poll', async () => {
 
 test('cb start, unbound pane: says how to bind and lists the projects', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'a', status => 'next')`;
-  await sql`select cb.task_add(project => 'tactiai', title => 'b')`;
+  await sql`select cb.task_add(project => 'iris', title => 'a', status => 'next')`;
+  await sql`select cb.task_add(project => 'zephyr', title => 'b')`;
   const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /Project +NOT BOUND/);
   assert.match(r.out, /cb iam <name> <project>/);
   assert.match(r.out, /W1@mac/);
-  assert.match(r.out, /^ +ihop +1 next/m);
-  assert.match(r.out, /^ +tactiai/m);
+  assert.match(r.out, /^ +iris +1 next/m);
+  assert.match(r.out, /^ +zephyr/m);
   assert.doesNotMatch(r.out, /cb relay/); // one step at a time
 });
 
 test('cb start, relay started before cb iam (the hook): its row has no project, so still not bound', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'a')`;
+  await sql`select cb.task_add(project => 'iris', title => 'a')`;
   await sql`select cb.inbox('mac', ${P})`; // what the SessionStart relay does first
   const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
   assert.match(r.out, new RegExp(`You +${P}@mac \\(not bound\\)`));
@@ -114,14 +114,14 @@ test('cb start, relay started before cb iam (the hook): its row has no project, 
 
 test('cb start, bound without relay: run cb relay; then shows work and the queue head', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'held', status => 'in_progress', actor => 'W1@test')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'top of queue', status => 'next', priority => 'P1')`;
-  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  await sql`select cb.task_add(project => 'iris', title => 'held', status => 'in_progress', actor => 'W1@test')`;
+  await sql`select cb.task_add(project => 'iris', title => 'top of queue', status => 'next', priority => 'P1')`;
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   const env = { CB_ACTOR: '', HERDR_PANE_ID: P, CLAUDE_CODE_MESSAGING_SOCKET: `sock-${process.pid}` };
   const r = cb(['start'], env);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /You +W1@test/);
-  assert.match(r.out, /Project +ihop/);
+  assert.match(r.out, /Project +iris/);
   assert.match(r.out, /Relay +OFF/);
   assert.match(r.out, /cb relay/);
 
@@ -145,8 +145,8 @@ test('cb start, bound without relay: run cb relay; then shows work and the queue
 
 test('cb start, bound with nothing held: tells it to cb next', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'top', status => 'next')`;
-  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  await sql`select cb.task_add(project => 'iris', title => 'top', status => 'next')`;
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P }); // no Claude inbox in env, no endpoint file
   assert.match(r.out, /Relay +unavailable/);
   assert.match(r.out, /cb next/);
@@ -165,8 +165,8 @@ test('cb start, bound with nothing held: tells it to cb next', async () => {
 
 test('cb relay needs only a pane; another agent is refused by name; claude needs its inbox in env or an endpoint file', async () => {
   const sql = await db();
-  await sql`select cb.ensure_project('ihop')`;
-  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  await sql`select cb.ensure_project('iris')`;
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   assert.match(cb(['relay'], { HERDR_PANE_ID: '' }).err, /cb relay needs a herdr pane/);
   assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P }).err, /agent "codex" is not installed yet/);
   assert.match(cb(['relay', '--agent', 'nope'], { HERDR_PANE_ID: P }).err, /unknown agent "nope"/);
@@ -175,7 +175,7 @@ test('cb relay needs only a pane; another agent is refused by name; claude needs
 
 test('errors say what to run instead', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'x')`;
+  await sql`select cb.task_add(project => 'iris', title => 'x')`;
   assert.match(cb(['move', '1']).err, /^cb: usage: cb move <id> <status> \["<note>"\]\. Details: cb help move$/);
   assert.match(cb(['done', '77', 'x']).err, /task #77 not found.*cb mine/);
   assert.match(cb(['user', 'drop', 'x']).err, /cb user add <name>/);
@@ -186,12 +186,12 @@ test('errors say what to run instead', async () => {
 
 test('cb ask --free posts, and reminds that a choice needs options', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'x')`;
-  const r = cb(['ask', 'ihop', 'What is the sandbox URL?', '--free']);
+  await sql`select cb.task_add(project => 'iris', title => 'x')`;
+  const r = cb(['ask', 'iris', 'What is the sandbox URL?', '--free']);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /^Q1 posted/);
   assert.match(r.out, /cb withdraw Q1/);
-  assert.doesNotMatch(cb(['ask', 'ihop', 'Merge?', '-o', 'Yes=x', '-o', 'No=y']).out, /withdraw/);
+  assert.doesNotMatch(cb(['ask', 'iris', 'Merge?', '-o', 'Yes=x', '-o', 'No=y']).out, /withdraw/);
 });
 
 test('cb help constructor / toString: not a page (no prototype lookups)', () => {
@@ -204,9 +204,9 @@ test('cb help constructor / toString: not a page (no prototype lookups)', () => 
 
 test('cb start: a task reassigned away is not "continue"; the footer says a teammate is not Ahmed', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'was mine', status => 'in_progress', actor => 'W1@test')`;
+  await sql`select cb.task_add(project => 'iris', title => 'was mine', status => 'in_progress', actor => 'W1@test')`;
   await sql`select cb.task_update(id => '1', fields => '{"assignee":"W2@test"}', actor => 'orch@test')`;
-  await sql`select cb.iam('mac', ${P}, 'W1@test', 'ihop')`;
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   const r = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.doesNotMatch(r.out, /continue #1/);

@@ -58,7 +58,7 @@ pulling in new matching cards. A card can be in an epic and a goal at once.
 
 ## My calls (Ahmed did not decide these)
 
-1. A goal can span every project (project null). The OCR goal touches ihop and ocr-arena.
+1. A goal can span every project (project null). The OCR goal touches iris and ocr-arena.
 2. Matching is labels + words + epics in SQL, not an LLM reading the description. Predictable, free, and
    Ahmed sees the result before saving.
 3. An unticked card never rejoins by matching; Ahmed can tick it back on the goal page.

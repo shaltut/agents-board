@@ -112,10 +112,10 @@ test('compose: a Markdown question reads as plain text: tables as rows, links wi
 
 test('compose: a Hand to row, one button per person on the project, above the send-back row (#1200)', () => {
   const q = { id: 7, project: 'demo', asked_by: 'W1', body: 'Ship it?', context: null, multi: false, options: [{ label: 'Yes', description: null }],
-    hands: [{ name: 'iman', display: 'Iman' }, { name: 'omar', display: 'Omar' }] };
+    hands: [{ name: 'ana', display: 'Ana' }, { name: 'cai', display: 'Cai' }] };
   const rows = tg.compose(q as any).reply_markup.inline_keyboard;
   // the send-back buttons are the last two rows (five in one were too narrow on a phone)
-  assert.deepEqual(rows.at(-3).map((b: any) => [b.text, b.callback_data]), [['Hand to Iman', 'h:7:iman'], ['Hand to Omar', 'h:7:omar']]);
+  assert.deepEqual(rows.at(-3).map((b: any) => [b.text, b.callback_data]), [['Hand to Ana', 'h:7:ana'], ['Hand to Cai', 'h:7:cai']]);
   assert.equal(rows.at(-2)[0].callback_data, 'b:7:details');
   assert.equal(tg.compose({ ...q, hands: [] } as any).reply_markup.inline_keyboard.length, 3, 'nobody on the project: no row');
   // review: Telegram refuses the whole message for a row over 8 buttons or callback_data over 64 bytes, and the question never arrives
@@ -154,16 +154,16 @@ test('pairing: a dashboard code pairs the chat once; other chats are ignored; un
 
 test('outgoing: a question for Ahmed goes out once; one for a guest does not; a follow-up goes when it opens', async () => {
   const sql = await paired();
-  await sql`select cb.user_add('omar', 'Omar', 'ahmed')`;
-  await sql`select cb.ensure_project('demo'), cb.user_project_add('omar', 'demo', 'ahmed')`;
+  await sql`select cb.user_add('cai', 'Cai', 'ahmed')`;
+  await sql`select cb.ensure_project('demo'), cb.user_project_add('cai', 'demo', 'ahmed')`;
   const p = await ask(sql, 'Parent?', { options: ['Yes', 'No'], context: 'some background' });
   const f = await ask(sql, 'Then which?', { parent: `Q${p}`, if_answer: 'Yes' });
-  await ask(sql, 'For Omar?', { to_user: 'omar' });
+  await ask(sql, 'For Cai?', { to_user: 'cai' });
   const [m] = await until(() => sentFor(p).length && sentFor(p), 'parent sent');
   assert.match(m.body.text, /some background/);
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(sentFor(f).length, 0, 'dormant: not yet');
-  assert.ok(!calls('sendMessage').some((c) => /For Omar/.test(c.body.text)), 'a guest question stays off Telegram');
+  assert.ok(!calls('sendMessage').some((c) => /For Cai/.test(c.body.text)), 'a guest question stays off Telegram');
 
   // a restart reconciles against the mapping: nothing re-sent
   await tg.reconcile();
@@ -285,13 +285,13 @@ test('network trouble never crashes: an unreachable API backs off and stops clea
 
 test('handed to a guest and back: the message says so, then gets its buttons back without a second message', async () => {
   const sql = await paired();
-  await sql`select cb.user_add('omar', 'Omar', 'ahmed')`;
-  await sql`select cb.ensure_project('demo'), cb.user_project_add('omar', 'demo', 'ahmed')`;
+  await sql`select cb.user_add('cai', 'Cai', 'ahmed')`;
+  await sql`select cb.ensure_project('demo'), cb.user_project_add('cai', 'demo', 'ahmed')`;
   const id = await ask(sql, 'Who takes this?', { options: ['Me', 'You'] });
   await until(() => sentFor(id).length, 'sent');
   const msg = await msgOf(sql, id);
-  await sql`select cb.question_assign(${String(id)}, 'omar')`;
-  await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to omar/.test(c.body.text)), 'handed on');
+  await sql`select cb.question_assign(${String(id)}, 'cai')`;
+  await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to cai/.test(c.body.text)), 'handed on');
   await sql`select cb.question_assign(${String(id)}, null)`;
   const back = await until(() => calls('editMessageText').find((c) => c.body.message_id === msg && c.body.reply_markup.inline_keyboard.length), 'buttons back');
   assert.equal(back.body.reply_markup.inline_keyboard[0][0].callback_data, `o:${id}:0`);
@@ -335,21 +335,21 @@ test('after Clarify, a reply to the question itself answers it; only a reply to 
 test('Hand to: one tap gives the question to that person; only people on its project are offered or accepted (#1200)', async () => {
   const sql = await paired();
   await sql`select cb.ensure_project('demo')`;
-  await sql`select cb.user_add('omar', 'Omar', 'ahmed'), cb.user_add('iman', 'Iman', 'ahmed')`;
-  await sql`select cb.user_project_add('omar', 'demo', 'ahmed')`; // iman is not on demo
-  const id = await ask(sql, 'Who reviews the import?', { options: ['Me', 'Omar'] });
+  await sql`select cb.user_add('cai', 'Cai', 'ahmed'), cb.user_add('ana', 'Ana', 'ahmed')`;
+  await sql`select cb.user_project_add('cai', 'demo', 'ahmed')`; // ana is not on demo
+  const id = await ask(sql, 'Who reviews the import?', { options: ['Me', 'Cai'] });
   const [sent] = await until(() => sentFor(id).length && sentFor(id), 'sent');
   const hands = sent.body.reply_markup.inline_keyboard.flat().filter((b: any) => b.callback_data.startsWith('h:'));
-  assert.deepEqual(hands.map((b: any) => b.text), ['Hand to Omar'], 'only people on the project');
+  assert.deepEqual(hands.map((b: any) => b.text), ['Hand to Cai'], 'only people on the project');
   const msg = await msgOf(sql, id);
 
-  press(msg, `h:${id}:iman`); // a forged button for someone off the project: refused, nothing changes
+  press(msg, `h:${id}:ana`); // a forged button for someone off the project: refused, nothing changes
   await until(() => calls('answerCallbackQuery').some((c) => /not on project/.test(c.body.text ?? '')), 'refused');
   assert.equal((await sql`select assigned_to from cb.questions where id = ${id}`)[0].assigned_to, null);
 
-  press(msg, `h:${id}:omar`);
-  await until(async () => (await sql`select assigned_to from cb.questions where id = ${id}`)[0].assigned_to === 'omar', 'handed');
-  assert.equal((await status(sql, id)).status, 'open', 'still open: now Omar answers it');
-  await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to omar/.test(c.body.text) && !c.body.reply_markup.inline_keyboard.length), 'message closed');
-  await until(() => calls('answerCallbackQuery').some((c) => c.body.text === 'Handed to Omar.'), 'toast');
+  press(msg, `h:${id}:cai`);
+  await until(async () => (await sql`select assigned_to from cb.questions where id = ${id}`)[0].assigned_to === 'cai', 'handed');
+  assert.equal((await status(sql, id)).status, 'open', 'still open: now Cai answers it');
+  await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to cai/.test(c.body.text) && !c.body.reply_markup.inline_keyboard.length), 'message closed');
+  await until(() => calls('answerCallbackQuery').some((c) => c.body.text === 'Handed to Cai.'), 'toast');
 });

@@ -182,7 +182,7 @@
 
 - [ ] **Step 1: Write the failing tests**
   - In `test/squad-up.test.ts`:
-    - `launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude` (update `:88-90,389,564-576` for `agent`, `board`, `CB_ROLE`, `CB_AGENT` while keeping `IHOP_WANT`/`IHOP_RESUME` and Claude herdr args unchanged).
+    - `launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude` (update `:88-90,389,564-576` for `agent`, `board`, `CB_ROLE`, `CB_AGENT` while keeping `IRIS_WANT`/`IRIS_RESUME` and Claude herdr args unchanged).
     - `seatSpec resolves per-seat overrides and non-Claude prompt includes --agent`.
     - `startOne refuses an unimplemented agent before creating a pane` (synthetic `Launch` with `agent: 'codex'` → `{ ok: false }`, zero herdr calls).
   - In `test/supervise-plan.test.ts`: `planTick respects precomputed safeToClose per session`.
@@ -214,12 +214,12 @@
 
 - [ ] **Stage A Release Gate (Ahmed, 26 Nov: Stage A ships together with Stage B, so every step below runs once, at the combined A+B gate after Task 4):**
   - Full suite under `cb lock take db`, on its own database (needs `web/` deps installed): `CB_TEST_DB=claude_board_test_anc_full NODE_OPTIONS=--max-old-space-size=4096 timeout 1800 pnpm -s test` (the suite takes about 18 minutes; release `db` lock).
-  - Before deploy, capture: `cb squad up ihop --dry-run`, `cb squad up qhs --dry-run`, `cb digest ihop --all`, `cb digest qhs --all` (the success checks below compare against these).
-  - Deploy: vps2 schema (`git merge --ff-only origin/main && cd deploy && dc up -d --build board`, check `/healthz`) → PC `git pull --ff-only` → Mac verified `tar` → stop `cb supervise`, run `cb supervise --dry-run` (must show zero surprise actions on `ihop`/`qhs`), start `cb supervise`.
+  - Before deploy, capture: `cb squad up iris --dry-run`, `cb squad up zed --dry-run`, `cb digest iris --all`, `cb digest zed --all` (the success checks below compare against these).
+  - Deploy: vps2 schema (`git merge --ff-only origin/main && cd deploy && dc up -d --build board`, check `/healthz`) → PC `git pull --ff-only` → Mac verified `tar` → stop `cb supervise`, run `cb supervise --dry-run` (must show zero surprise actions on `iris`/`zed`), start `cb supervise`.
   - Stage A restarts every relay once: `seatKey` in `cli/bridge.ts` is part of the relay's code list (`cli/relay.ts:47`) and the watchdog relaunches on a code change. Same on PC `git pull`, on the Mac tar, and again on rollback. A few seconds of task-change notices during the restart are not replayed (as for any relay update).
   - Success check (relays): every relay reconnects on the new `cb-relay/<ver>`: `select application_name, count(*) from pg_stat_activity where application_name like 'cb-relay%' group by 1`.
-  - Success check (argv): `cb squad up --dry-run` lines for `ihop` and `qhs` are identical to a capture taken before the deploy, and the argv pin test ("startOne: a Claude seat starts with exactly today's herdr argv") is green in the gate's full suite.
-  - Success check (digest): digest group 10 changes on deploy by design. Compare the model lines (`<actor> is a <role> on <model>; the role runs ...`) in `cb digest ihop --all` and `cb digest qhs --all` before and after (without `--all` the capped digest can drop them); every difference must be explained by that squad's role models (the old check compared against fixed defaults, the new one against the squad's own models). `cb iam` runs cleanly.
+  - Success check (argv): `cb squad up --dry-run` lines for `iris` and `zed` are identical to a capture taken before the deploy, and the argv pin test ("startOne: a Claude seat starts with exactly today's herdr argv") is green in the gate's full suite.
+  - Success check (digest): digest group 10 changes on deploy by design. Compare the model lines (`<actor> is a <role> on <model>; the role runs ...`) in `cb digest iris --all` and `cb digest zed --all` before and after (without `--all` the capped digest can drop them); every difference must be explained by that squad's role models (the old check compared against fixed defaults, the new one against the squad's own models). `cb iam` runs cleanly.
   - Success check (herdr): `--env CB_ROLE/CB_AGENT` is now on every pane-making herdr call (herdr 0.9.5 lists `--env` for `pane split`, `tab create` and `workspace create` on PC and Mac, checked 2026-11-26 from `--help`). Watch the first real seat start or restore on the PC and on the Mac succeed after deploy; if herdr refuses, roll back the PC/Mac code.
   - Rollback (strict order): **PC/Mac FIRST** (`git checkout <prev-sha>`, tar Mac, restart `cb supervise`) -> **vps2 LAST** (`git checkout <prev-sha> && cd deploy && dc up -d --build board`; `git checkout vps` before next forward deploy). Before vps2: find squads saved with the new keys, `select slug from cb.projects where squad::text ~ '"(seats|fallback)"'`; strip those keys and re-save them (or accept that the old board refuses to re-save them and the old launcher ignores seat models).
 ---
@@ -398,7 +398,7 @@ Algorithm details in `kit/guard/core.mjs`:
 
 - [ ] **Step 5: Stage C Release Gate & Live Proof (only after Ahmed's explicit OK)**
   - `cb ask claude-board -t 4002` for Stage C merge, deploy and `~/.claude/settings.json` guard switch approval.
-  - Merge `--ff-only` to `main`; pull PC (`F:\Work\claude-board`); ship verified `tar` to Mac (`~/Work/claude-board`).
+  - Merge `--ff-only` to `main`; pull PC (`C:\work\claude-board`); ship verified `tar` to Mac (`~/Work/claude-board`).
   - Run `node kit/guard/install.mjs` on PC and Mac, update `~/.claude/settings.json` PreToolUse command to `node <abs-home>/.claude-board/guard/shim-claude.mjs` (keeping pre-Phase-1 standalone `~/.claude/hooks/block-dangerous.mjs` untouched as the 1-line rollback), and confirm `node kit/guard/install.mjs --check` exits 0 on both machines.
   - Throwaway live check on a scratch repo (no client data): start one `builder` and one `reviewer` Claude seat via `cb squad up`, confirm relay push + `cb` bridge + heartbeat work, confirm `git push origin main` / `gh pr merge` / PowerShell `Remove-Item -Recurse -Force C:\` / malformed stdin block, confirm `rm -rf *` and feature push pass, confirm supervisor closes idle seat cleanly via `/exit`. Close scratch panes and `cb done 4002`.
   - Rollback (< 1 min): revert 1 line in `~/.claude/settings.json` back to `node ~/.claude/hooks/block-dangerous.mjs`.

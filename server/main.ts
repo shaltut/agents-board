@@ -25,7 +25,7 @@ app.onError((e: any, c) => e?.name === 'PostgresError'
 const opt = (v?: string) => (v ? v : undefined);
 
 // Default-deny. Everyone signs in (#1749): admins (Ahmed, the owner, is the user ahmed) get the whole board, by
-// password; members (Omar, Iman) get only their own questions and tasks, by password or their private link.
+// password; members (Cai, Ana) get only their own questions and tasks, by password or their private link.
 // One exception keeps the board on Ahmed's PC working as it always has: a request plainly from this machine is his.
 // That trust is off when the server listens beyond loopback (a container on 0.0.0.0: anyone reaching the port could
 // send Host: localhost) and when CB_TRUST_LOCAL=0 (the VPS sets it).
