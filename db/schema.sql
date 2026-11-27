@@ -445,13 +445,15 @@ end $$;
 -- a sleeping Mac must not hand the orchestrator's bugs to every worker; session rows are never deleted.
 -- One rule for the relay push (cb.inbox) and for what `cb bug` prints. The role is read off the session row here: a
 -- sql body may not call cb._role, which is defined further down (#3746).
+-- #3779: each name by its latest session, as cb._is_lead: a lead that has since bound another project (in another pane,
+-- so its old row stays) no longer triages this one, and cb bug's "no orchestrator there" note agrees with the list.
 create function cb.triagers(project text) returns text[] language sql stable as $$
+  with s as (select distinct on (x.actor) x.actor, x.project, x.role, x.last_seen from cb.sessions x order by x.actor, x.last_seen desc)
   select coalesce(
-    nullif(array(select s.actor from cb.sessions s
+    nullif(array(select s.actor from s
                   where s.project = $1 and coalesce(s.role, case when s.actor = 'orch' or s.actor like 'orch@%' then 'lead' end) = 'lead'
                     and s.last_seen > now() - interval '1 day' order by s.actor), '{}'),
-    array(select distinct s.actor from cb.sessions s
-           where s.project = $1 and s.last_seen > now() - interval '1 day' order by s.actor))
+    array(select s.actor from s where s.project = $1 and s.last_seen > now() - interval '1 day' order by s.actor))
 $$;
 
 create function cb.norm_id(id text) returns bigint language plpgsql immutable as $$
@@ -5225,7 +5227,7 @@ declare
   r record; m record; ar jsonb; seen text[] := '{}'; c int; mac int := 0; n_areas int;
   areas jsonb; roles jsonb := '{}'; ns jsonb;
   -- repos (#3703): rp as given, rs as saved (home on every repo), hm the home repo, area_repos the areas' repos
-  rp jsonb := squad->'repos'; rs jsonb := '{}'; x record; hm text; nm text; need text[]; area_repos text[] := '{}';
+  rp jsonb := squad->'repos'; rs jsonb := '{}'; x record; hm text; nm text; keys text; need text[]; area_repos text[] := '{}';
   busy text;  -- the open cards that hold a repo the new squad drops
   -- #4002: rv a role's agent, model and fallback as saved; st its seats as saved, sk the seat keys it has; se, sv a seat
   rv jsonb; st jsonb; sk text[]; se record; sv jsonb;
@@ -5424,21 +5426,23 @@ begin
   -- session name must fit. Home repo <p>-B2@m, another repo <p>-<repo>-B2@m (builders and reviewers only: project-wide
   -- roles are always <p>-Q1@m), owners <p>-O-<area>@m, the lead orch@m, or <p>-orch@m when orch@m leads another
   -- project (#3746).
-  select sn into nm from (
-      select 'orch@' || (roles->'lead'->>'machine') as sn where roles ? 'lead'
+  -- #3779: with each name, the keys that make it up, so the error names the fix for that name
+  select sn, ks into nm, keys from (
+      select 'orch@' || (roles->'lead'->>'machine') as sn, 'machine' as ks where roles ? 'lead'
       union all
-      select p || '-orch@' || (roles->'lead'->>'machine') where roles ? 'lead'
+      select p || '-orch@' || (roles->'lead'->>'machine'), 'project or machine' where roles ? 'lead'
       union all
-      select p || '-O-' || coalesce(ae ->> 'name', ae #>> '{}') || '@' || (roles->'owner'->>'machine')
+      select p || '-O-' || coalesce(ae ->> 'name', ae #>> '{}') || '@' || (roles->'owner'->>'machine'), 'project, area or machine'
         from jsonb_array_elements(areas) ae where roles ? 'owner'
       union all
-      select p || '-' || case when rp is null or cn.key = hm or rl.role not in ('builder', 'reviewer') then '' else cn.key || '-' end || rl.letter || cn.value || '@' || (roles->rl.role->>'machine')
+      select p || '-' || case when rp is null or cn.key = hm or rl.role not in ('builder', 'reviewer') then '' else cn.key || '-' end || rl.letter || cn.value || '@' || (roles->rl.role->>'machine'),
+             case when rp is null or cn.key = hm or rl.role not in ('builder', 'reviewer') then 'project or machine' else 'project, repo or machine' end
         from (values ('architect', 'A'), ('builder', 'B'), ('reviewer', 'R'), ('qa', 'Q'), ('investigator', 'I')) rl(role, letter)
         cross join lateral jsonb_each_text(case when jsonb_typeof(roles->rl.role->'count') = 'object' then roles->rl.role->'count'
                                                 else jsonb_build_object('main', roles->rl.role->'count') end) cn
        where roles ? rl.role) z
    where length(sn) > 32 limit 1;
-  if nm is not null then raise exception 'session name % is over herdr''s 32 characters: use a shorter repo, area or machine key', nm; end if;
+  if nm is not null then raise exception 'session name % is over herdr''s 32 characters: use a shorter % key', nm, keys; end if;
   -- a repo open work names stays (dropped or renamed, its cards and parts could never be claimed); flat is the one repo
   -- main. Adding repos is free.
   need := case when rp is null then '{main}' else array(select jsonb_object_keys(rs)) end;

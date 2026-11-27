@@ -272,6 +272,8 @@ test('squad up: a quiet lead: no lead started, one line names it and how to fix 
   const prot = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'releases/*'] } : [quietRow(10)]), fake(() => GONE).run);
   assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude' --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
   assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
+  // #3779: the board's clock ahead of this one: never "last seen -3 min ago"
+  assert.match(await squadUp('demo', true, callFn([quietRow(-3)]), fake(() => GONE).run), /\(last seen 0 min ago\)/);
   const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
   assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
   assert.doesNotMatch(old, /skip lead/);
@@ -982,6 +984,8 @@ test('squadShow: Claude roles exactly as before; another agent in brackets, a fa
     'reviewer  1 × opus on macbook',
     '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
     'areas: claims'].join('\n'));
+  // #3779: the protected branches print too, not only with --json
+  assert.equal(squadShow({ ...plain, protected: ['development', 'releases/*'] }), 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nareas: none\nprotected: development, releases/*');
 });
 
 test('squad up: a disabled project starts nothing and says so (#4559)', async () => {

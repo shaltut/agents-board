@@ -1518,3 +1518,19 @@ test('held notices survive a relay restart: the old agent dies, its relay leaves
     await stopSeat(pane, relay2 ?? relay);
   }
 });
+
+// #3779: cb.triagers judges each name by its latest session, as cb._is_lead does: a lead that has since bound another
+// project (in another pane: an older row stays) triages it no more, and cb bug's "no orchestrator there" note agrees
+test('triagers: a lead that moved to another project in another pane is not p\'s triager; p falls back to its own sessions', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+  await sql`select cb.iam('m', 'w1:p1', 'W1@m', 'p')`;
+  await sql`select cb.iam('m', 'w1:p9', 'QO@m', 'p', 'lead')`;
+  assert.deepEqual((await sql`select cb.triagers('p') as t`)[0].t, ['QO@m']);
+  await sql`select cb.iam('m', 'w1:p8', 'QO@m', 'q', 'lead')`;
+  await sql`update cb.sessions set last_seen = now() - interval '1 minute' where actor = 'QO@m' and pane = 'w1:p9'`;
+  const [{ t, lead }] = await sql`select cb.triagers('p') as t, cb._is_lead('QO@m', 'p') as lead`;
+  assert.equal(lead, false);
+  assert.deepEqual(t, ['W1@m'], 'the old p row no longer makes QO@m a triager of p');
+  assert.deepEqual((await sql`select cb.triagers('q') as t`)[0].t, ['QO@m']);
+});
