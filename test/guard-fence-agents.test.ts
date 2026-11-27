@@ -199,7 +199,7 @@ test('editTargets reads indented patch headers', () => {
 const shell = (command: string, role: string) => evaluate({ tool: 'shell', command, role }).allow;
 test('the fence judges git as a command: a search for the word git is a read; git behind a launcher or spelled as a path still writes', () => {
   const reads = ['rg -n git opencode.json', 'grep git .codex/config.toml', 'node cli/cb.ts help git -- .codex', 'cb help git -- .codex',
-    'rg "git" opencode.json', 'grep -rn git status opencode.json', 'sudo git log -- opencode.json', 'git "diff" opencode.json'];
+    'rg "git" opencode.json', 'grep -rn git status opencode.json', 'nice git log -- opencode.json', 'git "diff" opencode.json'];
   const writes = ['/usr/bin/git add opencode.json', 'git.exe add opencode.json', '"C:/Program Files/Git/cmd/git.exe" add opencode.json',
     'bash -c "git add opencode.json"', 'bash -c "cd x; git add opencode.json"', "sh -c 'git add .codex/config.toml'", 'xargs git add < l opencode.json',
     String.raw`find . -name opencode.json -exec git add {} \;`, 'timeout 5 git add opencode.json', 'cmd /c git add opencode.json',

@@ -8,6 +8,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
+import { runCodexShim } from '../kit/guard/shim-codex.mjs';
+import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
+import { runAgyShim } from '../kit/guard/shim-agy.mjs';
 import { installGuard, checkWiring, hookPath } from '../kit/guard/install.mjs';
 
 const GUARD = fileURLToPath(new URL('../kit/guard/', import.meta.url));
@@ -363,6 +366,99 @@ test('PR 96 r2: reading or staging an install.mjs passes; running the guard inst
     `python -c "import subprocess; subprocess.run(['node', 'kit/guard/install.mjs'])"`, 'cat kit/guard/install.mjs; node install.mjs']);
 });
 
+// #4669 (PR 96 r3 R3-I1): seven real-shell spellings that still changed CB_ROLE or CB_AGENT for a child, verbatim from the
+// review; and the reviewer's non-bypasses, which stay allowed (bash runs a command named CB_ROLE= for the first two)
+const seatVarR3 = [
+  "env -S'-i' codex exec x", 'env -S "-i codex exec x"', 'env --split-string="-u CB_ROLE codex"', "env -S'-uCB_AGENT codex'",
+  'read CB_ROLE < /dev/null', "read -r CB_ROLE <<< ''", 'IFS= read -r CB_AGENT < f', "printf -v CB_ROLE ''", 'mapfile CB_ROLE < /dev/null', 'readarray -t CB_AGENT < f',
+  'x=CB_ROLE; eval "$x= codex exec x"', 'x=CB_AGENT; eval "${x}= codex"', `bash -c 'n=CB_ROLE; eval "$n="; codex exec x'`,
+  '${env:CB_ROLE}=$null; codex exec x', '${env:CB_ROLE} = ""', '${Env:CB_AGENT}=""',
+  '$e::SetEnvironmentVariable("CB_"+"ROLE","")', "[Environment]::SetEnvironmentVariable('CB_' + 'AGENT', $null)",
+  `env C'B'_ROLE= codex exec x`, String.raw`env CB_ROLE\= codex exec x`, 'for CB_ROLE in x; do codex exec y; done',
+];
+const seatVarR3Fine = [String.raw`CB_R\OLE= codex`, `C'B'_ROLE= codex`, 'f() { local CB_ROLE; echo hi; }; f', 'typeset CB_ROLE', 'read -r line < f.txt',
+  'printf -v out %s x', 'mapfile -t lines < f.txt', 'for f in *.ts; do echo $f; done', 'eval "$(ssh-agent -s)"', 'x=1; eval "echo $x"',
+  `bash -c 'for f in a b; do echo $f; done'`, 'printf "%s\\n" "$CB_ROLE"', '[Environment]::GetEnvironmentVariable("CB_ROLE")'];
+
+// #4669: a process started with a fresh environment (sudo, a login to this machine, a scheduler, WSL, WMI, another user,
+// a tmux, screen or herdr pane) carries neither seat variable, so it runs outside a seat
+const freshEnv = [
+  'sudo codex exec x', 'sudo -u me opencode run x', 'doas agy', 'su -c "codex exec x" me', 'runuser -u me -- codex', 'pkexec codex',
+  'ssh localhost codex exec x', 'ssh 127.0.0.1 opencode run x', 'ssh me@localhost', 'ssh -p 22 ::1 x', 'ssh $(hostname) x', 'ssh "$HOSTNAME" x', 'ssh 0 x',
+  'systemd-run --user codex exec x', 'echo "codex exec x" | at now', 'at -f job.sh now', 'batch < job.sh', 'echo "* * * * * codex" | crontab -', 'crontab jobs.txt',
+  'launchctl submit -l x -- codex', 'wsl codex exec x', 'wsl.exe -e bash -c x', 'schtasks /create /tn x /tr codex.exe /sc once /st 00:00', 'schtasks /run /tn x',
+  'Register-ScheduledTask -TaskName x -Action $a', 'Start-ScheduledTask x', `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='codex exec x'}`,
+  `Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList 'codex'`, 'wmic process call create "codex exec x"', `([wmiclass]'Win32_Process').Create('codex exec x')`,
+  'Start-Process codex -UseNewEnvironment', 'runas /user:me codex', 'psexec -s codex', 'explorer.exe run.bat',
+  'tmux new -d "codex exec x"', 'tmux new-session -d codex', 'tmux new-window codex', 'tmux split-window "opencode run x"', 'tmux send-keys -t 0 "codex" Enter',
+  'tmux run-shell "codex exec x"', 'tmux respawn-pane -k codex', 'screen -dm codex exec x', 'screen -S s -X stuff "codex"',
+  'herdr pane run w1:p2 "codex exec x"', 'herdr pane send w1:p2 x', 'herdr tab create --cwd /w', 'herdr agent start x --kind codex --pane p -- a', 'herdr agent prompt w1:p2 hi',
+  // interpreter code that hands a child a new environment
+  `node -e "require('child_process').spawnSync('codex', [], { env: {} })"`, `node -e "cp.spawn('codex', [], {env: {PATH: process.env.PATH}})"`,
+  `node -e "for (const k in process.env) delete process.env[k]"`, `python -c "import subprocess; subprocess.run(['codex'], env={})"`,
+  `python3 -c "import subprocess,os; subprocess.Popen('agy', env={'PATH': os.environ['PATH']})"`, `python -c "import os; os.execve('/usr/bin/codex', ['codex'], {})"`,
+  `python -c "import os; [os.environ.pop(k) for k in list(os.environ)]"`, `python -c "import os; del os.environ[k]"`, `ruby -e "Process.spawn('codex', unsetenv_others: true)"`,
+  `deno eval "new Deno.Command('codex', {clearEnv: true}).spawn()"`, `pwsh -c "$p = New-Object System.Diagnostics.ProcessStartInfo codex; $p.EnvironmentVariables.Clear()"`,
+];
+const freshEnvFine = [
+  'sudo --version', 'ssh deploy@prod.example.com uptime', 'ssh -T git@github.com', 'git push origin feat/x', 'crontab -l', 'at -l', 'atq',
+  'tmux ls', 'tmux list-panes -a', 'tmux capture-pane -p -t 1', 'tmux display-message -p "#S"', 'tmux has-session -t x', 'screen -ls',
+  'herdr pane read w1:p2 --lines 20', 'herdr pane list', 'herdr tab list', 'wsl -l -v', 'wsl --status', 'schtasks /query', 'Get-ScheduledTask',
+  'Get-CimInstance Win32_Process', 'Get-WmiObject Win32_Process', 'wmic process list brief', 'explorer.exe .', 'Start-Process notepad',
+  `node -e "require('child_process').spawnSync('git', ['status'], { env: { ...process.env, GIT_PAGER: 'cat' } })"`, `node -e "cp.spawn('x', [], {env: process.env})"`,
+  `python -c "import subprocess,os; subprocess.run(['ls'], env={**os.environ, 'A': '1'})"`, `python -c "import subprocess,os; subprocess.run(['ls'], env=dict(os.environ, A='1'))"`,
+  `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
+  'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
+];
+test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
+  for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) assert.equal(evaluate({ tool: 'shell', command: c, role }).kind, 'role', `${role}: ${c}`);
+  blocksByRole('builder', [...seatVarR3.slice(0, 4), ...freshEnv.slice(0, 4), 'tmux new -d "codex exec x"', 'herdr pane run w1:p2 "codex exec x"']);
+  for (const c of [...seatVarR3Fine, ...freshEnvFine]) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  passes('builder', ['tmux ls', 'sudo --version', 'ssh -T git@github.com']);
+  // outside a seat none of this is the guard's business (the variables are not set there)
+  for (const c of ['sudo codex exec x', 'tmux new -d codex', 'ssh localhost x']) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: null }), { allow: true }, c);
+  assert.match(evaluate({ tool: 'shell', command: 'sudo codex', role: 'builder' }).reason, /fresh environment/);
+});
+
+// #4669: a shell script the seat wrote (or found) and then runs is judged for the same two rules, from its text: the
+// shim passes readScript, which reads a local file (none: nothing to judge)
+test('#4669: running a shell script that changes the seat variables or starts a fresh environment is blocked', () => {
+  const files: Record<string, string> = { 'x.sh': 'set -e\nunset CB_ROLE\ncodex exec x\n', 'go.ps1': '$env:CB_AGENT = ""\ncodex exec x\n', 'ok.sh': 'echo hi\nnpm test\n',
+    'run.cmd': '@echo off\r\nset CB_ROLE=\r\ncodex exec x\r\n', 'fresh.sh': '#!/bin/sh\nsudo -u me codex exec x\n', 'tm.sh': 'tmux new -d "codex exec x"\n' };
+  const readScript = (p: string) => files[p.replace(/^\.[\\/]/, '').replace(/^.*[\\/]/, '')] ?? null;
+  const ev = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', readScript });
+  for (const c of ['bash x.sh', 'sh ./x.sh', './x.sh', 'source x.sh', '. ./x.sh', 'pwsh -File go.ps1', 'pwsh go.ps1', '& ./go.ps1', String.raw`.\go.ps1`, 'cmd /c run.cmd', 'run.cmd',
+    'call run.cmd', 'bash fresh.sh', 'zsh tm.sh', 'cd scripts && bash x.sh', 'timeout 60 bash x.sh']) assert.equal(ev(c).kind, 'role', c);
+  for (const c of ['bash ok.sh', './ok.sh', 'bash missing.sh', 'node x.js', 'cat x.sh', 'git add x.sh', 'grep CB_ROLE x.sh']) assert.deepEqual(ev(c), { allow: true }, c);
+  assert.match(ev('bash x.sh').reason, /x\.sh/);
+  // no reader (an older shim): commands are judged as before
+  assert.deepEqual(evaluate({ tool: 'shell', command: 'bash x.sh', role: 'builder' }), { allow: true });
+});
+
+// #4669: every shim hands core a reader for the hook's cwd, so a real script file the seat wrote is judged by all four
+test('#4669: each shim reads a script the command runs (relative to the hook cwd, or absolute) and blocks one that clears a seat variable', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-script-'));
+  try {
+    writeFileSync(join(dir, 'x.sh'), 'unset CB_ROLE\ncodex exec x\n');
+    writeFileSync(join(dir, 'ok.sh'), 'echo hi\n');
+    const seat = (agent: string) => ({ CB_ROLE: 'builder', CB_AGENT: agent });
+    const claude = (command: string, cwd = dir) => runClaudeShim(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }), seat('claude'));
+    const codex = (command: string, cwd = dir) => runCodexShim(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd }), seat('codex'));
+    const agy = (command: string, cwd = dir) => runAgyShim(JSON.stringify({ toolCall: { name: 'run_command', args: { CommandLine: command } }, cwd, hookEventName: 'PreToolUse' }), seat('agy'));
+    const opencode = (command: string) => runOpencodeShim(JSON.stringify({ tool: 'bash', args: { command } }), seat('opencode'));
+    for (const [name, run] of [['claude', claude], ['codex', codex], ['agy', agy]] as const) {
+      assert.match(JSON.stringify(run('bash x.sh')), /x\.sh, whose text is changing CB_ROLE/, name);
+      assert.match(JSON.stringify(run('sudo codex exec x')), /fresh environment/, name);
+      assert.doesNotMatch(JSON.stringify(run('bash ok.sh')), /Blocked/, name);
+      assert.doesNotMatch(JSON.stringify(run('bash x.sh', tmpdir())), /x\.sh, whose/, `${name}: another cwd has no x.sh`);
+    }
+    assert.match(JSON.stringify(opencode(`bash ${join(dir, 'x.sh')}`)), /whose text is changing CB_ROLE/);
+    assert.deepEqual(opencode(`bash ${join(dir, 'ok.sh')}`), {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('role parity and evaluate(edit/ask)', () => {
   assert.deepEqual([...ROLES], ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);
   assert.deepEqual([...READ_ONLY_ROLES], ['reviewer', 'qa', 'investigator']);
@@ -677,6 +773,15 @@ test('long commands stay fast', () => {
     ['role scan, 20,000 quoted words after echo', () => evaluate({ tool: 'shell', command: 'echo ' + '"a b" '.repeat(20000), role: 'reviewer' })],
     ['role scan, 5,000 git pushes in one segment', () => evaluate({ tool: 'shell', command: 'git push origin feat/x '.repeat(5000), role: 'builder' })],
     ['role scan, gh -R 20,000 repeats', () => evaluate({ tool: 'shell', command: 'gh -R '.repeat(20000), role: 'builder' })],
+    // #4669: the seat-variable name takers, env -S and the fresh-environment launchers read a bounded window per word
+    ['#4669, 200 KB of read words, as a builder', asBuilder(kb200('read '))],
+    ['#4669, 200 KB of mapfile -t words, as a builder', asBuilder(kb200('mapfile -t '))],
+    ['#4669, 200 KB of env -S words, as a builder', asBuilder(kb200('env -S x '))],
+    ['#4669, 200 KB of sudo words, as a builder', asBuilder(kb200('sudo '))],
+    ['#4669, 200 KB of nohup then tmux, as a builder', asBuilder(kb200('nohup ') + 'tmux ls')],
+    ['#4669, 200 KB of ssh -p words, as a builder', asBuilder(kb200('ssh -p '))],
+    ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
+    ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
   ];
   for (const [name, run] of cases) {

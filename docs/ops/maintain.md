@@ -233,6 +233,16 @@ does. In a board seat every tool the shim does not judge is denied, and a seat m
 (PR 96 review r2): the seat prestart also refuses to start an agent in a pane where either is missing or names
 another agent.
 
+Nor may a seat start a process with a fresh environment, which would run outside the seat with neither variable
+(#4669): another user (`sudo`, `su`, `doas`, `runas`), `ssh` or `mosh` to this machine, a scheduler (`at`, `crontab`,
+`systemd-run`, `launchctl submit`, `schtasks /create|/run`, `Register-ScheduledTask`), `wsl`, WMI's
+`Win32_Process Create`, or a tmux, screen or herdr command that starts a pane or types into one. Their read-only forms
+pass (`sudo --version`, `crontab -l`, `tmux ls`, `herdr pane read`, `wsl -l`, `schtasks /query`). Interpreter code
+that hands a child an environment of its own (`env: {}`, `env={}` without `process.env` or `os.environ`) counts too.
+A shell script the command runs (`bash x.sh`, `./x.sh`, `source x.sh`, `pwsh -File x.ps1`, `cmd /c x.cmd`) is read
+from the hook's working folder and judged for both rules; `node x.js` and `python x.py` are not read, since tests start
+children with their own env on purpose. A `cd` earlier in the same command is not followed.
+
 `--agents` also installs the whole guard folder: Claude's shim and `core.mjs` there are replaced with this checkout's,
 exactly as a plain install does, so every agent on the machine runs the same rules.
 

@@ -73,7 +73,15 @@ function writesText(line) {
   return TEXT_WRITER.test(seg + (after < 0 ? line.slice(at) : line.slice(at, at + after)));
 }
 
+// #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
+let stripLast = null;
 export function stripMessages(cmd) {
+  if (stripLast && stripLast.in === cmd) return stripLast.out;
+  const out = stripMessagesOnce(cmd);
+  stripLast = { in: cmd, out };
+  return out;
+}
+function stripMessagesOnce(cmd) {
   return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
     .replace(MESSAGE_CMD, (_all, head, args) =>
       // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
@@ -1014,9 +1022,15 @@ const SEAT_VARS = /CB_(?:ROLE|AGENT)(?![\w])/i;
 // the command runs code (bash -c "unset CB_ROLE"), so grep "CB_ROLE=" stays a search. Each test reads a segment once.
 const SEAT_VAR = /^CB_(?:ROLE|AGENT)$/i;
 // a mention that is not a $ read: CB_ROLE, Env:CB_ROLE, process.env.CB_ROLE, 'CB_ROLE'
-const SEAT_VAR_NAMED = /(?<![\w$]|\$\{|\$env:)CB_(?:ROLE|AGENT)(?!\w)/i;
+const SEAT_VAR_NAMED = /(?<![\w$]|\$\{|\$env:|\$\{env:)CB_(?:ROLE|AGENT)(?!\w)/i;
 // an assignment: CB_ROLE=, CB_ROLE+=, export/set CB_ROLE=, $env:CB_ROLE =, process.env.CB_ROLE=, os.environ['CB_ROLE'] =
-const SEAT_VAR_SET = /(?<![\w$]|\$\{)CB_(?:ROLE|AGENT)(?!\w)["'`]?\]?[ \t]*\+?=(?!=)/i;
+// #4669 [6]: PowerShell's braced ${env:CB_ROLE} = ... too (a closing brace before the =)
+const SEAT_VAR_SET = /(?<![\w$]|\$\{)CB_(?:ROLE|AGENT)(?!\w)["'`]?[\]}]?[ \t]*\+?=(?!=)/i;
+// #4669: for CB_ROLE in ... (or select) assigns it on each pass
+const SEAT_VAR_FOR = /(?<![\w.$:\\/-])(?:for|select)[ \t]+CB_(?:ROLE|AGENT)(?!\w)/i;
+// #4669 [5]: eval, declare and the like assigning through a name they are given ($x=, ${x}=): a name the guard cannot read
+const NAME_ASSIGNER = /(?<![\w.$:\\/-])(?:eval|declare|typeset|export|local|readonly|let)(?![\w-])/i;
+const ASSIGN_THROUGH = /\$\{?[A-Za-z_]\w*\}?\+?=(?!=)/;
 // a command or call that removes or sets the variable named after it in the same segment (a word before : is a drive:
 // Get-Item Env:CB_ROLE reads)
 const SEAT_VAR_REMOVER = /(?<![\w.$:\\/-])(?:unset|unsetenv|putenv|setenv|setx|delete|del|env|set|reg(?:\.exe)?|(?:remove|clear|set|new|rename|move|copy)-item(?:property)?|ri|rm|erase|cli|si|ni|rni|ren|mi|mv)(?![\w:-])|\.(?:pop|remove)\b|SetEnvironmentVariable|(?<![\w.$:\\/-])(?:export|declare|typeset|local|readonly)[ \t]+(?:[-+]\w+[ \t]+)*?(?:\+\w*x|-\w*n)(?!\w)/i;
@@ -1024,18 +1038,33 @@ const HIDDEN_NAME = /[$`*?[{(%"']/;
 const UNSET = /(?<![\w.$:\\/-])(?:unset|unsetenv)(?![\w-])/i;
 const ENV_DRIVE_WRITER = /(?<![\w.$:\\/-])(?:(?:remove|clear|set|new|rename|move|copy)-item(?:property)?|ri|rm|del|erase|cli|si|ni|rni|ren|mi|mv)(?![\w-])/i;
 const ENV_DRIVE = /(?<![\w$])env:[\\/]*([^\s;&|)]*)/gi;
-const SET_ENV_CALL = /SetEnvironmentVariable[ \t]*\([ \t]*(?:(['"])([A-Za-z_]\w*)\1)?/gi;
+// #4669 [7]: a quoted name is read only when the argument ends there ("CB_"+"ROLE" is not the name CB_)
+const SET_ENV_CALL = /SetEnvironmentVariable[ \t]*\([ \t]*(?:(['"])([A-Za-z_]\w*)\1(?=[ \t]*[,)]))?/gi;
 const ENV_CLEARS = /(?<![\w.$:\\/-])exec[ \t]+-[a-z]*c(?![\w-])|-usenewenv\w*|environ\.clear[ \t]*\(|process\.env[ \t]*=(?!=)/i;
 const SEAT_RUNS_CODE = new RegExp(String.raw`${INTERPRETER.source}|(?<![\w.\\/-])(?:eval|iex|invoke-expression|cmd|fish|source)(?![\w.\\/-])`, 'i');
 // env's own options, word by word up to its command: -i, -, --ignore-environment, or -u/--unset of a seat variable or of
 // a name the guard cannot read
+// #4669 [1]: words are read with their quotes off, as env receives them (env -S'-i' is env -S-i; env C'B'_ROLE= sets
+// CB_ROLE), and a -S/--split-string value's words are more options for env (at most 64 words are added)
 function envChangesSeat(seg) {
-  const w = seg.trim().split(/[ \t]+/);
+  const w = (seg.match(WORD) ?? []).map(unquote);
+  let added = 0;
   for (let i = 0; i < w.length; i++) {
     if (!/^(?:\S*[\\/])?env(?:\.exe)?$/i.test(w[i])) continue;
     for (let j = i + 1; j < w.length; j++) {
       const x = w[j];
+      let split = null;
+      if (x === '-S' || x === '--split-string') split = w[++j] ?? '';
+      else if (x.startsWith('--split-string=')) split = x.slice(15);
+      else if (/^-[a-zA-Z0-9]*S/.test(x)) split = x.slice(x.indexOf('S') + 1) || (w[++j] ?? '');
+      if (split !== null) {
+        const more = split.trim().split(/[ \t]+/).filter(Boolean).slice(0, Math.max(0, 64 - added));
+        added += more.length;
+        w.splice(j + 1, 0, ...more);
+        continue;
+      }
       if (x === '-' || x === '--ignore-environment' || /^-[a-zA-Z0-9]*i/.test(x)) return true;
+      if (/^[A-Za-z_]\w*\+?=/.test(x) && SEAT_VAR.test(x.slice(0, x.search(/\+?=/)))) return true;
       let name = null;
       if (/^--unset(?:=|$)/.test(x)) name = x.length > 7 ? x.slice(8) : w[++j] ?? '';
       else if (/^-[a-zA-Z0-9]*u/.test(x)) name = x.slice(x.indexOf('u') + 1) || (w[++j] ?? '');
@@ -1050,16 +1079,45 @@ function envChangesSeat(seg) {
   }
   return false;
 }
+// #4669 [2][3][4]: builtins that write a variable named in their arguments: read's, mapfile's and readarray's names (and
+// -a's), printf -v's, getopts's. A seat variable there, or a name the guard cannot read, counts
+const ENV_WORD = /env/i;
+const TAKER_WORD = /read|mapfile|printf|getopts/i;
+const TAKER_ARG = { read: new Set(['-d', '-i', '-n', '-N', '-p', '-t', '-u']), mapfile: new Set(['-d', '-n', '-O', '-s', '-u', '-C', '-c']) };
+TAKER_ARG.readarray = TAKER_ARG.mapfile;
+const takenName = (t) => /[$`]/.test(t) || SEAT_VAR.test(unquote(t).split(/[<>[]/)[0]);
+function nameTakers(seg) {
+  const w = seg.match(WORD) ?? [];
+  for (let i = 0; i < w.length; i++) {
+    const name = cmdName(w[i]);
+    if (TAKER_ARG[name]) {
+      for (let j = i + 1; j < w.length && j <= i + 64 && !/^\d*[<>]/.test(w[j]); j++) { // a 64-word window: linear
+        if (w[j] === '-a') { if (w[j + 1] && takenName(w[++j])) return true; continue; }
+        if (TAKER_ARG[name].has(w[j])) { j++; continue; }
+        if (w[j].startsWith('-')) continue;
+        if (takenName(w[j])) return true;
+      }
+    } else if (name === 'printf') {
+      const v = w[i + 1] === '-v' ? w[i + 2] : /^-v./.test(w[i + 1] ?? '') ? w[i + 1].slice(2) : null;
+      if (v && takenName(v)) return true;
+    } else if (name === 'getopts' && w[i + 2] && takenName(w[i + 2])) return true;
+  }
+  return false;
+}
 function seatVarChangeOne(command) {
   const raw = stripMessages(String(command ?? ''));
   const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
-  if (SEAT_VAR_SET.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
+  if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
+  if (NAME_ASSIGNER.test(raw) && ASSIGN_THROUGH.test(raw)) return SEAT_VARS_CHANGE;
   for (const seg of t.match(SEGMENTS) ?? []) {
     const r = SEAT_VAR_REMOVER.exec(seg);
     if (r && SEAT_VAR_NAMED.test(seg.slice(r.index))) return SEAT_VARS_CHANGE;
     const u = UNSET.exec(seg);
     if (u && HIDDEN_NAME.test(seg.slice(u.index + u[0].length))) return SEAT_VARS_CHANGE;
-    if (envChangesSeat(seg)) return SEAT_VARS_CHANGE;
+  }
+  // the word walks run only where their command names appear (a cheap test first keeps big commands fast)
+  for (const seg of raw.match(SEGMENTS) ?? []) {
+    if ((ENV_WORD.test(seg) && envChangesSeat(seg)) || (TAKER_WORD.test(seg) && nameTakers(seg))) return SEAT_VARS_CHANGE;
   }
   // the Env: drive and .NET take the name as text: judged unblanked (Remove-Item ("Env:" + $n), Env:CB_*)
   for (const seg of raw.match(SEGMENTS) ?? []) {
@@ -1073,6 +1131,150 @@ function seatVarChangeOne(command) {
   }
   return null;
 }
+// #4669 (R3-I2 and the PR 96 residual list): a process started with a fresh environment carries neither seat variable, so
+// it runs outside the seat. Judged in command position: another user (sudo, doas, su, runuser, pkexec, runas, psexec); ssh
+// or mosh to this machine (loopback, a name in `hosts`, or a host the guard cannot read); a scheduler (systemd-run, at,
+// batch, crontab, launchctl submit|load|bootstrap|start|kickstart|asuser, schtasks /create|/run|/change,
+// Register-/Start-/Set-ScheduledTask); wsl; explorer opening a script; tmux, screen and herdr commands that start a pane
+// or type into one (the server's env, not the seat's). Their read-only forms pass (sudo --version, crontab -l, tmux ls,
+// herdr pane read, wsl -l, schtasks /query). Anywhere: WMI's Win32_Process Create and wmic process call create. In code
+// an interpreter runs: a child given an env of its own (env: {} or env= without process.env or os.environ, clearEnv,
+// unsetenv_others, os.exec*e and os.spawn*e), a delete or pop of a name the guard cannot read, EnvironmentVariables.Clear().
+const FRESH_WRAP = new Set(['nohup', 'time', 'nice', 'command', 'builtin', 'exec', 'xargs', 'setsid', 'stdbuf', 'ionice', 'then', 'do', 'else', 'if', 'while',
+  'until', '!', '{', 'call', 'start', 'start-process', 'saps']);
+// a cheap first test: a segment that names none of the launchers is not walked word by word
+const FRESH_NAME = /sudo|doas|su\b|runuser|pkexec|runas|psexec|ssh|mosh|systemd-run|\bat\b|batch|crontab|launchctl|wsl|schtasks|scheduled|explorer|tmux|screen|herdr/i;
+const OTHER_USER = new Set(['sudo', 'doas', 'su', 'runuser', 'pkexec', 'runas', 'psexec', 'psexec64']);
+const LOCAL_HOST = /^(?:localhost|[\w.-]*\.localhost|127(?:\.\d{1,3}){3}|::1|\[::1\]|0|0\.0\.0\.0|::|ip6-localhost)$/i;
+const SSH_ARG = new Set(['-b', '-B', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m', '-O', '-o', '-p', '-Q', '-R', '-S', '-W', '-w']);
+const TMUX_SAFE = new Set(['ls', 'list-sessions', 'list-windows', 'lsw', 'list-panes', 'lsp', 'list-clients', 'lsc', 'list-buffers', 'lsb', 'list-keys', 'lsk',
+  'list-commands', 'lscm', 'has-session', 'has', 'display-message', 'display', 'capture-pane', 'capturep', 'show-options', 'show', 'show-window-options', 'showw',
+  'show-environment', 'showenv', 'info', 'server-info', 'kill-session', 'kill-window', 'kill-pane', 'kill-server', 'select-pane', 'selectp', 'select-window',
+  'selectw', 'resize-pane', 'resizep', 'rename-session', 'rename', 'rename-window', 'renamew', 'detach-client', 'detach', '-V']);
+const HERDR_RUNS = new Set(['run', 'send', 'send-keys', 'type', 'paste', 'start', 'create', 'new', 'exec', 'prompt', 'spawn', 'split', 'respawn', 'keys']);
+const FRESH_CODE = [
+  /(?:spawn|exec|fork|Command)\w*[\s\S]{0,400}?\benv\s*:(?!\s*process\.env\b|\s*\{\s*\.\.\.\s*process\.env\b)/,
+  /(?:subprocess|Popen|create_subprocess)[\s\S]{0,400}?\benv\s*=(?!=|\s*os\.environ\b|\s*dict\(\s*os\.environ\b|\s*\{\s*\*\*\s*os\.environ\b)/,
+  /\bclearEnv\s*:\s*true/, /\bunsetenv_others\b/, /\.Environment(?:Variables)?\.Clear\s*\(/i,
+  /delete\s+process\.env\s*\[(?!\s*['"][A-Za-z_]\w*['"]\s*\])/, /del\s+os\.environ\s*\[(?!\s*['"][A-Za-z_]\w*['"]\s*\])/,
+  /environ\.pop\(\s*(?!['"][A-Za-z_]\w*['"]\s*[,)])/, /unsetenv\(\s*(?!['"][A-Za-z_]\w*['"]\s*\))/,
+];
+const OS_EXEC_E = /os\.(?:exec|spawn)\w*e\s*\(/;
+const localHost = (h, hosts) => LOCAL_HOST.test(h) || hosts.some((n) => typeof n === 'string' && n && [n, n.split('.')[0]].some((x) => x.toLowerCase() === h.toLowerCase()));
+function freshLaunch(name, a, hosts) {
+  const only = (ok) => a.length > 0 && a.every((x) => ok.test(x));
+  if (OTHER_USER.has(name)) return only(/^(?:--version|-V|-h|--help|-l|--list|-k|-K)$/) ? null : name;
+  if (name === 'ssh' || name === 'mosh') {
+    for (let i = 0; i < a.length; i++) {
+      if (SSH_ARG.has(a[i])) { i++; continue; }
+      if (a[i].startsWith('-')) continue;
+      const host = unquote(a[i]).replace(/^[^@]*@/, '');
+      return /[$`]/.test(a[i]) || !host || localHost(host, hosts) ? `${name} ${a[i].slice(0, 60)}` : null;
+    }
+    return null;
+  }
+  if (name === 'wsl') return only(/^(?:-l|--list|-v|--verbose|--status|--version|--help|-q|--quiet|--shutdown|--update|--all|--running)$/) ? null : name;
+  if (name === 'launchctl') return a.some((x) => /^(?:submit|load|bootstrap|start|kickstart|asuser)$/.test(x)) ? name : null;
+  if (name === 'at') return a.length === 0 || !only(/^-[lrdc]$|^\d+$/) ? name : null;
+  if (name === 'crontab') return a.some((x) => /^-[lr]$/.test(x)) ? null : name;
+  if (name === 'systemd-run') return only(/^(?:--version|-h|--help)$/) ? null : name;
+  if (name === 'batch') return name;
+  if (name === 'schtasks') return a.some((x) => /^[/-](?:create|run|change)$/i.test(x)) ? name : null;
+  if (/^(?:register|start|set)-scheduled(?:task|job)$/.test(name)) return name;
+  if (name === 'explorer' && a.some((x) => /\.(?:bat|cmd|ps1|exe|com|lnk|vbs|js|hta|msi|sh|py)$/i.test(unquote(x)))) return name;
+  if (name === 'tmux') {
+    let i = 0;
+    while (i < a.length && a[i].startsWith('-') && a[i] !== '-V') i += /^-[LSfcT]$/.test(a[i]) ? 2 : 1;
+    return a[i] !== undefined && TMUX_SAFE.has(a[i]) ? null : `tmux${a[i] ? ` ${a[i]}` : ''}`;
+  }
+  if (name === 'screen') return only(/^(?:-ls|-list|-v|--version|-h|--help)$/) ? null : name;
+  if (name === 'herdr') {
+    const sub = a.filter((x) => !x.startsWith('-')).slice(0, 2);
+    return sub.some((x) => HERDR_RUNS.has(x)) ? `herdr ${sub.join(' ')}` : null;
+  }
+  return null;
+}
+function freshEnvOne(command, hosts) {
+  const raw = stripMessages(String(command ?? ''));
+  for (const seg of raw.match(SEGMENTS) ?? []) {
+    if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
+    if (!FRESH_NAME.test(seg)) continue;
+    const w = seg.match(WORD) ?? [];
+    let cmd = true;
+    for (let i = 0; i < w.length; i++) {
+      const name = cmdName(w[i]);
+      if (!cmd) continue;
+      if (ASSIGNMENT.test(w[i]) || FRESH_WRAP.has(name)) continue;
+      if (name === 'env') { while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) i++; continue; }
+      if (name === 'timeout') { while (w[i + 1] && w[i + 1].startsWith('-')) i++; i++; continue; }
+      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts);
+      if (why) return FRESH_ENV(why);
+      cmd = false;
+    }
+  }
+  if (SEAT_RUNS_CODE.test(raw)) {
+    if (FRESH_CODE.some((re) => re.test(raw))) return FRESH_ENV('interpreter code that gives a child an environment of its own');
+    if (OS_EXEC_E.test(raw) && !/os\.environ/.test(raw)) return FRESH_ENV('os.exec*e or os.spawn*e with an environment of its own');
+  }
+  return null;
+}
+const freshEnv = (raw, hosts) => {
+  const joined = joinLines(raw);
+  return freshEnvOne(raw, hosts) ?? (joined === raw ? null : freshEnvOne(joined, hosts));
+};
+const FRESH_ENV = (what) => `starting a process with a fresh environment (${what}): another user (sudo, su), a login to this machine, a scheduler (at, cron, systemd-run, schtasks, launchctl), WSL, WMI, or a pane that tmux, screen or herdr starts or types into gives it an environment without CB_ROLE and CB_AGENT, so it runs outside the seat with the dangerous-command rules only. Run the command in this pane itself; for a change to how your seat runs: cb ask`;
+
+// #4669: a shell script the seat runs (bash x.sh, ./x.sh, source x.sh, pwsh -File x.ps1, cmd /c x.cmd, x.cmd) is read
+// through the shim's readScript and its text judged for the seat-variable and fresh-environment rules. Interpreter files
+// (node x.js, python x.py) are not read: tests spawn children with their own env on purpose. A cd earlier in the
+// command is not followed (the path is read from the hook's cwd; a file that is not there is not judged).
+const SCRIPT_EXT = /\.(?:sh|bash|zsh|ksh|fish|ps1|psm1|cmd|bat)$/i;
+const SCRIPT_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish']);
+const SCRIPT_LEAD = new Set(['nohup', 'time', 'exec', 'command', 'nice', 'builtin']);
+const pathWord = (w) => w.replace(/["']/g, '');
+export function scriptRuns(command) {
+  const out = [];
+  for (const seg of stripMessages(String(command ?? '')).match(SEGMENTS) ?? []) {
+    const w = (seg.match(WORD) ?? []).map(pathWord);
+    let i = 0;
+    for (;;) {
+      const n = cmdName(w[i] ?? '');
+      if (ASSIGNMENT.test(w[i] ?? '') || SCRIPT_LEAD.has(n)) i++;
+      else if (n === 'timeout') { i++; while (w[i] && w[i].startsWith('-')) i++; i++; }
+      else break;
+    }
+    if (i >= w.length) continue;
+    const n = cmdName(w[i]), a = w.slice(i + 1, i + 41);
+    if (n === 'source' || n === '.' || n === 'call') { if (a[0]) out.push(a[0]); continue; }
+    if (SCRIPT_SHELLS.has(n)) {
+      for (let j = 0; j < a.length; j++) {
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(a[j])) break;
+        if (/^[-+]O$|^[-+]o$|^--(?:rcfile|init-file)$/.test(a[j])) { j++; continue; }
+        if (/^[-+]/.test(a[j])) continue;
+        out.push(a[j]);
+        break;
+      }
+    } else if (n === 'pwsh' || n === 'powershell') {
+      const f = a.findIndex((x) => /^[-/]f(?:ile)?$/i.test(x));
+      if (f >= 0) { if (a[f + 1]) out.push(a[f + 1]); } else if (a[0] && SCRIPT_EXT.test(a[0])) out.push(a[0]);
+    } else if (n === 'cmd') {
+      const c = a.findIndex((x) => /^\/[ck]$/i.test(x));
+      if (c >= 0 && a[c + 1] && SCRIPT_EXT.test(a[c + 1])) out.push(a[c + 1]);
+    } else if (SCRIPT_EXT.test(w[i]) || /^\.{1,2}[\\/]/.test(w[i])) out.push(w[i]);
+  }
+  return out.filter((p) => p && !/[$`*?]/.test(p)).slice(0, 8);
+}
+/** The shims' readScript: fs is { readFileSync, statSync, resolve }. A regular file of at most 256 KB as text, else null. */
+export function scriptReader(cwd, fs) {
+  return (p) => {
+    try {
+      const f = fs.resolve(cwd || '.', p);
+      const st = fs.statSync(f);
+      return st.isFile() && st.size <= 256 * 1024 ? fs.readFileSync(f, 'utf8') : null;
+    } catch { return null; }
+  };
+}
+
 const SEAT_VARS_CHANGE = 'changing CB_ROLE or CB_AGENT (assigning, unsetting or removing either, or clearing the environment with env -i or the like): those two variables are what make this pane a seat, so a command or a child CLI (codex exec, opencode run, claude -p, agy) started without them runs with the dangerous-command rules only, and the guard installer would run. Reading them is fine (echo $CB_ROLE). A test that needs other values sets them in its own child\'s env inside the test file. A change to your seat: cb ask';
 const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), the .claude folder itself, ~/.claude-board (the guard, the runner config) and the other agents\' hook and config files (~/.codex hooks.json and *.toml, .agents/hooks.json, ~/.gemini, opencode.json, OpenCode plugins) are Ahmed\'s; a squad seat never writes them or runs the guard installer. Reading them is fine. A change there is his: cb ask';
 // a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
@@ -1239,11 +1441,20 @@ function squadTrustRun(command) {
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
 // a mention of pushing main (grep -rn "git push origin main" docs) blocks too.
-export function checkRole(command, role) {
+export function checkRole(command, role, { readScript = null, hosts = [] } = {}) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
-  const seatVars = seatVarChange(String(command ?? ''));
+  const hostList = Array.isArray(hosts) ? hosts : [];
+  const seatVars = seatVarChange(String(command ?? '')) ?? freshEnv(String(command ?? ''), hostList);
   if (seatVars) return seatVars;
+  if (typeof readScript === 'function') {
+    for (const p of scriptRuns(command)) {
+      const text = readScript(p);
+      if (typeof text !== 'string') continue;
+      const why = seatVarChange(text) ?? freshEnv(text, hostList);
+      if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
+    }
+  }
   const secret = secretRead(String(command ?? ''));
   if (secret) return secret;
   const fence = fenceWrite(String(command ?? ''));
@@ -1313,7 +1524,7 @@ Ask on Agents Board instead, then KEEP WORKING on something else:
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
-    const { tool, command, role = null, protectedBranches = [], allowAsk = false, agent = null, paths } = req ?? {};
+    const { tool, command, role = null, protectedBranches = [], allowAsk = false, agent = null, paths, readScript = null, hosts = [] } = req ?? {};
     if (role !== null && role !== undefined && role !== '' && !ROLES.includes(role)) {
       return block('input', `unknown CB_ROLE ${JSON.stringify(role)}: a squad seat's role is one of ${ROLES.join(', ')}`);
     }
@@ -1328,7 +1539,7 @@ export function evaluate(req) {
       if (danger) return block('dangerous', danger);
       const branch = protectedPush(command, Array.isArray(protectedBranches) ? protectedBranches : []);
       if (branch) return block('dangerous', pushReason(branch));
-      const byRole = checkRole(command, role);
+      const byRole = checkRole(command, role, { readScript, hosts });
       return byRole ? block('role', byRole) : { allow: true };
     }
     if (tool === 'edit') {
