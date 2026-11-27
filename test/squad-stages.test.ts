@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { stageWordsFor } from '../cli/stage-words.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -786,4 +787,18 @@ test('cb show and cb mine say the stage in words where brief does; show --json c
   assert.equal(json(atReview).stage_words, null);
   assert.equal(cb(['mine']).out, `#${held} [in_progress] P2 feature: c (B1@mac) · demo`);
   assert.doesNotMatch(cb(['show', String(atReview)]).out + cb(['mine']).out, /Not staged/);
+});
+
+test('cb mine and cb start read the stage words of a whole list in one query, not one per card (#4512 review I1)', async () => {
+  const sql = await setup();
+  await sql`select cb.ensure_project('old')`; // pipeline off
+  const rows = [{ project: 'demo', stage: 'review' }, { project: 'demo', stage: 'build' }, { project: 'demo', stage: 'qa' },
+    { project: 'demo', stage: 'review' }, { project: 'demo', stage: null }, { project: 'old', stage: 'build' }, { project: 'demo', stage: 'design' }];
+  let n = 0;
+  const counted = (s: any, ...v: any[]) => { n++; return sql(s, ...v); };
+  assert.deepEqual(await stageWordsFor(counted, rows),
+    ['In review', 'Building', 'Checking on dev against the design', 'In review', null, null, 'Design']);
+  assert.equal(n, 1);
+  assert.deepEqual(await stageWordsFor(counted, [{ project: 'demo', stage: null }]), [null]);
+  assert.equal(n, 1, 'no staged card: no query');
 });
