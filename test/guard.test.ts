@@ -664,6 +664,25 @@ test('role rules: hidden pushes, command-running git settings and gh extensions 
     blocksByRole(role, [`HOME='x; git push origin main #'; GIT_SSH_COMMAND="ssh -i $HOME/k" git fetch`,
       'GIT_SSH_COMMAND="ssh -i $HOMEDIR/k" git fetch']);
   }
+  // PR 111 r3 (straight against core, to keep the file fast): R3-1 git spelled with quotes is git to the alias rule;
+  // R3-3 any other mention of HOME or USERPROFILE drops the $HOME/ exemption, and $home/ is none
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const quotedGit = ['g""it p origin main', '"g"it p origin main', `'gi't p origin HEAD:main`, `gi''t p origin main`, 'G""IT p origin main',
+    'B=main; g""it p origin $B', `g""it -c core.fsmonitor='g""it p origin main #' status`, 'sudo g""it p origin main',
+    `& 'gi''t' p origin main`, 'g""it subtree push --prefix x origin main'];
+  const homeNamed = [String.raw`HOME+=$';git push -q origin ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`read -r HOME <<< $'/x;git push -q origin ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`printf -v HOME '%s' $';git push origin HEAD:ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`for HOME in $';git push origin HEAD:ma\x69n #'; do git -c core.fsmonitor="$HOME/k" status; done`,
+    `typeset -x HOME+=';x'; git -c core.fsmonitor="$HOME/k" status`, `Set-Variable -Name HOME -Value 'x' -Force; git -c core.fsmonitor="$HOME/k" status`,
+    `[Environment]::SetEnvironmentVariable('HOME', 'x'); git -c core.fsmonitor="$HOME/k" status`,
+    `$Global:HOME = 'x'; git -c core.fsmonitor="$HOME/k" status`, 'git -c core.fsmonitor="$home/k" status'];
+  const homeKept = ['cd /home/ubuntu/w && GIT_SSH_COMMAND="ssh -i $HOME/.ssh/k" git fetch',
+    'echo "home page"; GIT_SSH_COMMAND="ssh -i $HOME/k" git fetch', 'GIT_SSH_COMMAND="ssh -i $USERPROFILE\\.ssh\\k" git fetch'];
+  for (const role of ['lead', 'builder']) {
+    for (const c of [...quotedGit, ...homeNamed]) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    for (const c of homeKept) assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+  }
 });
 
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {
@@ -758,6 +777,8 @@ test('long commands stay fast', () => {
     ['seat vars, 200 KB of env -a words', asBuilder(kb200('env -a -b '))],
     ['seat vars, 200 KB of unset words then a name', asBuilder(kb200('unset x ') + 'CB_ROLE')],
     ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
+    // PR 111 r3-2: nested $HOME/ setting values read the command for HOME once per text, not once per value
+    ['git settings, 200 KB of nested $HOME/ values', asBuilder('git ' + kb200(`-c core.fsmonitor='git -c core.sshCommand="$HOME/k" status' `) + 'status')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

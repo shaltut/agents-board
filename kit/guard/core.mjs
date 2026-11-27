@@ -726,7 +726,8 @@ function aliasPush(w, i, j, hit) {
 // protectedPush's second scan (text already unbraced), where a shell runs it: aliasPush, then the commands of the call's
 // command-running settings (valuesPush). One pass for both, and none when no git word is in the text (PR 111 r2: a
 // 600 KB command took about six unbrace-and-scan passes, past the guard's time budget)
-const GIT_WORD = /git/i;
+// (r3-1: cmdName reads a command word without its quotes, so g""it and 'gi''t' are git too)
+const GIT_WORD = /g\W*i\W*t/i;
 function hiddenPushes(text, hit, list) {
   if (!GIT_WORD.test(text)) return null;
   return scanCommands(text, GIT, (w, i) => {
@@ -790,17 +791,23 @@ function runsValues(w, i, j) {
 // git runs such a value through a shell (and a trailing # makes git's own arguments a comment), so the value is judged
 // as a command by the same rules: the branch rules for main/master, then the role's (B1: git pu""sh, an alias, $S)
 // N1 (PR 111 r2): a value the shell fills in or decodes ($'...\x69...', $(...), $VAR, a backtick) cannot be read here
-// (a $HOME/ or $USERPROFILE\ path start is read as the home folder, unless the command sets HOME or USERPROFILE:
-// GIT_SSH_COMMAND="ssh -i $HOME/.ssh/key" passes)
-const HOME_SET = /(?:^|\W)(?:HOME|USERPROFILE)\s*=|env:(?:HOME|USERPROFILE)\b/i;
-// (the command is read for HOME= only when a value has such a path start, once per command: many values stay linear)
-let homeSetText = null, homeSetHit = false;
+// (a $HOME/ or $USERPROFILE\ path start is read as the home folder, unless the command names HOME or USERPROFILE any
+// other way: GIT_SSH_COMMAND="ssh -i $HOME/.ssh/key" passes. PR 111 r3-3: any other mention, not a list of setters
+// (HOME+=, read -r HOME, printf -v HOME, for HOME in, Set-Variable -Name HOME, $env:HOME); case-sensitive and not a
+// path segment, so /home/ubuntu and "home page" keep the exemption, and $home/ is no exemption)
+const HOME_NAMED = /(?<![$\w{/\\.])(?:HOME|USERPROFILE)\b(?![/\\.])/;
+// (the command is read only when a value has such a path start, once per text: nested values stay linear, r3-2)
+const homeNamed = new Map();
 function filledValue(value, text) {
   if (!/[$`]/.test(value)) return false;
-  const rest = value.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/gi, '');
+  const rest = value.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '');
   if (rest === value || /[$`]/.test(rest)) return true;
-  if (homeSetText !== text) { homeSetText = text; homeSetHit = HOME_SET.test(String(text ?? '')); }
-  return homeSetHit;
+  const key = String(text ?? '');
+  if (!homeNamed.has(key)) {
+    if (homeNamed.size >= 256) homeNamed.clear();
+    homeNamed.set(key, HOME_NAMED.test(key));
+  }
+  return homeNamed.get(key);
 }
 function valueRuns(setting, value, role, text) {
   if (filledValue(value, text)) return `${setting} runs a command the shell fills in (${value.slice(0, 60)}), which the guard cannot read: write the command out`;
