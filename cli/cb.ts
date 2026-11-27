@@ -168,6 +168,16 @@ async function partShown(rows: any[], who: string) {
   return rows.map((t) => held.has(Number(t.id)) ? { ...t, status: `part ${held.get(Number(t.id))}: ${t.status}` } : t);
 }
 
+/** #4452: cb.mine keeps a card closed or moved off you for 24h, so a cancel or a reassignment is seen once. Those come
+ *  after the open ones under their own heading, never as work. Split on the raw rows: partShown rewrites status. */
+const MOVED_OFF = 'CLOSED OR MOVED OFF YOU IN THE LAST 24H (shown for a day so you see it: not yours to work on)';
+const openFor = (who: string) => (t: any) => t.assignee === who && !['done', 'cancelled'].includes(t.status);
+async function mineLines(rows: any[], who: string, indent: string) {
+  const isOpen = rows.map(openFor(who)), shown = (await partShown(rows, who)).map((t) => indent + line(t));
+  const gone = shown.filter((_, i) => !isOpen[i]);
+  return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [] };
+}
+
 const line = (t: any) =>
   `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
 
@@ -290,7 +300,7 @@ async function start() {
 
   const mine: any = await callFn('mine', { actor });
   // cb.mine also lists tasks reassigned away in the last 24h: never tell the agent to continue those
-  const open = mine.filter((t: any) => t.assignee === actor && !['done', 'cancelled'].includes(t.status));
+  const open = mine.filter(openFor(actor)), held = await mineLines(mine, actor, '  ');
   const project = sessionProject;
   const queue = project ? await callFn('task_queue', { project, actor, lim: 3 }) as any[] : []; // what cb next would take: same filter and order
   const qs = await sql`select id, status, body, sent_back from cb.questions where asked_by = ${actor} and status in ('open', 'answered', 'sent_back') order by id`;
@@ -299,7 +309,7 @@ async function start() {
   const asks = (await callFn('asks_list', { to_actor: actor, include_closed: false }) as any[]).filter((a) => a.awaiting);
   if (asks.length) out.push('AHMED ASKS YOU', ...asks.map((a) =>
     `  A${a.id}${a.late ? ` LATE ${dur((Date.now() - +new Date(a.delivered_at)) / 60000)}` : ''}${a.from_terminal ? ' (asked in your terminal)' : ''}: ${cut(flat(a.body))}`));
-  out.push(`YOUR TASKS (cb mine)`, ...(mine.length ? (await partShown(mine, actor)).map((t: any) => '  ' + line(t)) : ['  none']),
+  out.push(`YOUR TASKS (cb mine)`, ...(held.open.length ? held.open : ['  none']), ...held.gone,
     `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line({ ...t, status: '' })) : ['  empty']),
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
@@ -866,7 +876,9 @@ ${body}`, json: pg };
     }
     case 'mine': {
       const rows: any = await callFn('mine', { actor });
-      return { out: rows.length ? (await partShown(rows, actor)).map(line).join('\n') : 'no tasks assigned to ' + actor, json: rows };
+      if (!rows.length) return { out: 'no tasks assigned to ' + actor, json: rows };
+      const { open, gone } = await mineLines(rows, actor, '');
+      return { out: [...(open.length ? open : [`no open tasks assigned to ${actor}`]), ...(gone.length ? ['', ...gone] : [])].join('\n'), json: rows };
     }
     case 'ask': {
       need(2, 'ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>"');
