@@ -458,8 +458,9 @@ export const STALE_PREFIX = 'Someone changed this squad since your copy was take
 export const OWNER_ONLY_MESSAGE = 'Only Ahmed changes project settings.'
 
 /** What a person sees when a save fails. Only two server sentences are shown as they are: the stale-copy one (its
- *  first sentence: the rest names a CLI command) and the owner-only one. Anything else is the caller's plain sentence;
- *  the details belong in the console. */
+ *  first sentence: the rest names a CLI command) and the owner-only one. squad_set's open-work refusal (a repo removed
+ *  while open cards name it: the form can't see that) is reworded with its card numbers. Anything else is the caller's
+ *  plain sentence; the details belong in the console. */
 export function saveError(e: unknown, plain: string): { kind: 'stale' | 'owner' | 'other'; text: string } {
   const msg = e instanceof Error ? e.message : String(e ?? '')
   if (msg.startsWith(STALE_PREFIX)) {
@@ -467,5 +468,7 @@ export function saveError(e: unknown, plain: string): { kind: 'stale' | 'owner' 
     return { kind: 'stale', text: first ? first[0] : `${STALE_PREFIX}.` }
   }
   if (msg.trim() === OWNER_ONLY_MESSAGE) return { kind: 'owner', text: OWNER_ONLY_MESSAGE }
+  const work = msg.match(/^repo ([a-z][a-z0-9-]*) still has open work \(((?:#\d+(?:, )?)+)\)/)
+  if (work) return { kind: 'other', text: `Repo ${work[1]} still has open cards (${work[2]}). Finish or move them before removing it.` }
   return { kind: 'other', text: plain }
 }

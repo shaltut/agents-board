@@ -65,6 +65,10 @@ test('a stale save shows the server\'s own first sentence and offers a reload; t
   const raw = saveError(new Error('builder count for web must be a whole number from 1 to 8'), 'The squad was not saved.');
   assert.deepEqual(raw, { kind: 'other', text: 'The squad was not saved.' });
   assert.equal(saveError('boom', 'Plain.').text, 'Plain.');
+  // the one refusal the form can't foresee (open cards on a removed repo): reworded, card numbers kept
+  assert.ok(schema.includes("'repo % still has open work (%): finish or move those cards first'"), 'squad_set still words it so');
+  assert.deepEqual(saveError(new Error('repo web still has open work (#12, #40): finish or move those cards first'), 'plain'),
+    { kind: 'other', text: 'Repo web still has open cards (#12, #40). Finish or move them before removing it.' });
 });
 
 test('the role text counter counts what role_text_set stores, against its 8000 cap', () => {

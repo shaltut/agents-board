@@ -95,7 +95,8 @@ function ProjectSettings({ project }: { project: string }) {
   const problems = squad ? checkSquad(squad, project, opts) : []
   const at = (where: string) => problems.filter((p) => p.where === where).map((p) => p.text)
   const changes = dirty && draft ? diffSquads(data.squad, draft.squad) : []
-  const supervised = data.pipeline && !!squad?.supervise
+  const supervised = data.pipeline && !!squad?.supervise // as it will be once saved: the save bar's sentence
+  const supervisedNow = data.pipeline && data.supervise // as saved: what running seats do now
   const reload = () => { setDraft(null); setSaveState(null); void qc.invalidateQueries({ queryKey: ['squad-page', project] }) }
 
   async function save() {
@@ -136,7 +137,7 @@ function ProjectSettings({ project }: { project: string }) {
               {macSeats > 0 && ` · MacBook: ${macSeats} of ${opts.limits.macbook_seats} seats in this squad (other projects' running seats count too)`}
             </p>
             <ul className="grid items-start gap-3 lg:grid-cols-2">
-              {ROLES.map((r) => <RoleCard key={r} role={r} squad={squad} options={opts} seats={data.seats} supervised={supervised} problems={at(`role:${r}`)} edit={edit} />)}
+              {ROLES.map((r) => <RoleCard key={r} role={r} squad={squad} options={opts} seats={data.seats} supervised={supervisedNow} problems={at(`role:${r}`)} edit={edit} />)}
             </ul>
             <div>
               <h3 className="mb-2 font-medium">Areas</h3>
