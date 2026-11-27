@@ -6,7 +6,7 @@
 // only bash, powershell, the edit family, the read family (read, grep, glob, list) and question: every other tool name is
 // blocked here, never allowed by default. CB_AGENT without CB_ROLE blocks too (#4002): cb squad up always sets both.
 import { readFileSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 let core = null;
@@ -17,6 +17,7 @@ try {
   loadErr = e;
 }
 
+const FS = { resolve, dirname, basename, join, realpathSync };
 const SHELL_TOOLS = new Set(['bash', 'powershell']);
 const EDIT_TOOLS = new Set(['edit', 'write', 'patch', 'apply_patch', 'multiedit']);
 // native reads (#4002 install gate): a path naming a secret file blocks for a role seat, as a shell read does
@@ -61,7 +62,9 @@ export function runOpencodeShim(raw, env = process.env) {
     // a file glob names files too: grep's include and glob's pattern (grep's own pattern is the text searched for)
     const glob = p.tool === 'read' && isObject(p.args) ? (p.name === 'grep' ? p.args.include : p.name === 'glob' ? p.args.pattern : undefined) : undefined;
     if (typeof glob === 'string' && glob.trim()) paths.push(glob.trim());
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths });
+    // review 68-I2: each target also resolved against the cwd and through the real path of its nearest existing folder
+    const forms = paths && [...new Set(paths.flatMap((t) => core.editPathForms(t, process.cwd(), FS)))];
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return block(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

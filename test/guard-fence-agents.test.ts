@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,4 +136,60 @@ test('a seat with CB_AGENT but no CB_ROLE is blocked by the Codex and OpenCode s
   assert.equal(opencode('bash', { command: 'ls' }, {}), true);
   // the role rules then apply as for any seat
   assert.match(String(codex('Bash', { command: 'git push origin feat/x' }, { CB_AGENT: 'codex', CB_ROLE: 'reviewer' })), /^Blocked by role \(reviewer\)/);
+});
+
+// Review 68-I1: git is a writer only through its write subcommands, so reads naming a fenced file pass (on main they blocked,
+// .claude/settings.json included); a repo's own .codex, .agents/hooks.json, opencode.json and .opencode stay fenced
+// anywhere, while .gemini and .config/opencode are fenced only under a home folder.
+test('the fence lets read-only git and a repo .gemini through; git and formatter writes to the repo-level names stay fenced', () => {
+  const allowed = ['git diff -- opencode.json', 'git log --oneline -- opencode.json', 'git show HEAD:opencode.json', 'git blame opencode.jsonc',
+    'git grep -n opencode.json', 'git status .opencode', 'git diff .gemini/styleguide.md', 'git log -p -- .codex', 'git -C /r log -- opencode.json',
+    'cd ~/.codex && git log', 'git diff .claude/settings.json', 'git -C ~/.claude status', 'curl -s https://h.example/.agents/hooks.json -o /tmp/h.json',
+    'git add .gemini/styleguide.md', 'git checkout -- .gemini/config.yaml', 'echo x > .gemini/styleguide.md', 'cd .gemini && echo x > styleguide.md'];
+  const fenced = ['git add opencode.json', 'git add .codex/config.toml', 'git rm --cached .opencode/plugins/x.js', 'git -C ~/.claude checkout -- settings.json',
+    'cd ~/.claude && git apply p.diff', 'git -c core.x=y checkout main -- .agents/hooks.json', 'git diff --output=/home/u/.codex/hooks.json',
+    'pnpm exec prettier --write opencode.json', 'npx prettier -w .codex/config.toml', 'echo x > $HOME/.gemini/config/hooks.json',
+    String.raw`echo x > $env:USERPROFILE\.gemini\antigravity-cli\settings.json`, 'rm -rf /Users/me/.config/opencode/plugins', 'cd ~/.gemini && echo x > y'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of allowed) assert.equal(evaluate({ tool: 'shell', command: c, role }).allow, true, `${role}: ${c}`);
+    for (const c of fenced) assert.equal(evaluate({ tool: 'shell', command: c, role }).allow, false, `${role}: ${c}`);
+  }
+  assert.equal(editFence('.gemini/styleguide.md'), null);
+  assert.equal(editFence('/repo/.gemini/config.yaml'), null);
+  for (const p of ['~/.gemini/config/hooks.json', '/home/u/.gemini/x', String.raw`C:\Users\u\.config\opencode\plugins\x.js`, '.codex/hooks.json', '.opencode/plugins/x.js']) assert.ok(editFence(p), p);
+});
+
+// Review 68-I2: the spellings that passed, through the edit tools and the shell.
+test('the fence folds ./ and ../, trailing dots and spaces, 8.3 names and links', () => {
+  const spellings = ['~/.codex/./hooks.json', '/Users/me/.codex/x/../hooks.json', '~/.config/opencode/./plugins/cb-guard.js', String.raw`C:\Users\me\.codex.\hooks.json`,
+    String.raw`C:\Users\me\.codex \hooks.json`, '~/.codex/hooks.json.', '/home/u/.gemini/../.gemini/./config/hooks.json'];
+  for (const p of spellings) {
+    assert.match(String(codex('Write', { file_path: p, content: 'x' }, CODEX)), /fence/, `codex ${p}`);
+    assert.match(String(opencode('write', { filePath: p }, OPENCODE)), /fence/, `opencode ${p}`);
+    assert.ok(editFence(p), `editFence ${p}`);
+  }
+  for (const c of ['echo x > ~/.codex/./hooks.json', 'cp x /Users/me/.codex/x/../hooks.json', 'echo x > ~/.config/opencode/./plugins/cb-guard.js',
+    String.raw`echo x > C:\Users\me\.codex.\hooks.json`, String.raw`echo x > CODEX~1\hooks.json`, String.raw`del C:\Users\me\GEMINI~1\config\hooks.json`,
+    String.raw`echo x > OPENCO~1\plugins\x.js`, 'echo x > ~/.codex/a/b/../../hooks.json']) {
+    assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).allow, false, c);
+  }
+  // a link: an edit to a name in an ordinary folder that is a junction or link into ~/.codex is judged at its target
+  const root = mkdtempSync(join(tmpdir(), 'cb-fence-link-'));
+  try {
+    mkdirSync(join(root, 'home', '.codex'), { recursive: true });
+    writeFileSync(join(root, 'home', '.codex', 'hooks.json'), '{}');
+    symlinkSync(join(root, 'home', '.codex'), join(root, 'cfg'), 'junction');
+    assert.match(String(codex('Write', { file_path: join(root, 'cfg', 'hooks.json'), content: 'x' }, CODEX)), /fence/);
+    assert.match(String(codex('apply_patch', { command: patch('cfg/hooks.json') }, CODEX, { cwd: root })), /fence/);
+    assert.equal(codex('Write', { file_path: join(root, 'cfg2', 'hooks.json'), content: 'x' }, CODEX), true, 'an ordinary folder');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Review 68-M1: an indented patch header is a target too.
+test('editTargets reads indented patch headers', () => {
+  const p = '*** Begin Patch\n*** Update File: src/a.ts\n@@\n-a\n+b\n  *** Update File: /Users/me/.codex/hooks.json\n@@\n-a\n+b\n*** End Patch';
+  assert.deepEqual(editTargets({ command: p }), ['src/a.ts', '/Users/me/.codex/hooks.json']);
+  assert.match(String(codex('apply_patch', { command: p }, CODEX)), /fence/);
 });

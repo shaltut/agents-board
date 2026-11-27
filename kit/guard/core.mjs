@@ -620,12 +620,14 @@ function secretRead(command) {
 // (Claude seats); the other agents' shims pass their edit targets to evaluate, which applies editFence (#4002).
 // A tripwire, not a sandbox: it reads command text, so a script the seat wrote and then runs (node fix.mjs) or a path
 // built in a variable passes. It stops the accident and the injected command; the boundary is OS permissions.
-// Per segment (review I3): a segment that names a fence path blocks when it also has a writer, an in-place edit, an
-// interpreter with a write call, or a redirect INTO a fence path; after a cd into ~/.claude or ~/.claude-board any
-// later writer or redirect blocks. Fence paths: .claude/settings*.json anywhere, the .claude folder itself (moving or
-// deleting it, git -C it), and .claude-board; a repo's .claude/skills, agents, worktrees are ordinary work. Spellings
-// that hide the path count: quote pairs and a backslash inside the word (.cla""ude, .cl\aude), a glob (.cl*, .claud?),
-// trailing dots (.claude.), the 8.3 name (CLAUDE~1). Fail closed. Linear: a few single-pass tests per segment.
+// Per segment (review I3): a segment that names a fence path blocks when it also has a writer (git only through a write
+// subcommand, a formatter only with its write flag: #4002 review 68-I1), an in-place edit, an interpreter with a write
+// call, or a redirect INTO a fence path; after a cd into ~/.claude or ~/.claude-board any later writer or redirect blocks.
+// Fence paths: .claude/settings*.json anywhere, the .claude folder itself (moving or deleting it, a git write in it), and
+// .claude-board; a repo's .claude/skills, agents, worktrees are ordinary work. Spellings that hide the path count: quote
+// pairs and a backslash inside the word (.cla""ude, .cl\aude), a glob (.cl*, .claud?), trailing dots (.claude.), the 8.3
+// name (CLAUDE~1), ./ and seg/../ (review 68-I2). A URL names no local file. Fail closed. Linear: a few single-pass
+// tests per segment.
 const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~])`;
 const FENCE_END = String.raw`(?=[\s"';&|)>]|$)`;
 const FENCE_NAME = String.raw`(?:\.claude\.*|claude~\d)`;
@@ -635,22 +637,29 @@ const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\
 // [features] hooks), every OpenCode config (opencode.json[c] anywhere: plugins, permissions, MCP) and all of ~/.gemini
 // (agy's settings, trusted workspaces, global hooks and MCP), and the Codex and OpenCode config folders themselves (moving
 // or deleting one, a cd into one). test/guard-fence-agents.test.ts pins it to the adapters.
-const AGENT_FENCE = new RegExp(FENCE_LEAD + String.raw`(?:\.codex(?:[\\/]+(?:hooks\.json|[\w.-]*\.toml)|[\\/]*)|\.agents[\\/]+hooks\.json|\.gemini(?:[\\/]+[^\s"';&|)>]*)?|opencode\.jsonc?|(?:\.config[\\/]+opencode|\.opencode)(?:[\\/]+plugins?(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
+// Review 68-I1: the repo-level names stay fenced anywhere (a repo's own .codex hooks run unreviewed under Codex's hook-trust
+// bypass, .agents/hooks.json runs in a trusted agy folder, a repo's opencode.json or .opencode/plugins load into a seat),
+// but ~/.gemini and ~/.config/opencode only under a home folder: a repo's .gemini/ (a styleguide) is not agy's config.
+// Trailing dots (Windows drops them) and the 8.3 names (CODEX~1) count, as for .claude.
+const AGENT_FENCE = new RegExp(FENCE_LEAD + String.raw`(?:(?:\.codex\.*|codex~\d)(?:[\\/]+(?:hooks\.json|[\w.-]*\.toml)\.*|[\\/]*)|\.agents\.*[\\/]+hooks\.json\.*|opencode\.jsonc?\.*|(?:\.opencode\.*|openco~\d)(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
+const HOME = String.raw`(?:~|\$\{?HOME\}?|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|[\\/](?:Users|home)[\\/]+[^\\/\s"';&|)>]+|[\\/]root)[\\/]+`;
+const HOME_AGENT_FENCE = new RegExp(HOME + String.raw`(?:(?:\.gemini\.*|gemini~\d)(?:[\\/]+[^\s"';&|)>]*)?|\.config\.*[\\/]+opencode\.*(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
 // the cd argument is in the fence: anything under .claude-board, or the .claude folder itself
 const IN_BOARD_DIR = /(?:^|[\\/~])\.claude-board\.*(?:[\\/]|$)/i;
 const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
-// or another agent's config folder: ~/.codex, ~/.gemini, OpenCode's config folder
-const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex|\.gemini|\.config[\\/]+opencode|\.opencode)(?:[\\/]|$)/i;
+// or another agent's config folder: a .codex or .opencode folder, ~/.gemini, ~/.config/opencode
+const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex\.*|codex~\d|\.opencode\.*|openco~\d)(?:[\\/]|$)/i;
+const IS_HOME_AGENT_DIR = new RegExp(HOME + String.raw`(?:\.gemini\.*|gemini~\d|\.config\.*[\\/]+opencode\.*)(?:[\\/]|$)`, 'i');
 const fenceDir = (seg) => {
   const arg = seg.replace(CD, '').trim().replace(/^["']|["']$/g, '');
-  return [arg, unhide(arg)].some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a));
+  return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
 };
 const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
 // a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device
 const REDIRECT_TARGET = /(?<![-\d&])\d?>>?[ \t]*["']?(\S*)/g;
 const NULL_DEVICE = /^(?:\/dev\/null|\$null|nul)(?![\w/.\\-])/i;
 const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
-  'curl', 'wget', 'git', 'sponge', 'patch', 'tar', 'unzip', '7z', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
+  'curl', 'wget', 'sponge', 'patch', 'tar', 'unzip', '7z', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
   'new-item', 'ni', 'remove-item', 'ri', 'del', 'erase', 'copy-item', 'cpi', 'copy', 'move-item', 'mi', 'move',
   'rename-item', 'rni', 'ren', 'clear-content', 'clc', 'mklink', 'robocopy', 'xcopy', 'icacls', 'takeown', 'attrib',
   'expand-archive', 'invoke-webrequest', 'iwr',
@@ -659,6 +668,12 @@ const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync',
   'vi', 'vim', 'nvim', 'nano', 'emacs', 'code', 'notepad'];
 // a whole word (not part of a path or a longer word): touch in ~/.claude/touch is not the command
 const FENCE_WRITER = new RegExp(String.raw`(?<![\w.\\/-])(?:${FENCE_WORDS.join('|')})(?![\w.\\/-])`, 'i');
+// git writes files only through some subcommands (review 68-I1: git diff, log, show, blame, grep and status naming a fence
+// path are reads, and were blocked); commit and push write no working file. Global options (-C dir, -c k=v, --x[=y]) may
+// come first. A formatter writes only with its write flag.
+const GIT_WRITE = /(?<![\w.\\/-])git(?![\w.\\/-])(?:[ \t]+(?:-[Cc][ \t]+\S+|--?[\w-]+(?:=\S*)?))*[ \t]+(?:add|rm|mv|checkout|restore|reset|apply|am|stash|clean|worktree|switch|pull|merge|rebase|cherry-pick|revert|config|submodule|sparse-checkout|update-index|checkout-index|read-tree|init|clone|archive|format-patch)(?![\w-])|(?<![\w.\\/-])git(?![\w.\\/-])[^;&|]*[ \t]--output(?:=|[ \t])/i;
+const FORMAT_WRITE = /(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
+const writes = (seg) => FENCE_WRITER.test(seg) || GIT_WRITE.test(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
 const WRITE_CALL = /write|append|unlink|rename|copy|move|remove|delete|rmdir|rmsync|truncate|chmod|replace|dump|mkdir|\bopen\s*\([^),]{0,300},\s*["'][wax+]|-i\b|--in-place/i;
@@ -671,7 +686,19 @@ const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), th
 // a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
 // original is tested too, so a Windows path keeps its separators)
 const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi, '');
-const fencePath = (t) => FENCE_PATH.test(t) || FENCE_PATH.test(unhide(t)) || AGENT_FENCE.test(t) || AGENT_FENCE.test(unhide(t));
+// review 68-I2: /./ and seg/../ folded, so ~/.codex/./hooks.json and ~/.codex/x/../hooks.json name the file they reach
+// (bounded: a few passes, each linear)
+const fold = (t) => {
+  let s = t.replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
+  for (let i = 0; i < 8; i++) {
+    const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+    if (n === s) break;
+    s = n;
+  }
+  return s;
+};
+const forms = (t) => { const u = unhide(t); return [t, u, fold(t), fold(u)]; };
+const fencePath = (t) => forms(t).some((f) => FENCE_PATH.test(f) || AGENT_FENCE.test(f) || HOME_AGENT_FENCE.test(f));
 function redirects(seg, anyTarget) {
   for (const m of seg.matchAll(REDIRECT_TARGET)) {
     const target = m[1] ?? '';
@@ -682,10 +709,12 @@ function redirects(seg, anyTarget) {
 }
 // Stripping only removes text, so a raw command naming neither a fence path nor the installer cannot name one stripped:
 // skip the second stripMessages (the costly step on big heredocs) for nearly every command.
-const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|\.agents|\.gemini|opencode/i;
+const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini|opencode/i;
+// a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
+const URL_WORD = /\b[a-z][a-z\d+.-]*:\/\/[^\s"';&|)>]*/gi;
 function fenceWrite(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
-  const text = stripMessages(command);
+  const text = stripMessages(command).replace(URL_WORD, ' ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
   let inFence = false;
@@ -694,7 +723,7 @@ function fenceWrite(command) {
     const names = fencePath(seg);
     if (!names && !inFence) continue;
     if (redirects(seg, inFence && !names)) return FENCE;
-    if (FENCE_WRITER.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg))) return FENCE;
+    if (writes(seg)) return FENCE;
   }
   return null;
 }
@@ -705,7 +734,8 @@ function fenceWrite(command) {
 // recursively (Codex sends apply_patch as {command: "<patch>"} or {command: ["apply_patch", "<patch>"]}). [] when none:
 // evaluate then blocks the edit, never allows an edit whose target it cannot see.
 const PATH_KEYS = new Set(['file_path', 'filepath', 'path', 'targetfile', 'absolutepath', 'notebook_path', 'move_path']);
-const PATCH_FILE = /^\*\*\* (?:Add File|Update File|Delete File|Move to):[ \t]*(.+?)[ \t]*$/gm;
+// leading whitespace allowed (review 68-M1): an indented header is still read, never skipped
+const PATCH_FILE = /^[ \t]*\*\*\*[ \t]*(?:Add File|Update File|Delete File|Move to)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
 export function editTargets(input) {
   const out = new Set();
   const walk = (v, key, depth) => {
@@ -721,11 +751,37 @@ export function editTargets(input) {
 }
 // null, or why an edit tool may not write this path: a fence path (the hook settings, ~/.claude-board, another agent's
 // hook or config file) or a secret file.
+// Review 68-I2: every spelling of the path is judged, folded (/./, seg/../) and with each segment's trailing dots and
+// spaces dropped (Windows drops them: .codex.\hooks.json is .codex\hooks.json). The shims add the resolved and real forms
+// (editPathForms), since core has no fs.
+const trimSegments = (p) => p.split(/([\\/]+)/).map((s, i) => (i % 2 || /^\.\.?$/.test(s) ? s : s.replace(/[. ]+$/, '') || s)).join('');
 export function editFence(path) {
   if (typeof path !== 'string' || !path.trim()) return 'the edit names an empty target path';
-  if (fencePath(` ${path}`)) return FENCE;
-  if (secretPath(path)) return SECRET;
+  for (const p of new Set([path, trimSegments(path), fold(trimSegments(path))])) {
+    if (fencePath(` ${p}`)) return FENCE;
+    if (secretPath(p)) return SECRET;
+  }
   return null;
+}
+/** The forms of an edit target a shim passes to evaluate (review 68-I2): as given, resolved against the cwd (folds ./ and
+ *  ../ in absolute paths too), and through the real path of its nearest existing folder or itself, so a link is judged at
+ *  its target. fs is the shim's { resolve, dirname, basename, join, realpathSync }: core stays import-free. */
+export function editPathForms(path, cwd, fs) {
+  const out = new Set([path]);
+  let abs = null;
+  try { abs = fs.resolve(cwd || '.', trimSegments(path)); } catch { /* the given form stays */ }
+  if (abs) {
+    out.add(abs);
+    const rest = [];
+    for (let dir = abs, i = 0; i < 64; i++) {
+      try { out.add(fs.join(fs.realpathSync(dir), ...rest)); break; } catch { /* not there yet: one folder up */ }
+      const up = fs.dirname(dir);
+      if (up === dir) break;
+      rest.unshift(fs.basename(dir));
+      dir = up;
+    }
+  }
+  return [...out];
 }
 
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
