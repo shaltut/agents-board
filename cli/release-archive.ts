@@ -11,7 +11,14 @@ import { FORMAT, RELEASE_DIRS, headSha, neverReleased, releasePath, type Manifes
 
 export const ARCHIVE = 'release.tgz'; // at the repo root, built at deploy (the image has no .git)
 const MAX_TAR = 200 * 1024 * 1024; // unpacked: the release is well under 1 MB; a bomb stops here
-export type Release = { manifest: Manifest; tgz: Buffer; sha256: string };
+// deps: the sha256 of the pnpm-lock.yaml the release runs with (beside the 7 folders, not in the archive: a worker on
+// slice 2 refuses any other path). A worker reuses its own node_modules only when its lockfile has the same hash.
+export type Release = { manifest: Manifest; tgz: Buffer; sha256: string; deps?: { 'pnpm-lock.yaml': string } | null };
+export const LOCKFILE = 'pnpm-lock.yaml';
+/** The sha256 of root's pnpm-lock.yaml, or null when it has none. */
+export function lockfileSha(root: string): string | null {
+  try { return hex(readFileSync(join(root, LOCKFILE))); } catch (e: any) { if (e?.code === 'ENOENT') return null; throw e; }
+}
 
 const hex = (b: Buffer | Uint8Array) => createHash('sha256').update(b).digest('hex');
 const field = (b: Buffer, at: number, len: number) => { const s = b.subarray(at, at + len); const z = s.indexOf(0); return s.subarray(0, z < 0 ? len : z).toString('utf8'); };
@@ -87,11 +94,13 @@ export function gitArchive(root: string): Buffer {
 
 /** The release a board at root serves: its own commit when root is a checkout, else the archive made at deploy. */
 export function releaseAt(root: string): Release {
-  if (headSha(root)) return releaseFromArchive(gitArchive(root));
+  const lock = lockfileSha(root);
+  const deps = lock ? { [LOCKFILE]: lock } as { 'pnpm-lock.yaml': string } : null;
+  if (headSha(root)) return { ...releaseFromArchive(gitArchive(root)), deps };
   let tgz: Buffer;
   try { tgz = readFileSync(join(root, ARCHIVE)); } catch (e: any) {
     if (e?.code !== 'ENOENT') throw e;
     throw new Error(`no ${ARCHIVE} in ${root} and no git checkout: make it at deploy (docs/ops/maintain.md, Upgrade)`);
   }
-  return releaseFromArchive(tgz);
+  return { ...releaseFromArchive(tgz), deps };
 }

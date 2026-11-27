@@ -54,8 +54,8 @@ Then the workers, right away, because their `cb` must match the schema:
 
   ```bash
   tar czf /tmp/cb.tgz bin cli db prompts server hooks kit && sum=$(md5sum /tmp/cb.tgz | cut -d' ' -f1)
-  scp /tmp/cb.tgz macbook:Work/claude-board/cb.tgz
-  ssh macbook "cd ~/Work/claude-board && [ \"\$(md5 -q cb.tgz)\" = $sum ] && tar xzf cb.tgz && rm cb.tgz && zsh -lc 'node cli/cb.ts sessions' | head -3"
+  ssh macbook '[ ! -L Work/claude-board ]' && scp /tmp/cb.tgz macbook:Work/claude-board/cb.tgz
+  ssh macbook "[ -L ~/Work/claude-board ] && { echo \"this copy is updated with cb update\"; exit 1; }; cd ~/Work/claude-board && [ \"\$(md5 -q cb.tgz)\" = $sum ] && tar xzf cb.tgz && rm cb.tgz && zsh -lc 'node cli/cb.ts sessions' | head -3"
   ```
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
@@ -70,6 +70,35 @@ Then the workers, right away, because their `cb` must match the schema:
   `/release/current.json` and `/release/<sha>.tgz` (no sign-in: the public repo's tracked files only; the board refuses
   an archive holding an env file or node_modules), verifies the archive, and compares the worker's files the same way.
   It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
+- **Install the release on a copy** (#4352): `cb update --from <board https address>` on the worker (the Mac),
+  instead of the tar lines above. A git checkout (the PC) is refused: it updates with `git pull --ff-only`.
+  Once a copy has had one `cb update`, never use the tar lines on it again: they would extract into the version in
+  use (through the link) instead of a new one. This change touches `cli/relay.ts`, so the Mac gate below applies.
+  - First run: the copy moves to `<copy>.home` and `<copy>` becomes a link to it (a symlink; a junction on Windows),
+    the same code. Each release goes in `<copy>.home/versions/<sha>`: written from the verified archive, `bin/cb` made
+    executable (git stores it 644), checked file by file against the manifest, then `cb help` and `cb sessions` run
+    from it. Only then `<copy>` is pointed at it (macOS: a new link renamed over the old one, atomic). A probe that
+    fails leaves `<copy>` on the old code and nothing staged.
+  - Packages: `node_modules`, `package.json`, `pnpm-lock.yaml` and `.env` stay in `<copy>.home` and are never touched;
+    a version finds them by Node's upward lookup (and `.env` through server/db.ts). The board's `current.json` names
+    the release's lockfile hash; a different one is refused: update the packages in `<copy>.home` by hand
+    (`pnpm install --frozen-lockfile`), then `cb update` again. Absolute links into the copy (pnpm on Windows) are
+    refused before anything moves (`--config.node-linker=hoisted` avoids them).
+  - The safe point: a running process keeps the modules it loaded, and no version is ever deleted, so nothing breaks
+    mid-flip. Relays notice their code path now points at new files and restart into it: each flip, update or
+    rollback, restarts every relay running from the copy within ~3 s (no message is lost; at worst one duplicate push). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
+    pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
+    Nothing is stopped by `cb update`.
+  - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
+    run it again to go forward. Back on the original copy, relays run its older relay.ts, which does not follow a flip:
+    after the next `cb update`, run `cb relay --restart` in each pane (rollback prints this). `<copy>.home/versions/state.json` holds `{current, previous}`. One update at a time
+    per copy (`<copy>.update.lock`, taken over when its pid is gone). Old versions stay until removed by hand.
+  - The probes are `cb help`, `cb sessions` and `node cli/relay.ts` (no pane: it loads every relay module, then exits
+    before connecting). A run cut off midway is finished by the next one: a missing copy path is linked again, a
+    `state.json` behind the link is settled, and a dead run's staging folder or spare link is removed.
+    With the copy's path gone, `cb` cannot start from it: run `node <copy>.home/cli/cb.ts update --root <copy>`
+    (on the Mac: `node ~/Work/claude-board.home/cli/cb.ts update --root ~/Work/claude-board`). Without `--root` it
+    refuses, since `<copy>.home` is never a copy.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac

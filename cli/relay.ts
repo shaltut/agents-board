@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
@@ -22,6 +22,11 @@ import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
+import { startedAs } from './started-as.ts';
+
+// the path this relay was started with: a release flip (cb update) changes what it points at (started-as.ts)
+const SELF = startedAs(process.argv[1], import.meta.filename);
+const HERE = dirname(SELF);
 
 const flag = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
 const SOCKET = process.env.CLAUDE_CODE_MESSAGING_SOCKET || '';
@@ -44,7 +49,7 @@ const AGENT = flag('--agent') || process.env.CB_AGENT || 'claude';
 const MEMO = join(tmpdir(), `cb-relay-${key}.refused`);
 const refused = refusalWords(AGENT);
 if (refused && !process.argv.includes('--child')) {
-  spawn(process.execPath, [import.meta.filename, '--child', '--pane', PANE, '--agent', AGENT],
+  spawn(process.execPath, [SELF, '--child', '--pane', PANE, '--agent', AGENT],
     { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
   process.exit(flag('--agent') ? 1 : 0);
 }
@@ -67,7 +72,7 @@ const lockPid = () => { try { return Number(readFileSync(LOCK, 'utf8')) || 0; } 
 const touch = () => { if (lockPid() !== process.pid) return; const now = new Date(); try { utimesSync(LOCK, now, now); } catch {} };
 /** The adapter's answer; an unknown one counts as alive (it never stops a relay, never takes a seat). */
 const aliveNow = async () => { try { return await adapter.isAlive(seat); } catch { return true; } };
-const relaunch = () => spawn(process.execPath, [import.meta.filename, '--child', '--pane', PANE, '--agent', adapter.kind],
+const relaunch = () => spawn(process.execPath, [SELF, '--child', '--pane', PANE, '--agent', adapter.kind],
   { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
 /** The env inbox answers: its socket is there (statSync, never a connect to a Windows pipe) and, on POSIX, accepts a
  *  connection (a killed Claude can leave its socket file behind, so a file is not enough). Same probe as isAlive. */
@@ -109,8 +114,8 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
-const CODE = [import.meta.filename, join(import.meta.dirname, 'bridge.ts'), join(import.meta.dirname, '..', 'server', 'db.ts'),
-  join(import.meta.dirname, 'agents', 'index.ts'), join(import.meta.dirname, 'agents', 'claude.ts')];
+const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts')];
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay

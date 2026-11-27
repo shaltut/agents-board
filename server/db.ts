@@ -1,11 +1,19 @@
 import postgres from 'postgres';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { hostname } from 'node:os';
 
-/** A KEY=value from the repo's .env (never cwd), so settings reach already-running sessions. */
+// The repo's .env (never cwd). A release installed by cb update runs from <home>/versions/<sha>/ and reads its home's
+// .env (#4352): one file of settings and secrets for every version, never a copy per version.
+const ENV_FILES = [join(import.meta.dirname, '..', '.env'),
+  ...(basename(join(import.meta.dirname, '..', '..')) === 'versions' ? [join(import.meta.dirname, '..', '..', '..', '.env')] : [])];
+/** A KEY=value from the repo's .env, so settings reach already-running sessions. */
 export function dotenv(key: string): string | undefined {
-  try { return readFileSync(join(import.meta.dirname, '..', '.env'), 'utf8').match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1].trim(); } catch {}
+  for (const f of ENV_FILES) {
+    let text: string;
+    try { text = readFileSync(f, 'utf8'); } catch { continue; }
+    return text.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1].trim();
+  }
 }
 
 /** DATABASE_URL from CB_DATABASE_URL env, else the repo's .env. */
