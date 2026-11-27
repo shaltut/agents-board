@@ -408,6 +408,9 @@ Set up, once, on the PC:
    - A `guards` recipe can also run the repo's script tests on every job with the pre-push hook's own command
      (`pnpm exec lefthook run pre-push --commands <command> --no-tty`): the commit's own `lefthook.yml` decides which
      files run, so no file list is copied into runner.json.
+   - Placeholders in `steps`, `finally` and `cwd` are written `{name}` (declared in `params`; at most one per step
+     argument). Write `{{` and `}}` for literal braces (inline JS, JSON: `fs.rmSync('dist', {{force:true}})`), so
+     misspelled parameter names are still refused at start (#3773).
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
@@ -513,6 +516,20 @@ new session as a tab there (two per tab, as before), and make the workspace when
 pane takes the first session. Without `workspace` a session opens in whichever workspace is focused on that machine.
 Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
 Card #3719.
+
+## Squad file: Codex, OpenCode and agy seats (#4585)
+
+A role or a seat in any project may give `"agent": "codex"` (or `opencode`, `agy`) with that agent's model (Q3024).
+The save gate's list is `cb._agents_main()` in `db/schema.sql`, the launch gate's `INSTALLED` in `cli/agents/index.ts`
+(`test/settings.test.ts` compares them). Each of the three needs, on every machine that runs its seats and where
+`cb squad up`, the supervisor and the seat's relay run:
+
+- its MCP check done by Ahmed (no MCP server in that CLI's own config), then `CB_MCP_GATE_OK=codex,opencode,agy`
+  (the ones checked) in that environment; without it the launch fails before any pane (`cb squad up --dry-run` prints a
+  `would fail` line under the seat);
+- the guard installed for that CLI (`kit/guard/install.mjs`), which the seat prestart checks before the agent starts.
+
+An OpenCode seat's server port comes from its name (41000-48999, `CB_OPENCODE_PORT`).
 
 ## Squad file: protected branches
 

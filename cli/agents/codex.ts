@@ -69,9 +69,10 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           // prestart refuses a seat whose hooks.json has no cb guard entry, and the fence keeps every seat out of hooks.json
           // and config.toml. DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too.
           '--dangerously-bypass-hook-trust',
-          '-s', readOnly ? 'read-only' : 'workspace-write',
-          // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
-          ...(readOnly ? [] : ['-c', 'sandbox_workspace_write.network_access=true']),
+          // Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat, no CLI sandbox, the board guard is the fence. Read-only
+          // roles keep Codex's read-only sandbox (as their Claude permission files deny edits); every other role runs
+          // unsandboxed, so node, git commit and the board connection work (#4573, #4574) and no network opening is needed
+          '-s', readOnly ? 'read-only' : 'danger-full-access',
           '-c', EXCLUDE,
           ...adapter.mcpOff(l.board).args,
           ...adapter.trustSpec([l.cwd], process.platform).extraArgs,

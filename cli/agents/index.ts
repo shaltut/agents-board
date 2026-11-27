@@ -16,11 +16,10 @@ export const ADAPTERS: Readonly<Record<AgentKind, AgentAdapter>> = {
   get claude() { return claudeAdapter; }, get codex() { return codexAdapter; },
   get opencode() { return opencodeAdapter; }, get agy() { return agyAdapter; },
 };
-/** The agents the board may run. An adapter joins this list only once relay, squad up, the supervisor and the guard
- *  installer are wired for it and its live checks pass (#4002): until then cb relay, squad up and the supervisor
- *  refuse it exactly as before it was written. The save gate's list is cb._agents_main() (db/schema.sql): add an agent
- *  to both (test/settings.test.ts compares them). */
-export const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude']);
+/** The agents the board may run (the launch gate): cb relay, squad up and the supervisor refuse any other (#4002). All
+ *  four in every project since #4585 (Q3024); an agent with an mcpGate still needs CB_MCP_GATE_OK where it starts. The
+ *  save gate's list is cb._agents_main() (db/schema.sql): change both (test/settings.test.ts compares them). */
+export const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude', 'codex', 'opencode', 'agy']);
 
 /** The kinds whose MCP gate the owner has checked: CB_MCP_GATE_OK=codex,agy (comma separated, any case). It is a claim about
  *  every machine that runs those seats, so it is read where getAdapter runs: squad up, the supervisor and the seat's relay. */
@@ -36,12 +35,13 @@ export function mcpGateRefusal(a: AgentAdapter, env: NodeJS.ProcessEnv = process
 
 /** `opts` is for tests: the environment to read CB_MCP_GATE_OK from and an installed set in place of INSTALLED. */
 export function getAdapter(kind: string, opts: { env?: NodeJS.ProcessEnv; installed?: ReadonlySet<AgentKind> } = {}): AgentAdapter {
-  if (isAgentKind(kind) && (opts.installed ?? INSTALLED).has(kind)) {
+  const installed = opts.installed ?? INSTALLED;
+  if (isAgentKind(kind) && installed.has(kind)) {
     const refused = mcpGateRefusal(ADAPTERS[kind], opts.env);
     if (refused) throw new Error(refused);
     return ADAPTERS[kind];
   }
-  if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (phase 1 supports claude only)`);
+  if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (this cb runs ${[...installed].join(', ')} only)`);
   throw new Error(`unknown agent "${kind}"`);
 }
 
