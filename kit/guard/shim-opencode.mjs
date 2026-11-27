@@ -6,7 +6,7 @@
 // only bash, powershell, the edit family, the read family (read, grep, glob, list) and question: every other tool name is
 // blocked here, never allowed by default. CB_AGENT without CB_ROLE blocks too (#4002): cb squad up always sets both.
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -74,7 +74,7 @@ export function runOpencodeShim(raw, env = process.env) {
     const forms = paths && [...new Set(paths.flatMap((t) => core.editPathForms(t, process.cwd(), FS)))];
     // #4669: a shell script the command runs is read from OpenCode's cwd and judged too; ssh to this machine's own name counts
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms,
-      readScript: readerFor(process.cwd()), hosts: [hostname()] });
+      readScript: readerFor(process.cwd()), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return block(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

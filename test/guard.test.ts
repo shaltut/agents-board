@@ -412,7 +412,7 @@ const freshEnvFine = [
 ];
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
 const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
-  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
+  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'DEPLOY_HOST=vps2; ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
 test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
   for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) {
     if (role === 'lead' && leadKeeps.includes(c)) continue;
@@ -456,12 +456,13 @@ test('#4669 I2: herdr --machine <m> / -m <m> before a pane run or send-keys is s
   }
 });
 
-// N1 (the lead's ruling on #4669): a lead seat keeps herdr agent prompt, herdr pane send-keys and ssh to the deploy VPS
+// N1 / #4707 R2-1: a lead seat keeps herdr agent prompt, herdr pane send-keys and a resolved variable naming the deploy VPS
 // (deploy/copy-to-vps.sh); every other role is blocked from them, and the lead is not exempt from the rest
 test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the deploy ssh; other roles are blocked', () => {
   const deploy = readFileSync(fileURLToPath(new URL('../deploy/copy-to-vps.sh', import.meta.url)), 'utf8');
+  assert.match(deploy, /^VPS=\$\{VPS:-vps2\}$/m, 'the guard exception must track the deploy script default');
   const readScript = (p: string) => (p.replace(/^.*[\\/]/, '') === 'copy-to-vps.sh' ? deploy : null);
-  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript });
+  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript, deployHost: 'vps2' });
   for (const c of [...leadKeeps, 'bash deploy/copy-to-vps.sh', 'VPS=vps2 deploy/copy-to-vps.sh']) {
     assert.deepEqual(ev(c, 'lead'), { allow: true }, `lead: ${c}`);
     for (const role of ROLES.filter((r) => r !== 'lead')) assert.equal(ev(c, role).kind, 'role', `${role}: ${c}`);
@@ -835,6 +836,9 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
     ['#4669 I1, 200 KB of local x; echo "$k=$v"; as a builder', asBuilder(kb200('local x; echo "$k=$v"; '))],
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
+    ['#4707, 200 KB of quoted assignment values, as a builder', asBuilder(kb200('local args="--set $k=$v"; '))],
+    ['#4707, 200 KB of wrapper option values, as a builder', asBuilder(kb200('xargs -a f ') + 'echo hi')],
+    ['#4707, 200 KB of host assignments before SSH, as a lead', () => evaluate({ tool: 'shell', command: kb200('VPS=vps2; ') + 'ssh "$VPS" uptime', role: 'lead' })],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
   ];
@@ -989,7 +993,7 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     const bad = join(tmp, 'bad');
     mkdirSync(bad);
     copyFileSync(SHIM, join(bad, 'shim-claude.mjs'));
-    writeFileSync(join(bad, 'core.mjs'), 'export function evaluate() { return { allow: true }; }\n');
+    writeFileSync(join(bad, 'core.mjs'), 'export const localHosts = () => [];\nexport function evaluate() { return { allow: true }; }\n');
     const refused = installGuard(bad, target);
     assert.equal(refused.ok, false);
     assert.equal(refused.failures.length, 4, refused.failures.join('\n'));
