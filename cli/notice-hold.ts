@@ -17,10 +17,11 @@ export const HOLD_MS = 10 * 60_000; // Q2997: a low-priority notice may wait up 
 export const lowMessage = (m: any) =>
   !m.raw && (m.actor === 'runner' || m.actor === 'github' || (m.actor === 'board' && typeof m.notice === 'string'));
 
-/** Someone's move, edit, close or note on my card: not Ahmed's, not on a P0 card, not a card created for me. */
+/** Someone's move, edit, close or note on my card: not Ahmed's, not on a P0 card, not a card created for me, handed
+ *  to me or taken off me (an assignment is work handed out, as a Next offer is). */
 export const lowEvent = (e: any) =>
   ['moved', 'updated', 'done', 'note'].includes(e.kind) && typeof e.actor === 'string' && e.actor !== 'ahmed'
-  && typeof e.priority === 'string' && e.priority !== 'P0';
+  && typeof e.priority === 'string' && e.priority !== 'P0' && e.assignee_changed === false;
 
 /** A broadcast or a shared-memory change by anyone but Ahmed. */
 export const lowNotice = (x: any) => typeof x.actor === 'string' && x.actor !== 'ahmed';

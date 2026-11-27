@@ -7,7 +7,7 @@ import { HOLD_MS, holdStep } from '../cli/notice-hold.ts';
 const box = (o: any = {}) => ({ hold: null, messages: [], events: [], broadcasts: [], memory: [], answers: [], asks: [], sent_back: [],
   answer_copies: [], bugs: [], huddles: [], next_work: [], ...o });
 const runner = (id: number) => ({ id, actor: 'runner', summary: `job #${id} test: passed`, raw: false, notice: null });
-const note = (o: any = {}) => ({ id: 50, kind: 'note', actor: 'orch', priority: 'P2', task_id: 1, ...o });
+const note = (o: any = {}) => ({ id: 50, kind: 'note', actor: 'orch', priority: 'P2', assignee_changed: false, task_id: 1, ...o });
 
 test('the window is 10 minutes', () => assert.equal(HOLD_MS, 600_000));
 
@@ -47,6 +47,8 @@ test('anything important goes at once and takes the held items along', () => {
     "Ahmed's card edit": { events: [note(), note({ id: 51, actor: 'ahmed' })] },
     'an edit on a P0 card': { events: [note({ priority: 'P0' })] },
     'a card created for me': { events: [note({ kind: 'task_created' })] },
+    'a card handed to me (cb edit --assignee)': { events: [note({ kind: 'updated', assignee_changed: true })] },
+    'a card taken off me': { events: [note({ kind: 'moved', assignee_changed: true })] },
   };
   for (const [what, o] of Object.entries(important)) {
     const { typed, ...rest } = o;
@@ -61,7 +63,8 @@ test('what it cannot place goes at once: an unknown sender or kind, a missing fi
     'no sender': box({ messages: [{ id: 1, summary: 'x' }] }),
     'a board message with no notice field (an older board)': box({ messages: [{ id: 1, actor: 'board', summary: 'Digest' }] }),
     'an unknown event kind': box({ events: [note({ kind: 'renamed' })] }),
-    'an event with no priority (an older board)': box({ events: [{ id: 1, kind: 'note', actor: 'orch' }] }),
+    'an event with no priority (an older board)': box({ events: [{ id: 1, kind: 'note', actor: 'orch', assignee_changed: false }] }),
+    'an event with no assignee_changed (an older board)': box({ events: [{ id: 1, kind: 'note', actor: 'orch', priority: 'P2' }] }),
     'a broadcast with no sender': box({ broadcasts: [{ id: 1 }] }),
     'a board that keeps no holds (no hold key)': (() => { const b: any = box({ messages: [runner(1)] }); delete b.hold; return b; })(),
   };

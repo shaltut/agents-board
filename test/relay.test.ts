@@ -275,7 +275,8 @@ test('routine notices wait up to 10 min, then one push; anything important takes
     assert.match(flushed, /Message from github: \[GitHub · untrusted\] widgets[\s\S]*Message from orch: take #19 next[\s\S]*orch noted on #1 "mine"/);
     assert.ok(await cleared(), 'the hold ends with the flush');
     // a restart mid-hold: the new relay finds the hold on the board, reads the held items again, keeps the window's
-    // clock, and pushes them once
+    // clock (12 s left here), and its own timer pushes them once when it ends: nothing else arrives to wake it, and
+    // its 30 s poll is later
     await sql`select cb.tell(${me}, 'job #9 lint at abcdef1: passed (exit 0).', 'runner')`;
     await sql`select cb.log('demo', 'second look', '1', '{}', 'orch')`;
     await wait(1500);
@@ -283,13 +284,15 @@ test('routine notices wait up to 10 min, then one push; anything important takes
     assert.notEqual(await held(), null);
     relay.kill();
     await exited;
+    await sql`update cb.sessions set hold_at = now() - interval '9 minutes 48 seconds' where pane = ${pane}`;
     fs.writeFileSync(seatFiles(pane).lock, '');
+    const restarted = Date.now();
     relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
     exited = new Promise((r) => relay.on('exit', r));
     await wait(2500);
     assert.equal(inbox.got.length, 2, 'the restarted relay keeps holding inside the window');
-    await expireHold(sql, pane);
-    assert.ok(await upTo(() => inbox.got.length > 2, 5000), 'the restarted relay delivers at the window end');
+    assert.ok(await upTo(() => inbox.got.length > 2, 20_000), 'the restarted relay delivers when the window ends, on its own timer');
+    assert.ok(Date.now() - restarted < 25_000, 'before the 30 s poll');
     await sql`select pg_notify('cb', 'test')`;
     await wait(1200);
     assert.equal(inbox.got.length, 3, 'once');
@@ -303,6 +306,14 @@ test('routine notices wait up to 10 min, then one push; anything important takes
     await sql`insert into cb.events (actor, project, kind, summary, data) values ('board', 'demo', 'message', '#1 part api is back with you at build', ${sql.json({ to: me })})`;
     assert.ok(await upTo(() => inbox.got.length > 3, 5000), 'an unmarked board message goes at once');
     assert.match(pushes()[3]!, /stall nudge[\s\S]*back with you at build/);
+    // a card handed to me by an edit is work handed out: at once, with a held note
+    await sql`select cb.task_add(project => 'demo', title => 'for someone', status => 'next', assignee => 'W2@testbox', actor => 'orch')`;
+    await sql`select cb.log('demo', 'third look', '1', '{}', 'orch')`;
+    await wait(1200);
+    assert.equal(inbox.got.length, 4, 'a note waits');
+    await sql`select cb.task_update('2', ${sql.json({ assignee: me })}, 'orch')`;
+    assert.ok(await upTo(() => inbox.got.length > 4, 5000), 'an assignment goes at once');
+    assert.match(pushes()[4]!, /orch noted on #1 "mine" \(now in_progress\): third look[\s\S]*orch edited #2 "for someone"/);
   } finally {
     await inbox.close();
     await Promise.race([exited, wait(8000)]);
@@ -321,7 +332,7 @@ test('inbox: a digest with a new P0 or a supervisor problem is not marked as a n
   await sql`select cb.task_add(project => 'demo', title => 'hot', priority => 'P0', status => 'in_progress', assignee => 'orch', actor => 'W1')`;
   const [{ i }] = await sql`select cb.inbox('pc', 'w9:p1', ${start}) as i`;
   assert.deepEqual(i.messages.map((m: any) => [m.summary, m.notice]), [['digest', 'digest'], ['urgent digest', null], ['nudge', 'nudge'], ['plain', null]]);
-  assert.deepEqual(i.events.map((e: any) => e.priority), ['P0']);
+  assert.deepEqual(i.events.map((e: any) => [e.priority, e.assignee_changed]), [['P0', false]]);
   assert.equal(i.hold, null, 'nothing held: the key is there, empty');
   // a hold keeps its first cursor and clock; null ends it; another session in the pane starts clean
   await sql`select cb.relay_hold('pc', 'w9:p1', 5)`;

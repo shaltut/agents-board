@@ -1704,7 +1704,10 @@ begin
                               and ((lower(q.reply_to ->> 'machine') = m and q.reply_to ->> 'pane' = pane)
                                    or (coalesce(q.reply_to ->> 'pane', '') = '' and q.asked_by = me))), '[]'),
     'events', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'task_id', e.task_id, 'kind', e.kind, 'summary', e.summary,
-                                                            'actor', e.actor, 'title', t.title, 'status', t.status, 'priority', t.priority) order by e.id)
+                                                            'actor', e.actor, 'title', t.title, 'status', t.status,
+                                                            -- #3221: what the relay needs to hold an edit or not: a P0
+                                                            -- card, or a card handed to me or taken off me, goes at once
+                                                            'priority', t.priority, 'assignee_changed', e.data ? 'assignee') order by e.id)
                           from cb.events e join cb.tasks t on t.id = e.task_id
                          where me is not null and e.id > after_event and e.actor <> me
                            and e.kind in ('task_created', 'moved', 'updated', 'done', 'note')
