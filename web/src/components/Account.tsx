@@ -19,7 +19,7 @@ export async function signOut() {
 /** Who is signed in, Change password and Sign out. Nothing on the PC board's own screen (role local: no sign-in there). */
 export function Account({ user, compact }: { user: User; compact?: boolean }) {
   const [open, setOpen] = useState(false)
-  // The board's top bar has ten tabs and no room for three more controls: there, one button with the name, and the
+  // The board's top bar is tight (tabs and group menus): there, one button with the name, and the
   // rest in its menu. (Spread out, they wrapped the logo and pushed the last tabs out of sight.)
   if (compact) return (
     <>

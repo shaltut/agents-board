@@ -2,28 +2,16 @@ import { Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAsks, useMemories, useQuestions } from '@/lib/api'
 import { replyIds } from '@/lib/asks'
-import { go, href, type Route, type View } from '@/lib/route'
+import { headerPages, type Page, type Route } from '@/lib/route'
 import { Kbd } from '@/components/ui/kbd'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { Mark, useTabLamp } from './Mark'
 import { RingToggle, ThemeToggle } from './ThemeToggle'
 import { useRing } from '@/lib/ring'
 import { Account, useWho } from './Account'
+import { GroupMenus, pageLink, tabClass } from './NavMenus'
 
-const TABS: { view: View; label: string; key: string }[] = [
-  { view: 'today', label: 'Today', key: '1' },
-  { view: 'board', label: 'Board', key: '2' },
-  { view: 'backlog', label: 'Backlog', key: '3' },
-  { view: 'sessions', label: 'Sessions', key: '4' },
-  { view: 'huddles', label: 'Huddles', key: '5' },
-  { view: 'history', label: 'History', key: '6' },
-  { view: 'people', label: 'Users', key: '7' },
-  { view: 'epics', label: 'Epics', key: '8' },
-  { view: 'memory', label: 'Memory', key: '9' },
-  { view: 'goals', label: 'Goals', key: '0' },
-]
-
-export function TopBar({ route, live, onSearch }: { route: Route; live: 'live' | 'reconnecting'; onSearch: () => void }) {
+export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: readonly Page[]; live: 'live' | 'reconnecting'; onSearch: () => void }) {
   const { data: all = [] } = useQuestions(route.project, 'open')
   const open = all.filter((q) => !q.assigned_to) // questions handed to Cai/Ana aren't waiting on Ahmed
   const { data: mems = [] } = useMemories(route.project)
@@ -40,7 +28,7 @@ export function TopBar({ route, live, onSearch }: { route: Route; live: 'live' |
   return (
     <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-md backdrop-saturate-150">
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-3 gap-y-0 px-4 sm:px-6 lg:flex-nowrap">
-        {/* the logo and the tools keep their width; the tabs are what gives way (they scroll) */}
+        {/* the logo and the tools keep their width; the tabs and group menus are what gives way (they scroll) */}
         <a href="#/today" className="flex h-13 shrink-0 items-center gap-2.5 rounded-md whitespace-nowrap" aria-label="Claude Board, go to Today">
           <Mark lit={open.length > 0} />
           <span className="hidden text-[15px] font-semibold tracking-tight [font-stretch:88%] sm:inline">Claude Board</span>
@@ -49,15 +37,12 @@ export function TopBar({ route, live, onSearch }: { route: Route; live: 'live' |
         <ProjectSwitcher project={route.project} />
 
         <nav className="order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-0.5 overflow-x-auto border-t px-3 py-1.5 [scrollbar-width:none] sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-5 lg:order-none lg:mx-2 lg:w-auto lg:min-w-0 lg:border-t-0 lg:p-0" aria-label="Views">
-          {TABS.map((t) => {
+          {headerPages(pages).map((t) => {
             const active = route.view === t.view || (t.view === 'today' && route.view === 'questions')
             return (
-              <a key={t.view} href={href({ view: t.view, project: route.project, tag: route.tag })}
-                onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return; e.preventDefault(); go({ view: t.view, task: undefined, actor: undefined, huddle: undefined, epic: undefined, goal: undefined }) }}
-                aria-current={active ? 'page' : undefined} title={`${t.label} (${t.key})`}
-                className={cn('group flex h-8 shrink-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors duration-150',
-                  active ? 'bg-raised font-medium text-foreground' : 'text-muted-foreground hover:bg-raised/60 hover:text-foreground')}>
-                <span aria-hidden className={cn('callsign hidden w-2 text-[11px] text-muted-foreground/70 xl:inline', active && 'text-muted-foreground')}>{t.key}</span>
+              <a key={t.view} {...pageLink(t, route)} aria-current={active ? 'page' : undefined} title={`${t.label} (${t.digit}, or g then ${t.g})`}
+                className={tabClass(active)}>
+                <span aria-hidden className={cn('callsign hidden w-2 text-[11px] text-muted-foreground/70 xl:inline', active && 'text-muted-foreground')}>{t.digit}</span>
                 {t.label}
                 {t.view === 'today' && open.length > 0 && (
                   <span className="flex items-center gap-1.5 text-[12px] font-semibold text-lamp tabular-nums">
@@ -65,14 +50,11 @@ export function TopBar({ route, live, onSearch }: { route: Route; live: 'live' |
                     <span className="sr-only">waiting on you</span>
                   </span>
                 )}
-                {t.view === 'memory' && proposed > 0 && (
-                  <span className="relative text-[12px] font-semibold text-muted-foreground tabular-nums">
-                    {proposed}<span className="sr-only"> proposals waiting for you</span>
-                  </span>
-                )}
               </a>
             )
           })}
+          {/* every other page sits in a group menu; Memory's proposals count shows on its group's button */}
+          <GroupMenus pages={pages} route={route} counts={{ memory: proposed }} />
         </nav>
 
         <div className="ml-auto flex items-center gap-1.5 whitespace-nowrap lg:shrink-0">

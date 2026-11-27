@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react'
 import { type Task, type User } from '@/lib/api'
 import { useWho } from '@/components/Account'
 import { Guest } from '@/views/Guest'
 import { Login } from '@/views/Login'
 import { useLive } from '@/lib/live'
-import { go, useRoute, VIEWS } from '@/lib/route'
-import { shortcutsOff } from '@/lib/keys'
+import { digitView, go, isOwner, openPage, pageOf, useRoute, visiblePages, type Route, type View } from '@/lib/route'
+import { chord, CHORD_MS, shortcutsOff } from '@/lib/keys'
 import { TopBar } from '@/components/TopBar'
 import { CommandMenu } from '@/components/CommandMenu'
+import { GoHint } from '@/components/NavMenus'
 import { NewTask } from '@/components/NewTask'
 import { TaskPanel } from '@/components/TaskPanel'
 import { Today } from '@/views/Today'
@@ -44,18 +45,41 @@ function GuestLive({ user }: { user: User }) {
   return <Guest user={user} />
 }
 
+/** Every page that has a screen. A page in route.ts's PAGES without one here stays out of the menus and keys, and its
+ *  address shows Today. */
+const SCREENS: Partial<Record<View, ComponentType<{ route: Route }>>> = {
+  today: Today, questions: Today, board: Board, backlog: Backlog, sessions: Sessions, huddles: Huddles, history: History,
+  people: People, epics: Epics, memory: Memory, goals: Goals,
+}
+
 export default function App() {
-  const route = useRoute()
+  const hashRoute = useRoute()
+  const route: Route = SCREENS[hashRoute.view] ? hashRoute : { ...hashRoute, view: 'today' }
   const live = useLive()
+  const { data: who } = useWho()
+  const owner = isOwner(who)
+  const pages = useMemo(() => visiblePages(owner, (v) => !!SCREENS[v]), [owner])
   const [menu, setMenu] = useState(false)
   const [newTask, setNewTask] = useState(false)
+  const [hint, setHint] = useState(false) // g pressed: the letters show in the corner until the next key or the timeout
+  const keys = useRef({ pages, since: null as number | null })
+  useEffect(() => { keys.current.pages = pages }, [pages]) // the key handler is bound once and reads the latest list
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setMenu((m) => !m); return }
-      if (shortcutsOff(e.target as Element | null) || e.ctrlKey || e.metaKey || e.altKey) return
-      const i = e.key === '0' ? 9 : Number(e.key) - 1 // 0 is the tenth view (Goals)
-      if (i >= 0 && i < VIEWS.length) go({ view: VIEWS[i], task: undefined, actor: undefined, huddle: undefined, epic: undefined, goal: undefined })
+      const k = keys.current
+      if (shortcutsOff(e.target as Element | null) || e.ctrlKey || e.metaKey || e.altKey) { k.since = null; setHint(false); return }
+      const c = chord(k.since, e.key, Date.now(), k.pages)
+      k.since = c.since
+      setHint(c.since !== null)
+      if (c.used) {
+        if (e.key !== 'Escape') e.preventDefault() // Esc still reaches an open dialog
+        if (c.view) openPage(c.view)
+        return
+      }
+      const view = digitView(e.key, k.pages) // 1-9 and 0: the same pages as before the menus
+      if (view) openPage(view)
       else if (e.key === 'c') { e.preventDefault(); setNewTask(true) }
       else if (e.key === '/') { e.preventDefault(); setMenu(true) }
     }
@@ -63,7 +87,14 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const View = { today: Today, questions: Today, board: Board, backlog: Backlog, sessions: Sessions, huddles: Huddles, history: History, people: People, epics: Epics, memory: Memory, goals: Goals }[route.view]
+  useEffect(() => {
+    if (!hint) return
+    const t = setTimeout(() => { keys.current.since = null; setHint(false) }, CHORD_MS)
+    return () => clearTimeout(t)
+  }, [hint])
+
+  const View = SCREENS[route.view] ?? Today
+  const ownersOnly = pageOf(route.view)?.owner && !owner // the server refuses the data too; this just says why
 
   return (
     <div className="min-h-dvh">
@@ -71,7 +102,7 @@ export default function App() {
         className="sr-only z-50 rounded-md bg-foreground px-3 py-2 text-sm text-background focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
         Skip to content
       </button>
-      <TopBar route={route} live={live} onSearch={() => setMenu(true)} />
+      <TopBar route={route} pages={pages} live={live} onSearch={() => setMenu(true)} />
       <main id="main" tabIndex={-1} className="outline-none mx-auto max-w-[1600px] px-4 pt-6 pb-16 sm:px-6 lg:pt-8">
         {(route.tag || route.type) && (route.view === 'board' || route.view === 'backlog') && (
           <div className="mb-4 flex flex-wrap items-center gap-2 text-sm" role="status">
@@ -83,9 +114,10 @@ export default function App() {
             </button>
           </div>
         )}
-        <View route={route} />
+        {ownersOnly ? <p className="text-sm text-muted-foreground">This page is for the board's owner.</p> : <View route={route} />}
       </main>
-      <CommandMenu open={menu} onOpenChange={setMenu} onNewTask={() => setNewTask(true)} />
+      <CommandMenu open={menu} onOpenChange={setMenu} onNewTask={() => setNewTask(true)} pages={pages} />
+      {hint && <GoHint pages={pages} />}
       <NewTask open={newTask} onOpenChange={setNewTask} project={route.project} />
       <TaskPanel id={route.task} />
     </div>
