@@ -5,6 +5,7 @@
 import { classifyAgentGet, realRun, type Runner } from '../squad-up.ts';
 import type { AgentAdapter, AgentState, DisableAskSpec, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 import { stripClaudeOnly } from './env.ts';
+import { agyPreseed } from './trust.ts';
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 const CLAUDE_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable']);
@@ -123,8 +124,8 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     },
 
     // trustedWorkspaces holds native Windows paths (e.g. the user's home folder); never written here.
-    trustSpec() {
-      return { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] };
+    trustSpec(_paths, platform) {
+      return { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', preseed: agyPreseed(platform), extraArgs: [] };
     },
 
     disableAskSpec(): DisableAskSpec {
