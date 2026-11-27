@@ -973,7 +973,10 @@ async function main() {
     // A remote board (another machine) can't be started from here: say so and let the session carry on.
     if (!local) throw new Error(`board unreachable at ${host} (${e.code}). The board machine may be asleep: keep working and register this later.`);
     if (e.code !== 'ECONNREFUSED') throw e;
-    (await import('../db/pg.ts')).ensurePg();
+    // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
+    const pg = await import('../db/pg.ts');
+    if (!pg.ownsPg(databaseUrl())) throw e;
+    pg.ensurePg();
     r = await run();
   }
   if (o.json && 'json' in r) console.log(JSON.stringify(r.json, null, 2));

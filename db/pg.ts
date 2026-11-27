@@ -31,7 +31,10 @@ export function ensurePg(dir = PGDATA, port = 5434, adopt = true): void {
   if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status === 0) return;
   // stdio 'ignore': the postmaster inherits pg_ctl's handles, so a pipe here never closes and spawnSync hangs.
   const log = join(dir, 'server.log');
-  const r = spawnSync(pgCtl, ['-D', dir, '-o', `-p ${port}`, '-l', log, '-w', 'start'], { stdio: 'ignore' });
+  // A worktree's cluster listens on 127.0.0.1 only (the test URL's host): with the default 'localhost', a port another
+  // program held on 127.0.0.1 still "started" on ::1, and the tests reached that program (#4413).
+  const opts = adopt ? `-p ${port}` : `-p ${port} -c listen_addresses=127.0.0.1`;
+  const r = spawnSync(pgCtl, ['-D', dir, '-o', opts, '-l', log, '-w', 'start'], { stdio: 'ignore' });
   if (r.status !== 0) throw new Error(`could not start Postgres in ${dir}; see ${log}`);
 }
 
@@ -45,8 +48,25 @@ export function ownTestPg(root = ROOT, platform = process.platform): boolean {
   return platform === 'win32' && (statSync(join(root, '.git'), { throwIfNoEntry: false })?.isFile() ?? false);
 }
 
-/** The port a test run on this checkout uses: 5434; for a worktree, the port its running cluster listens on, else the
- *  first free one from a start derived from the worktree's path (15435-16454: below Windows' excluded dynamic ranges). */
+/** Where a worktree's port search starts: FNV-1a of its path, so the same worktree gets the same port each run. */
+export function testPortStart(root: string): number {
+  let h = 2166136261;
+  for (const c of root.toLowerCase()) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
+  return 15435 + (h % 1000);
+}
+
+// Any program that accepts a TCP connection on 127.0.0.1 holds the port (pg_isready reports "no response" for a
+// non-Postgres listener exactly as for an empty port); only a refused connection is free. One child checks the window.
+const FIRST_FREE = `const net = require('node:net'); const [s, n] = process.argv.slice(1).map(Number);
+(async () => { for (let p = s; p < s + n; p++) {
+  const taken = await new Promise((r) => { const c = net.connect({ host: '127.0.0.1', port: p }); c.setTimeout(3000);
+    c.once('connect', () => { c.destroy(); r(true); }); c.once('timeout', () => { c.destroy(); r(true); });
+    c.once('error', (e) => r(e.code !== 'ECONNREFUSED')); });
+  if (!taken) { console.log(p); return; } } })();`;
+
+/** The port a test run on this checkout uses: 5434; for a worktree, the port its running cluster listens on, else
+ *  CB_TEST_PG_PORT (test/helpers.ts sets it, so its db/setup.ts --test child picks the same port), else the first free
+ *  one from testPortStart (15435-16453: below Windows' excluded dynamic ranges). */
 export function testPgPort(root = ROOT, platform = process.platform): number {
   if (!ownTestPg(root, platform)) return 5434;
   const dir = join(root, '.pgdata');
@@ -54,13 +74,11 @@ export function testPgPort(root = ROOT, platform = process.platform): number {
     const port = Number(readFileSync(join(dir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[3]);
     if (port > 0) return port;
   }
-  let h = 2166136261; // FNV-1a of the path: the same worktree gets the same port each run
-  for (const c of root.toLowerCase()) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
-  const start = 15435 + (h % 1000);
-  // free = no server at all (pg_isready 2; null when it can't run, e.g. off Windows): a cluster in crash recovery (1) is taken
-  const free = (port: number) => [2, null].includes(spawnSync(join(BIN, 'pg_isready.exe'), ['-h', '127.0.0.1', '-p', String(port)], { stdio: 'ignore' }).status);
-  for (let port = start; port < start + 20; port++) if (free(port)) return port;
-  throw new Error(`no free port for this worktree's test Postgres in ${start}-${start + 19}: other servers answer on all of them`);
+  if (root === ROOT && Number(process.env.CB_TEST_PG_PORT) > 0) return Number(process.env.CB_TEST_PG_PORT);
+  const start = testPortStart(root);
+  const port = Number(spawnSync(process.execPath, ['-e', FIRST_FREE, String(start), '20'], { encoding: 'utf8' }).stdout);
+  if (port > 0) return port;
+  throw new Error(`no free port for this worktree's test Postgres in ${start}-${start + 19}: other programs hold all of them`);
 }
 
 /** The test database's URL: CB_TEST_DB on this checkout's test cluster. */
@@ -72,4 +90,11 @@ export function testDbUrl(db = process.env.CB_TEST_DB ?? 'claude_board_test', ro
 export function ensureTestPg(url: string, root = ROOT): void {
   if (ownTestPg(root)) ensurePg(join(root, '.pgdata'), Number(new URL(url).port), false);
   else if (ownsPg(url)) ensurePg();
+}
+
+/** Stops a worktree's test cluster: run it before removing the worktree (a running Postgres holds the folder). */
+export function stopTestPg(root = ROOT): string {
+  if (!ownTestPg(root)) return 'no test cluster of its own here (not a Windows worktree)';
+  const r = spawnSync(pgCtl, ['-D', join(root, '.pgdata'), 'stop', '-w'], { encoding: 'utf8' });
+  return (r.stdout || r.stderr || '').trim();
 }
