@@ -1,7 +1,7 @@
 // cb squad up: start a project's missing squad sessions through herdr. planSquad is pure (tested);
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 
@@ -121,6 +121,10 @@ export function gateEnv(agent: AgentKind, env: NodeJS.ProcessEnv = process.env):
   return agent !== 'claude' && ok ? { CB_MCP_GATE_OK: ok } : {};
 }
 
+/** #4585: an OpenCode seat's server port on its machine's loopback (the adapter needs CB_OPENCODE_PORT; the prestart writes
+ *  it to the seat's endpoint file). From the seat's name, so a restart gets the same port: 41000-48999. */
+export const opencodePort = (name: string) => 41000 + (parseInt(createHash('sha256').update(name).digest('hex').slice(0, 8), 16) % 8000);
+
 // env: where CB_MCP_GATE_OK is read (gateEnv); squad up and the supervisor pass none, so it is this machine's
 export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next', env: NodeJS.ProcessEnv = process.env): Launch {
   const machine = w.name.split('@')[1], mc = squad.machines[machine], repos = reposOf(squad), { agent, model, fallback } = seatSpec(squad, w);
@@ -131,7 +135,8 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     ...w, agent, model, ...(fallback ? { fallback } : {}), machine, herdr: mc.herdr, board: mc.board, cwd: repos[w.repo]?.paths[machine] ?? '',
     ...(mc.workspace ? { workspace: mc.workspace } : {}),
     // CB_PROTECTED_BRANCHES last: the pane-making call ends with it, as before #4002
-    env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
+    env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(agent === 'opencode' ? { CB_OPENCODE_PORT: String(opencodePort(w.name)) } : {}),
+      ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     // --agent only for another agent than claude: a Claude seat's cb iam stays the 8-argument call (cli/iam-args.ts)
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${model}${squad.repos ? ` --repo ${w.repo}` : ''}${agent !== 'claude' ? ` --agent ${agent}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
@@ -348,7 +353,11 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   }
   for (const l of plan.herdrOnly) lines.push(`skip ${l.name}: running in herdr but not on the board (not bound?)`, `  ${promptCommand(l)}`);
   for (const n of plan.refused) lines.push(`refused ${n}: the Mac already has ${MAC_CAP} live sessions`);
-  for (const l of toStart) lines.push(`start ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
+  for (const l of toStart) {
+    lines.push(`start ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
+    // #4585: a dry run says what startOne would refuse here (MCP gate, model, port), before any pane
+    if (dryRun) try { launchSpec(l); } catch (e) { lines.push(`  would fail: ${(e as Error).message}`); }
+  }
   if (dryRun) return lines.join('\n');
   // Only tabs made in this run are reused: two panes per tab, never an existing pane.
   const tabs: Record<string, { pane: string; panes: number }> = {};

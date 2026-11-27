@@ -21,7 +21,8 @@ function fake(res: { status: number | null; stderr?: string; stdout?: string; er
 
 test('registry: agy is registered and is the adapter this file builds', () => {
   assert.equal(ADAPTERS.agy, agyAdapter);
-  assert.throws(() => getAdapter('agy'), /agent "agy" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('agy', { env: {} }), /agent "agy" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('agy', { env: { CB_MCP_GATE_OK: 'agy' } }), ADAPTERS.agy);
   assert.ok(AGENT_KINDS.includes('agy'));
   assert.equal(agyAdapter.kind, 'agy');
   assert.equal(agyAdapter.relayStart, 'pane-prestart');

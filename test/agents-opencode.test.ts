@@ -27,7 +27,8 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput => ({
 
 test('registry: opencode is registered; defaultModelFor stays null like cb._role_model', () => {
   assert.equal(ADAPTERS.opencode, opencodeAdapter);
-  assert.throws(() => getAdapter('opencode'), /agent "opencode" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('opencode', { env: {} }), /agent "opencode" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('opencode', { env: { CB_MCP_GATE_OK: 'opencode' } }), ADAPTERS.opencode);
   assert.equal(opencodeAdapter.kind, 'opencode');
   assert.equal(opencodeAdapter.relayStart, 'pane-prestart');
   assert.ok(AGENT_KINDS.includes('opencode'));

@@ -18,7 +18,8 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput =>
 
 test('registry: codex resolves to the codex adapter; its default model is null (cb._role_model gives none for non-Claude)', () => {
   assert.equal(ADAPTERS.codex, codexAdapter);
-  assert.throws(() => getAdapter('codex'), /agent "codex" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('codex', { env: {} }), /agent "codex" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('codex', { env: { CB_MCP_GATE_OK: 'codex' } }), ADAPTERS.codex);
   assert.equal(codexAdapter.kind, 'codex');
   assert.equal(codexAdapter.relayStart, 'pane-prestart');
   for (const r of ['builder', 'lead', 'reviewer']) assert.equal(defaultModelFor('codex', r), null);
