@@ -267,3 +267,31 @@ test('#3762 repro: a pipeline card whose holder was cleared with --assignee none
   await sql`select cb.stage_set(${id}::text, 'none', 'no code: a measurement', 'orch@pc')`;
   assert.equal((await sql`select stage from cb.tasks where id = ${id}`)[0].stage, null);
 });
+
+test('cb.task_find (#4339): titles and bodies, notes on request, open cards first, a project or every one', async () => {
+  const sql = await db();
+  const add = async (project: string, title: string, body = '') =>
+    Number((await sql`select cb.task_add(project => ${project}, title => ${title}, body => ${body}) as id`)[0].id);
+  const old = await add('demo', 'Relay drops a message after a restart');
+  await sql`update cb.tasks set status = 'cancelled' where id = ${old}`;
+  const open = await add('demo', 'Answers lost', 'the relay drops a message when the pane is busy');
+  const noted = await add('demo', 'Slow brief');
+  await sql`select cb.log('demo', 'seen with the relay drops too', ${String(noted)}, '{}', 'W1@mac')`;
+  const other = await add('iris', 'relay drops on the Mac');
+  await add('demo', '100% CPU in the relay');
+  const find = async (q: string, project: string | null, notes = false, lim: number | null = 20) =>
+    (await sql`select cb.task_find(${q}, ${project}, ${notes}, ${lim}) as f`)[0].f;
+
+  const r = await find('relay drops', 'demo');
+  assert.deepEqual(r.cards.map((t: any) => Number(t.id)), [open, old], 'open first, then the cancelled one; notes not searched');
+  assert.equal(r.total, 2);
+  assert.deepEqual(Object.keys(r.cards[0]).sort(), ['assignee', 'id', 'priority', 'project', 'stage', 'status', 'title', 'type']);
+  assert.ok((await find('relay drops', 'demo', true)).cards.some((t: any) => Number(t.id) === noted), 'with notes: a note matches');
+  assert.ok((await find('relay drops', null)).cards.some((t: any) => Number(t.id) === other), 'no project: every project');
+  assert.equal((await find('%', 'demo')).cards.length, 1, 'a % is the character, not a wildcard');
+  const capped = await find('relay', 'demo', false, 1);
+  assert.equal(capped.cards.length, 1);
+  assert.equal(capped.total, 3, 'total counts past the cap');
+  await assert.rejects(sql`select cb.task_find('  ', 'demo')`, /required/);
+  await assert.rejects(sql`select cb.task_find('relay', 'nope')`, /unknown project "nope"/);
+});

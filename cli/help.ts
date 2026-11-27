@@ -44,6 +44,9 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     show: { use: 'cb show <id>', topic: 'work',
       does: 'One task in full: its line, the goals it is in, its body, and its last 10 notes (cb log, cb done). Read-only; works for any project\'s task.',
       eg: 'cb show 42' },
+    search: { use: 'cb search [project] "<words>" [--notes] [--all]', topic: 'work',
+      does: 'Find cards by their words, to check for a duplicate before you file one (cb bug, cb add): titles and bodies; --notes adds the cards\' notes. Open cards first, then cancelled and done; each line shows status, stage and holder. Two or more words: the first is the project; one word (or one quoted phrase) searches your project (--project names another), or every project when this pane has none. 20 lines; --all lists every match. Read-only.',
+      eg: 'cb search claude-board "relay drops"' },
     page: { use: 'cb page show <task> [--approved]\ncb page set <task> -f <file|->\ncb page show|set --area <name> [--project p]', topic: 'work',
       does: 'A card\'s design page, or an area page: one body, every save versioned. show prints it with its version; --approved prints the approved version (what review and QA compare against). set reads the text from a file, or stdin with -f -. No secrets or personal data: describe the code and where a value lives.',
       eg: 'cb page set 42 -f design.md' },
@@ -104,7 +107,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     bug: { use: 'cb bug <project> "<title>" -b "<what happened, how to reproduce, expected vs actual>" [-p P1] [-l tag] [--stage build --why "<why>"] [--repo <repo,repo>]', topic: 'work',
       does: 'File a bug you found outside your task; it goes to Next and the project\'s orchestrator is told and assigns it. Then keep working on your task. A problem with the board itself (cb, relay, web board): project claude-board.',
       eg: 'cb bug iris "Dates before 1970 parse as 1900" -b "row 8812: 1969-02-01 read as 1900-02-01; expected 1969-02-01"',
-      more: '-b is required. The project must exist: a typo errors with the known projects instead of creating one.' },
+      more: '-b is required. The project must exist: a typo errors with the known projects instead of creating one. Filed already? Check first: cb search <project> "<words>".' },
   }],
   ['ASK AHMED', {
     ask: { use: 'cb ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>" [-c "<context>"] [--multi] [--blocking -t <id>] [--to <user>] [--free] [--after Q<id> [--if "<Label>"]] [-i "<Caption>=<picture>" ...]', topic: 'ask',
