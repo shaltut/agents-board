@@ -74,6 +74,11 @@ export function machineLabel(m?: Pick<MachineSpec, 'herdr'> | null, key?: string
   if (m.herdr == null) return 'This PC'
   return m.herdr === 'macbook' ? 'MacBook' : m.herdr
 }
+/** The herdr name a machine gets back when it is switched from This PC to Another machine: the one it had before the
+ *  switch on this page, else the one another project's squad gives that key, else the MacBook. */
+export function restoredHerdr(key: string, before: Record<string, string>, used: readonly ({ key: string } & Pick<MachineSpec, 'herdr'>)[]) {
+  return before[key] || used.find((m) => m.key === key && m.herdr)?.herdr || 'macbook'
+}
 /** Who did something, in words: Ahmed, the lead or another session (the session name goes in a tooltip), or a signed-in
  *  admin by name. */
 export const actorLabel = (a: string) => (a === 'ahmed' ? 'Ahmed' : /(^|-)orch@/.test(a) ? 'The lead' : a.includes('@') ? 'A session' : a)
@@ -132,6 +137,14 @@ export function pruneSeats(sq: Squad): string[] {
     if (Object.keys(spec.seats).length === 0) delete spec.seats
   }
   return gone
+}
+
+/** The Supervisor switch. Off on a saved squad that has no supervise key drops the key again (squad_set stores it only
+ *  when given), so ticking it on and off leaves nothing to save. */
+export function setSupervise(sq: Squad, on: boolean, saved: Squad | null): Squad {
+  const next = clone(sq)
+  if (on || (saved && 'supervise' in saved)) next.supervise = on; else delete next.supervise
+  return next
 }
 
 export function setRoleOn(sq: Squad, role: Role, on: boolean, defaults: Record<string, string>): Squad {
@@ -426,7 +439,9 @@ export function historyLines(history: SquadPage['history'], i: number): string[]
 /** A live session in words: "Builder 3 on MacBook", "The lead on This PC". The session name stays in a tooltip. */
 export function seatName(s: Seat, sq: Squad | null): string {
   const key = s.actor.split('@')[1]
-  const m = key && sq?.machines[key] ? machineLabel(sq.machines[key], key) : s.machine ?? 'another machine'
+  // a session name whose machine key is not in the squad: the squad machine with that herdr name, never the raw name
+  const byHerdr = s.machine ? Object.values(sq?.machines ?? {}).find((x) => x.herdr === s.machine) ?? (s.machine === 'macbook' ? { herdr: s.machine } : null) : null
+  const m = key && sq?.machines[key] ? machineLabel(sq.machines[key], key) : byHerdr ? machineLabel(byHerdr) : 'another machine'
   const n = (s.actor.match(/[ABRQI]([0-9]+)@/) ?? [])[1]
   if (s.role === 'lead') return `The lead on ${m}`
   if (s.role === 'owner') return `Area owner${s.area ? ` of ${s.area}` : ''} on ${m}`
@@ -449,11 +464,13 @@ export function seatNote(s: Seat, sq: Squad | null, supervised: boolean): string
 
 // ---------------------------------------------------------------- role text and server messages
 export const ROLE_TEXT_CAP = 8000
+/** Characters as the server counts them (code points): the counter and the Last edits lengths agree. */
+export const charCount = (s: string) => [...s].length
 /** The role text as cb.role_text_set will store it (spaces, tabs and line breaks trimmed at both ends) and its length in
  *  characters (Postgres length counts code points, so does [...s]). */
 export function roleTextState(body: string, saved: string) {
   const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
-  const count = [...t].length
+  const count = charCount(t)
   const over = count > ROLE_TEXT_CAP, empty = count === 0, changed = t !== saved
   return { count, over, empty, changed, canSave: changed && !over && !empty }
 }
@@ -463,7 +480,7 @@ export function roleTextState(body: string, saved: string) {
 export const ADDITION_CAP = 1000
 export function additionState(body: string, saved: string) {
   const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
-  const count = [...t].length
+  const count = charCount(t)
   const over = count > ADDITION_CAP, changed = t !== saved
   return { count, over, changed, canSave: changed && !over }
 }

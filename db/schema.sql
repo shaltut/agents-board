@@ -3656,12 +3656,12 @@ create function cb._area(a text) returns text language sql stable as $$
   select s.area from cb.sessions s where s.actor = a order by s.last_seen desc limit 1
 $$;
 
--- Ahmed turns the squad pipeline on or off for a project, from the dashboard.
+-- Ahmed turns the squad pipeline on or off for a project, from the dashboard (its Project settings page since #4332).
 create function cb.project_pipeline(project text, enabled boolean, actor text default null) returns boolean language plpgsql as $$
 #variable_conflict use_variable
 declare a text; p text := cb.read_project(project);
 begin
-  perform cb.dashboard_only('Board');
+  perform cb.dashboard_only('Project settings');
   a := cb.set_actor(coalesce(actor, 'ahmed'));
   update cb.projects pr set pipeline = coalesce(enabled, false) where pr.slug = p;
   insert into cb.events (actor, project, kind, summary)
@@ -4633,6 +4633,9 @@ create table if not exists cb.role_texts (
   updated_at timestamptz not null default now()
 );
 alter table cb.role_texts add column if not exists updated_by text;
+-- The settings page re-reads the role texts when one changes (another tab, a Load), not on every board event.
+create or replace trigger role_texts_notify after insert or update or delete on cb.role_texts
+  for each statement execute function cb.notify();
 -- Every edit of a role text, with the text before and after (#4332). Seeding a missing role is not an edit.
 create table if not exists cb.role_text_edits (
   id     bigint generated always as identity primary key,

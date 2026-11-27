@@ -13,6 +13,13 @@ test('every table that notifies is mapped: a new one fails here, not silently on
   const notifying = [...schema.matchAll(/trigger \w+ after [a-z ]+ on cb\.(\w+)\s+for each statement execute function cb\.notify\(\)/g)].map((m) => m[1]);
   assert.ok(notifying.length >= 10, `found ${notifying.length} notifying tables`);
   for (const t of notifying) assert.ok(t in TABLE_KEYS, `cb.${t} notifies but invalidate.ts does not map it`);
+  assert.ok(notifying.includes('role_texts'), 'a role text change notifies on its own');
+});
+
+test('the role texts (about 0.4 MB) re-read when one changes, not on every history line (PR 71 review)', () => {
+  const ev = keysFor(tables('events'));
+  assert.ok(Array.isArray(ev) && !ev.includes('role-texts'));
+  assert.deepEqual(keysFor(tables('role_texts')), ['role-texts']);
 });
 
 test('a history line alone (a note, a message) leaves the board, goals and accounts alone', () => {

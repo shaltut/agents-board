@@ -11,7 +11,7 @@ test('project_pipeline: only the dashboard switches it, and roles read from sess
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo')`;
   const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
-  await assert.rejects(() => session`select cb.project_pipeline('demo', true, 'W1@mac')`, /only Ahmed/);
+  await assert.rejects(() => session`select cb.project_pipeline('demo', true, 'W1@mac')`, /only Ahmed can do this, on the Project settings page/);
   assert.equal((await sql`select cb.project_pipeline('demo', true, 'ahmed') as r`)[0].r, true);
   assert.equal((await sql`select cb._pipeline('demo') as r`)[0].r, true);
   await sql`insert into cb.sessions (machine, pane, actor, project, role, area) values ('mac','p1','W1@mac','demo','builder',null), ('pc','p2','orch@pc','demo',null,null)`;
