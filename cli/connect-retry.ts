@@ -6,6 +6,7 @@
 // write may have landed, and task_add or ask would run twice.
 
 import { isNetworkError } from './survive.ts';
+import { titleBody } from './title-body.ts';
 
 // The connection never opened, whatever the syscall: refused, DNS, postgres.js's own connect timer (it is cancelled at
 // the first ReadyForQuery, before postgres.js executes the query that opened the connection).
@@ -55,8 +56,13 @@ export function checkFirst(cmd: string | undefined, args: string[], me: string):
   // #3331: an unchanged resend of a question still open returns it; one with pictures always posts
   if (cmd === 'ask') return `send the same cb ask again, unchanged: a question still open is returned, not asked twice (with pictures it posts again: check cb brief ${args[0] ?? '<project>'} first)`;
   const id = /^#?\d{1,15}$/.test(args[0] ?? '') ? args[0]!.replace('#', '') : null;
-  // cb search reads the words as a web search: a leading - would exclude the word, so it goes with the quotes
-  const words = String(args[1] ?? '').replace(/["`$\\]|(?<!\S)-+/g, '').trim().split(/\s+/).slice(0, 6).join(' ');
+  // the title as cb add/bug read it: bare words joined (cb add p Fix month parse), else the quoted title. A mix only
+  // runs with -b, where all of it is the title.
+  let title = '';
+  if (cmd === 'add' || cmd === 'bug') try { title = titleBody(cmd, args.slice(1), undefined).title; } catch { title = args.slice(1).filter((w) => w.trim()).join(' '); }
+  // cb search reads the words as a web search: a leading - would exclude the word, and a quote wrapping one goes. The
+  // rest becomes a space, never nothing: C:\w\cli must stay three words, as the board's search splits it (review I1)
+  const words = title.replace(/"/g, '').replace(/[`$\\]/g, ' ').replace(/(?<!\S)-+/g, '').trim().split(/\s+/).slice(0, 6).join(' ');
   const check = id && ON_CARD.has(cmd ?? '') ? `cb show ${id}`
     : id && STAGED.has(cmd ?? '') ? `cb show ${id} --json (its stage; a card in parts: the parts line of cb show ${id})`
     : (cmd === 'add' || cmd === 'bug') && args[0] ? `cb search ${args[0]} "${words || '<title words>'}"`

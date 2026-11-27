@@ -98,7 +98,11 @@ test('checkFirst names the command that shows whether this one landed, and every
     ['done', ['#42', 'fixed'], 'check with cb show 42 before running it again'],
     ['log', ['42', 'note'], 'check with cb show 42 before running it again'],
     ['move', ['42', 'review'], 'check with cb show 42 before running it again'],
-    ['add', ['demo', 'Fix the "month" parse  in rows', 'body'], 'check with cb search demo "Fix the month parse in rows" before running it again'],
+    ['add', ['demo', 'Fix the "month" parse  in rows', 'row 8812 reads 1900'], 'check with cb search demo "Fix the month parse in rows" before running it again'],
+    // bare words are the title, joined, as cb add reads them (title-body.ts); not just the first word (review M1)
+    ['add', ['demo', 'Fix', 'month', 'parse'], 'check with cb search demo "Fix month parse" before running it again'],
+    // a backslash becomes a space, so the path keeps its parts apart (review I1)
+    ['bug', ['demo', 'Path C:\\w\\cli breaks'], 'check with cb search demo "Path C: w cli breaks" before running it again'],
     ['bug', ['demo', 'one two three four five six seven eight'], 'check with cb search demo "one two three four five six" before running it again'],
     // a leading - would exclude the word from the search; a - inside a word stays
     ['add', ['demo', 'Drop the -v flag from re-runs'], 'check with cb search demo "Drop the v flag from re-runs" before running it again'],
@@ -218,5 +222,36 @@ test('cb never resends a write whose connection dropped after it was sent', { sk
     // and the check it names finds that card (cb search calls cb.task_find with these words and the project)
     const [{ f }] = await sql`select cb.task_find('Sent once, not twice', 'demo') as f`;
     assert.equal(f.total, 1);
+    // review I1: a title holding a Windows path; the words checkFirst names must find it too
+    const path = 'Path C:\\w\\rv-50\\cli breaks the guard';
+    await sql`select cb.task_add(project => 'demo', title => ${path}, actor => 'W1@test')`;
+    const w = /cb search demo "([^"]+)"/.exec(checkFirst('add', ['demo', path], 'W1@test'))![1]!;
+    const [{ g }] = await sql`select cb.task_find(${w}, 'demo') as g`;
+    assert.equal(g.total, 1, w);
   } finally { server.close(); }
+});
+
+// review M3: exit 3 means nothing of the command reached the board. cb run --wait queues the job (answered), then polls
+// every 3 s: the board goes away in between, the next poll is refused (never sent), and cb must still exit 1.
+test('cb exits 1, never 3, when an earlier step of the command reached the board before it went away', { skip: noAlias, timeout: 60_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('test', 'p1', 'W1@test', 'demo', 'builder')`;
+  const runner = connect(TEST_URL, { app: 'cb-runner/test', max: 1 }); clients.push(runner);
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1/', ${runner.json([{ project: 'demo', recipe: 'test', params: { files: { min: 1, max: 20 } }, db: false }] as any)})`;
+  const port = await freePort();
+  const socks = new Set<net.Socket>();
+  const server = await proxy(port, (_d, c) => { socks.add(c); return false; });
+  const p = spawn(process.execPath, ['cli/cb.ts', 'run', 'test', '--sha', 'abc1234', '--files', 'a.test.ts', '--project', 'demo', '--wait'],
+    { env: { ...process.env, CB_DATABASE_URL: remote(port), CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
+  let out = '', errs = '';
+  p.stderr.on('data', (d) => errs += d);
+  const queued = new Promise<void>((r) => p.stdout.on('data', (d) => { out += d; if (/queued/.test(out)) r(); }));
+  const code = new Promise<number | null>((r) => p.on('close', r));
+  await queued; // job_add answered; the first poll follows at once, then cb sleeps 3 s before the next
+  await new Promise((r) => setTimeout(r, 1000));
+  server.close(); for (const s of socks) s.destroy(); // the board goes away: the next poll's connect is refused
+  assert.equal(await code, 1, errs);
+  assert.match(errs, /board unreachable at 127\.0\.0\.2 \(ECONNREFUSED, tried \d+ times over \d+ s\): the call that failed never reached it, but an earlier step of this command did and may have saved your change: check with cb jobs/);
+  assert.equal((await sql`select count(*)::int as n from cb.jobs`)[0].n, 1);
 });
