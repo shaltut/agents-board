@@ -657,13 +657,21 @@ const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
 const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex\.*|codex~\d|\.opencode\.*|openco~\d)(?:[\\/]|$)/i;
 const IS_HOME_AGENT_DIR = new RegExp(HOME + String.raw`(?:\.gemini\.*|gemini~\d|\.config\.*[\\/]+opencode\.*)(?:[\\/]|$)`, 'i');
 // #4590: the cd's redirects go first (cd ~/.claude 2>/dev/null still enters the fence)
+// #4595: the whole argument and each word on its own: an option after the target (Set-Location $HOME\.claude -PassThru,
+// sl ~/.claude -ea 0, cd ~/.claude --) hid it from the end-anchored tests. Any word, not the first non-option one: which
+// options take a value is not known here (-ErrorAction 0 ~/.claude), so fail closed. -Path:<dir> names its value too.
+const CD_WORD = /"[^"]*"|'[^']*'|\S+/g;
+const isFenceDir = (a) => forms(a).some((f) => IN_BOARD_DIR.test(f) || IS_CLAUDE_DIR.test(f) || IS_AGENT_DIR.test(f) || IS_HOME_AGENT_DIR.test(f));
 const fenceDir = (seg) => {
-  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim().replace(/^["']|["']$/g, '');
-  return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
+  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim();
+  if (isFenceDir(arg.replace(/^["']|["']$/g, ''))) return true;
+  return (arg.match(CD_WORD) ?? []).some((w) => isFenceDir(w.replace(/^-[\w-]+:/, '').replace(/^["']|["']$/g, '')));
 };
-const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
-// a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device
-const REDIRECT_TARGET = /(?<![-\d&])\d?>>?[ \t]*["']?(\S*)/g;
+// #4631: Push-Location is pushd's PowerShell name
+const CD = /^\s*(?:cd|pushd|chdir|set-location|push-location|sl)\s+/i;
+// a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device.
+// #4631: any fd number (Git Bash opens and truncates the target of 10>)
+const REDIRECT_TARGET = /(?<![-\d&])\d*>>?[ \t]*["']?(\S*)/g;
 const NULL_DEVICE = /^(?:\/dev\/null|\$null|nul)(?![\w/.\\-])/i;
 const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
   'curl', 'wget', 'sponge', 'patch', 'tar', 'unzip', '7z', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
@@ -933,12 +941,17 @@ const rawAndJoined = (check) => (raw) => {
   return check(raw) ?? (joined === raw ? null : check(joined));
 };
 // #4594: >| (n>| too) is bash's noclobber override, a redirect: read as > before the split, or its | cut the target off
-// into a segment of its own. &>| and >>| are syntax errors in bash, left as they are. Rewriting only merges, never hides.
-const NOCLOBBER = /(?<![>&])>\|/g;
+// into a segment of its own. #4631: zsh's clobber forms too (Mac seat panes run zsh): >!, >>|, >>!, &>|, &>!, >&|,
+// &>>|, each read as the redirect without its | or !. In bash &>| and >>| are syntax errors and >! writes a file named
+// !, so nothing bash runs is read as a write it is not. Rewriting only merges, never hides.
+const NOCLOBBER = /(&?>>?&?)[|!]/g;
+// #4631: >&word sends both streams to the file word, unless word is an fd number or - (>&1, >&-: a duplication). Read
+// as > before the split, or its & cut the target off into a segment of its own
+const BOTH_TO = />&(?![ \t]*[\d-])/g;
 const fenceWrite = rawAndJoined(fenceWriteOne);
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
-  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
+  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '$1 ').replace(BOTH_TO, '> ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
@@ -1016,6 +1029,22 @@ export function editPathForms(path, cwd, fs) {
   return [...out];
 }
 
+// #4575: cb squad trust writes the agents' own config files (the fence's ~/.claude.json, ~/.codex/config.toml and agy
+// settings) to mark folders trusted: Ahmed's one step, never a seat's, for every role including the lead. Read where a
+// shell runs it (runnerArg), so a message or a grep that names it is text. Kept apart from the fence on purpose.
+const CB_NAMES = new Set(['cb', 'cb.cmd', 'cb.ps1', 'cb.ts', 'cb.mjs', 'cb.js']);
+const SQUAD_TRUST = 'cb squad trust writes the agents\' own config files to mark folders trusted (#4575): Ahmed runs it once in his own terminal, never a squad seat. A folder that needs it: cb ask';
+// Fail closed (review 89 M1): cb takes its options anywhere (cb squad --machine pc trust x, cb --tag squad squad trust x),
+// so any cb command holding both words is blocked, in any case. A PowerShell backtick escape inside a word (squa`d) is
+// dropped first, as pwsh does.
+function squadTrustRun(command) {
+  return scanCommands(String(command ?? '').replace(/`(?=\w)/g, ''), CB_NAMES, (w, i) => {
+    let squad = false, trust = false;
+    for (let j = i + 1; j < w.length; j++) { const x = w[j].toLowerCase(); squad ||= x === 'squad'; trust ||= x === 'trust'; }
+    return squad && trust ? SQUAD_TRUST : null;
+  }, runnerArg);
+}
+
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
@@ -1027,6 +1056,8 @@ export function checkRole(command, role) {
   if (secret) return secret;
   const fence = fenceWrite(String(command ?? ''));
   if (fence) return fence;
+  const trust = squadTrustRun(command);
+  if (trust) return trust;
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);

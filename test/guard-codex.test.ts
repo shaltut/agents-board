@@ -119,3 +119,53 @@ test('the parser: shell, edit and ask map to core tools; the in-process run matc
   assert.deepEqual(runCodexShim(bash('git reset --hard'), {}), denial('Blocked dangerous command: git reset --hard'));
   assert.deepEqual(runCodexShim(undefined as any, {}), denial('Blocked: guard could not read hook input (empty stdin)'));
 });
+
+// #4618: the shapes Codex 0.160 really sends, read from its source at tag rust-v0.160.0 (codex-rs/core/src/tools):
+// - exec_command, its only shell tool on every platform (PowerShell on Windows included), reaches the hook as
+//   tool_name "Bash" with tool_input { command: <the raw command string> } (exec_command.rs pre_tool_use_payload,
+//   HookToolName::bash()); there is no tool named unified_exec (that is the feature) and none named PowerShell
+// - write_stdin sends no PreToolUse at all (write_stdin.rs: it continues a command that already ran PreToolUse as Bash)
+// - apply_patch reaches it as tool_name "apply_patch" with tool_input { command: <the patch text> }
+// - every other function tool reaches it under its own name with its JSON arguments (registry.rs default payload); the
+//   catch-all matcher (#4609) sends them all here, and each is denied: pinned by name, so allowing one is a deliberate change
+const real = (tool_name: string, tool_input: unknown) =>
+  call(tool_name, tool_input, { cwd: 'C:/w/scratch', model: 'gpt-5', permission_mode: 'bypassPermissions', transcript_path: null });
+
+test('Codex 0.160 exec_command, as the hook sees it (Bash + raw command): judged like a shell command, PowerShell forms too', () => {
+  assert.equal(run(real('Bash', { command: 'git status' }), { CB_ROLE: 'builder' }).stdout, '{}');
+  assert.equal(run(real('Bash', { command: 'Get-ChildItem -Force' }), { CB_ROLE: 'builder' }).stdout, '{}');
+  for (const [command, env, why] of [
+    ['git reset --hard', {}, /^Blocked dangerous command: /],
+    ['Remove-Item -Recurse -Force C:\\', {}, /^Blocked dangerous command: /],
+    ['git push origin main', { CB_ROLE: 'builder' }, /^Blocked by role \(builder\): /],
+    ['git commit -m x', { CB_ROLE: 'reviewer' }, /^Blocked by role \(reviewer\): /],
+    ['Get-Content .env', { CB_ROLE: 'builder' }, /^Blocked/],
+    ['Set-Content -Path C:\\Users\\me\\.codex\\hooks.json -Value x', { CB_ROLE: 'builder' }, /^Blocked/],
+  ] as const) {
+    const out = run(real('Bash', { command }), env as Record<string, string>).out;
+    assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', command);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, why, command);
+  }
+});
+
+test('Codex 0.160 apply_patch, as the hook sees it ({ command: patch }): its file lines are the fence and secret targets', () => {
+  const patch = (body: string) => real('apply_patch', { command: `*** Begin Patch\n${body}\n*** End Patch` });
+  assert.equal(run(patch('*** Update File: src/a.ts\n@@\n-a\n+b'), { CB_ROLE: 'builder' }).stdout, '{}');
+  for (const body of ['*** Add File: .env\n+X=1', '*** Update File: .codex/hooks.json\n@@\n-a\n+b', '*** Delete File: C:/Users/me/.claude-board/guard/core.mjs']) {
+    assert.equal(run(patch(body), { CB_ROLE: 'builder' }).out.hookSpecificOutput?.permissionDecision, 'deny', body);
+  }
+});
+
+test('Codex 0.160\'s other tools reach the catch-all hook under their own names: each is denied, by name (#4618)', () => {
+  const OTHERS: [string, unknown][] = [
+    ['update_plan', { plan: [{ step: 'x', status: 'pending' }] }], ['view_image', { path: 'a.png' }], ['spawn_agent', { message: 'x' }],
+    ['send_input', { id: 'a', message: 'x' }], ['wait_agent', { ids: ['a'] }], ['close_agent', { id: 'a' }], ['request_permissions', {}],
+    ['list_mcp_resources', {}], ['read_mcp_resource', { server: 's', uri: 'u' }], ['tool_search', { query: 'x' }],
+    ['exec_command', { cmd: 'git reset --hard' }], ['write_stdin', { session_id: 1, chars: 'git push origin main\n' }], ['unified_exec', { cmd: 'ls' }],
+  ];
+  for (const [name, input] of OTHERS) {
+    const out = run(real(name, input), { CB_ROLE: 'builder' }).out;
+    assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', name);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /^Blocked: unrecognized tool/, name);
+  }
+});

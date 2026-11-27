@@ -5,6 +5,10 @@
 // Fails closed exactly like shim-claude.mjs: empty or unreadable input, a hook event other than PreToolUse, an unknown tool
 // (including a missing tool_name: Codex always sends one), a missing or broken core.mjs, or any error blocks. No static local
 // imports: core.mjs loads dynamically, so a shim copied without it still blocks. Deploy with the installer (see the design note).
+// What Codex 0.160 really sends (#4618, read from its source at rust-v0.160.0; pinned in test/guard-codex.test.ts):
+// exec_command, its one shell tool on every platform, arrives as tool_name Bash with { command: <raw string> } (there is
+// no unified_exec or PowerShell tool); apply_patch as { command: <patch text> }; write_stdin fires no hook at all, since
+// it feeds a session whose command already passed here as Bash; every other function tool arrives under its own name.
 import { readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';

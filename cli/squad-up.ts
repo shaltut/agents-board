@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
+import { homeTrust, type TrustCheck } from './squad-trust.ts';
 
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
 // machine.workspace: the herdr workspace (its label) new sessions open in; none: herdr's focused one (#3719)
@@ -347,7 +348,10 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   }
 }
 
-export async function squadUp(project: string, dryRun: boolean, callFn: (fn: string, a: any) => Promise<unknown>, run: Runner = realRun): Promise<string> {
+// trust (#4575): a seat whose folder its agent does not trust yet stops here, before any pane, instead of parking at the
+// trust dialog. Read from this machine's home for a real herdr; a fake one (tests) opens no real pane, so none unless given.
+export async function squadUp(project: string, dryRun: boolean, callFn: (fn: string, a: any) => Promise<unknown>, run: Runner = realRun,
+  trust: TrustCheck | null = run === realRun ? homeTrust() : null): Promise<string> {
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
@@ -398,7 +402,9 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   }
   for (const l of plan.herdrOnly) lines.push(`skip ${l.name}: running in herdr but not on the board (not bound?)`, `  ${promptCommand(l)}`);
   for (const n of plan.refused) lines.push(`refused ${n}: the Mac already has ${MAC_CAP} live sessions`);
+  const untrusted = new Map(toStart.map((l) => [l.name, trust?.(l, project) ?? null]));
   for (const l of toStart) {
+    if (untrusted.get(l.name)) { lines.push(`failed ${l.name}: ${untrusted.get(l.name)}`); continue; }
     lines.push(`start ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
     // #4585: a dry run says what startOne would refuse here (MCP gate, model, port), before any pane
     if (dryRun) try { launchSpec(l); } catch (e) { lines.push(`  would fail: ${(e as Error).message}`); }
@@ -406,6 +412,6 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   if (dryRun) return lines.join('\n');
   // Only tabs made in this run are reused: two panes per tab, never an existing pane.
   const tabs: Record<string, { pane: string; panes: number }> = {};
-  for (const l of toStart) lines.push(startOne(l, run, tabs).line);
+  for (const l of toStart) if (!untrusted.get(l.name)) lines.push(startOne(l, run, tabs).line);
   return lines.join('\n');
 }

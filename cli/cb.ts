@@ -13,6 +13,7 @@ import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
+import { squadTrust } from './squad-trust.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
@@ -827,7 +828,9 @@ ${body}`, json: pg };
       return { out: resumeText(r), json: r };
     }
     case 'squad': {
-      if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]');
+      if (!['show', 'set', 'up', 'trust'].includes(args[0] ?? '') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]  |  cb squad trust <project> [--machine <m>] [--dry-run]');
+      // #4575: Ahmed's one step per machine; it writes only this machine's agent config files, never the board
+      if (args[0] === 'trust') { const out = await squadTrust(args[1], { machine: o.machine, dryRun: !!o['dry-run'], callFn }); return { out, json: { project: args[1], lines: out.split('\n') } }; }
       if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], callFn); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
       if (args[0] === 'set') {
         if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
