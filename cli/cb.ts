@@ -554,10 +554,12 @@ async function run(): Promise<unknown> {
       }
       const id = await callFn('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
       // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits.
-      // A name with no session row (its pane re-bound) is never "still writing", as in the digest
+      // A name with no session row (a pane re-bound to another name, or a session that never started a relay) is not
+      // "relay down", as in the digest; but if it wrote lately, say so rather than "it may be gone" (#4421)
       const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
-        case when exists (select 1 from cb.sessions where actor = ${args[0]}) then cb._board_active(${args[0]}) end as mins`;
+        exists (select 1 from cb.sessions where actor = ${args[0]}) as has_row, cb._board_active(${args[0]}) as mins`;
       const how = s.live ? 'relay live: delivered within seconds'
+        : s.mins !== null && !s.has_row ? `no session on the board under this name, but it last wrote to the board ${s.mins}m ago (a session with no relay, or its pane now runs another name): the message waits up to 24h for a relay under this name`
         : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
         : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
       return { out: `message #${id} to ${args[0]} (${how})`, json: id };

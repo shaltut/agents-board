@@ -152,6 +152,11 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
+  // #4421: no session row at all (a session that never started a relay), yet it wrote lately: not "it may be gone"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
+  const v = cb(['tell', 'V1@vps', 'ping']);
+  assert.equal(v.code, 0, v.err);
+  assert.match(v.out, /\(no session on the board under this name, but it last wrote to the board 3m ago \(a session with no relay, or its pane now runs another name\): the message waits up to 24h for a relay under this name\)/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
