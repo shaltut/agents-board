@@ -33,7 +33,7 @@ test('every page has its own g letter and its own digit; every page is on the he
 test('owner: the PC screen and the admin ahmed; nobody else', () => {
   assert.equal(isOwner({ role: 'local' }), true);
   assert.equal(isOwner(admin('ahmed')), true);
-  assert.equal(isOwner(admin('kamel')), false);
+  assert.equal(isOwner(admin('sam')), false);
   assert.equal(isOwner({ role: 'guest', user: { name: 'ahmed' } }), false);
   assert.equal(isOwner(undefined), false);
 });

@@ -7,10 +7,13 @@ import { Kbd } from '@/components/ui/kbd'
 export const tabClass = (active: boolean) => cn('group flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-sm sm:px-2.5 whitespace-nowrap transition-colors duration-150',
   active ? 'bg-raised font-medium text-foreground' : 'text-muted-foreground hover:bg-raised/60 hover:text-foreground')
 
+/** Where a page link goes: the page fresh, keeping the project and the tag and type filters. */
+const pageHref = (page: Page, route: Route) => href({ view: page.view, project: route.project, tag: route.tag, type: route.type })
+
 /** A link to a page that opens it fresh on a plain click and leaves ctrl/shift/middle click to the browser (new tab). */
 export function pageLink(page: Page, route: Route) {
   return {
-    href: href({ view: page.view, project: route.project, tag: route.tag }),
+    href: pageHref(page, route),
     onClick: (e: React.MouseEvent) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return; e.preventDefault(); openPage(page.view) },
   }
 }
@@ -51,7 +54,8 @@ export function GroupMenus({ pages, route, counts }: { pages: readonly Page[]; r
             const Icon = p.icon
             return (
               <DropdownMenuItem key={p.view} asChild className={cn('py-2.5 sm:py-1.5', active && 'bg-raised font-medium')}>
-                <a {...pageLink(p, route)} aria-current={active ? 'page' : undefined}>
+                {/* a plain href: Radix closes the menu on select (a prevented click would keep it open); ctrl-click opens a tab */}
+                <a href={pageHref(p, route)} aria-current={active ? 'page' : undefined}>
                   <Icon className="text-muted-foreground" />
                   {p.label}
                   {(counts[p.view] ?? 0) > 0 && <span className="text-[12px] font-semibold text-muted-foreground tabular-nums">{counts[p.view]}</span>}
