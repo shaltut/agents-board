@@ -274,3 +274,20 @@ test('the fence judges a shell-filled command word as git, sees paths inside bac
     for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
   }
 });
+
+// PR 77 re-review: a shell-filled word before a writing git subcommand is git in any position (no wrapper list to fall
+// behind: main blocked these by its word match); a definition inside quoted text is not a definition; alias -- and hash -p
+// define too.
+test('the fence judges a shell-filled word before a writing git subcommand as git anywhere; quoted text defines nothing', () => {
+  const writes = ['caffeinate $GIT checkout -- opencode.json', 'caffeinate -i $GIT checkout -- .claude/settings.json',
+    'arch -arm64 $GIT checkout -- opencode.json', 'taskset 1 $GIT checkout -- opencode.json', 'chrt 1 $GIT checkout -- opencode.json',
+    'firejail $GIT checkout -- opencode.json', 'proxychains $GIT checkout -- opencode.json', 'time -p $GIT checkout -- opencode.json',
+    '. $GIT checkout -- opencode.json', 'caffeinate `which git` checkout -- opencode.json', 'alias -- c=cp; c x opencode.json',
+    'hash -p /bin/cp c; c x opencode.json'];
+  const reads = ['caffeinate $GIT log -- opencode.json', 'arch -arm64 $GIT diff opencode.json', 'echo $HOME opencode.json', '$PAGER opencode.json',
+    '$x = Get-Content opencode.json', 'grep -E "a|function b" opencode.json', 'node -e "(function f(){})()" opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});

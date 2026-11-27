@@ -102,9 +102,11 @@ export function duplicateJsonKey(text: string): string | null {
 export function readCodexToml(toml: string): { hooks: boolean | undefined; profile: string | undefined; profiles: Map<string, boolean> } {
   const out = { hooks: undefined as boolean | undefined, profile: undefined as string | undefined, profiles: new Map<string, boolean>() };
   const inlineHooks = (v: string) => { const m = /\bhooks\s*=\s*(\w+)/.exec(v); return m ? m[1] === 'true' : undefined; };
+  // a basic """ string ends at """ with no escaping backslash before it (a\""" is an escaped quote and "": round 2 minor 3)
+  const closes = (s: string, d: string) => (d === '"""' ? /(?<!\\)(?:\\\\)*"""/ : /'''/).test(s);
   let section = '', inTable = false, open: string | null = null;
   for (const raw of toml.split(/\r?\n/)) {
-    if (open) { if (raw.includes(open)) open = null; continue; } // inside a multi-line string: text, not keys
+    if (open) { if (closes(raw, open)) open = null; continue; } // inside a multi-line string: text, not keys
     const line = raw.replace(/\s+#.*$|^#.*$/, '').trim();
     const head = /^\[\[?\s*([^\]]+?)\s*\]\]?$/.exec(line); // [table] or [[array.of.tables]] (PR 77 review M2)
     if (head) { section = head[1]!.replace(/["'\s]/g, ''); inTable = true; continue; }
@@ -114,7 +116,7 @@ export function readCodexToml(toml: string): { hooks: boolean | undefined; profi
     // a multi-line string that runs on past this line: only a value that starts with one (a triple quote inside a
     // one-line string of the other kind, msg = "it'''s", opens nothing: PR 77 review M2)
     const ml = /^("""|''')/.exec(val);
-    if (ml && !val.slice(3).includes(ml[1]!)) open = ml[1]!;
+    if (ml && !closes(val.slice(3), ml[1]!)) open = ml[1]!;
     let m: RegExpExecArray | null;
     if (key === 'features.hooks') out.hooks = val === 'true';
     else if (key === 'features') { const h = inlineHooks(val); if (h !== undefined) out.hooks = h; }

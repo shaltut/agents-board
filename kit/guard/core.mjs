@@ -726,6 +726,12 @@ const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 
   'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
   'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
 const PS_ASSIGN = /^\$[\w:.{}]+(?:[+\-*/]?=.*)?$/;
+// git subcommands that write (or run a program): a shell-filled word before one of them is judged as git, in any position
+const GIT_WRITE_SUBS = new Set(['add', 'am', 'apply', 'archive', 'bisect', 'branch', 'bundle', 'checkout', 'checkout-index', 'cherry-pick',
+  'clean', 'clone', 'commit', 'config', 'difftool', 'fetch', 'filter-branch', 'format-patch', 'gc', 'hash-object', 'init', 'lfs', 'merge',
+  'mergetool', 'mv', 'notes', 'prune', 'pull', 'push', 'read-tree', 'rebase', 'replace', 'reset', 'restore', 'revert', 'rm', 'sparse-checkout',
+  'stash', 'submodule', 'switch', 'symbolic-ref', 'tag', 'update-index', 'update-ref', 'worktree', 'write-tree']);
+const hasWriteSub = (raw, from) => raw.slice(from).some((x) => GIT_WRITE_SUBS.has(unquote(x).toLowerCase()));
 const gitWrites = (seg) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
   let start = true, runsEnv = false, launched = false;
@@ -735,6 +741,7 @@ const gitWrites = (seg) => {
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
       if (t === '`' && start && gitCallWrites(['`', ...rest(k + 1)], true, runsEnv)) return true;
+      if (t === '`' && hasWriteSub(raw, k + 1)) return true; // anywhere: caffeinate `which git` checkout ...
       start = true;
       continue;
     }
@@ -754,7 +761,12 @@ const gitWrites = (seg) => {
       if (start) continue;
     }
     const filled = u.startsWith('$') && (start || launched);
-    if ((cmdName(t) === 'git' || filled) && gitCallWrites(rest(k), start, runsEnv)) return true;
+    // a filled word takes the argument-position rule ($PAGER opencode.json is no git call; $GIT $SUB still blocks)
+    const isGit = cmdName(t) === 'git';
+    if ((isGit || filled) && gitCallWrites(rest(k), start && isGit, runsEnv)) return true;
+    // round 2: a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper
+    // list to fall behind) is git when a later word in the segment is a git subcommand that writes
+    if (u.startsWith('$') && hasWriteSub(raw, k + 1)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
@@ -809,8 +821,10 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
-// a definition in command position: name() {, function name, alias name=, PowerShell Set-Alias / New-Alias / sal / nal
-const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+[\w.-]+=|(?:set-alias|new-alias|sal|nal)\s)/i;
+// a definition in command position: name() {, function name, alias [--] name=, hash -p, PowerShell Set-Alias / New-Alias / sal / nal
+const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
+// judged with quoted text blanked (round 2: grep -E "a|function b" opencode.json is a search, not a definition)
+const QUOTED_TEXT = /"(?:\\.|[^"\\])*"|'[^']*'/g;
 function fenceWrite(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ');
@@ -818,7 +832,7 @@ function fenceWrite(command) {
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
-  if (DEFINES_FN.test(text)) return FENCE;
+  if (DEFINES_FN.test(text.replace(QUOTED_TEXT, '""'))) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     if (CD.test(seg)) { inFence = fenceDir(seg); continue; }

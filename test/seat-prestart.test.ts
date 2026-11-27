@@ -422,6 +422,9 @@ test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks 
   assert.equal(w.refusal('codex'), null, 'keys after an array-of-tables header are that table\'s');
   writeFileSync(w.cfg, `[features]\n[[hooks.extra]]\nhooks = true\n`);
   assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true under [[hooks.extra]] is not [features]');
+  // round 2 minor 3: a\""" is an escaped quote and "", so the string runs on and [features] below is its text
+  writeFileSync(w.cfg, `[tui]\nnote = """\na\\"""\n[features]\nhooks = true\n"""\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'an escaped quote before "" does not close the string');
   writeFileSync(w.cfg, `[tui]\nnote = '''\n[features]\nhooks = true\n'''\n`);
   assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true only inside a multi-line string');
 });
