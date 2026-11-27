@@ -602,8 +602,10 @@ export function secretPath(path) {
 }
 // Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first). A
 // backtick substitution inside a message runs before the message goes anywhere (review I1), so with one the message
-// text is judged too.
-function secretRead(command) {
+// text is judged too. #4589: line continuations are joined first, as for the fence (joinLines, #4587): cat \<newline>
+// .env split the reader from the name, and .e\<newline>nv hid the name from the cheap test.
+function secretRead(raw) {
+  const command = joinLines(raw);
   if (!SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
   const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
   for (const seg of text.match(SEGMENTS) ?? []) {
