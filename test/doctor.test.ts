@@ -4,10 +4,10 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildManifest, readManifest, compareManifest, FORMAT } from '../cli/release.ts';
+import { buildManifest, readManifest, compareManifest, headSha, FORMAT } from '../cli/release.ts';
 import { doctor } from '../cli/doctor.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-doctor-${process.pid}-`));
@@ -37,6 +37,13 @@ function checkout() {
   put(root, 'README.md', 'not released\n');
   return root;
 }
+const FIXTURE = ['bin/cb', 'bin/cb.cmd', 'cli/cb.ts', 'kit/guard/core.mjs', 'kit/guard/shim-claude.mjs'];
+/** A manifest of the fixture's release files as they are now, written to a file. */
+function manifestOf(root: string, c: string) {
+  const f = join(dir(), 'release.json');
+  writeFileSync(f, JSON.stringify({ format: FORMAT, sha: c.repeat(40), files: Object.fromEntries(FIXTURE.map((p) => [p, sha(readFileSync(join(root, p), 'utf8'))])) }));
+  return f;
+}
 /** The installed guard, a copy of the checkout's. */
 function guardOf(root: string) {
   const g = dir();
@@ -61,6 +68,9 @@ test('the manifest lists every tracked release file with its sha256 and the comm
   put(root, 'cli/cb.ts', 'console.log(2)\n');
   assert.throws(() => buildManifest(root), /uncommitted changes in the release files[\s\S]*cli\/cb\.ts/);
   assert.throws(() => buildManifest(dir()), /not a git checkout/);
+  // review M1: git looks up the parents; a copy inside another repo has no commit of its own
+  assert.equal(headSha(join(root, 'cli')), null);
+  assert.equal(headSha(root), m.sha);
 });
 
 test('node cli/release.ts --out writes the manifest; a bad argument is refused', () => {
@@ -111,10 +121,10 @@ test('cb doctor: a machine matching the release passes; missing and changed file
   const bad = doctor(opts);
   assert.equal(snapshot(tmp), before, 'doctor changed a file');
   assert.equal(bad.ok, false);
-  assert.match(bad.lines[0]!, /^files: 2 of 5 differ from release ccccccc \(1 missing, 1 changed\); this checkout is at unknown\. Update this machine to the release$/);
+  assert.match(bad.lines[0]!, /^files: 2 differ from release ccccccc \(of 5; 1 missing, 1 changed\); this checkout is at unknown\. Update this machine to the release$/);
   assert.ok(bad.lines.includes('  missing: bin/cb'));
   assert.ok(bad.lines.includes('  changed: cli/cb.ts'));
-  assert.deepEqual(bad.json.files, { missing: ['bin/cb'], changed: ['cli/cb.ts'], total: 5 });
+  assert.deepEqual(bad.json.files, { missing: ['bin/cb'], changed: ['cli/cb.ts'], extra: [], outside: [], total: 5 });
   assert.equal(bad.lines.at(-1), 'doctor: 1 check failed');
 });
 
@@ -130,14 +140,13 @@ test('cb doctor: no manifest, a stale guard and a missing hook each fail it, wor
   assert.equal(r.lines.at(-1), 'doctor: 3 checks failed');
   assert.equal(r.json.problems, 3);
   // release.json in the checkout is the default manifest
-  writeFileSync(join(root, 'release.json'), JSON.stringify({ format: FORMAT, sha: 'd'.repeat(40), files: { 'cli/cb.ts': sha('console.log(1)\n') } }));
-  assert.match(doctor({ root, manifest: null, guardTarget: guard, settingsFile: null }).lines[0]!, /^files: all 1 match release ddddddd$/);
+  writeFileSync(join(root, 'release.json'), readFileSync(manifestOf(root, 'd')));
+  assert.match(doctor({ root, manifest: null, guardTarget: guard, settingsFile: null }).lines[0]!, /^files: all 5 match release ddddddd$/);
 });
 
 test('cb doctor runs with the board unreachable and in a bound pane: it never connects', () => {
   const root = checkout();
-  const mf = join(dir(), 'release.json');
-  writeFileSync(mf, JSON.stringify({ format: FORMAT, sha: 'e'.repeat(40), files: { 'cli/cb.ts': sha('console.log(1)\n') } }));
+  const mf = manifestOf(root, 'e');
   const home = dir(); // this run's ~: the guard installed from the checkout, no Claude settings
   mkdirSync(join(home, '.claude-board'));
   const g = guardOf(root);
@@ -150,7 +159,7 @@ test('cb doctor runs with the board unreachable and in a bound pane: it never co
   assert.equal(r.status, 1, r.stderr); // the hook check fails: this home has no settings.json
   assert.doesNotMatch(r.stderr, /board|ECONN|ETIMEDOUT/);
   const j = JSON.parse(r.stdout);
-  assert.deepEqual(j.files, { missing: [], changed: [], total: 1 });
+  assert.deepEqual(j.files, { missing: [], changed: [], extra: [], outside: [], total: 5 });
   assert.equal(j.release, 'e'.repeat(40));
   assert.equal(j.guard.ok, true);
   assert.equal(j.wiring.ok, false);
@@ -160,5 +169,38 @@ test('cb doctor runs with the board unreachable and in a bound pane: it never co
 test('compareManifest reads only the listed files', () => {
   const root = checkout();
   const r = compareManifest(root, { format: FORMAT, sha: 'f'.repeat(40), files: { 'cli/cb.ts': sha('console.log(1)\n'), 'cli/gone.ts': sha('') } });
-  assert.deepEqual(r, { missing: ['cli/gone.ts'], changed: [], total: 2 });
+  assert.deepEqual(r, { missing: ['cli/gone.ts'], changed: [], extra: ['bin/cb', 'bin/cb.cmd', 'kit/guard/core.mjs', 'kit/guard/shim-claude.mjs'], outside: [], total: 2 });
+});
+
+// review M3: the Mac update is tar xzf over a copy, which never deletes: a file a release dropped stays behind
+test('cb doctor: a file on disk the release does not list is extra and fails it; node_modules and dist are left out', () => {
+  const root = checkout();
+  const mf = manifestOf(root, '1');
+  put(root, 'cli/old-relay.ts', 'dropped in this release\n');
+  put(root, 'kit/agy/settings.json', '{}\n');
+  put(root, 'cli/node_modules/x/index.js', 'installed\n');
+  put(root, 'server/dist/a.js', 'built\n');
+  const r = doctor({ root, manifest: mf, guardTarget: guardOf(root), settingsFile: null });
+  assert.equal(r.ok, false);
+  assert.match(r.lines[0]!, /^files: 2 differ from release 1111111 \(of 5; 2 extra\); .*Extra = not in the release \(a tar extract never deletes\): remove it$/);
+  assert.ok(r.lines.includes('  extra: cli/old-relay.ts') && r.lines.includes('  extra: kit/agy/settings.json'), r.lines.join('\n'));
+  assert.deepEqual(r.json.files.extra, ['cli/old-relay.ts', 'kit/agy/settings.json']);
+  assert.equal(r.json.ok, false);
+});
+
+// review M2: a link planted in the checkout must not make doctor read a file outside it
+test('cb doctor: a release file that resolves outside the checkout is reported as outside and never read', () => {
+  const root = checkout();
+  const away = dir();
+  put(away, 'x.mjs', 'export const x = 1;\n');
+  symlinkSync(away, join(root, 'kit', 'linked'), 'junction'); // a junction on Windows (no admin needed), a link elsewhere
+  const mf = join(dir(), 'release.json');
+  writeFileSync(mf, JSON.stringify({ format: FORMAT, sha: '2'.repeat(40), files: { ...JSON.parse(readFileSync(manifestOf(root, '2'), 'utf8')).files,
+    'kit/linked/x.mjs': sha('export const x = 1;\n') } })); // the right hash: a read through the link would call it a match
+  const r = doctor({ root, manifest: mf, guardTarget: guardOf(root), settingsFile: null });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.json.files.outside, ['kit/linked/x.mjs']);
+  assert.deepEqual(r.json.files.changed, []);
+  assert.ok(r.lines.includes('  outside: kit/linked/x.mjs'), r.lines.join('\n'));
+  assert.match(r.lines[0]!, /Outside = a link that leaves this checkout: replace it with the file/);
 });

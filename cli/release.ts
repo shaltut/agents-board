@@ -5,8 +5,8 @@
 // .gitattributes pins eol=lf, and *.cmd eol=crlf everywhere.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const RELEASE_DIRS = ['bin', 'cli', 'db', 'prompts', 'server', 'hooks', 'kit'];
@@ -21,9 +21,17 @@ function git(root: string, args: string[]) {
   return r.status === 0 ? r.stdout : null;
 }
 
-/** This checkout's commit, or null (no git, or not a checkout: the Mac's copy). Reads only. */
+// one comparable form of a folder: its real path, case folded on Windows
+const same = (a: string, b: string) => {
+  const f = (p: string) => { try { p = realpathSync(p); } catch {} return process.platform === 'win32' ? p.toLowerCase() : p; };
+  return f(resolve(a)) === f(resolve(b));
+};
+
+/** This checkout's commit, or null (no git, or not a checkout: the Mac's copy). git looks up the parent folders, so a
+ *  copy inside some other repo would get that repo's commit: only a repo whose top is root itself counts. Reads only. */
 export function headSha(root: string): string | null {
-  return git(root, ['rev-parse', 'HEAD'])?.trim() || null;
+  const [top, sha] = (git(root, ['rev-parse', '--show-toplevel', 'HEAD']) ?? '').trim().split(/\r?\n/);
+  return top && sha && same(top, root) ? sha : null;
 }
 
 /** The manifest of the commit checked out at root. Refuses a tree whose release files differ from that commit: the
@@ -59,18 +67,47 @@ export function readManifest(file: string): Manifest {
   return m;
 }
 
-/** Which of the manifest's files are missing under root, and which differ. Reads only. */
+// folders under the release folders that are never part of a release (installed or built), left out of the extras
+const NOT_RELEASED = new Set(['node_modules', 'dist', '.cache']);
+
+/** Every file (and link) on disk under root's release folders, as git paths. Links are listed, never followed. */
+function onDisk(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch (e: any) { if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return; throw e; }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) { if (!NOT_RELEASED.has(e.name)) walk(full); } else out.push(relative(root, full).split(sep).join('/'));
+    }
+  };
+  for (const d of RELEASE_DIRS) walk(join(root, d));
+  return out.sort();
+}
+
+/** The manifest against root: its files missing or different, files on disk it does not list (a tar extract never
+ *  deletes, so a file a release removed stays behind), and files that resolve outside root (a planted link). Reads only. */
 export function compareManifest(root: string, m: Manifest) {
-  const missing: string[] = [], changed: string[] = [];
+  const missing: string[] = [], changed: string[] = [], outside: string[] = [];
+  const realRoot = realpathSync(root);
+  const inside = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
   for (const [p, want] of Object.entries(m.files)) {
+    let real: string;
+    try { real = realpathSync(join(root, p)); } catch (e: any) {
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') { missing.push(p); continue; }
+      throw e;
+    }
+    // never read through a link that leaves the checkout: report it instead
+    if (!real.startsWith(inside)) { outside.push(p); continue; }
     let got: string;
-    try { got = sha256(join(root, p)); } catch (e: any) {
-      if (e?.code === 'ENOENT' || e?.code === 'EISDIR') { missing.push(p); continue; }
+    try { got = sha256(real); } catch (e: any) {
+      if (e?.code === 'EISDIR') { missing.push(p); continue; }
       throw e;
     }
     if (got !== want) changed.push(p);
   }
-  return { missing, changed, total: Object.keys(m.files).length };
+  const extra = onDisk(root).filter((p) => !Object.hasOwn(m.files, p));
+  return { missing, changed, extra, outside, total: Object.keys(m.files).length };
 }
 
 // run directly, also through a symlinked path (macOS /tmp, a linked checkout): compare real paths, as install.mjs does

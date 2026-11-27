@@ -43,14 +43,18 @@ export function doctor(o: DoctorOptions) {
       const r = compareManifest(root, m);
       json.release = m.sha;
       json.files = r;
-      const bad = r.missing.length + r.changed.length;
+      const bad = r.missing.length + r.changed.length + r.extra.length + r.outside.length;
       if (!bad) {
         lines.push(`files: all ${r.total} match release ${short(m.sha)}`);
       } else {
         problems++;
         const at = here === m.sha ? `this checkout is at that commit, so files were changed by hand` : `this checkout is at ${short(here)}`;
-        lines.push(`files: ${bad} of ${r.total} differ from release ${short(m.sha)} (${r.missing.length} missing, ${r.changed.length} changed); ${at}. Update this machine to the release`);
-        lines.push(...names('missing', r.missing), ...names('changed', r.changed));
+        const kinds = [['missing', r.missing], ['changed', r.changed], ['extra', r.extra], ['outside', r.outside]] as const;
+        const counts = kinds.filter(([, l]) => l.length).map(([k, l]) => `${l.length} ${k}`).join(', ');
+        lines.push(`files: ${bad} differ from release ${short(m.sha)} (of ${r.total}; ${counts}); ${at}. Update this machine to the release`
+          + (r.extra.length ? '. Extra = not in the release (a tar extract never deletes): remove it' : '')
+          + (r.outside.length ? '. Outside = a link that leaves this checkout: replace it with the file' : ''));
+        for (const [k, l] of kinds) lines.push(...names(k, l));
       }
     } catch (e: any) {
       problems++;
