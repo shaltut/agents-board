@@ -179,6 +179,9 @@ function dropLocks(d: string, skip: string) {
   }
 }
 
+// whether a slot clone's .git holds a link (removed on the way: the slot starts over anyway); unreadable counts as one
+const linkedGit = (gitDir: string) => { try { return dropLinks(gitDir, new Set()).length > 0; } catch { return true; } };
+
 const isLists = (v: unknown): v is Record<string, string[]> =>
   typeof v === 'object' && v !== null && !Array.isArray(v) && Object.values(v).every((a) => Array.isArray(a) && a.every((x) => typeof x === 'string'));
 
@@ -262,6 +265,13 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   // A fetch that fails in an existing clone while origin answers (a job may have left garbage under .git, e.g. a non-ref
   // file in refs) starts the slot over once: a fresh clone, then the fetch again. rmSync removes links, never what they point at.
   for (let again = false; ; again = true) {
+    // #4412: a link under .git (a junction at .git/refs/remotes/origin/x) let the fetch's --prune delete ref-shaped files
+    // in its target, outside the slot, and git's own cleanup works in .git/objects: a .git holding any link, or a folder
+    // there the walk cannot read, starts over
+    if (!again && lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() && linkedGit(gitDir)) {
+      writeSync(io.fd, 'runner: a job left a link under .git: the slot starts over\n');
+      again = true;
+    }
     if (again || !lstatSync(gitDir, { throwIfNoEntry: false })?.isDirectory() || !existsSync(saved)) { // missing, or a link: start over
       rmSync(dir, { recursive: true, force: true });
       rmSync(lockState, { force: true });

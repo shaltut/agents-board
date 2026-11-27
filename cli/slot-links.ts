@@ -2,16 +2,17 @@
 // was (a junction on Windows, which git there walks as a folder). checkout --force kept it, and clean -ffdx then
 // deleted untracked files inside its target, outside the clone. Before the checkout the runner removes every link in
 // the worktree: the checkout puts the tracked ones (mode 120000) back as git writes them. Not under .git and not under
-// node_modules (the install's own links; the clean keeps node_modules). Out of scope here: a link under .git/refs
-// (the fetch runs before this walk) and a process a job left running that plants a link again (#4412), and tracked
-// files under a node_modules folder (a link there is kept).
+// node_modules (the install's own links; the clean keeps node_modules). A link under .git is the runner's own check
+// before the fetch (#4412: it walks .git with an empty keep set). Out of scope here: a process a job left running that
+// plants a link again between this walk and the clean, and tracked files under a node_modules folder (a link there is kept).
 import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const KEEP = new Set(['.git', 'node_modules']);
 
-/** Remove every link under root (never what it points at) but under .git and node_modules; returns them, relative. */
-export function dropLinks(root: string): string[] {
+/** Remove every link under root (never what it points at) but under folders named in keep (.git and node_modules);
+ *  returns them, relative. */
+export function dropLinks(root: string, keep: ReadonlySet<string> = KEEP): string[] {
   const gone: string[] = [];
   const dirs = [''];
   while (dirs.length) {
@@ -27,7 +28,7 @@ export function dropLinks(root: string): string[] {
       if (e.isSymbolicLink()) {
         rmSync(join(root, p), { recursive: true, force: true, maxRetries: 3 }); // the link, never its target; retries ride out an indexer's handle (M5)
         gone.push(p);
-      } else if (e.isDirectory() && !KEEP.has(e.name)) {
+      } else if (e.isDirectory() && !keep.has(e.name)) {
         dirs.push(p);
       }
     }

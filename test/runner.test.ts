@@ -598,6 +598,24 @@ test('an origin that does not answer keeps the slot clone and what is in it', as
   assert.ok(existsSync(marker), 'the slot was wiped for an outside problem');
 });
 
+// #4412: a junction a job left under .git/refs let the fetch's --prune delete the ref-shaped files in its target, outside
+// the slot. The target holds only such a file: one non-ref file there and git refuses the whole prune.
+test('a link a job leaves under .git starts the slot over: the fetch never prunes through it', async () => {
+  const a = await direct('refslink', ORIGIN, 900006);
+  assert.equal(a?.state, 'passed', a?.summary);
+  const outside = join(TMP, 'refs-target');
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, 'victim'), `${MAIN}\n`);
+  const at = join(TMP, 'direct', 'refslink-1', '.git', 'refs', 'remotes', 'origin');
+  mkdirSync(at, { recursive: true });
+  symlinkSync(outside, join(at, 'x'), 'junction');
+  const b = await direct('refslink', ORIGIN, 900007);
+  assert.equal(b?.state, 'passed', b?.summary);
+  assert.ok(existsSync(join(outside, 'victim')), 'the fetch pruned a file outside the slot, through the link');
+  assert.match(dlog(900007), /a job left a link under \.git: the slot starts over/);
+  assert.match(dlog(900007), /git clone/);
+});
+
 // #3703: a project may hold several repos, each with its own git, lockfile, install and recipes
 const LOG = { host: '127.0.0.1', port: 1, peers: [] };
 const repoOf = (gitUrl: string, rs: object = { ok: recipes.ok }) => { const { base: _b, ...r } = project(gitUrl, rs); return r; };
