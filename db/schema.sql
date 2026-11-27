@@ -233,6 +233,12 @@ alter table cb.sessions add constraint sessions_agent_check check (agent in ('cl
 -- with the endpoint). Another id in the same pane is another session: cb.inbox resets the row. Null (a row from before
 -- it, or one a cb iam just bound) takes the next id as it is
 alter table cb.sessions add column if not exists session_id text;
+-- #3221: a relay holding low-priority notices (runner results, GitHub, digests, nudges, card edits, broadcasts, memory)
+-- marks it here: hold_from is the card-event cursor (`after`) the held read used, hold_at when the hold began. A relay
+-- that restarts mid-hold reads from hold_from again and keeps the window's clock, so nothing held is lost or doubled.
+-- Null: nothing held. Set and cleared by cb.relay_hold; reset with broadcast_seen when the row starts again.
+alter table cb.sessions add column if not exists hold_from bigint;
+alter table cb.sessions add column if not exists hold_at timestamptz;
 
 create table if not exists cb.settings (
   key   text primary key,
@@ -305,6 +311,7 @@ drop function if exists cb.huddles_list cascade;
 drop function if exists cb._huddle_post cascade;
 drop function if exists cb._huddle_join cascade;
 drop function if exists cb.broadcast_seen cascade;
+drop function if exists cb.relay_hold cascade;
 drop function if exists cb._broadcasts cascade;
 drop function if exists cb.tick cascade;
 drop function if exists cb._is_review cascade;
@@ -1670,6 +1677,11 @@ begin
         -- relay's own row (still its pane@machine name) keeps that row's mark, set when the relay started
         broadcast_seen = case when excluded.actor = cb.sessions.actor or cb.sessions.actor = cb._seat_name(lower(trim(machine)), trim(pane))
                               then cb.sessions.broadcast_seen else excluded.broadcast_seen end,
+        -- #3221: a held window belongs to the mark above: it starts clean with it
+        hold_from = case when excluded.actor = cb.sessions.actor or cb.sessions.actor = cb._seat_name(lower(trim(machine)), trim(pane))
+                         then cb.sessions.hold_from end,
+        hold_at = case when excluded.actor = cb.sessions.actor or cb.sessions.actor = cb._seat_name(lower(trim(machine)), trim(pane))
+                       then cb.sessions.hold_at end,
         -- the relay's next check takes its session id as it is (#4379): the session that bound may be one its relay
         -- has not seen yet, and must not be reset to the relay's own name a moment after it bound
         session_id = null;
@@ -1684,6 +1696,7 @@ end $$;
 create function cb.inbox(machine text, pane text, after_event bigint default 0, session text default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare m text := lower(trim(machine)); sid text := nullif(trim(session), ''); me text; proj text; seen bigint; myrepo text; am_lead boolean; ag text;
+        hf bigint; ha timestamptz;
 begin
   -- a new session (relay before cb iam) starts from now; until it joins a project it hears no broadcasts.
   -- #4379: so does another session in a reused pane id. A session id other than the row's is not the row's session:
@@ -1701,15 +1714,26 @@ begin
         model = case when sid <> cb.sessions.session_id then null else cb.sessions.model end,
         repo = case when sid <> cb.sessions.session_id then null else cb.sessions.repo end,
         broadcast_seen = case when sid <> cb.sessions.session_id then excluded.broadcast_seen else cb.sessions.broadcast_seen end,
+        hold_from = case when sid <> cb.sessions.session_id then null else cb.sessions.hold_from end,
+        hold_at = case when sid <> cb.sessions.session_id then null else cb.sessions.hold_at end,
         started_at = case when sid <> cb.sessions.session_id then now() else cb.sessions.started_at end,
         closing_at = case when sid <> cb.sessions.session_id then null else cb.sessions.closing_at end
-  returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen, cb.sessions.agent into me, proj, seen, ag;
+  returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen, cb.sessions.agent, cb.sessions.hold_from, cb.sessions.hold_at
+       into me, proj, seen, ag, hf, ha;
   myrepo := cb._repo(me);  -- once, not per event row (next_work)
   am_lead := cb._is_lead(me, proj);  -- once too (answer_copies)
   return jsonb_build_object(
     'actor', me,
     'project', proj, -- with actor: the binding the relay hands to cb (#3256)
     'agent', ag, -- the session's agent (#4002)
+    -- #3221: the relay's held window (cb.relay_hold), its age on the board's clock; null: nothing held. The key's
+    -- presence says the board keeps holds: a relay that does not see it delivers everything at once
+    -- from: the cursor to read again from, no further back than 24 h (review M5: as messages; a seat down a day with a
+    -- hold open does not replay older memory changes)
+    'hold', case when hf is null then null
+                 else jsonb_build_object('from', greatest(hf, coalesce((select e.id from cb.events e where e.at <= now() - interval '24 hours'
+                                                                         order by e.at desc limit 1), 0)),
+                                         'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
@@ -1717,8 +1741,19 @@ begin
                                and e.at > now() - interval '24 hours'
                                and e.actor is distinct from me), '[]'),
     -- raw: Ahmed typing from the dashboard (cb.type_to); the relay hands it over as a plain prompt, no board wrapper
+    -- notice (#3221): a routine board message the relay may hold (a digest, a stall or ping nudge); null for every
+    -- other message, and for a digest that carries a new P0 or a supervisor problem (data.urgent)
+    -- urgent (#3221): never held: marked so (a part freed off me, GitHub lines by Ahmed's login), or about a P0 card (a
+    -- nudge's card, a job's card in data.task), its priority as it is now
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
-                                                              'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true') order by e.id)
+                                                              'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true',
+                                                              'notice', case when e.data ->> 'urgent' = 'true' then null
+                                                                             when e.data ? 'digest' then 'digest'
+                                                                             when e.data ? 'nudge' then 'nudge' end,
+                                                              'urgent', coalesce(e.data ->> 'urgent' = 'true', false)
+                                                                        or exists (select 1 from cb.tasks t where t.priority = 'P0'
+                                                                                      and t.id = coalesce(e.task_id, case when e.data ->> 'task' ~ '^[0-9]{1,18}$'
+                                                                                                                         then (e.data ->> 'task')::bigint end))) order by e.id)
                             from cb.events e
                            where e.kind = 'message' and e.data ->> 'to' = me and e.id > seen
                              and e.at > now() - interval '24 hours'), '[]'),
@@ -1825,6 +1860,15 @@ end $$;
 create function cb.broadcast_seen(machine text, pane text, upto bigint) returns void language sql as $$
   -- positional: in a SQL function a bare "pane" would mean the column
   update cb.sessions s set broadcast_seen = greatest(s.broadcast_seen, $3)
+   where s.machine = lower(trim($1)) and s.pane = $2
+$$;
+
+-- #3221: the relay starts a hold (from_event: the card-event cursor its held read used) or ends one (null, after the
+-- flush). A hold already running keeps its cursor and its clock: the window counts from the first held notice.
+create function cb.relay_hold(machine text, pane text, from_event bigint) returns void language sql as $$
+  update cb.sessions s
+     set hold_from = case when $3 is null then null else coalesce(s.hold_from, $3) end,
+         hold_at = case when $3 is null then null else coalesce(s.hold_at, now()) end
    where s.machine = lower(trim($1)) and s.pane = $2
 $$;
 
@@ -4256,8 +4300,9 @@ begin
       continue when moved = 0;
       delete from cb.stage_nudges d where d.task_id = r.id;
       insert into cb.events (actor, project, task_id, kind, summary, data)
+      -- urgent (#3221 review M2): a card taken off a seat is never held by its relay; nudge stays (no card activity)
       values ('board', r.project, r.id, 'message', format('#%s went back to the queue: %s', r.id, why),
-              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'urgent', true));
       n := n + 2;
     elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
@@ -4307,7 +4352,7 @@ begin
               jsonb_build_object('stall', true, 'repo', r.repo));
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message', format('#%s part %s went back to the queue: %s', r.id, r.repo, why),
-              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo));
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo, 'urgent', true));  -- as above (M2)
       n := n + 2;
     elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
@@ -4378,9 +4423,11 @@ begin
                 count(*) filter (where t.stage = 'merge'), count(*) filter (where t.stage = 'qa'))
     into head from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled');
   with items(grp, p0, id, line) as (
-    -- 1: a P0 card created since the last digest, named so the "at once" digest says what it is about
+    -- 1: a P0 card created since the last digest, or raised to P0 since (#3221 review), named so the "at once" digest
+    -- says what it is about
     select 1, true, t.id, format('#%s is P0: "%s": cb show %s', t.id, left(t.title, 80), t.id)
-      from cb.tasks t where t.project = p and t.priority = 'P0' and t.created_at > since and t.status not in ('done', 'cancelled')
+      from cb.tasks t where t.project = p and t.priority = 'P0' and t.status not in ('done', 'cancelled')
+       and (t.created_at > since or exists (select 1 from cb.events e where e.task_id = t.id and e.at > since and e.data -> 'fields' ? 'priority'))
     union all
     -- 2: freed since the last digest
     select 2, t.priority = 'P0', t.id, format('#%s freed from %s (%s): cb session %s', t.id, m[1], m[2], m[1])
@@ -4540,6 +4587,7 @@ end $$;
 -- The digest is one message to each lead and writes nothing on any card, so it never counts as card activity.
 create function cb.digests_due() returns int language plpgsql as $$
 declare r record; leads text[]; last_at timestamptz; last_hash text; lines jsonb; txt text; h text; newp0 boolean; l text; n int := 0;
+        urgent boolean;
 begin
   -- #4559: only enabled projects; after an enable the digest covers the time since then, never the time disabled
   for r in select pr.slug, pr.state_at from cb.projects pr where pr.pipeline and pr.state = 'enabled' loop
@@ -4548,9 +4596,16 @@ begin
     continue when leads is null;
     select (st.value ->> 'at')::timestamptz, st.value ->> 'hash' into last_at, last_hash from cb.settings st where st.key = 'digest:' || r.slug;
     last_at := greatest(last_at, r.state_at);  -- greatest skips a null: no digest yet, or a state never changed
-    newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
+    -- a card raised to P0 since counts as new too (#3221 review), as cb.digest's first group names it
+    newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0'
+                                               and (t.created_at > last_at or exists (select 1 from cb.events e where e.task_id = t.id and e.at > last_at
+                                                                                         and e.data -> 'fields' ? 'priority')));
     continue when last_at is not null and last_at > now() - interval '15 minutes' and not newp0;
     lines := cb.digest(r.slug, coalesce(last_at, now() - interval '15 minutes'));
+    -- #3221: a digest with a new P0 or a session the supervisor could not keep up is never held by the lead's relay
+    urgent := newp0 or exists (select 1 from cb.events e where e.project = r.slug and e.kind = 'supervisor'
+                                  and e.at > coalesce(last_at, now() - interval '15 minutes')
+                                  and e.data ->> 'what' in ('down_again', 'blocked', 'failed'));
     -- the body without its stage line: a byte-identical one is not sent again (a new P0 always is)
     select string_agg(x.v, E'\n' order by x.n) into txt from jsonb_array_elements_text(lines) with ordinality x(v, n) where x.n > 1;
     h := md5(coalesce(txt, ''));
@@ -4558,7 +4613,8 @@ begin
       txt := (lines ->> 0) || E'\n' || txt;
       foreach l in array leads loop
         insert into cb.events (actor, project, kind, summary, data)
-        values ('board', r.slug, 'message', 'Digest for ' || r.slug || E':\n' || txt, jsonb_build_object('to', l, 'digest', true));
+        values ('board', r.slug, 'message', 'Digest for ' || r.slug || E':\n' || txt,
+                jsonb_build_object('to', l, 'digest', true) || case when urgent then '{"urgent": true}'::jsonb else '{}' end);
         n := n + 1;
       end loop;
     end if;
@@ -5729,13 +5785,22 @@ end $$;
 -- A repo other than main is named after the recipe: "job #N test (dashboard) at ..." (#3703).
 -- untrusted: the summary is the job's output (code from any origin branch), marked like GitHub lines; the head is not.
 -- Best effort: an unknown requester (session gone, no events) must not stop the job from ending.
+-- data.task (#3221 review M3): the job's card, so the relay never holds a P0 card's result (data, not task_id: a job
+-- result is no activity on the card for the stall and ping clocks).
 create function cb._job_tell(j cb.jobs, untrusted boolean default false) returns void language plpgsql as $$
+declare new_id bigint;
 begin
-  perform cb.tell(j.requester,
+  new_id := cb.tell(j.requester,
     format('job #%s %s%s at %s: %s%s. %s%s', j.id, j.recipe, case when j.repo <> 'main' then format(' (%s)', j.repo) else '' end, left(j.sha, 7), j.state,
            case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end,
            case when untrusted and coalesce(j.summary, '') <> '' then '[job output · untrusted] ' else '' end, coalesce(j.summary, ''))
     || case when j.started_at is not null then E'\nLog: cb job log ' || j.id else '' end, 'runner');
+  begin  -- its own block: a failure here must not take the result back
+    if j.task_id is not null then
+      update cb.events e set data = e.data || jsonb_build_object('task', j.task_id) where e.id = new_id;
+    end if;
+  exception when others then null;
+  end;
 exception when others then null;
 end $$;
 

@@ -96,6 +96,9 @@ Then the workers, right away, because their `cb` must match the schema:
     mid-flip. Relays notice their code path now points at new files and restart into it: each flip, update or
     rollback, restarts every relay running from the copy within ~3 s (no message is lost; at worst one duplicate push). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
     pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
+    One started by a relative path (`node cli/runner.ts`) counts only when its working folder is the copy (read from
+    `/proc` or `lsof`); another checkout's does not. When the folder cannot be read (always on Windows), `cb update`
+    refuses and says so: `--force` when it is not this copy's.
     Nothing is stopped by `cb update`.
   - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
     run it again to go forward. Back on the original copy, relays run its older relay.ts, which does not follow a flip:
@@ -370,6 +373,20 @@ dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       #
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
 lock at once. Removing someone, or a new link for a member, is on the Users page only.
 
+## GitHub watch: Ahmed's own login (#3221)
+
+The lead's relay holds routine notices up to 10 minutes; a PR, comment, review or commit by Ahmed on a watched repo goes
+through at once (with the rest of that poll's message). The watch knows which login is his only from the `github-owner` setting (a JSON string). None is
+set by default, and then nothing is marked urgent. It is never taken from gh's own login: the agents post under it.
+Ahmed sets it once (not a secret, but keep it out of cards, pages and this repo):
+
+```bash
+dc exec db psql -U cb -d claude_board -c "insert into cb.settings (key, value) values ('github-owner', to_jsonb('<your GitHub login>'::text)) on conflict (key) do update set value = excluded.value"
+dc exec db psql -U cb -d claude_board -c "delete from cb.settings where key = 'github-owner'"   # back to none
+```
+
+The next poll (within 3 minutes) uses it; case does not matter. Failed CI runs are never marked, whoever pushed.
+
 ## Secrets
 
 All in `deploy/.env` (mode 600). After changing one: `dc up -d` (recreates what changed).
@@ -551,6 +568,8 @@ It never:
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
   live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
+  `cb squad trust <project>`, run once by the owner on each machine (#4575), marks the squad's seat folders trusted for
+  Claude, Codex and agy so that dialog never shows; `cb squad up` stops an untrusted seat before its pane (`cb help squad`);
 - frees a card held by a down session, or runs anything heavy itself.
 
 ## Squad file: herdr workspace
