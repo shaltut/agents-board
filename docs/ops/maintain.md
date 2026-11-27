@@ -400,6 +400,9 @@ Set up, once, on the PC:
    - A `guards` recipe can also run the repo's script tests on every job with the pre-push hook's own command
      (`pnpm exec lefthook run pre-push --commands <command> --no-tty`): the commit's own `lefthook.yml` decides which
      files run, so no file list is copied into runner.json.
+   - Placeholders in `steps`, `finally` and `cwd` are written `{name}` (declared in `params`; at most one per step
+     argument). Write `{{` and `}}` for literal braces (inline JS, JSON: `fs.rmSync('dist', {{force:true}})`), so
+     misspelled parameter names are still refused at start (#3773).
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
