@@ -411,10 +411,17 @@ test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks 
     ['profile after a table is that table\'s key', `${on}[tui]\nprofile = "x"\n[profiles.x.features]\nhooks = false\n`],
     ['hooks = false inside a multi-line string', `${on}[tui]\nnote = """\n[features]\nhooks = false\n"""\n`],
     ['a one-line triple-quoted string', `[features]\nx = """a"""\nhooks = true\n`],
+    // PR 77 review M2: an array-of-tables header is a header; a triple quote inside a one-line string opens nothing
+    ['an array of tables after [features]', `${on}[[hooks.extra]]\nhooks = false\n`],
+    ['a triple quote inside a one-line string', `[tui]\nmsg = "it'''s"\nother = 'a """ b'\n${on}`],
   ] as const) {
     writeFileSync(w.cfg, toml);
     assert.equal(w.refusal('codex'), null, what);
   }
+  writeFileSync(w.cfg, `[[hooks.extra]]\nx = 1\n[features]\nhooks = true\n[[profiles.y]]\nhooks = true\n`);
+  assert.equal(w.refusal('codex'), null, 'keys after an array-of-tables header are that table\'s');
+  writeFileSync(w.cfg, `[features]\n[[hooks.extra]]\nhooks = true\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true under [[hooks.extra]] is not [features]');
   writeFileSync(w.cfg, `[tui]\nnote = '''\n[features]\nhooks = true\n'''\n`);
   assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true only inside a multi-line string');
 });

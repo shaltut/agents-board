@@ -628,10 +628,12 @@ function secretRead(command) {
 // pairs and a backslash inside the word (.cla""ude, .cl\aude), a glob (.cl*, .claud?), trailing dots (.claude.), the 8.3
 // name (CLAUDE~1), ./ and seg/../ (review 68-I2). A URL names no local file. Fail closed. Linear: a few single-pass
 // tests per segment.
-const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~])`;
-const FENCE_END = String.raw`(?=[\s"';&|)>]|$)`;
+// PR 77 review I2: a backtick starts and ends a path too (echo `cp x ~/.claude/settings.json` hid it)
+const TICK = '`';
+const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~` + TICK + '])';
+const FENCE_END = String.raw`(?=[\s"';&|)>` + TICK + ']|$)';
 const FENCE_NAME = String.raw`(?:\.claude\.*|claude~\d)`;
-const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\/\s"';&|)>]|$)|${FENCE_NAME}(?:[\\/]+settings[\w.*?-]*\.json|[\\/]*)${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}[\\/]+settings[\w.*?-]*\.json${FENCE_END})`, 'i');
+const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\/\s"';&|)>` + TICK + String.raw`]|$)|${FENCE_NAME}(?:[\\/]+settings[\w.*?-]*\.json|[\\/]*)${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}[\\/]+settings[\w.*?-]*\.json${FENCE_END})`, 'i');
 // The other agents' own guard and config files (#4002 install gate): the hook file each adapter's guardInstallSpec names
 // (~/.codex/hooks.json, a seat's .agents/hooks.json, OpenCode's plugins folder), Codex's config and profiles (hook trust,
 // [features] hooks), every OpenCode config (opencode.json[c] anywhere: plugins, permissions, MCP) and all of ~/.gemini
@@ -716,13 +718,31 @@ function gitCallWrites(w, atCommand, runsEnv) {
   if (runsEnv || !GIT_READS.has(s) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
   return s === 'grep' && w.slice(i + 1).some((x) => /^--op/.test(x) || /^-(?!-)[A-Za-z]*O/.test(x));
 }
+// PR 77 review I1: a command word the shell fills in ($GIT, "$GIT", ${GIT:-git}, $(...), a backtick) is an unknown
+// program, judged as git (fail closed: $GIT checkout -- opencode.json blocks, $GIT log -- opencode.json reads). So is an
+// expansion after one of these launchers (sudo $GIT checkout ...), with the argument-position rule. A PowerShell
+// assignment ($x = ...) is not a command word.
+const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'timeout', 'gtimeout', 'time', 'stdbuf',
+  'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
+  'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
+const PS_ASSIGN = /^\$[\w:.{}]+(?:[+\-*/]?=.*)?$/;
 const gitWrites = (seg) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
-  let start = true, runsEnv = false;
+  let start = true, runsEnv = false, launched = false;
+  const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
   for (let k = 0; k < raw.length; k++) {
     const t = raw[k];
-    if (GIT_OPENER.test(t)) { start = true; continue; }
+    if (GIT_OPENER.test(t)) {
+      // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
+      if (t === '`' && start && gitCallWrites(['`', ...rest(k + 1)], true, runsEnv)) return true;
+      start = true;
+      continue;
+    }
     const u = unquote(t);
+    if (start && PS_ASSIGN.test(u) && (/=/.test(u) || /^[+\-*/]?=/.test(raw[k + 1] ?? ''))) { // $x = ..., $env:X='y'
+      if (!/=/.test(u)) k++;
+      continue;
+    }
     // a quoted command line, judged on its own: one layer of quotes off (an unclosed quote dropped, so it always shrinks)
     if (/["']/.test(t) && /[\s;&|]/.test(u)) {
       const inner = u === t ? t.replace(/["']/g, '') : u;
@@ -733,8 +753,12 @@ const gitWrites = (seg) => {
       if (GIT_RUNS_ENV.test(u) && !(/pager$/i.test(u.slice(0, eq)) && PAGER_OK.test(u.slice(eq + 1)))) runsEnv = true;
       if (start) continue;
     }
-    if (cmdName(t) === 'git' && gitCallWrites(raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote), start, runsEnv)) return true;
-    if (start && !SHELL_KEYWORD.has(u.toLowerCase())) start = false;
+    const filled = u.startsWith('$') && (start || launched);
+    if ((cmdName(t) === 'git' || filled) && gitCallWrites(rest(k), start, runsEnv)) return true;
+    if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
+      start = false;
+      if (LAUNCHERS.has(cmdName(t))) launched = true;
+    }
   }
   return false;
 };
@@ -785,11 +809,16 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
+// a definition in command position: name() {, function name, alias name=, PowerShell Set-Alias / New-Alias / sal / nal
+const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+[\w.-]+=|(?:set-alias|new-alias|sal|nal)\s)/i;
 function fenceWrite(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
+  // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
+  // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
+  if (DEFINES_FN.test(text)) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     if (CD.test(seg)) { inFence = fenceDir(seg); continue; }

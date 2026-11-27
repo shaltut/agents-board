@@ -106,13 +106,15 @@ export function readCodexToml(toml: string): { hooks: boolean | undefined; profi
   for (const raw of toml.split(/\r?\n/)) {
     if (open) { if (raw.includes(open)) open = null; continue; } // inside a multi-line string: text, not keys
     const line = raw.replace(/\s+#.*$|^#.*$/, '').trim();
-    const head = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
+    const head = /^\[\[?\s*([^\]]+?)\s*\]\]?$/.exec(line); // [table] or [[array.of.tables]] (PR 77 review M2)
     if (head) { section = head[1]!.replace(/["'\s]/g, ''); inTable = true; continue; }
     const kv = /^([\w."' -]+?)\s*=\s*(.+)$/.exec(line);
     if (!kv) continue;
     const key = [section, kv[1]!.replace(/["'\s]/g, '')].filter(Boolean).join('.'), val = kv[2]!.trim();
-    const ml = /"""|'''/.exec(val);
-    if (ml && !val.slice(ml.index + 3).includes(ml[0])) open = ml[0]; // a multi-line string that runs on past this line
+    // a multi-line string that runs on past this line: only a value that starts with one (a triple quote inside a
+    // one-line string of the other kind, msg = "it'''s", opens nothing: PR 77 review M2)
+    const ml = /^("""|''')/.exec(val);
+    if (ml && !val.slice(3).includes(ml[1]!)) open = ml[1]!;
     let m: RegExpExecArray | null;
     if (key === 'features.hooks') out.hooks = val === 'true';
     else if (key === 'features') { const h = inlineHooks(val); if (h !== undefined) out.hooks = h; }

@@ -255,3 +255,22 @@ test('the fence folds a ... segment, reads bash $USERPROFILE as home, and drops 
   for (const p of ['notes/.../x.md', 'src/a::b.ts']) assert.equal(editFence(p), null, p);
   assert.equal(shell('echo ... > notes.txt', 'builder'), true);
 });
+
+// PR 77 review: I1, a command word the shell fills in is an unknown program, judged as git (main blocked these by its
+// word match); I2, a backtick around a command hid the fence path (main and head); M1, a function or alias defined on
+// the same line moved the writer into another segment.
+test('the fence judges a shell-filled command word as git, sees paths inside backticks, and treats a same-line function or alias as a writer', () => {
+  const writes = ['$GIT checkout -- opencode.json', '"$GIT" checkout -- opencode.json', '${GIT:-git} checkout -- opencode.json',
+    'sudo $GIT checkout -- opencode.json', 'xargs $GIT add < l opencode.json', '$(which git) checkout -- opencode.json',
+    '`which git` checkout -- opencode.json',
+    'echo `cp x opencode.json`', 'echo `cp x ~/.codex/hooks.json`', 'echo `echo x > .claude/settings.json`', 'v=`cp x ~/.claude/settings.json`',
+    'x=`git checkout -- opencode.json`',
+    'f() { cp x "$1"; }; f .claude/settings.json', 'alias c=cp; c x .claude/settings.json', 'g() { git checkout -- "$@"; }; g opencode.json',
+    'function f { cp x $args }; f opencode.json', 'Set-Alias c Copy-Item; c x opencode.json'];
+  const reads = ['$GIT log -- opencode.json', 'echo $HOME opencode.json', '$x = Get-Content ~/.codex/config.toml',
+    "$env:X = 'y'; cat opencode.json", 'x=$(cat opencode.json)', 'echo `date` opencode.json', 'rg -n "function opencode" src opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
