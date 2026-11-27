@@ -1,7 +1,7 @@
 // cb squad trust (#4575): Ahmed runs it once per project on each machine, in his own terminal. It marks the squad's seat
 // folders trusted in each agent's own config (the adapters' trustSpec().preseed), so cb squad up never stops at a
 // folder-trust dialog, and no seat ever answers one. Squad seats may not run it: the guard blocks it and so does this file.
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ADAPTERS, type AgentKind } from './agents/index.ts';
@@ -43,15 +43,29 @@ export function homeTrust(home = homedir(), platform: NodeJS.Platform = process.
 }
 
 const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
-/** Write beside the file, then rename over it: a reader never sees half a file. Windows refuses the rename while another
- *  process holds the file open for a moment (a running agent saving its config): retried, then the error. */
-function replaceFile(file: string, text: string) {
-  const tmp = `${file}.cb-trust-${process.pid}.tmp`;
-  writeFileSync(tmp, text);
-  for (let i = 1; ; i++) {
-    try { renameSync(tmp, file); return; } catch (e) {
-      if (i >= 10 || !['EPERM', 'EBUSY', 'EACCES'].includes((e as NodeJS.ErrnoException).code ?? '')) { rmSync(tmp, { force: true }); throw e; }
-      sleep(100);
+/** Edit a config file another program also writes (a running Claude rewrites ~/.claude.json often): edit what is there,
+ *  write it beside the file with the file's own mode (0600 for ~/.claude.json: it holds sign-in data), read the file
+ *  again and start over if it changed meanwhile, then rename over it, so a reader never sees half a file and a save made
+ *  during the edit is not lost. A symlinked dotfile is followed: the target is replaced, the link kept. Windows refuses
+ *  the rename while another process holds the file open for a moment: retried, then the error. Returns the text written
+ *  (the same text: nothing written). */
+export function editFile(file: string, edit: (text: string) => string): string {
+  const real = realpathSync(file), tmp = `${real}.cb-trust-${process.pid}.tmp`;
+  for (let attempt = 1; ; attempt++) {
+    const before = readFileSync(real, 'utf8'), after = edit(before);
+    if (after === before) return before;
+    rmSync(tmp, { force: true });
+    writeFileSync(tmp, after, { mode: statSync(real).mode & 0o777, flag: 'wx' });
+    if (readFileSync(real, 'utf8') !== before) {
+      rmSync(tmp, { force: true });
+      if (attempt >= 5) throw new Error('the file kept changing while it was edited: run cb squad trust again');
+      continue;
+    }
+    for (let i = 1; ; i++) {
+      try { renameSync(tmp, real); return after; } catch (e) {
+        if (i >= 10 || !['EPERM', 'EBUSY', 'EACCES'].includes((e as NodeJS.ErrnoException).code ?? '')) { rmSync(tmp, { force: true }); throw e; }
+        sleep(100);
+      }
     }
   }
 }
@@ -78,17 +92,20 @@ export async function squadTrust(project: string, o: TrustOpts): Promise<string>
     const file = join(home, p.file);
     if (!existsSync(file)) { lines.push(`skip ${agent}: ${file} not found: start ${agent} once on this machine, then run again`); continue; }
     try {
-      const before = readFileSync(file, 'utf8');
-      let text = before;
-      const mine: string[] = []; // only once the file is written: a later path that fails leaves the file as it was
-      for (const path of paths) {
-        const s = p.state(text, path);
-        if (s === 'trusted') mine.push(`already ${agent}: ${path}`);
-        else if (s === 'untrusted') mine.push(`left ${agent}: ${path} is marked untrusted in ${file}: change it there by hand`);
-        else { text = p.add(text, path); mine.push(`${o.dryRun ? 'would add' : 'added'} ${agent}: ${path} (${file})`); }
-      }
-      if (text !== before && !o.dryRun) replaceFile(file, text);
-      lines.push(...mine);
+      let mine: string[] = []; // the last pass's lines: editFile runs the edit again if the file changed meanwhile
+      const edit = (before: string) => {
+        let text = before;
+        mine = [];
+        for (const path of paths) {
+          const s = p.state(text, path);
+          if (s === 'trusted') mine.push(`already ${agent}: ${path}`);
+          else if (s === 'untrusted') mine.push(`left ${agent}: ${path} is marked untrusted in ${file}: change it there by hand`);
+          else { text = p.add(text, path); mine.push(`${o.dryRun ? 'would add' : 'added'} ${agent}: ${path} (${file})`); }
+        }
+        return text;
+      };
+      if (o.dryRun) edit(readFileSync(file, 'utf8')); else editFile(file, edit);
+      lines.push(...mine); // only once the file is written: a path that fails leaves it as it was
     } catch (e) { lines.push(`skip ${agent}: ${file}: ${(e as Error).message}`); }
   }
   for (const k of keys) if (k !== machine && trustTargets(squad, k).agents.length) lines.push(`on ${k}: cb squad trust ${project} --machine ${k}`);

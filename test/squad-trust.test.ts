@@ -2,11 +2,11 @@
 // guard's block. Pure: no database, and never the real home folder (every file is under a temp HOME).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ADAPTERS } from '../cli/agents/index.ts';
-import { squadTrust, trustTargets, homeTrust } from '../cli/squad-trust.ts';
+import { editFile, squadTrust, trustTargets, homeTrust } from '../cli/squad-trust.ts';
 import { squadUp, type Runner } from '../cli/squad-up.ts';
 import { evaluate } from '../kit/guard/core.mjs';
 
@@ -111,6 +111,35 @@ test('squadTrust: writes each agent\'s entry once under the given home; a second
     const again = await squadTrust('demo', { machine: 'pc', home: h, platform: 'win32', env: {}, callFn: call });
     assert.match(again, /already claude: C:\/w\/demo/);
     assert.doesNotMatch(again, /added/);
+  } finally { rmSync(h, { recursive: true, force: true }); }
+});
+
+test('editFile: a save made during the edit is kept (the edit runs again on it); no temp file is left', () => {
+  const h = home();
+  try {
+    const f = join(h, 'c.json');
+    writeFileSync(f, 'a');
+    let n = 0;
+    const out = editFile(f, (t) => { if (++n === 1) writeFileSync(f, 'a+other'); return t + '!'; });
+    assert.equal(n, 2);
+    assert.equal(out, 'a+other!');
+    assert.equal(readFileSync(f, 'utf8'), 'a+other!');
+    assert.deepEqual(readdirSync(h), ['c.json']);
+    assert.equal(editFile(f, (t) => t), 'a+other!'); // nothing to change: nothing written
+  } finally { rmSync(h, { recursive: true, force: true }); }
+});
+
+test('editFile: keeps the file mode (0600 ~/.claude.json) and the link of a symlinked dotfile', { skip: process.platform === 'win32' }, () => {
+  const h = home();
+  try {
+    const target = join(h, 'real.json'), link = join(h, 'link.json');
+    writeFileSync(target, '{}');
+    chmodSync(target, 0o600);
+    symlinkSync(target, link);
+    editFile(link, () => '{"a":1}');
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+    assert.equal(readFileSync(target, 'utf8'), '{"a":1}');
+    assert.ok(readdirSync(h).includes('link.json') && readFileSync(link, 'utf8') === '{"a":1}');
   } finally { rmSync(h, { recursive: true, force: true }); }
 });
 
