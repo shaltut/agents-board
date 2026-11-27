@@ -239,6 +239,7 @@ function printBrief(b: any) {
     console.log(`${name} (${rows.length})`);
     for (const r of rows) console.log('  ' + fmt(r));
   };
+  if (b.disabled) console.log(`PROJECT DISABLED: ${b.disabled}.`); // #4559: first, before its cards and questions
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
   sec('IN PROGRESS', b.in_progress, withStage);
   // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
@@ -296,7 +297,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
   const projects = async () => (await sql`select p.slug,
       count(t.id) filter (where t.status = 'next')::int as next, count(t.id) filter (where t.status = 'in_progress')::int as doing,
       (select count(*)::int from cb.sessions s where s.project = p.slug and s.last_seen > now() - interval '90 seconds') as live
-    from cb.projects p left join cb.tasks t on t.project = p.slug group by p.slug order by p.slug`)
+    from cb.projects p left join cb.tasks t on t.project = p.slug where p.state = 'enabled' group by p.slug order by p.slug`) // #4559: only projects that get work
     .map((p: any) => `    ${p.slug.padEnd(16)} ${p.next} next, ${p.doing} in progress, ${p.live} sessions live`).join('\n') || '    (none yet: cb help project)';
   const via = o.as ? '--as' : process.env.CB_ACTOR ? '$CB_ACTOR' : row?.project ? 'bound to this pane' : 'not bound'; // the relay's own row (before cb iam) has no project
   const done = () => {
@@ -338,6 +339,16 @@ async function start(): Promise<{ out: string; json: unknown }> {
     `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line({ ...t, status: '' })) : ['  empty']),
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
+  // #4559: the bound project gets no work: that block replaces the next step (Ahmed's asks and answers still come first)
+  const [off] = project ? await sql`select cb._wait_words(${project}) as words`.catch(() => [null]) : [null];
+  if (off?.words) {
+    out.splice(out.length - 1, 1, 'PROJECT DISABLED', `  ${off.words}.`, '', 'NEXT');
+    for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
+    if (qs.some((q: any) => q.status === 'answered')) out.push('  cb pending                      an answer to your question is waiting: act on it, then cb delivered <qid> <you>');
+    out.push(doing ? `  wrap up #${doing.id}: push your work, cb log ${doing.id} "<where it stands>", release any lock, then wait` : '  wait: take no new card; you will be told when it is enabled',
+      '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
+    return done();
+  }
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -662,10 +673,12 @@ async function run(): Promise<unknown> {
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
-      if (!o.json) return { out: `#${id}` };
-      // --json (#4513): what was stored (a project alias resolved, the default status), read only when asked for
-      const [t] = await sql`select project, status, stage from cb.tasks where id = ${Number(id)}`;
-      return { json: { id: Number(id), project: t.project, status: t.status, stage: t.stage } };
+      // --json (#4513): what was stored (a project alias resolved, the default status). #4559: and whether its project gets
+      // work (a disabled one parks the card in its Backlog), so the filer is told
+      const [t] = await sql`select project, status, stage, cb._state_words(project) as words from cb.tasks where id = ${Number(id)}`;
+      const parked = t.words ? `#${id} filed in ${t.project}'s Backlog: ${t.words}; nobody picks it up until Ahmed enables it` : null;
+      if (!o.json) return { out: parked ?? `#${id}` };
+      return { json: { id: Number(id), project: t.project, status: t.status, stage: t.stage, ...(parked ? { disabled: t.words } : {}) } };
     }
     case 'bug': {
       need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual" [--stage build --why "<why>"] [--repo <repo,repo>]');
@@ -677,10 +690,13 @@ async function run(): Promise<unknown> {
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       // orch: one of those told is the project's lead (the lead role, whatever its name; #3746)
-      const [{ project, all, stage, multi, orch }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
+      const [{ project, all, stage, multi, orch, words }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
         t.repos is null and cb._multi_repo(t.project) as multi,
-        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch
+        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch,
+        cb._state_words(t.project) as words
         from cb.tasks t where t.id = ${id}`;
+      // #4559 (Q3020): a disabled project takes the report but parks it, and nobody triages it there (cb.inbox)
+      if (words) return { out: `#${id} bug filed in ${project}'s Backlog: ${words}; nobody picks it up until Ahmed enables it`, json: { id, project, told: [], stage, disabled: words } };
       const told = all.filter((a: string) => a !== actor);
       if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build${multi ? ' --repo <repo,repo>' : ''} --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
@@ -791,7 +807,12 @@ ${body}`, json: pg };
         if (p !== sessionProject) throw new Error(`this session works in ${sessionProject}; ${p}'s work is for ${p}'s sessions. Run: cb next (takes from ${sessionProject})`);
       }
       const rows: any = await callFn('task_claim', { project, actor });
-      if (!rows.length) return { out: 'nothing to claim', json: null };
+      if (!rows.length) {
+        // #4559: a disabled project hands out nothing: say so, and what to do meanwhile. Read only when nothing came, and a
+        // board without the words (a rolled-back schema) still answers
+        const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
+        return { out: w?.words ?? 'nothing to claim', json: null };
+      }
       const t = rows[0];
       const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
       // a part claim (#3703) leaves the card in Next: show the part taken and its status instead

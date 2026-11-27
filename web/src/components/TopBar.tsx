@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAsks, useMemories, useQuestions } from '@/lib/api'
+import { useAsks, useMemories, useProjects, useQuestions } from '@/lib/api'
 import { replyIds } from '@/lib/asks'
 import { headerPages, type Page, type Route } from '@/lib/route'
 import { Kbd } from '@/components/ui/kbd'
@@ -15,7 +15,9 @@ import { GroupMenus, pageLink, tabClass } from './NavMenus'
 
 export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: readonly Page[]; live: 'live' | 'reconnecting'; onSearch: () => void }) {
   const { data: all = [] } = useQuestions(route.project, 'open')
-  const open = all.filter((q) => !q.assigned_to) // questions handed to Cai/Ana aren't waiting on Ahmed
+  // questions handed to Cai/Ana aren't waiting on Ahmed; nor are a disabled project's, until it is enabled (#4559, Q3019)
+  const off = new Set((useProjects().data ?? []).filter((p) => p.state !== 'enabled').map((p) => p.slug))
+  const open = all.filter((q) => !q.assigned_to && !off.has(q.project))
   const { data: mems = [] } = useMemories(route.project)
   const proposed = mems.filter((m) => m.status === 'proposed').length
   useTabLamp(open.length)

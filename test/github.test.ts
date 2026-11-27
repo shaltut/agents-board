@@ -887,3 +887,25 @@ test("what orch's terminal gets for one poll: the grouped message once, framed a
     for (const f of [join(tmpdir(), `cb-relay-${key}.pid`), join(tmpdir(), `cb-relay-${key}.log`), bridgeFiles(key).info, claudeEndpointPath('testbox', pane)]) fs.rmSync(f, { force: true });
   }
 });
+
+test('a disabled project\'s repo is not polled and keeps its checkpoint; enabled again, it catches up from there (#4559, Q3021)', async () => {
+  const { sql, watch } = await board();
+  const f = fakeGh({
+    [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [pr(4, { created_at: at(10), updated_at: at(10) })] : [],
+    [`repos/${R}/issues/comments`]: () => [comment(4, at(11), 'looks good')],
+  });
+  await sql`select cb.project_state('iris', 'disabled', 'ahmed')`;
+  const r = await poll(f, watch);
+  assert.equal(r.ok, true, 'skipped is not failed');
+  assert.deepEqual(f.calls, [], 'GitHub is not asked');
+  assert.equal(await gh.pollAll({ run: f.run, now: NOW, logTask: watch }), true, 'pollAll does not read a skipped repo as down');
+  assert.deepEqual(f.calls, []);
+  const s = await state(sql);
+  assert.equal(s.since, T0, 'the checkpoint stays');
+  assert.equal(s.last_error, null);
+  await sql`select cb.project_state('iris', 'enabled', 'ahmed')`;
+  assert.equal((await poll(f, watch)).ok, true);
+  assert.ok(f.calls.length > 0);
+  assert.equal((await state(sql)).since, NEXT, 'caught up from the checkpoint');
+  assert.equal((await tells(sql)).length, 1);
+});
