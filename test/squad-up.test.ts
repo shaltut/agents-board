@@ -681,8 +681,10 @@ test('launchFor (#4429): a non-claude seat carries the launching machine\'s CB_M
     { CB_ROLE: 'builder', CB_AGENT: 'codex', CB_MCP_GATE_OK: 'codex,agy', CB_PROTECTED_BRANCHES: 'main' });
   assert.deepEqual(Object.keys(launchFor('demo', prot, b3, 'next', { CB_MCP_GATE_OK: 'codex' }).env).at(-1), 'CB_PROTECTED_BRANCHES');
   assert.equal(launchFor('demo', MIXED, agy, 'next', { CB_MCP_GATE_OK: 'agy' }).env.CB_MCP_GATE_OK, 'agy');
-  // never a default: unset, empty or only commas give no key
-  for (const env of [{}, { CB_MCP_GATE_OK: '' }, { CB_MCP_GATE_OK: ' , ' }]) assert.deepEqual(launchFor('demo', MIXED, b3, 'next', env).env, { CB_ROLE: 'builder', CB_AGENT: 'codex' });
+  // agent names only: the restart hint single-quotes the value, so a quote or a command never travels
+  assert.equal(launchFor('demo', MIXED, b3, 'next', { CB_MCP_GATE_OK: "codex,it's; rm -rf ~" }).env.CB_MCP_GATE_OK, 'codex');
+  // never a default: unset, empty, only commas or no agent name give no key
+  for (const env of [{}, { CB_MCP_GATE_OK: '' }, { CB_MCP_GATE_OK: ' , ' }, { CB_MCP_GATE_OK: "it's; rm -rf ~,grok" }]) assert.deepEqual(launchFor('demo', MIXED, b3, 'next', env).env, { CB_ROLE: 'builder', CB_AGENT: 'codex' });
   // a Claude seat: claude has no MCP gate, its launch stays byte-identical
   assert.deepEqual(launchFor('demo', MIXED, b1, 'next', { CB_MCP_GATE_OK: 'codex' }).env, { CB_ROLE: 'builder', CB_AGENT: 'claude' });
   // squad up (planSquad) and the supervisor (supervise-plan) pass no env: this process's is read, so the PC's or the Mac's

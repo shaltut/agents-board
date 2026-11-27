@@ -1,7 +1,7 @@
 // cb squad up: start a project's missing squad sessions through herdr. planSquad is pure (tested);
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
-import { getAdapter, mcpGateOk, type AgentKind } from './agents/index.ts';
+import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
@@ -112,10 +112,11 @@ export function promptCommand(l: { herdr: string | null; name: string; prompt: s
 }
 
 /** #4429: the seat's relay runs getAdapter in the seat's own env, so a non-claude seat carries the launching machine's
- *  CB_MCP_GATE_OK (normalised as mcpGateOk reads it). Unset or empty: nothing, never a default. A Claude seat: nothing
+ *  CB_MCP_GATE_OK (normalised as mcpGateOk reads it, agent names only: the restart hint single-quotes it). Unset, empty or no
+ *  agent name: nothing, never a default. A Claude seat: nothing
  *  (claude has no MCP gate), so its launch stays as it was. */
 export function gateEnv(agent: AgentKind, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const ok = [...mcpGateOk(env)].join(',');
+  const ok = [...mcpGateOk(env)].filter(isAgentKind).join(',');
   return agent !== 'claude' && ok ? { CB_MCP_GATE_OK: ok } : {};
 }
 
