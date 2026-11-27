@@ -553,6 +553,22 @@ test('role rules: hidden pushes, command-running git settings and gh extensions 
       'gh workflow view merge.yml', 'gh repo sync', 'gh repo view o/r', 'gh copilot suggest x', 'gh status', 'gh issue list',
       'gh search prs x', 'echo gh merge 5', 'which gh', 'gh --version', 'gh help', 'gh auth status', 'rg "gh merge" docs']);
   }
+
+  // review before the PR: a launcher with an argument, a filled subcommand with no literal branch, command-running keys
+  // through GIT_CONFIG_*, hidden config path spellings
+  for (const role of ROLES) {
+    blocksByRole(role, ['timeout 30 git $S origin main', 'env -i git p origin main', 'S=push; B=main; git $S origin $B',
+      'git $S origin HEAD', 'git $S --all', 'echo x >> .git/con""fig', 'echo x >> .git/./config',
+      `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='git push origin HEAD:main' git log`]);
+    passes(role, ['echo "git is on main"', 'grep -rn "git lg main" docs', 'cat .git/worktrees/x/config.worktree']);
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ['sudo -u x gh merge 5']);
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, [`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='git commit -am x' git log`,
+      `GIT_CONFIG_PARAMETERS="'core.pager=git commit -am x'" git log`]);
+    passes(role, ['git -c core.fsmonitor=false status', 'git -c credential.helper= fetch']);
+  }
+  passes('builder', ['git subtree push -P x origin feat/x 2>$null']);
 });
 
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {

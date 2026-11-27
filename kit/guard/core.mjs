@@ -527,7 +527,7 @@ export function protectedPush(cmd, list) {
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
   return scanCommands(unbrace(cmd), GIT, (w, i) => {
     const j = gitSub(w, i);
-    if (w[j] !== 'push') return hiddenPush(w, i, j, hit); // #4661 S1: git $S / an alias / subtree push
+    if (w[j] !== 'push') return subtreePush(w, j, hit); // #4661 S1
     const { words, del } = pushArgs(w, j);
     // the shell fills in a $ word: the branch is unknown here. The remote too: an unquoted $R can split into two words
     const filled = words.find((x) => x.includes('$'));
@@ -541,7 +541,7 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  });
+  }) ?? aliasPush(cmd, hit); // #4661 S1: git $S / an alias naming the branch
 }
 
 // The block reason for a protectedPush hit.
@@ -611,11 +611,12 @@ function gitHides(w, i, j, role) {
     if (pos.some((x, k) => ALIAS_KEY.test(x) && pos[k + 1] !== undefined)) return `git config writing an alias or include: ${ALIASES}`;
   }
   if (sub === 'send-pack' || sub === 'http-push') return `git ${sub} pushes past the branch rules: push with git push, ${NAME_IT}`;
+  // #4661 S1: a subcommand the shell fills in can be push (S=push; git $S origin $B), for every role
+  if ((isFilled(sub) || /[$`%]/.test(sub)) && isCommandWord(w, i)) return `git ${sub}: a subcommand the shell fills in can push past the branch rules: name the subcommand`;
   if (!READ_ONLY_ROLES.includes(role)) return null;
   if (RO_GIT_WRITES.has(sub) || (sub === 'hash-object' && w.slice(j + 1).some((x) => /^-[^-]*w/.test(x)))) return `git ${sub}: ${readsOnly(role)}`;
   // git as the command: first in its segment, or after assignments, launchers (sudo git ci) and $( (x=$(git ci))
-  const atCommand = w.slice(0, i).every((x) => ASSIGNMENT.test(x) || LAUNCHERS.has(cmdName(x)) || SHELL_KEYWORD.has(x)) || /(?:^|=)\$$/.test(w[i - 1] ?? '');
-  if (atCommand && !GIT_COMMANDS.has(sub.toLowerCase())) {
+  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub.toLowerCase())) {
     return `git ${sub} is not a git command (an alias, or a word the shell fills in): a ${role} runs git subcommands by their own names; ${readsOnly(role)}`;
   }
   return null;
@@ -672,8 +673,9 @@ function ghApiWrites(w, j) {
 }
 
 // #4661 (PR 107 review S1, L1, L2): more ways past the push, commit and merge rules.
-// - S1, every role: a git call whose subcommand the shell fills in (S=push; git $S origin main) or that is no git command
-//   (an alias already in a config file: git p origin main) and that names main/master or a protected branch later; git
+// - S1, every role: a git call whose subcommand the shell fills in (S=push; git $S origin $B: any, branch named or not)
+//   or that is no git command (an alias already in a config file: git p origin main) and names main/master or a
+//   protected branch later (read where a shell runs it, so echo "git is on main" is text); git
 //   subtree push to one; and any write to a git config file (.git/config, a worktree's config, ~/.gitconfig,
 //   ~/.config/git/config, /etc/gitconfig), which can add an alias. A git setting or variable that runs a command which
 //   pushes (git -c core.pager='git push origin HEAD:main' log) too.
@@ -688,33 +690,55 @@ function ghApiWrites(w, j) {
 const unbrace = (t) => String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
 // word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p))
 const isCommandWord = (w, i) => w.slice(0, i).every((x) => ASSIGNMENT.test(x) || LAUNCHERS.has(cmdName(x)) || SHELL_KEYWORD.has(x))
-  || /(?:^|=)\$$/.test(w[i - 1] ?? '');
-// protectedPush's test for a call that is not git push: the protected branch it names, or null
-function hiddenPush(w, i, j, hit) {
-  const sub = w[j];
-  if (sub === undefined) return null;
-  let from;
-  if (sub === 'subtree') {
-    from = w.indexOf('push', j + 1) + 1;
-    if (from === 0) return null;
-    const filled = w.slice(from).find((x) => x.includes('$'));
-    if (filled) return filled;
-  } else if ((isFilled(sub) || /[$`%]/.test(sub) || !GIT_COMMANDS.has(sub.toLowerCase())) && isCommandWord(w, i)) from = j + 1;
-  else return null;
-  for (const x of stopArgs(w.slice(from))) {
-    if (x.startsWith('-')) continue;
-    const to = destination(x, false).replace(/^(?:refs\/)?heads\//, '');
-    if (hit(to)) return to;
-  }
-  return null;
+  || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).some((x) => LAUNCHERS.has(cmdName(x))); // timeout 30 git, sudo -u x gh
+// the protected branch one of words names (src:dst's dst, +, refs/heads/ dropped), or null
+const namesBranch = (words, hit) => words.filter((x) => !x.startsWith('-'))
+  .map((x) => destination(x, false).replace(/^(?:refs\/)?heads\//, '')).find(hit) ?? null;
+// protectedPush's test for git subtree push (in the same every-quoted-string scan as git push): the protected branch, or
+// a word the shell fills in
+function subtreePush(w, j, hit) {
+  if (w[j] !== 'subtree') return null;
+  const from = w.indexOf('push', j + 1) + 1;
+  if (from === 0) return null;
+  const words = stopArgs(w.slice(from)); // a redirection is no branch (2>$null)
+  return words.find((x) => x.includes('$')) ?? namesBranch(words, hit);
+}
+// A git call where git is the command, whose subcommand the shell fills in or is no git command (an alias), naming a
+// protected branch later. Read where a shell runs it (runnerArg), not in every quoted string: echo "git is on main" is text.
+function aliasPush(cmd, hit) {
+  return scanCommands(unbrace(cmd), GIT, (w, i) => {
+    const j = gitSub(w, i), sub = w[j];
+    if (sub === undefined || !isCommandWord(w, i)) return null;
+    if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
+    return namesBranch(stopArgs(w.slice(j + 1)), hit);
+  }, runnerArg);
 }
 const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
 const SWITCH = /^(?:true|false|yes|no|on|off|[01])?$/i;
 // a config key whose value git runs as a command (alias and include are gitHides' own)
+// (a switch or an empty value runs nothing: core.fsmonitor=false, credential.helper= clears the helpers)
 function keyRuns(key, value, isEnv) {
-  if (/^core\.pager$/i.test(key)) return isEnv || !PAGER_OK.test(value);
-  if (/^pager\./i.test(key)) return isEnv || !(PAGER_OK.test(value) || SWITCH.test(value));
+  if (!isEnv && SWITCH.test(value)) return false;
+  if (/^core\.pager$/i.test(key) || /^pager\./i.test(key)) return isEnv || !PAGER_OK.test(value);
   return !ALIAS_KEY.test(key) && (GIT_RUNS_KEY.test(key) || /\.driver$/i.test(key));
+}
+// GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs and GIT_CONFIG_PARAMETERS ('key=value' or 'key'='value', space apart)
+// among the assignments before git: [key, value] each
+function configEnvPairs(before) {
+  const vars = new Map();
+  for (const x of before) {
+    const m = /^(GIT_CONFIG_(?:KEY|VALUE)_\d+|GIT_CONFIG_PARAMETERS)=(.*)$/is.exec(x);
+    if (m) vars.set(m[1].toUpperCase(), m[2]);
+  }
+  const out = [];
+  for (const [k, v] of vars) {
+    const n = /^GIT_CONFIG_KEY_(\d+)$/.exec(k);
+    if (n) out.push([v, vars.get(`GIT_CONFIG_VALUE_${n[1]}`) ?? '']);
+  }
+  for (const m of (vars.get('GIT_CONFIG_PARAMETERS') ?? '').matchAll(/'([^'=]*)(?:=([^']*)'|'(?:='([^']*)')?)/g)) {
+    out.push([m[1], m[2] ?? m[3] ?? '']);
+  }
+  return out;
 }
 // git's words w, git at i, its subcommand at j: why a setting or variable that runs a command (or a read-only role's
 // subtree write) may not run, or null
@@ -724,6 +748,7 @@ function gitRuns(w, i, j, role) {
     const m = RUNS_ENV.exec(w[k]);
     if (m && !(/PAGER$/i.test(m[1]) && PAGER_OK.test(m[2]))) found.push([m[1], m[2]]);
   }
+  for (const [key, value] of configEnvPairs(w.slice(0, i))) if (keyRuns(key, value, false)) found.push([key, value]);
   for (let k = i + 1; k < j; k++) {
     const o = w[k];
     if (/^--exec-path=/i.test(o)) found.push(['--exec-path', o.slice(12)]);
@@ -740,18 +765,21 @@ function gitRuns(w, i, j, role) {
   const write = w[j] === 'subtree' && w.slice(j + 1).find((x) => /^(?:push|add|merge|pull)$/.test(x));
   return write ? `git subtree ${write}: ${readsOnly(role)}` : null;
 }
-// a git config file as a path, any separator
-const GIT_CONFIG_FILE = /(?:^|[\s"'=:(\\/~<>])(?:\.git[\\/]+(?:(?:worktrees|modules)[\\/]+[^\s"';&|)>]+[\\/]+)?config(?:\.worktree)?|\.gitconfig|\.config[\\/]+git[\\/]+config|gitconfig)(?=[\s"';&|)>`]|$)/i;
+// a git config file as a path, any separator (one worktree or module folder name, with no separator in it, so a long
+// path is read once from each start)
+const GIT_CONFIG_FILE = /(?:^|[\s"'=:(\\/~<>])(?:\.git[\\/]+(?:(?:worktrees|modules)[\\/]+[^\s"';&|)>\\/]+[\\/]+)?config(?:\.worktree)?|\.gitconfig|\.config[\\/]+git[\\/]+config|gitconfig)(?=[\s"';&|)>`]|$)/i;
 const GIT_CONFIG_WRITE = 'a write to a git config file (.git/config, ~/.gitconfig and the like) can add an alias or include that renames a git subcommand past the commit, push and merge rules: change a setting with git config (never alias.* or include.*); one that needs the file itself: cb ask';
 // per segment, like the fence: the segment names a git config file and redirects into it or has a writer (not git: git
 // config's own writes are gitHides'); the joined text is judged as well as the raw lines (rawAndJoined)
 function gitConfigFileWrite(raw) { return rawAndJoined(gitConfigFileWriteOne)(raw); }
 function gitConfigFileWriteOne(command) {
-  if (!/config/i.test(command)) return null;
+  if (!/config/i.test(unhide(command))) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
+  // the fence's spellings of a path: quote pairs and a backslash inside a word, ./ and seg/../ folded (.git/con""fig)
+  const named = (t) => forms(t).some((f) => GIT_CONFIG_FILE.test(f));
   for (const seg of text.match(SEGMENTS) ?? []) {
-    if (!GIT_CONFIG_FILE.test(seg)) continue;
-    for (const m of seg.matchAll(REDIRECT_TARGET)) if (GIT_CONFIG_FILE.test(` ${m[1] ?? ''}`)) return GIT_CONFIG_WRITE;
+    if (!named(seg)) continue;
+    for (const m of seg.matchAll(REDIRECT_TARGET)) if (named(` ${m[1] ?? ''}`)) return GIT_CONFIG_WRITE;
     if (FENCE_WRITER.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg))) return GIT_CONFIG_WRITE;
   }
   return null;
