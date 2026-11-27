@@ -16,8 +16,8 @@ function cleanEnv(extra: Record<string, string> = {}) {
   for (const k of Object.keys(env)) if (CB_ENV.includes(k.toUpperCase())) delete env[k];
   return { ...env, ...extra };
 }
-/** A board seat's env: CB_AGENT is always set by cb squad up. */
-const seat = (extra: Record<string, string> = {}) => ({ CB_AGENT: 'agy', ...extra });
+/** A board seat's env: cb squad up always sets CB_AGENT and CB_ROLE. */
+const seat = (extra: Record<string, string> = {}) => ({ CB_AGENT: 'agy', CB_ROLE: 'builder', ...extra });
 type Out = { decision?: string; reason?: string };
 /** One real hook run: exit 0 and JSON on stdout. An empty or unparsable stdout fails the test (agy would deny it). */
 function runHook(input: string, env: Record<string, string> = seat(), file = SHIM): Out & { stdout: string } {
@@ -54,15 +54,24 @@ test('CB_PROTECTED_BRANCHES is read from the env', () => {
   assert.equal(runHook(shell('git push origin release/1')).decision, 'allow');
 });
 
-test('a pane with neither CB_ROLE nor CB_AGENT is denied, naming the board guard; either one is enough', () => {
+test('a pane with neither CB_ROLE nor CB_AGENT is denied, naming the board guard; CB_ROLE is enough', () => {
   for (const raw of [shell('ls'), tool('read_file', {}), tool('write_file')]) {
     const r = runHook(raw, {});
     assert.equal(r.decision, 'deny');
     assert.match(r.reason ?? '', /not a board seat.*board guard/);
   }
   assert.equal(runHook(shell('ls'), { CB_ROLE: 'builder' }).decision, 'allow');
-  assert.equal(runHook(shell('ls'), { CB_AGENT: 'agy' }).decision, 'allow');
   assert.equal(runHook(shell('ls'), { CB_AGENT: '  ' }).decision, 'deny');
+});
+
+test('#4392: CB_AGENT without CB_ROLE is denied for every tool (no role means no secret or fence rule in core)', () => {
+  for (const raw of [shell('ls'), shell('cat .env'), tool('read_file', { TargetFile: 'src/a.ts' }, { cwd: ws, workspacePaths: [ws] }), tool('write_file', { TargetFile: 'src/a.ts' }, { cwd: ws, workspacePaths: [ws] })]) {
+    for (const env of [{ CB_AGENT: 'agy' }, { CB_AGENT: 'agy', CB_ROLE: '  ' }]) {
+      const r = runAgyShim(raw, env);
+      assert.equal(r.decision, 'deny', raw);
+      assert.match(r.reason ?? '', /CB_ROLE is not set/);
+    }
+  }
 });
 
 test('read-only roles are denied every edit tool; a read tool is allowed to any role', () => {
@@ -210,6 +219,25 @@ test('read confinement: a symlink inside the workspace that points out is denied
   const r = read({ TargetFile: 'rlink/secret.txt' });
   assert.equal(r.decision, 'deny');
   assert.match(r.reason ?? '', /reading outside the workspace/);
+});
+
+test('#4392: a secret file is never read or edited natively, by name or through a link; templates and look-alikes pass', (t) => {
+  for (const f of ['.env', '.env.local', 'src/.env.production', join(ws, '.env'), 'id_rsa', 'certs/server.key', '.npmrc', 'deploy/.ENV']) {
+    for (const name of [...READ_TOOLS, 'write_file', 'edit_file']) {
+      const r = READ_TOOLS.includes(name) ? read({ TargetFile: f }, undefined, name, 'builder') : edit({ TargetFile: f }, undefined, name);
+      assert.equal(r.decision, 'deny', `${name} ${f}`);
+      assert.match(r.reason ?? '', /secret file/, `${name} ${f}`);
+    }
+  }
+  assert.equal(read({ TargetFile: 'src/a.ts', path: '.env' }).decision, 'deny'); // every given path arg is judged
+  for (const f of ['.env.example', '.env.d.ts', 'src/env.ts', 'docs/keys.md']) {
+    assert.deepEqual(read({ TargetFile: f }), { decision: 'allow' }, f);
+    assert.deepEqual(edit({ TargetFile: f }), { decision: 'allow' }, f);
+  }
+  writeFileSync(join(ws, '.env'), 'X=1\n');
+  try { symlinkSync(join(ws, '.env'), join(ws, 'notes.txt'), 'file'); } catch { t.skip('no symlink right on this machine'); return; }
+  assert.match(read({ TargetFile: 'notes.txt' }).reason ?? '', /secret file/);
+  assert.match(edit({ TargetFile: 'notes.txt' }).reason ?? '', /secret file/);
 });
 
 test('deny segments fold case on every platform: .GIT and .Agents', () => {
