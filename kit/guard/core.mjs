@@ -573,6 +573,102 @@ function pastOpts(w, j, valueOpt) {
   return j;
 }
 
+// #4638 (PR 99 review): spellings past the commit, push and merge rules, which read git's subcommand and gh pr merge.
+// An alias renames a subcommand, so git -c alias.c=commit c commits and git -c alias.p=push p origin main pushes main
+// unseen: every role, an alias or include (a file that can hold one) set for the call (-c, --config-env, GIT_CONFIG_*
+// before git) or written to git config is blocked. send-pack and http-push push past git push's branch rules. A read-only
+// role also writes no commit or ref by plumbing (commit-tree, update-ref, mktree, mktag, write-tree, fast-import,
+// hash-object -w), and runs git only by its subcommands' own names where git is the command: an alias from a config
+// file the guard cannot see (git ci) or a subcommand the shell fills in (git $SUB) blocks.
+const ALIAS_KEY = /^(?:alias|include|includeif)\./i;
+const CONFIG_NULL = /^(?:\/dev\/null|nul|\$null)$/i;
+const RO_GIT_WRITES = new Set(['commit', 'commit-tree', 'update-ref', 'mktree', 'mktag', 'write-tree', 'fast-import']);
+const ALIASES = 'an alias renames a git subcommand past the commit, push and merge rules: run git with the subcommand\'s own name';
+// an assignment before git that sets an alias or include for the call: GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS naming
+// one, or GIT_CONFIG / _GLOBAL / _SYSTEM pointing at a config file (other than the null device), which can hold one
+function configEnvAlias(x) {
+  const m = /^(GIT_CONFIG\w*)=(.*)$/is.exec(x);
+  if (!m) return false;
+  const k = m[1].toUpperCase();
+  if (k === 'GIT_CONFIG_PARAMETERS' || /^GIT_CONFIG_KEY_\d+$/.test(k)) return /(?:^|['"\s])(?:alias|include|includeif)\./i.test(m[2]);
+  return (k === 'GIT_CONFIG' || k === 'GIT_CONFIG_GLOBAL' || k === 'GIT_CONFIG_SYSTEM') && !CONFIG_NULL.test(m[2]);
+}
+// git's words w, git at i, its subcommand at j: the reason this call gets past the rules, or null
+function gitHides(w, i, j, role) {
+  for (let k = 0; k < i; k++) if (configEnvAlias(w[k])) return `${w[k].split('=')[0]} before git: ${ALIASES}`;
+  for (let k = i + 1; k < j; k++) {
+    const o = w[k];
+    const cfg = o === '-c' || o === '--config-env' ? (w[k + 1] ?? '') : /^--config-env=/.test(o) ? o.slice(13) : null;
+    if (cfg !== null && ALIAS_KEY.test(cfg)) return `git ${o.split('=')[0]} ${cfg.split('=')[0]}: ${ALIASES}`;
+  }
+  const sub = w[j];
+  if (sub === undefined) return null;
+  if (sub === 'config') {
+    // git config [--global] alias.x <value>, git config set alias.x <value>: a key followed by a value is a write
+    const pos = stopArgs(w.slice(j + 1)).filter((x) => !x.startsWith('-')); // to a redirection: --get alias.c 2>/dev/null reads
+    if (pos.some((x, k) => ALIAS_KEY.test(x) && pos[k + 1] !== undefined)) return `git config writing an alias or include: ${ALIASES}`;
+  }
+  if (sub === 'send-pack' || sub === 'http-push') return `git ${sub} pushes past the branch rules: push with git push, ${NAME_IT}`;
+  if (!READ_ONLY_ROLES.includes(role)) return null;
+  if (RO_GIT_WRITES.has(sub) || (sub === 'hash-object' && w.slice(j + 1).some((x) => /^-[^-]*w/.test(x)))) return `git ${sub}: ${readsOnly(role)}`;
+  // git as the command: first in its segment, or after assignments, launchers (sudo git ci) and $( (x=$(git ci))
+  const atCommand = w.slice(0, i).every((x) => ASSIGNMENT.test(x) || LAUNCHERS.has(cmdName(x)) || SHELL_KEYWORD.has(x)) || /(?:^|=)\$$/.test(w[i - 1] ?? '');
+  if (atCommand && !GIT_COMMANDS.has(sub.toLowerCase())) {
+    return `git ${sub} is not a git command (an alias, or a word the shell fills in): a ${role} runs git subcommands by their own names; ${readsOnly(role)}`;
+  }
+  return null;
+}
+
+// gh api (#4638): a call that writes, by an explicit method other than GET or HEAD or by a body (-f, -F, --field,
+// --raw-field, --input make gh send POST), merges (pulls/<n>/merge, merges), moves refs (git/refs) or commits (contents,
+// update-branch) past gh pr merge: every role but the lead. A graphql query given inline with no mutation in it is a read.
+// gh alias set / import renames a command (gh m for pr merge) the same way.
+// gh api's options: the long ones taking a value, the boolean ones; a short flag bundles as pflag reads it (-iX PUT,
+// -iXPUT, -X=PUT). An option it does not know is judged a write (fail closed: it may take a value and shift the endpoint).
+const GH_API_LONG_VALUE = new Set(['--header', '--jq', '--template', '--hostname', '--cache', '--preview']);
+const GH_API_LONG_BOOL = new Set(['--paginate', '--slurp', '--include', '--silent', '--verbose', '--allow-escape-sequences', '--help']);
+const GH_WRITES = 'gh api that writes (a method other than GET, or -f/-F/--input fields, which make gh POST) can merge, move a branch or commit past the merge rule: read with GET, comment with gh pr comment or gh pr review, and ' + LEAD_MERGES;
+function ghApiWrites(w, j) {
+  let method = null, body = false, unseen = false, endpoint = null;
+  const fields = [];
+  for (let k = j + 1; k < w.length; k++) {
+    const x = w[k];
+    if (/^\d*[<>]/.test(x)) continue; // a redirection
+    if (x.startsWith('--')) {
+      const eq = x.indexOf('='), name = eq < 0 ? x : x.slice(0, eq);
+      const val = () => (eq < 0 ? (w[++k] ?? '') : x.slice(eq + 1));
+      if (name === '--method') method = val();
+      else if (name === '--field' || name === '--raw-field') { body = true; fields.push(val()); }
+      else if (name === '--input') { body = true; unseen = true; val(); }
+      else if (GH_API_LONG_VALUE.has(name)) val();
+      else if (!GH_API_LONG_BOOL.has(name)) return true;
+      continue;
+    }
+    if (x.startsWith('-') && x.length > 1) {
+      for (let c = 1; c < x.length; c++) {
+        const letter = x[c];
+        if (letter === 'i') continue; // --include, the one boolean short flag
+        const rest = x.slice(c + 1).replace(/^=/, '');
+        const val = rest !== '' ? rest : (w[++k] ?? '');
+        if (letter === 'X') method = val;
+        else if (letter === 'f' || letter === 'F') { body = true; fields.push(val); }
+        else if (!'Hqtp'.includes(letter)) return true;
+        break;
+      }
+      continue;
+    }
+    endpoint ??= x;
+  }
+  if (/^(?:https?:\/\/[^/]+(?:\/api)?)?\/?graphql$/i.test(endpoint ?? '')) {
+    // a read only with its query readable here: given inline (not a file or stdin), not a value the shell fills in (no
+    // { in it), and no mutation anywhere
+    const query = fields.filter((f) => /^query=/i.test(f));
+    return unseen || query.length === 0 || fields.some((f) => /=@/.test(f)) || query.some((f) => !f.includes('{'))
+      || w.slice(j + 1).some((x) => /\bmutation\b/i.test(x));
+  }
+  return method !== null ? !/^(?:get|head)$/i.test(method) : body;
+}
+
 // Secret files (#4347). What a seat reads goes to the model provider, and the board holds client work, so no role
 // reads a secret file into its context: .env and its real variants (not .env.example/sample/template/dist, nor source
 // files named after it: .env.d.ts, .env.md), private keys and keystores, .pgpass, .netrc, git, npm, cloud and container
@@ -1061,7 +1157,8 @@ export function checkRole(command, role) {
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);
-    if (readOnly && w[j] === 'commit') return `git commit: ${readsOnly(role)}`;
+    const hides = gitHides(w, i, j, role); // #4638: aliases, push and commit plumbing, a read-only role's git ci
+    if (hides) return hides;
     if (w[j] !== 'push') return null;
     if (readOnly) return `git push: ${readsOnly(role)}`;
     const { words, opts, del } = pushArgs(w, j);
@@ -1078,8 +1175,14 @@ export function checkRole(command, role) {
   const branch = protectedPush(command, ['main', 'master']);
   if (branch) return pushReason(branch);
   if (role === 'lead') return null;
-  const gh = scanCommands(command, GH, (w, i) => {
+  // #4638: a brace group with no space in it outside quotes (gh's {owner}, {repo}, {branch}; ${OWNER}, ${env:X}) read
+  // without its braces, or the braces end the segment and hide the rest of a gh api call (gh api
+  // repos/{owner}/{repo}/pulls/5/merge -X PUT)
+  const unbraced = String(command ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'), (m, inner) => inner ?? m);
+  const gh = scanCommands(unbraced, GH, (w, i) => {
     let j = pastOpts(w, i + 1, GH_OPT_ARG);
+    if (w[j] === 'api') return ghApiWrites(w, j) ? GH_WRITES : null; // #4638
+    if (w[j] === 'alias' && /^(?:set|import)$/.test(w[pastOpts(w, j + 1, GH_OPT_ARG)] ?? '')) return `gh alias ${w[pastOpts(w, j + 1, GH_OPT_ARG)]} renames a gh command past the merge rule: ${LEAD_MERGES}`;
     if (w[j] !== 'pr') return null;
     j = pastOpts(w, j + 1, GH_OPT_ARG);
     return w[j] === 'merge' ? `gh pr merge: ${LEAD_MERGES}` : null;
