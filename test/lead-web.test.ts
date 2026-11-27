@@ -6,8 +6,10 @@ import { freshDb } from './helpers.ts';
 import { callFn } from '../server/rpc.ts';
 import { defaultRecipient } from '../web/src/lib/asks.ts';
 
+const { app } = await import('../server/main.ts');
+const { sql: serverSql } = await import('../server/db.ts');
 const clients: any[] = [];
-after(() => Promise.all(clients.map((c) => c.end())));
+after(() => Promise.all([...clients.map((c) => c.end()), serverSql.end()]));
 
 test('sessions_overview: lead is true for the lead-role session whatever its name, false for an orch@ name in another role', async () => {
   const sql = await freshDb(); clients.push(sql);
@@ -29,4 +31,15 @@ test('defaultRecipient: the project\'s lead by role, a live one first; none: nob
   assert.equal(defaultRecipient(s.slice(0, 2), 'zed'), 'QO@old', 'a quiet lead beats a live orch@ name in another role');
   assert.equal(defaultRecipient([row('orch@pc', 'zed', true, false)], 'zed'), '', 'no lead: Ahmed picks');
   assert.equal(defaultRecipient(s, undefined), '');
+});
+
+test('GET /api/sessions carries lead: the field the ask box and the huddle dialog read', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('zed')`;
+  await sql`select cb.iam('pc', 'p1', 'QO@pc', 'zed', 'lead')`;
+  await sql`select cb.iam('pc', 'p2', 'orch@pc', 'zed', 'builder')`;
+  const r = await app.request('/api/sessions?project=zed', { headers: { host: 'localhost:4747' } });
+  assert.equal(r.status, 200);
+  const rows = await r.json() as any[];
+  assert.equal(defaultRecipient(rows, 'zed'), 'QO@pc');
 });
