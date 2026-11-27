@@ -325,6 +325,20 @@ dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       #
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
 lock at once. Removing someone, or a new link for a member, is on the Users page only.
 
+## GitHub watch: Ahmed's own login (#3221)
+
+The lead's relay holds routine notices up to 10 minutes; a PR, comment, review or commit by Ahmed on a watched repo goes
+through at once (with the rest of that poll's message). The watch knows which login is his only from the `github-owner` setting (a JSON string). None is
+set by default, and then nothing is marked urgent. It is never taken from gh's own login: the agents post under it.
+Ahmed sets it once (not a secret, but keep it out of cards, pages and this repo):
+
+```bash
+dc exec db psql -U cb -d claude_board -c "insert into cb.settings (key, value) values ('github-owner', to_jsonb('<your GitHub login>'::text)) on conflict (key) do update set value = excluded.value"
+dc exec db psql -U cb -d claude_board -c "delete from cb.settings where key = 'github-owner'"   # back to none
+```
+
+The next poll (within 3 minutes) uses it; case does not matter. Failed CI runs are never marked, whoever pushed.
+
 ## Secrets
 
 All in `deploy/.env` (mode 600). After changing one: `dc up -d` (recreates what changed).

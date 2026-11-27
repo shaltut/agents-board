@@ -295,6 +295,33 @@ test('muted logins (Ahmed: shaltut, his own workers): what they open, say or com
   assert.deepEqual((await state(sql)).prs, {});
 });
 
+test("a line by the login set as Ahmed's (github-owner, none by default) is marked urgent; anyone else's is not (#3221 review M4)", async () => {
+  const urgentOf = async (who: string, owner: string | null = 'Shaltut') => {
+    const { sql, watch } = await board();
+    if (owner) await sql`insert into cb.settings (key, value) values ('github-owner', ${sql.json(owner)})`;
+    const f = fakeGh({ [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [pr(30, { title: 'Rulings' })] : [],
+                       [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', who, 'OWNER')] });
+    await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch });
+    assert.ok(!f.calls.some((c) => !String(c).startsWith('repos/')), 'gh is never asked who it is');
+    const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github' order by id`;
+    assert.equal(rows.length, 1);
+    assert.doesNotMatch(rows[0].summary, /\u0001/, 'the mark never reaches the text');
+    assert.match(rows[0].summary, new RegExp(`^\\[GitHub · untrusted\\] widgets: 1 update\\n  PR #30 "Rulings" → card #2: 1 comment by ${who}\\n`));
+    return rows[0].u;
+  };
+  assert.equal(await urgentOf('shaltut'), 'true', 'his login, case-blind');
+  assert.equal(await urgentOf('dev1'), null, 'anyone else: a routine notice');
+  assert.equal(await urgentOf('shaltut', null), null, 'no login set (the default): nothing is marked, as on main');
+  // his login muted: his comment is dropped; a failed run he pushed is GitHub's report, kept, and not his words
+  const { sql, watch } = await board();
+  await sql`insert into cb.settings (key, value) values ('github-muted', ${sql.json(['shaltut'])}), ('github-owner', ${sql.json('shaltut')})`;
+  const f = fakeGh({ [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', 'shaltut', 'OWNER')],
+                     [`repos/${R}/actions/runs`]: () => ({ pages: [{ total_count: 1, workflow_runs: [run({ name: 'Deploy', actor: { login: 'shaltut' } })] }] }) });
+  await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch });
+  const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github'`;
+  assert.deepEqual(rows.map((r: any) => [r.summary.split('\n')[1], r.u]), [['  branch "main": 1 CI failure by shaltut', null]]);
+});
+
 
 test('a card per PR: created once, reused, closed on merge or close with a note saying which', async () => {
   const { sql, watch } = await board();
@@ -832,6 +859,10 @@ test("what orch's terminal gets for one poll: the grouped message once, framed a
       [`repos/${R}/issues/comments`]: () => [comment(20, at(5), 'secret comment text')],
     });
     await poll(f, watch);
+    // a GitHub line waits up to 10 minutes for something important (#3221): end the window on the board's clock
+    for (let i = 0; i < 50 && !(await sql`select 1 from cb.sessions where pane = ${pane} and hold_at is not null`).length; i++) await new Promise((r) => setTimeout(r, 100));
+    await sql`update cb.sessions set hold_at = now() - interval '11 minutes' where pane = ${pane}`;
+    await sql`select pg_notify('cb', 'test')`;
     for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
     await new Promise((r) => setTimeout(r, 800)); // nothing more follows
     assert.equal(inbox.got.length, 1, JSON.stringify(inbox.got));
