@@ -5,7 +5,7 @@ import { Guest } from '@/views/Guest'
 import { Login } from '@/views/Login'
 import { useLive } from '@/lib/live'
 import { digitView, go, isOwner, openPage, pageOf, useRoute, visiblePages, type Route, type View } from '@/lib/route'
-import { chord, CHORD_MS, shortcutsOff } from '@/lib/keys'
+import { chord, CHORD_MS, keyName, shortcutsOff } from '@/lib/keys'
 import { TopBar } from '@/components/TopBar'
 import { CommandMenu } from '@/components/CommandMenu'
 import { GoHint } from '@/components/NavMenus'
@@ -67,21 +67,23 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setMenu((m) => !m); return }
+      if ((e.ctrlKey || e.metaKey) && keyName({ key: e.key, code: e.code })?.toLowerCase() === 'k') { e.preventDefault(); setMenu((m) => !m); return }
       const k = keys.current
       if (shortcutsOff(e.target as Element | null) || e.ctrlKey || e.metaKey || e.altKey) { k.since = null; setHint(false); return }
-      const c = chord(k.since, e.key, Date.now(), k.pages)
+      const key = keyName(e) // null: auto-repeat; a non-Latin layout reads the physical key
+      if (key === null) return
+      const c = chord(k.since, key, Date.now(), k.pages)
       k.since = c.since
       setHint(c.since !== null)
       if (c.used) {
-        if (e.key !== 'Escape') e.preventDefault() // Esc still reaches an open dialog
+        if (key !== 'Escape') e.preventDefault() // Esc still reaches an open dialog
         if (c.view) openPage(c.view)
         return
       }
-      const view = digitView(e.key, k.pages) // 1-9 and 0: the same pages as before the menus
+      const view = digitView(key, k.pages) // 1-9 and 0: the same pages as before the menus
       if (view) openPage(view)
-      else if (e.key === 'c') { e.preventDefault(); setNewTask(true) }
-      else if (e.key === '/') { e.preventDefault(); setMenu(true) }
+      else if (key === 'c') { e.preventDefault(); setNewTask(true) }
+      else if (key === '/') { e.preventDefault(); setMenu(true) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

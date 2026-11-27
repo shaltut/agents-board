@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PAGES, GROUPS, digitView, headerPages, isOwner, navGroups, pageOf, parse, visiblePages, type View } from '../web/src/lib/route.ts';
-import { CHORD_MS, chord } from '../web/src/lib/keys.ts';
+import { CHORD_MS, chord, keyName } from '../web/src/lib/keys.ts';
 
 const all = () => true; // every page treated as built, so the owner filter is what is tested
 const admin = (name: string) => ({ role: 'admin' as const, user: { name } });
@@ -79,4 +79,24 @@ test('g then a letter: goes within the time, swallows the second key, resets on 
   assert.deepEqual(chord(1000, 'm', 1001 + CHORD_MS, pages), { since: null, used: false }, 'too late: m is just m');
   assert.deepEqual(chord(1000, 'g', 1001 + CHORD_MS, pages), { since: 1001 + CHORD_MS, used: true }, 'too late g starts again');
   assert.deepEqual(chord(null, '3', 1000, pages), { since: null, used: false }, 'digits pass through');
+});
+
+test('keyName: auto-repeat is ignored, so holding g never becomes g g (Goals)', () => {
+  assert.equal(keyName({ key: 'g', code: 'KeyG', repeat: true }), null);
+  assert.equal(keyName({ key: 'g', code: 'KeyG' }), 'g');
+});
+
+test('keyName: on an Arabic layout the physical key decides, for g chords and the single keys', () => {
+  const pages = visiblePages(false, all);
+  const ar = (key: string, code: string) => keyName({ key, code }) ?? '';
+  assert.equal(ar('ل', 'KeyG'), 'g'); // the G key
+  assert.equal(chord(chord(null, ar('ل', 'KeyG'), 0, pages).since, ar('م', 'KeyL'), 10, pages).view, 'backlog', 'g l by position');
+  assert.equal(ar('ؤ', 'KeyC'), 'c'); // New task
+  assert.equal(ar('ظ', 'Slash'), '/'); // the command menu
+  assert.equal(ar('١', 'Digit1'), '1');
+  assert.equal(digitView(ar('٩', 'Digit9'), pages), 'memory');
+  assert.equal(keyName({ key: 'ن', code: 'KeyK' }), 'k'); // Ctrl K
+  // a Latin layout keeps its own key: Shift+1 is "!", not Today; Escape stays Escape
+  assert.equal(keyName({ key: '!', code: 'Digit1', shiftKey: true }), '!');
+  assert.equal(keyName({ key: 'Escape', code: 'Escape' }), 'Escape');
 });

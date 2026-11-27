@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAsks, useMemories, useQuestions } from '@/lib/api'
@@ -24,6 +25,8 @@ export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: 
   const { data: asks } = useAsks(undefined)
   useRing(asks && replyIds(asks))
   const { data: who } = useWho()
+  const nav = useRef<HTMLElement>(null)
+  const more = useMoreToTheRight(nav, pages)
 
   return (
     <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-md backdrop-saturate-150">
@@ -36,7 +39,8 @@ export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: 
         <span aria-hidden className="hidden h-5 w-px bg-border sm:block" />
         <ProjectSwitcher project={route.project} />
 
-        <nav className="order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-0.5 overflow-x-auto border-t px-3 py-1.5 [scrollbar-width:none] sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-5 lg:order-none lg:mx-2 lg:w-auto lg:min-w-0 lg:border-t-0 lg:p-0" aria-label="Views">
+        <nav ref={nav} className={cn("order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-0.5 overflow-x-auto border-t px-2 py-1.5 [scrollbar-width:none] sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-5 lg:order-none lg:mx-2 lg:w-auto lg:min-w-0 lg:border-t-0 lg:p-0",
+          more && "[mask-image:linear-gradient(to_left,transparent,currentColor_3rem)]")} aria-label="Views">
           {headerPages(pages).map((t) => {
             const active = route.view === t.view || (t.view === 'today' && route.view === 'questions')
             return (
@@ -76,3 +80,21 @@ export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: 
   )
 }
 
+
+/** True while the nav row has items cut off on the right: the row then fades out at that edge, so a hidden menu
+ *  (on a phone, Machines and Settings once they land) reads as "scroll for more" instead of a clipped word. */
+function useMoreToTheRight(ref: React.RefObject<HTMLElement | null>, pages: readonly Page[]) {
+  const [more, setMore] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const check = () => setMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+    check()
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    for (const c of el.children) ro.observe(c)
+    el.addEventListener('scroll', check, { passive: true })
+    return () => { ro.disconnect(); el.removeEventListener('scroll', check) }
+  }, [ref, pages])
+  return more
+}

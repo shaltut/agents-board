@@ -21,3 +21,16 @@ export function chord<V>(since: number | null, key: string, now: number, pages: 
   }
   return key === 'g' ? { since: now, used: true } : { since: null, used: false }
 }
+
+/** The key a shortcut reads, or null for the keyboard's auto-repeat (holding g must not become g g = Goals).
+ *  On a non-Latin layout (Arabic: the G key gives ل) e.key is not a letter, so the physical key decides: KeyG is g,
+ *  Digit1 is 1, Slash is /. A Latin layout keeps e.key, so Shift+1 (!) stays nothing. */
+export function keyName(e: { key: string; code: string; repeat?: boolean; shiftKey?: boolean }): string | null {
+  if (e.repeat) return null
+  if (e.key.length !== 1 || e.key.charCodeAt(0) < 128) return e.key // Latin, digits, Escape, Enter, ...
+  const letter = /^Key([A-Z])$/.exec(e.code)?.[1]
+  if (letter) return e.shiftKey ? letter : letter.toLowerCase()
+  const digit = /^(?:Digit|Numpad)(\d)$/.exec(e.code)?.[1]
+  if (digit) return digit
+  return e.code === 'Slash' ? '/' : e.key
+}
