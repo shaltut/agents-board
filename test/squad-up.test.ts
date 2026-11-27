@@ -910,3 +910,11 @@ test('squadShow: Claude roles exactly as before; another agent in brackets, a fa
     '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
     'areas: claims'].join('\n'));
 });
+
+test('squad up: a disabled project starts nothing and says so (#4559)', async () => {
+  const f = fake(() => OK);
+  const off = async (fn: string) => fn === 'squad_get' ? squad
+    : fn === 'project_state_preview' ? { state: 'disabled', words: 'Demo is disabled by Ahmed: no work is handed out there' } : [];
+  await assert.rejects(squadUp('demo', false, off, f.run), /Demo is disabled by Ahmed: no work is handed out there; Ahmed enables it on Projects first, then cb squad up demo$/);
+  assert.deepEqual(f.calls, [], 'herdr is never asked');
+});

@@ -15,6 +15,9 @@ export function cardBlock(c: any, head = true): string {
 /** cb resume's text from cb.resume's json. */
 export function resumeText(r: any): string {
   const roleLine = r.role ? `\n\nYour role: cb role ${r.role}` : '';
+  // #4559: the bound project gets no work. The SessionStart hook prints this text too, so a restored session learns it
+  if (r.disabled) return `PROJECT DISABLED: ${r.disabled}.\n\n` + (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''} in ${r.project}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
+    : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Take no new one.`) + roleLine;
   return (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
     : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine;
 }

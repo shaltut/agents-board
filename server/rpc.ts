@@ -16,6 +16,8 @@ export const RPC_FUNCTIONS = [
   'job_cancel', 'job_retry', 'job_move', 'job_hold', 'runner_set', 'runner_limits_set',
   // one project's addition and who its seats ask first; loading the release's role texts (#4525)
   'project_role_set', 'project_role_page', 'role_text_import',
+  // project states (#4559): the change is Ahmed's (OWNER_ONLY in server/main.ts); the preview is the confirm dialog's read
+  'project_state', 'project_state_preview',
 ];
 const SETOF = new Set(['task_claim', 'mine', 'answers_pending', 'task_queue']);
 

@@ -17,6 +17,18 @@ create table if not exists cb.projects (
 -- #4531: the board's own project shows as Agents Board; its slug stays claude-board (every cb bug claude-board keeps
 -- working). Only the name cb.ensure_project made moves: a name set by hand is kept, and a re-run touches no row.
 update cb.projects set name = 'Agents Board' where slug = 'claude-board' and name = 'Claude Board';
+-- #4559: a project is enabled (gets work), disabled (no new work; nothing lost) or archived (disabled, and nothing new
+-- is filed). Only Ahmed changes it (cb.project_state). state_by and state_at say who and when; state_at is also where
+-- every quiet clock (reminders, stall nudges, the digest) starts again after an enable. archived is kept and always
+-- written with the state: an older server reads it, and a rollback keeps columns.
+alter table cb.projects add column if not exists state text not null default 'enabled';
+alter table cb.projects add column if not exists state_by text;
+alter table cb.projects add column if not exists state_at timestamptz;
+alter table cb.projects drop constraint if exists projects_state_check;
+alter table cb.projects add constraint projects_state_check check (state in ('enabled', 'disabled', 'archived'));
+-- one-time: a project archived by hand before #4559 is archived. Once a state was set (state_at), archived follows it,
+-- so a re-run never archives a project Ahmed enabled again.
+update cb.projects set state = 'archived', state_at = now(), state_by = 'board' where archived and state = 'enabled' and state_at is null;
 
 
 -- Old or alternative names for a project: "tamarind" → iris. New work through an alias gets its tags.
@@ -254,6 +266,11 @@ drop function if exists cb.norm_id cascade;
 drop function if exists cb.ensure_project cascade;
 drop function if exists cb.slug cascade;
 drop function if exists cb.read_project cascade;
+drop function if exists cb._live cascade;
+drop function if exists cb._state_words cascade;
+drop function if exists cb._wait_words cascade;
+drop function if exists cb.project_state cascade;
+drop function if exists cb.project_state_preview cascade;
 drop function if exists cb.resolve cascade;
 drop function if exists cb.project_alias cascade;
 drop function if exists cb.tasks_before cascade;
@@ -463,6 +480,8 @@ declare
 begin
   if a = '' or t = '' then raise exception 'alias and target are required'; end if;
   if a = t then raise exception 'a project cannot be an alias of itself'; end if;
+  -- #4559: merged work would land where nothing picks it up
+  if not cb._live(t) then raise exception '%: nothing is merged into it until Ahmed enables it on Projects', cb._state_words(t); end if;
   perform cb.ensure_project(t);
   if exists (select 1 from cb.projects p where p.slug = a) then
     perform set_config('cb.quiet', 'on', true);
@@ -512,8 +531,28 @@ declare s text := nullif(cb.resolve(project), '');
 begin
   if s is null or exists (select 1 from cb.projects p where p.slug = s) then return s; end if;
   raise exception 'unknown project "%"; known: %', s,
-    coalesce((select string_agg(p.slug, ', ' order by p.slug) from cb.projects p), 'none yet (cb add creates one)');
+    coalesce((select string_agg(p.slug, ', ' order by p.slug) from cb.projects p where p.state = 'enabled'), 'none yet (cb add creates one)');
 end $$;
+
+-- #4559: does this project get work? Only an enabled one does. A slug with no row yet is enabled: first use makes it so.
+create function cb._live(project text) returns boolean language sql stable as $$
+  select coalesce((select p.state = 'enabled' from cb.projects p where p.slug = $1), true)
+$$;
+
+-- The one sentence every refusal, notice and banner uses for a project that gets no work; null while it is enabled.
+create function cb._state_words(project text) returns text language sql stable as $$
+  select case p.state
+    when 'disabled' then format('%s is disabled by Ahmed%s: no work is handed out there',
+                                p.name, coalesce(' since ' || to_char(p.state_at at time zone 'UTC', 'DD Mon HH24:MI') || ' UTC', ''))
+    when 'archived' then format('%s is archived: nothing new goes there', p.name)
+  end from cb.projects p where p.slug = $1
+$$;
+-- What a seat of such a project does meanwhile (cb next, cb start, the notice, refused work).
+create function cb._wait_words(project text) returns text language sql stable as $$
+  select cb._state_words($1) || case when cb._live($1) then '' when (select p.state from cb.projects p where p.slug = $1) = 'archived'
+    then '. File new work elsewhere, or ask Ahmed to unarchive it'
+    else '. Write where you stopped (cb log <card> "...") and wait: you will be told when it is enabled' end
+$$;
 
 create function cb.ensure_project(project text) returns text language plpgsql as $$
 #variable_conflict use_variable
@@ -705,6 +744,15 @@ declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new
                   else cb.norm_status(coalesce(status, 'backlog')) end;
 begin
   if coalesce(trim(title), '') = '' then raise exception 'title is required'; end if;
+  -- #4559 (Q3020): an archived project takes nothing new, from anyone. A disabled one takes the card but parks it in its
+  -- Backlog with no holder and no stage jump, so a filer in another project (cb bug, cb triage) is never broken; Ahmed's
+  -- dashboard files as he chooses. The CLI tells the filer (cb._state_words).
+  if not cb._live(p) then
+    if (select pr.state from cb.projects pr where pr.slug = p) = 'archived' then
+      raise exception '%. File it elsewhere, or ask Ahmed to unarchive it', cb._state_words(p);
+    end if;
+    if not cb._is_dashboard() then st := 'backlog'; assignee := null; sg := null; end if;
+  end if;
   if sg is not null and not piped then raise exception 'stage is only for projects with the pipeline on'; end if;
   if sg is not null and sg <> 'build' then raise exception 'a new card starts at design; the lead can send small work to build: stage => build'; end if;
   -- said here, not by stage_set: its hint would name a card id that the refusal rolls back
@@ -727,9 +775,17 @@ end $$;
 create function cb.task_move(id text, status text, note text default null, actor text default null)
 returns void language plpgsql as $$
 #variable_conflict use_variable
-declare tid bigint := cb.norm_id(id); s text := cb.norm_status(status);
+declare tid bigint := cb.norm_id(id); s text := cb.norm_status(status); cur cb.tasks;
 begin
   perform cb.set_actor(actor);
+  -- #4559: starting work never passes cb._claimable here, so it has its own rule: in a project that gets no work, a
+  -- session may wrap up (log, done, block, review, back to Next or Backlog) but not move a card into In progress
+  if s = 'in_progress' and not cb._is_dashboard() then
+    select * into cur from cb.tasks t where t.id = tid;
+    if found and cur.status <> 'in_progress' and not cb._live(cur.project) then
+      raise exception '%', cb._wait_words(cur.project);
+    end if;
+  end if;
   perform set_config('cb.note', coalesce(note, ''), true);
   -- #4454: the status asked for rides on the event, so a move to the status a card already has (its history writes a
   -- note, not a moved event) still reads as a move there: cb move <id> blocked "<new why>" restates a blocked card's reason
@@ -759,6 +815,17 @@ begin
   -- the update (#3703: repos and parts change together)
   select * into cur from cb.tasks t where t.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
+  -- #4559: giving a card a holder starts work outside a claim, so a project that gets no work refuses it from a session
+  -- (clearing a holder is fine; Ahmed's dashboard may do both). A card moved into a disabled project lands and waits;
+  -- into an archived one it is refused
+  if fields ? 'project' and cb.resolve(fields ->> 'project') <> cur.project
+     and (select pr.state from cb.projects pr where pr.slug = cb.resolve(fields ->> 'project')) = 'archived' then
+    raise exception '%. Move it elsewhere, or ask Ahmed to unarchive it', cb._state_words(cb.resolve(fields ->> 'project'));
+  end if;
+  if not cb._is_dashboard() and nullif(trim(fields ->> 'assignee'), '') is not null and (fields ->> 'assignee') is distinct from cur.assignee
+     and not cb._live(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end) then
+    raise exception '%', cb._wait_words(case when fields ? 'project' then cb.resolve(fields ->> 'project') else cur.project end);
+  end if;
   rs := cur.repos;
   if fields ? 'repos' then
     -- repos lock from approval on: Ahmed approved a design for these repos, and builders may already work in them.
@@ -1016,6 +1083,11 @@ declare a text := cb.set_actor(actor); p text := cb.ensure_project(project);
         qid bigint; par cb.questions; label text;
 begin
   if coalesce(trim(body), '') = '' then raise exception 'question body is required'; end if;
+  -- #4559: nothing new is asked in a project that gets no work. The design-approval question cb.stage_pass asks for a
+  -- design passed while wrapping up is the one exemption (it sets cb.ask_internal around its call)
+  if not cb._live(p) and current_setting('cb.ask_internal', true) is distinct from 'on' then
+    raise exception '%: nothing is asked there until Ahmed enables it. Write where you stopped with cb log <card> "..."', cb._state_words(p);
+  end if;
   if nullif(trim(if_answer), '') is not null and nullif(trim(parent), '') is null then
     raise exception '--if needs --after: name the question whose answer it waits for (cb ask ... --after Q12 --if "Yes")';
   end if;
@@ -1482,18 +1554,21 @@ returns jsonb language plpgsql stable as $$
 declare p text := cb.read_project(project); tg text := nullif(cb.norm_tag(tag), '');
   ty text := case when nullif(trim(type), '') is null then null else cb.norm_type(type) end;
 begin
-  return jsonb_build_object(
+  -- #4559: a project that gets no work says so first (disabled: its words; absent while enabled). With no project
+  -- given, such projects are left out (cb._brief_tasks too)
+  return case when p is not null and not cb._live(p) then jsonb_build_object('disabled', cb._wait_words(p)) else '{}'::jsonb end
+   || jsonb_build_object(
     'in_progress', cb._brief_tasks(p, tg, 'in_progress', 50, ty),
     'next', cb._brief_tasks(p, tg, 'next', 10, ty),
     'blocked', cb._brief_tasks(p, tg, 'blocked', 50, ty),
     'review', cb._brief_tasks(p, tg, 'review', 50, ty),
     'open_questions', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'project', q.project, 'body', q.body,
         'blocking', q.blocking, 'asked_by', q.asked_by, 'task_id', q.task_id, 'options', q.options, 'assigned_to', q.assigned_to) order by q.blocking desc, q.id)
-      from cb.questions q where q.status = 'open' and (p is null or q.project = p)), '[]'),
+      from cb.questions q where q.status = 'open' and (q.project = p or (p is null and cb._live(q.project)))), '[]'),
     'answered_pending', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'project', q.project, 'body', q.body,
         'answer', q.answer, 'asked_by', q.asked_by, 'reply_to', q.reply_to, 'task_id', q.task_id,
         'was', q.answer_history -> -1 ->> 'answer') order by q.id)
-      from cb.questions q where q.status = 'answered' and (p is null or q.project = p)), '[]'),
+      from cb.questions q where q.status = 'answered' and (q.project = p or (p is null and cb._live(q.project)))), '[]'),
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary, 'at', e.at)
                                                order by e.id desc)
       from cb.events e where e.kind = 'broadcast' and e.at > now() - interval '24 hours'
@@ -1523,7 +1598,7 @@ begin
                  where e.task_id = t.id and e.kind = 'note' order by e.id desc limit 1) end as last_note,
            row_number() over (order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last,
                                        t.priority, t.rank, t.id) as o
-      from cb.tasks t where t.status = s and (p is null or t.project = p) and (tg is null or tg = any(t.labels))
+      from cb.tasks t where t.status = s and (t.project = p or (p is null and cb._live(t.project))) and (tg is null or tg = any(t.labels))
                         and (ty is null or t.type = ty)
      order by o limit lim) x);
 end $$;
@@ -1571,6 +1646,12 @@ begin
   end if;
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
+  -- #4559: no new seat binds to a project that gets no work; a pane already bound to it keeps its binding (a re-bind
+  -- after a compaction included), and a call that names no project keeps the pane's
+  if p is not null and not cb._live(p)
+     and (select s.project from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane)) is distinct from p then
+    raise exception '%: no new seat binds to it until Ahmed enables it', cb._state_words(p);
+  end if;
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
   insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo, agent)
   values (lower(trim(machine)), trim(pane), trim(actor), p, coalesce((select max(e.id) from cb.events e), 0), role, ar, mo, rp, coalesce(ag, 'claude'))
@@ -1653,7 +1734,8 @@ begin
                         from cb.events e join cb.tasks t on t.id = e.task_id
                        where e.kind = 'task_created' and t.type = 'bug' and t.assignee is null and t.status not in ('done', 'cancelled')
                          and t.project = proj and e.actor <> me and e.id > seen and e.at > now() - interval '24 hours'
-                         and me = any(cb.triagers(proj))), '[]'),
+                         and me = any(cb.triagers(proj))
+                         and cb._live(proj)), '[]'),  -- #4559: no triage offers in a project that gets no work
     -- huddle lines for huddles I'm in; a member added later hears only from its own 'add' on
     'huddles', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'huddle', h.id, 'topic', h.topic, 'action', e.data ->> 'action',
                                                              'actor', e.actor, 'summary', e.summary) order by e.id)
@@ -1898,9 +1980,12 @@ declare r record; o text; n int := 0; mins int; idle text; live boolean;
 begin
   for r in
     select t.id, t.project, left(t.title, 80) as title, nullif(trim(t.assignee), '') as assignee, t.status,  -- unassigned cards hold '' as well as null; a title is cut: GitHub cards carry strangers' text
-           t.stage, greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at)) as last_at
+           -- #4559: quiet time counts from the project's last enable (state_at; greatest skips a null), so an enable is no burst
+           t.stage, greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at),
+                             (select pr.state_at from cb.projects pr where pr.slug = t.project)) as last_at
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
      where t.status not in ('done', 'cancelled')
+       and cb._live(t.project)  -- #4559: a project that gets no work is not asked about; its reminder rows are kept
        and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
        and not exists (select 1 from cb.questions q where q.task_id = t.id and q.status = 'open')  -- waiting on a person is not silence (Q2357)
   loop
@@ -2001,6 +2086,8 @@ begin
   end if;
   p := coalesce(p, cb.read_project(project), (select s.project from cb.sessions s where s.actor = a order by s.last_seen desc limit 1));
   if p is null then raise exception 'which project? pass a task (-t) or bind this session (cb iam)'; end if;
+  -- #4559: open huddles stay open; no new one starts in a project that gets no work
+  if not cb._live(p) then raise exception '%: no new huddle starts there until Ahmed enables it', cb._state_words(p); end if;
   insert into cb.huddles (project, topic, task_id, opened_by) values (p, trim(topic), tid, a) returning * into h;
   insert into cb.huddle_members (huddle_id, actor, added_by) values (h.id, a, a);
   ev := cb._huddle_post(h, 'open', 'opened: ' || h.topic, a);
@@ -2354,8 +2441,11 @@ $$;
 create function cb.tick(project text default null, actor text default null) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project); me text := coalesce(nullif(trim(actor), ''), 'unknown');
+        -- #4559: a project that gets no work: one line (disabled), plus the answers and my questions (answers already
+        -- given still matter). With no project given, such projects' cards, seats and huddles are left out
+        off boolean := p is not null and not cb._live(p);
 begin
-  return jsonb_build_object(
+  return case when off then jsonb_build_object('disabled', cb._wait_words(p)) else '{}'::jsonb end || jsonb_build_object(
     -- answered, not delivered: whoever the answer is addressed to (reply_to's session, else the asker) acts
     'answered', coalesce((select jsonb_agg(jsonb_build_object('id', q.id, 'body', q.body, 'answer', q.answer, 'answered_by', q.answered_by,
         'answered_at', q.answered_at, 'who', coalesce(s.actor, q.asked_by)) order by q.answered_at, q.id)
@@ -2370,8 +2460,10 @@ begin
     -- in progress, and the holder has written nothing anywhere for 30 minutes (relay heartbeats don't count)
     'silent', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'last_at', l.at) order by l.at nulls first, t.id)
       from cb.tasks t cross join lateral (select max(e.at) as at from cb.events e where e.actor = t.assignee) l
-     where t.status = 'in_progress' and (p is null or t.project = p) and t.assignee is not null and t.assignee <> 'ahmed'
-       and t.assignee not in (select u.name from cb.users u) and (l.at is null or l.at < now() - interval '30 minutes')), '[]'),
+     where t.status = 'in_progress' and (p is null or t.project = p) and not off and cb._live(t.project) and t.assignee is not null and t.assignee <> 'ahmed'
+       -- #4559: quiet since the project was enabled, not since the wrap-up before it was disabled
+       and t.assignee not in (select u.name from cb.users u)
+       and coalesce(greatest(l.at, (select pr.state_at from cb.projects pr where pr.slug = t.project)), '-infinity') < now() - interval '30 minutes'), '[]'),
     'blocked', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'since', coalesce(b.at, t.updated_at),
         'note', r.summary, 'question', q.id, 'question_body', q.body, 'question_status', q.status, 'question_for', coalesce(q.assigned_to, 'ahmed'))
         order by coalesce(b.at, t.updated_at))
@@ -2382,11 +2474,12 @@ begin
       -- the reason as cb brief picks it (#4454): a reason restated on a card already blocked is newest; since stays the move
       left join lateral (select e.summary from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note') and e.data ->> 'to' = 'blocked'
                           order by e.id desc limit 1) r on true
-     where t.status = 'blocked' and (p is null or t.project = p) and coalesce(b.at, t.updated_at) < now() - interval '1 hour'
+     where t.status = 'blocked' and (p is null or t.project = p) and not off and cb._live(t.project)
+       and greatest(coalesce(b.at, t.updated_at), (select pr.state_at from cb.projects pr where pr.slug = t.project)) < now() - interval '1 hour'
        -- waiting on an open task blocker is by design, not stuck (a question it also holds on still shows)
        and (t.blocked_on is not null or cardinality(cb._waits_on(t.id)) = 0)), '[]'),
     'unreviewed', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'pr', t.links ->> 'pr') order by t.id)
-      from cb.tasks t where t.status = 'review' and (p is null or t.project = p)
+      from cb.tasks t where t.status = 'review' and (p is null or t.project = p) and not off and cb._live(t.project)
        -- a staged card in review is an approval card: the pipeline reviews it, not a "Review #N" card
        and not (t.stage is not null and cb._pipeline(t.project))
        and not cb._is_review(t.labels, t.title) and not cb._has_reviewer(t)
@@ -2400,7 +2493,7 @@ begin
     'misheld', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'by', l.actor) order by t.id)
       from cb.tasks t cross join lateral (select e.actor from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note', 'done')
                                            order by e.id desc limit 1) l
-     where t.status = 'in_progress' and (p is null or t.project = p) and t.assignee is not null and l.actor <> t.assignee
+     where t.status = 'in_progress' and (p is null or t.project = p) and not off and cb._live(t.project) and t.assignee is not null and l.actor <> t.assignee
        and l.actor not in ('ahmed', 'relay', 'unknown') and cb._role(l.actor) is distinct from 'lead'
        and l.actor not in (select u.name from cb.users u)), '[]'),
     -- live sessions (relay within 90s) holding nothing in progress; tags = what they worked on this week
@@ -2413,16 +2506,17 @@ begin
       -- one row per actor (its latest live session), with the project it is bound to
       from (select distinct on (s2.actor) s2.actor, s2.project from cb.sessions s2
              where (p is null or s2.project = p) and s2.last_seen > now() - interval '90 seconds' order by s2.actor, s2.last_seen desc) s
-     -- a lead of its own project is never offered work (#3746)
-     where s.actor <> me and not cb._is_lead(s.actor, s.project)
+     -- a lead of its own project is never offered work (#3746); nor a seat of a project that gets no work (#4559)
+     where s.actor <> me and not cb._is_lead(s.actor, s.project) and not off and cb._live(s.project)
        and not exists (select 1 from cb.tasks t where t.assignee = s.actor and t.status = 'in_progress')
        -- a part in work (#3703) is work in progress too
        and not exists (select 1 from cb._held_parts() h where h.assignee = s.actor and h.status = 'in_progress')), '[]'),
-    'next', cb._brief_tasks(p, null, 'next', 50),
+    'next', case when off then '[]'::jsonb else cb._brief_tasks(p, null, 'next', 50) end,
     'huddles', coalesce((select jsonb_agg(jsonb_build_object('id', h.id, 'topic', h.topic, 'last_at', l.at) order by l.at)
       from cb.huddles h cross join lateral (select coalesce(max(e.at), h.opened_at) as at from cb.events e
                                              where e.kind = 'huddle' and (e.data ->> 'huddle')::bigint = h.id) l
-     where h.status = 'open' and (p is null or h.project = p) and l.at < now() - interval '20 minutes'), '[]'),
+     where h.status = 'open' and (p is null or h.project = p) and not off and cb._live(h.project)
+       and greatest(l.at, (select pr.state_at from cb.projects pr where pr.slug = h.project)) < now() - interval '20 minutes'), '[]'),
     'locks', cb.lock_queue(null),
     -- Ahmed's asks to me (#936) still without a reply 15 minutes after delivery
     'late_asks', coalesce((select jsonb_agg(jsonb_build_object('id', a.id, 'body', a.body, 'delivered_at', a.delivered_at, 'from_terminal', a.from_terminal) order by a.id)
@@ -2437,7 +2531,7 @@ begin
       from cb.tasks t
       left join lateral (select e.summary from cb.events e where e.task_id = t.id and e.kind in ('done', 'note') and e.summary ~ '\mGO\M'
                           order by e.id desc limit 1) v on true
-     where (p is null or t.project = p) and cb._pr_no(t.links) is not null
+     where (p is null or t.project = p) and not off and cb._live(t.project) and cb._pr_no(t.links) is not null
        and (t.status not in ('done', 'cancelled') or t.updated_at > now() - interval '7 days')), '[]'));
 end $$;
 
@@ -3915,10 +4009,13 @@ begin
   hold := case when nxt = 'done' then a end;
   perform cb._stage_move(tid, nxt, hold, trim(summary), extra || jsonb_build_object('links', lk));
   if nxt = 'approval' then
+    -- #4559: exempt from the disabled-project ask rule, and only this call (the setting is cleared right after)
+    perform set_config('cb.ask_internal', 'on', true);
     qid := cb.ask(t.project, format('Approve the design for #%s "%s"?', tid, t.title),
                   jsonb_build_array(jsonb_build_object('label', 'Approve', 'description', 'it goes to build'),
                                     jsonb_build_object('label', 'Changes needed', 'description', 'back to ' || a || ' with your note')),
                   task_id => tid::text, context => pgbody || E'\n\nv' || v || ', written by ' || a, actor => 'board');
+    perform set_config('cb.ask_internal', '', true);
     perform cb.set_actor(a);
     update cb.questions q set approval_for = tid, page_version = v where q.id = qid;
   end if;
@@ -4081,6 +4178,8 @@ end $$;
 create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
   select case
     when cb._closing(a) then false
+    -- #4559: the one place "no new work" lives: cb next, the cb start preview, the relay's offers and cb tick's "can take"
+    when not cb._live(t.project) then false
     when not cb._pipeline(t.project) then true
     when t.stage is null then
       case when t.type = 'research' then cb._role(a) = 'investigator' or t.assignee = a
@@ -4127,10 +4226,13 @@ begin
                                           coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at),
                                           coalesce((select max(e.at) from cb.events e where e.actor = t.assignee), t.updated_at),
                                           -- a restored session starts afresh (cb.iam writes no event): Q2324
-                                          coalesce((select max(s.started_at) from cb.sessions s where s.actor = t.assignee), t.updated_at)) as quiet_since) q
+                                          coalesce((select max(s.started_at) from cb.sessions s where s.actor = t.assignee), t.updated_at),
+                                          -- #4559: quiet time counts from the project's last enable (null: never changed)
+                                          (select pr.state_at from cb.projects pr where pr.slug = t.project)) as quiet_since) q
       left join cb.stage_nudges nd on nd.task_id = t.id
      where t.stage is not null and t.stage <> 'approval' and nullif(trim(t.assignee), '') is not null
        and t.status in ('in_progress', 'next') and cb._pipeline(t.project)
+       and cb._live(t.project)  -- #4559 (Q3017): a disabled project's held cards keep their holders: no nudge, no freeing
        and q.quiet_since <= now() - interval '30 minutes'
        and exists (select 1 from cb.sessions s where s.actor = t.assignee and s.last_seen > now() - interval '10 minutes')
        and not exists (select 1 from cb.questions qq where qq.task_id = t.id and qq.status = 'open')  -- waiting on a person (Q2357)
@@ -4182,8 +4284,9 @@ begin
                                           -- a sibling part's free note (stall) is not this part's activity
                                           (select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge' or e.data ? 'stall')),
                                           (select max(e.at) from cb.events e where e.actor = h.assignee),
-                                          (select max(s.started_at) from cb.sessions s where s.actor = h.assignee)) as quiet_since) q
-     where t.status in ('in_progress', 'next') and cb._pipeline(t.project) and q.quiet_since <= now() - interval '30 minutes'
+                                          (select max(s.started_at) from cb.sessions s where s.actor = h.assignee),
+                                          (select pr.state_at from cb.projects pr where pr.slug = t.project)) as quiet_since) q  -- #4559
+     where t.status in ('in_progress', 'next') and cb._pipeline(t.project) and cb._live(t.project) and q.quiet_since <= now() - interval '30 minutes'
        and exists (select 1 from cb.sessions s where s.actor = h.assignee and s.last_seen > now() - interval '10 minutes')
        and not exists (select 1 from cb.questions qq where qq.task_id = t.id and qq.status = 'open')
   loop
@@ -4438,11 +4541,13 @@ end $$;
 create function cb.digests_due() returns int language plpgsql as $$
 declare r record; leads text[]; last_at timestamptz; last_hash text; lines jsonb; txt text; h text; newp0 boolean; l text; n int := 0;
 begin
-  for r in select pr.slug from cb.projects pr where pr.pipeline loop
+  -- #4559: only enabled projects; after an enable the digest covers the time since then, never the time disabled
+  for r in select pr.slug, pr.state_at from cb.projects pr where pr.pipeline and pr.state = 'enabled' loop
     select array_agg(distinct s.actor) into leads from cb.sessions s
      where s.project = r.slug and cb._role(s.actor) = 'lead' and s.last_seen > now() - interval '1 day';
     continue when leads is null;
     select (st.value ->> 'at')::timestamptz, st.value ->> 'hash' into last_at, last_hash from cb.settings st where st.key = 'digest:' || r.slug;
+    last_at := greatest(last_at, r.state_at);  -- greatest skips a null: no digest yet, or a state never changed
     newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
     continue when last_at is not null and last_at > now() - interval '15 minutes' and not newp0;
     lines := cb.digest(r.slug, coalesce(last_at, now() - interval '15 minutes'));
@@ -4582,7 +4687,9 @@ create function cb.resume(actor text default null) returns jsonb language plpgsq
 declare a text := coalesce(nullif(trim(actor), ''), nullif(current_setting('cb.actor', true), ''), 'unknown'); s cb.sessions%rowtype;
 begin
   select * into s from cb.sessions x where x.actor = a order by x.last_seen desc limit 1;
-  return jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'agent', s.agent, 'project', s.project,
+  -- disabled (#4559): the bound project gets no work, in the words cb start and the SessionStart hook print; absent while enabled
+  return case when s.project is not null and not cb._live(s.project) then jsonb_build_object('disabled', cb._wait_words(s.project)) else '{}'::jsonb end
+   || jsonb_build_object('actor', a, 'role', cb._role(a), 'area', s.area, 'model', s.model, 'agent', s.agent, 'project', s.project,
     'cards', coalesce((select jsonb_agg(jsonb_build_object(
         'id', t.id, 'title', t.title, 'stage', case when cb._pipeline(t.project) then (w.v).stage end,
         'stage_words', cb._stage_words(case when cb._pipeline(t.project) then (w.v).stage end), 'status', (w.v).status,
@@ -5683,6 +5790,8 @@ returns jsonb language plpgsql as $$
 declare a text := cb.set_actor(actor); p text := cb.read_project(project); r text; j cb.jobs;
 begin
   if p is null then raise exception 'project is required'; end if;
+  -- #4559: refused with words, so cb run --wait never sits silent on a job no runner will take
+  if not cb._live(p) then raise exception '%: its runner jobs wait, and no new one is queued until Ahmed enables it', cb._state_words(p); end if;
   if not cb._is_dashboard() and not exists (select 1 from cb.sessions s where s.actor = a and s.project = p and s.last_seen > now() - interval '1 day') then
     raise exception '% has no bound session on % in the last day: only a session of the project, or Ahmed, can queue a job', a, p;
   end if;
@@ -5806,6 +5915,8 @@ begin
   select x.id, rr.db into jid, d from cb.jobs x
   join cb.runner_recipes rr on rr.runner = job_claim.runner and rr.project = x.project and rr.repo = x.repo and rr.recipe = x.recipe
   where x.state = 'queued' and (allow_db or not rr.db) and not exists (select 1 from cb.job_holds h where h.project = x.project)
+    -- #4559: a project that gets no work keeps its jobs waiting. Its own condition, not a job_holds row a lead could release
+    and not exists (select 1 from cb.projects pr where pr.slug = x.project and pr.state <> 'enabled')
   order by coalesce(x.pos, x.id), x.id limit 1 for update of x skip locked;
   if not found then return null; end if;
   update cb.jobs x set state = 'running', runner = job_claim.runner, started_at = now() where x.id = jid returning x.* into j;
@@ -5919,6 +6030,7 @@ begin
     raise exception 'only the requester, the lead of % or Ahmed can run job #% again', j.project, id;
   end if;
   if j.state in ('queued', 'running') then raise exception 'job #% has not ended: stop it first, or wait for it', id; end if;
+  if not cb._live(j.project) then raise exception '%: no new job is queued until Ahmed enables it', cb._state_words(j.project); end if;  -- #4559, as job_add
   perform pg_advisory_xact_lock(hashtext('cb-job-queue'));
   select x.id into dup from cb.jobs x where x.state in ('queued', 'running') and x.project = j.project and x.repo = j.repo
     and x.recipe = j.recipe and x.sha = j.sha and x.params = j.params order by x.id limit 1;
@@ -6072,7 +6184,10 @@ begin
      where f.stage in ('build', 'review') and not exists (select 1 from cb.task_parts pt where pt.task_id = f.id)
   )
   select jsonb_build_object(
-    'project', p, 'squad', sq, 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true', false),
+    -- #4559: a project that gets no work is not supervised: nothing is started or restored for it (its seats stay as
+    -- they are, as with the pipeline off); state says why
+    'project', p, 'squad', sq, 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true' and cb._live(p), false),
+    'state', (select pr.state from cb.projects pr where pr.slug = p),
     'waiting', jsonb_build_object(
       'builder', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'build' and w.repo = r)) from unnest(rs) r),
       'reviewer', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'review' and w.repo = r)) from unnest(rs) r),
@@ -6281,6 +6396,78 @@ begin
                  'cache_write_tokens', r.cache_write_tokens, 'cost_usd', r.cost_usd, 'first_seen', r.first_seen,
                  'updated_at', r.updated_at)
                  order by r.cost_usd desc nulls last, r.output_tokens desc) from r), '[]'::jsonb)));
+end $$;
+
+-- ---------------------------------------------------------------- Project states (#4559)
+-- Enabled, disabled or archived, set by Ahmed alone from his dashboard (exactly ahmed: cb._is_owner, not cb.ahmed_like;
+-- the server also keeps it from other admins, OWNER_ONLY). Enabled <-> disabled, disabled <-> archived: archive only a
+-- disabled project, and unarchive goes back to disabled, so waking an old one is always two steps. Nothing is deleted
+-- or moved: held cards keep their holders, jobs and questions wait (the rules that skip them read cb._live). Disable
+-- and enable tell each seat bound to the project in the last day and each holder of its open cards or parts, once.
+-- state_at is where every quiet clock starts again after an enable (cb.pings_due, cb.stage_stalls_due, cb.digests_due).
+create function cb.project_state(project text, state text, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text; p text; s text := lower(trim(coalesce(state, ''))); cur cb.projects; verb text; msg text; who text; n int := 0;
+begin
+  perform cb.dashboard_only('Projects');
+  a := cb.set_actor(actor);
+  if not cb._is_owner(a) then raise exception 'only Ahmed changes a project''s state, on the Projects page'; end if;
+  p := cb.read_project(project);
+  if p is null then raise exception 'project is required'; end if;
+  if s not in ('enabled', 'disabled', 'archived') then raise exception 'state must be enabled, disabled or archived (got %)', state; end if;
+  select * into cur from cb.projects pr where pr.slug = p for update;
+  if cur.state = s then
+    return jsonb_build_object('project', p, 'state', cur.state, 'state_by', cur.state_by, 'state_at', cur.state_at, 'told', 0, 'changed', false);
+  end if;
+  if s = 'archived' and cur.state = 'enabled' then raise exception '% is enabled: disable it first, then archive it', cur.name; end if;
+  if s = 'enabled' and cur.state = 'archived' then raise exception '% is archived: unarchive it first (it goes back to disabled), then enable it', cur.name; end if;
+  verb := case when s = 'disabled' and cur.state = 'archived' then 'unarchived' else s end;  -- before the update: from where
+  update cb.projects pr set state = s, state_by = a, state_at = now(), archived = (s = 'archived') where pr.slug = p returning pr.* into cur;
+  insert into cb.events (actor, project, kind, summary, data)
+  values (a, p, 'note', format('Ahmed %s %s', verb, cur.name), jsonb_build_object('state', s));
+  -- the seats are told only on disable and enable: archive and unarchive happen to a project already quiet
+  msg := case verb
+    when 'disabled' then format('Ahmed disabled %s. Stop at a safe point: push your work, write where it stands (cb log <card> "..."), and release any lock you hold. Take no new card. Your cards stay yours, and you will be told when %s is enabled again.', cur.name, cur.name)
+    when 'enabled' then format('Ahmed enabled %s again. Carry on: cb resume, then cb next.', cur.name) end;
+  if msg is not null then
+    for who in
+      select distinct x.who from (
+        select s2.actor as who from cb.sessions s2 where s2.project = p and s2.last_seen > now() - interval '1 day'
+        union select t.assignee from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled')
+        union select h.assignee from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p) x
+       where nullif(trim(x.who), '') is not null and not cb.ahmed_like(x.who)
+         and x.who not in (select u.name from cb.users u)  -- people see their own page, not session messages
+       order by x.who
+    loop
+      insert into cb.events (actor, project, kind, summary, data)
+      values ('board', p, 'message', msg, jsonb_build_object('to', who, 'state', s));
+      n := n + 1;
+    end loop;
+  end if;
+  if s = 'enabled' then perform pg_notify('cb_jobs', '0'); end if;  -- the runner takes the waiting jobs now
+  -- its open questions leave (or come back to) Today, the lamp and Telegram: the readers of the questions channel re-read
+  perform pg_notify('cb', 'questions');
+  return jsonb_build_object('project', p, 'state', cur.state, 'state_by', cur.state_by, 'state_at', cur.state_at, 'told', n, 'changed', true);
+end $$;
+
+-- What disabling (or archiving) this project would touch, in one read: the confirm dialog's counts. Reads only.
+create function cb.project_state_preview(project text) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); pr cb.projects;
+begin
+  if p is null then raise exception 'project is required'; end if;
+  select * into pr from cb.projects x where x.slug = p;
+  return jsonb_build_object('project', p, 'name', pr.name, 'state', pr.state, 'state_by', pr.state_by, 'state_at', pr.state_at,
+    'words', cb._state_words(p),
+    'seats_live', (select count(distinct s.actor) from cb.sessions s where s.project = p and s.last_seen > now() - interval '90 seconds'),
+    'open', (select count(*) from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled')),
+    'in_progress', (select count(*) from cb.tasks t where t.project = p and t.status = 'in_progress' and nullif(trim(t.assignee), '') is not null),
+    'held', (select count(*) from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled') and nullif(trim(t.assignee), '') is not null)
+            + (select count(*) from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p),
+    'jobs_waiting', (select count(*) from cb.jobs j where j.project = p and j.state = 'queued'),
+    'jobs_running', (select count(*) from cb.jobs j where j.project = p and j.state = 'running'),
+    'questions', (select count(*) from cb.questions q where q.project = p and q.status = 'open' and q.assigned_to is null),
+    'github_watches', (select count(*) from cb.settings st where st.key like 'github:%' and st.key not like 'github:outbox:%' and st.value ->> 'project' = p));
 end $$;
 
 -- Releases (#4352). cb update installs on a worker the release the board serves; these say what the board's database

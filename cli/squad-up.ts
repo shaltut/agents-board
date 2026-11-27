@@ -351,6 +351,9 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
+  // #4559: a disabled or archived project starts no seats (its squad can still be edited on Project settings)
+  const st = await callFn('project_state_preview', { project }) as { state?: unknown; words?: string } | null;
+  if (typeof st?.state === 'string' && st.state !== 'enabled') throw new Error(`${st.words}; Ahmed enables it on Projects first, then cb squad up ${project}`);
   const rows = await callFn('sessions_overview', { project: null }) as any[];
   const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string,
     project: (r.project ?? null) as string | null, role: (r.role ?? null) as string | null }));

@@ -94,11 +94,14 @@ function hands(q: Q): Button[][] {
   return Array.from({ length: Math.ceil(b.length / 3) }, (_, i) => b.slice(i * 3, i * 3 + 3));
 }
 
+const WAITING = 'Waiting: this project is disabled. It comes back here, to answer, when Ahmed enables it.';
+
 /** What a closed message says, from the question as it is now. */
 function outcome(q: any) {
   if (q.status === 'answered' || q.status === 'delivered')
     return `Answered${q.answered_by && q.answered_by !== 'ahmed' ? ` by ${q.answered_by}` : ''}: ${q.answer}`;
   if (q.status === 'sent_back') return `Sent back: ${REASONS[q.sent_back?.reason]?.toLowerCase() ?? q.sent_back?.reason}${q.sent_back?.note ? ` — ${q.sent_back.note}` : ''}`;
+  if (q.status === 'open' && !q.assigned_to && q.live === false) return WAITING;
   if (q.status === 'withdrawn') return 'Withdrawn.';
   if (q.status === 'dormant') return `Waiting again: it opens if Q${q.parent_id}'s answer picks it.`;
   if (q.assigned_to) return `Handed to ${q.assigned_to}.`;
@@ -126,8 +129,10 @@ async function pass() {
   const chat = await pairedChat();
   if (!chat) return;
   // 1. messages whose question is no longer open for Ahmed as sent (or whose answer changed): show the outcome
-  const moved = await sql`select q.*, ${HANDS()}, ${PICS()}, m.message_id, m.chat_id as m_chat, m.state, m.desired from (
-      select m.*, case when q.status = 'open' and q.assigned_to is null and q.created_at = m.asked_at then 'open'
+  const moved = await sql`select q.*, ${HANDS()}, ${PICS()}, cb._live(q.project) as live, m.message_id, m.chat_id as m_chat, m.state, m.desired from (
+      -- waiting: its project is disabled (#4559, Q3019): the buttons come off until it is enabled, then 'open' restores them
+      select m.*, case when q.status = 'open' and q.assigned_to is null and not cb._live(q.project) then 'waiting'
+                       when q.status = 'open' and q.assigned_to is null and q.created_at = m.asked_at then 'open'
                        when q.status = 'open' and q.assigned_to is null then 'superseded'
                        when q.status in ('answered', 'delivered') then 'answered:' || q.answer
                        when q.status = 'open' then 'assigned:' || q.assigned_to
@@ -149,6 +154,7 @@ async function pass() {
   // asked_at as text: created_at has microseconds, which a JS Date would drop (and every pass would re-send)
   const fresh = await sql`select q.*, ${HANDS()}, ${PICS()}, q.created_at::text as asked_at from cb.questions q left join cb.telegram_messages m on m.question_id = q.id
     where q.status = 'open' and q.assigned_to is null and (m.question_id is null or m.state <> 'open' or m.chat_id <> ${chat})
+      and cb._live(q.project) -- #4559 (Q3019): a disabled project's questions wait; enabling it sends them (cb.project_state notifies questions)
     order by q.created_at, q.id`;
   for (const q of fresh) {
     try {
@@ -167,8 +173,8 @@ async function act(id: number, asked: string, fn: 'answer' | 'send_back' | 'ques
   try {
     const done = await sql.begin(async (tx: any) => {
       await tx`set local application_name = 'cb-web'`;
-      const [q] = await tx`select *, created_at = ${asked}::text::timestamptz as same from cb.questions where id = ${id} for update`;
-      if (!q || q.status !== 'open' || q.assigned_to) return refusal(id, q);
+      const [q] = await tx`select *, created_at = ${asked}::text::timestamptz as same, cb._live(project) as live from cb.questions where id = ${id} for update`;
+      if (!q || q.status !== 'open' || q.assigned_to || !q.live) return refusal(id, q); // #4559: a disabled project's question waits
       if (!q.same) return `Q${id} was rewritten: answer the new message.`;
       await callFn(fn, { id: String(id), ...args }, tx);
       return null;
@@ -184,6 +190,7 @@ async function act(id: number, asked: string, fn: 'answer' | 'send_back' | 'ques
 function refusal(id: number, q: any) {
   if (!q) return `Q${id} is not on the board.`;
   if (q.status === 'open' && q.assigned_to) return `Q${id} is handed to ${q.assigned_to} now.`;
+  if (q.status === 'open' && q.live === false) return `Q${id} waits: its project is disabled. It comes back here when Ahmed enables it.`;
   if (q.status === 'answered' || q.status === 'delivered') return `Q${id} is already answered: ${q.answer}`;
   if (q.status === 'sent_back') return `Q${id} is already sent back; it comes back when the session rewrites it.`;
   if (q.status === 'open') return `Q${id} was rewritten: answer the new message.`;
@@ -203,7 +210,7 @@ async function onButton(cb: any, chat: number) {
   const m = Number.isSafeInteger(id) ? await row(sql`m.question_id = ${id}`) : null;
   const toast = (text: string, alert = false) => tg('answerCallbackQuery', { callback_query_id: cb.id, text: fit(text, 200), show_alert: alert });
   if (!m || m.message_id !== cb.message?.message_id || m.chat_id !== chat) return toast('This message is out of date.');
-  if (m.state !== 'open') return toast(refusal(id, (await sql`select * from cb.questions where id = ${id}`)[0]), true);
+  if (m.state !== 'open') return toast(refusal(id, (await sql`select *, cb._live(project) as live from cb.questions where id = ${id}`)[0]), true);
   const label = (i: string) => m.options?.[Number(i)]?.label as string | undefined;
   if (kind === 'o' && label(arg)) {
     const r = await act(id, m.asked, 'answer', { answer: label(arg)!.replace(RECOMMENDED, '') });
@@ -247,7 +254,7 @@ async function onText(msg: any, chat: number) {
   if (!to) return say(chat, "Reply to a question's message to answer it (swipe it left, or long-press and Reply).");
   const m = await row(sql`m.chat_id = ${chat} and (m.message_id = ${to} or m.prompt_id = ${to})`);
   if (!m) return say(chat, "That message isn't a question waiting on you (a rewrite comes as a new message).", { reply_parameters: { message_id: msg.message_id } });
-  if (m.state !== 'open') return say(chat, refusal(m.question_id, (await sql`select * from cb.questions where id = ${m.question_id}`)[0]),
+  if (m.state !== 'open') return say(chat, refusal(m.question_id, (await sql`select *, cb._live(project) as live from cb.questions where id = ${m.question_id}`)[0]),
     { reply_parameters: { message_id: msg.message_id } });
   const clarify = m.awaiting === 'clarify' && to === m.prompt_id; // a reply to the question itself answers it
   if (m.awaiting && !clarify) await sql`update cb.telegram_messages set awaiting = null where question_id = ${m.question_id}`;
