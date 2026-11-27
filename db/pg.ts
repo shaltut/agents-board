@@ -57,7 +57,9 @@ export function testPgPort(root = ROOT, platform = process.platform): number {
   let h = 2166136261; // FNV-1a of the path: the same worktree gets the same port each run
   for (const c of root.toLowerCase()) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
   const start = 15435 + (h % 1000);
-  for (let port = start; port < start + 20; port++) if (!answers(port)) return port;
+  // free = no server at all (pg_isready 2; null when it can't run, e.g. off Windows): a cluster in crash recovery (1) is taken
+  const free = (port: number) => [2, null].includes(spawnSync(join(BIN, 'pg_isready.exe'), ['-h', '127.0.0.1', '-p', String(port)], { stdio: 'ignore' }).status);
+  for (let port = start; port < start + 20; port++) if (free(port)) return port;
   throw new Error(`no free port for this worktree's test Postgres in ${start}-${start + 19}: other servers answer on all of them`);
 }
 

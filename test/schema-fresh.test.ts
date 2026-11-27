@@ -5,9 +5,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import postgres from 'postgres';
 import { TEST_URL } from './helpers.ts'; // also the claude_board_test* guard
+import { ensureTestPg } from '../db/pg.ts';
 
 test('schema.sql applies to a brand-new database, twice', { timeout: 120_000 }, async () => {
   const db = `claude_board_test_fresh_${process.pid}`;
+  ensureTestPg(TEST_URL); // the admin connection below comes before setup.ts would start it (a worktree's stopped cluster, #4413)
   const adminUrl = new URL(TEST_URL); adminUrl.pathname = '/postgres';
   const admin = postgres(adminUrl.toString(), { onnotice: () => {} });
   try {
