@@ -299,9 +299,9 @@ test('broadcasts reach every session once, filtered by project', async () => {
 // still mine to claim. The lead's create-then-assign (seconds apart) no longer reaches another idle builder.
 test('work_still_open: a card assigned to someone else, or moved out of Next, since it was offered is dropped', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
-  await sql`select cb.iam('pc', 'p1', 'W1', 'ihop')`;
-  const add = async (title: string) => Number((await sql`select cb.task_add(project => 'ihop', title => ${title}, status => 'next', actor => 'orch') as id`)[0].id);
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
+  await sql`select cb.iam('pc', 'p1', 'W1', 'iris')`;
+  const add = async (title: string) => Number((await sql`select cb.task_add(project => 'iris', title => ${title}, status => 'next', actor => 'orch') as id`)[0].id);
   const free = await add('still free'), taken = await add('given to B7'), mine = await add('given to me'), moved = await add('moved on');
   await sql`update cb.tasks set assignee = 'B7' where id = ${taken}`;
   await sql`update cb.tasks set assignee = 'W1' where id = ${mine}`;
@@ -316,7 +316,7 @@ test('work_still_open: a card assigned to someone else, or moved out of Next, si
   assert.deepEqual(part, []);
   await sql`delete from cb.task_parts where task_id = ${parts}`;
   // an unassigned bug outside a pipeline goes to triage, never offered (as the inbox)
-  const bug = Number((await sql`select cb.task_add(project => 'ihop', title => 'a bug', status => 'next', type => 'bug', actor => 'orch') as id`)[0].id);
+  const bug = Number((await sql`select cb.task_add(project => 'iris', title => 'a bug', status => 'next', type => 'bug', actor => 'orch') as id`)[0].id);
   const [{ b }] = await sql`select cb.work_still_open(${[free, bug]}::bigint[], 'W1') as b`;
   assert.deepEqual(b.map(Number), [free]);
   // started something meanwhile: nothing is offered
@@ -331,15 +331,15 @@ test('work_still_open: a card assigned to someone else, or moved out of Next, si
 // broadcast since, days old. Broadcasts now age out at 24 h, as messages, answers and huddle lines do.
 test('broadcasts older than 24 h are never pushed, so a reused pane gets no days-old backlog', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'x')`;
-  await sql`select cb.iam('pc', 'w8:p1', 'old-seat', 'ihop')`;
-  await sql`select cb.broadcast('four days old: stop all merges', 'ihop', 'orch')`;
-  await sql`select cb.broadcast('yesterday morning, 25 h ago', 'ihop', 'orch')`;
+  await sql`select cb.task_add(project => 'iris', title => 'x')`;
+  await sql`select cb.iam('pc', 'w8:p1', 'old-seat', 'iris')`;
+  await sql`select cb.broadcast('four days old: stop all merges', 'iris', 'orch')`;
+  await sql`select cb.broadcast('yesterday morning, 25 h ago', 'iris', 'orch')`;
   await sql`update cb.events set at = now() - interval '4 days' where kind = 'broadcast' and summary like 'four days%'`;
   await sql`update cb.events set at = now() - interval '25 hours' where kind = 'broadcast' and summary like 'yesterday%'`;
-  await sql`select cb.broadcast('23 h ago, still in the window', 'ihop', 'orch')`;
+  await sql`select cb.broadcast('23 h ago, still in the window', 'iris', 'orch')`;
   await sql`update cb.events set at = now() - interval '23 hours' where kind = 'broadcast' and summary like '23 h%'`;
-  await sql`select cb.broadcast('fresh: relay is live', 'ihop', 'orch')`;
+  await sql`select cb.broadcast('fresh: relay is live', 'iris', 'orch')`;
   const [{ i }] = await sql`select cb.inbox('pc', 'w8:p1', 0) as i`;
   assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['23 h ago, still in the window', 'fresh: relay is live']);
 });

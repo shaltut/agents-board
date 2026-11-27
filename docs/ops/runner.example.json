@@ -99,7 +99,8 @@
             ["node", "scripts/input-validation-audit.mjs"],
             ["node", "scripts/suppression-audit.mjs"],
             ["node", "scripts/llm-client-boundary.mjs"],
-            ["node", "scripts/check-auth-error-envelope.mjs"]
+            ["node", "scripts/check-auth-error-envelope.mjs"],
+            ["pnpm", "exec", "lefthook", "run", "pre-push", "--commands", "program-script-tests", "--no-tty"]
           ],
           "timeout": 900
         }
