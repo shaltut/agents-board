@@ -233,6 +233,38 @@ board's schema must already have `cb.session_usage` (the board applies it on sta
    and its numbers grow at each Stop.
 4. **Switch it off.** Remove that entry, or set `CB_USAGE_OFF=1` in the session's environment.
 
+## Fault log and triage (#4535)
+
+Every `cb` run that fails, needed a connect retry, started this machine's own board, or took over 5 s
+(`CB_FAULT_SLOW_MS`) appends one JSON line to `~/.claude-board/faults/<UTC day>.jsonl` on the machine that ran it. A run
+that succeeds writes nothing. The line holds the command and flag names, the kind, the exit code, an error code,
+timings, the pane and a masked message: only words found in cb's own source survive (`kit/fault-words.json`), every
+other word is `‹v›`, every number `N`, every argument value and quoted span `‹v›`. Never a value, a token, a URL, a path
+or an environment value.
+
+- **Where and how much.** `CB_FAULTS_HOME=<dir>` moves it, `CB_FAULTS_OFF=1` stops it. 5 MB per day file (then one
+  `cap` line and nothing more that day), 14 days kept (`CB_FAULTS_KEEP_DAYS`). Under `node --test` nothing is written
+  unless the test sets `CB_FAULTS_HOME`, so the suite's expected errors never reach a real log.
+- **The words file.** `kit/fault-words.json` is generated (`node kit/fault-line.mjs --words`). Regenerate it as part of
+  each release: `node cli/release.ts` prints a note when it differs from the source; then run the command on a branch
+  and merge it before the release. A word missing from it is only masked, never leaked, so a stale file is a note,
+  not a failure. `test/fault-log.test.ts` fails only when the file holds a word no longer in the source (a removed name
+  must not survive) or a denied name.
+- **Read it:** `cb faults [--since 24h] [--json]`. Local files only; works with the board down.
+- **Triage it, by hand only** (Q3002: no schedule): `cb triage --dry-run` first, then `cb triage`. cb decides the
+  plain groups itself (wrong use by fewer than 3 sessions, the board unreachable), searches claude-board for cards that
+  may hold the rest, and makes one `claude -p --model opus` call with Read, Grep and Glob only (no shell, no MCP
+  servers, no settings or hooks, an allow-listed environment) in a temporary copy of the tracked code (never the
+  checkout's `.env`). The whole card as filed (the judge's text and cb's facts) passes the redaction check, or the
+  group is held. Bugs and misleading messages pass a
+  redaction check and are filed as P2 bugs on claude-board ending `fault:ft-…`, or noted on the open card that carries
+  that marker, under `pg_advisory_xact_lock` on the template: two machines never file one fault twice. Nothing else is
+  ever written (Q3001). Bounds: `--max 4` groups per run (one Opus run with 2 groups measured USD 0.28), `--budget 1.00` USD (`CB_TRIAGE_BUDGET_USD`), a 10-minute
+  timeout (`CB_TRIAGE_TIMEOUT_MS`), one filing run per machine per 6 hours (`--force`). `triage.json` in the fault
+  folder remembers every verdict, so a group is judged again only when its count triples or a new release shows it.
+- **Not covered yet:** the hooks (session-start, usage-stop), the relay and the supervisor still log only to their own
+  files, and the guard's fail-closed reasons are not recorded (it needs the guard reinstalled, which is Ahmed's).
+
 ## Backups
 
 `deploy/backup.sh` runs nightly from root's crontab ([deploy.md](deploy.md#6-backups)): a `pg_dump -Fc` in
