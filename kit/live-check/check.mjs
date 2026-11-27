@@ -83,10 +83,22 @@ export function cases(agents = ['codex', 'agy', 'opencode']) {
   return out;
 }
 
-// Which PRs the installed guard has: PR 96 (own tools outside a seat), PR 104 (the interactive-session rule).
+// Which PRs the installed guard has, asked of its Codex shim (PR 108 review K3: behaviour, not a text marker): PR 96 lets
+// a tool it does not judge pass outside a seat; PR 104 refuses an interactive python in a seat, naming write_stdin.
 export function installedFeatures(guard) {
-  const read = (f) => { try { return readFileSync(join(guard, f), 'utf8'); } catch { return ''; } };
-  return { 'PR 96': /\bunknown:/.test(read('shim-codex.mjs')), 'PR 104': /stdinSession/.test(read('core.mjs')) };
+  const shim = join(guard, SHIMS.codex);
+  if (!existsSync(shim)) return { 'PR 96': false, 'PR 104': false };
+  const ask = (input, seat) => {
+    const env = { ...process.env };
+    for (const k of Object.keys(env)) if (/^CB_(ROLE|AGENT|PROTECTED_BRANCHES|ALLOW_ASK)$/i.test(k)) delete env[k];
+    if (seat) Object.assign(env, { CB_ROLE: 'builder', CB_AGENT: 'codex' });
+    const r = spawnSync(process.execPath, [shim], { input: JSON.stringify(input), env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
+    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+  };
+  const own = ask({ hook_event_name: 'PreToolUse', tool_name: 'cb_live_check_unknown', tool_input: {} }, false);
+  const py = ask({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'python' } }, true);
+  const deny = py?.hookSpecificOutput;
+  return { 'PR 96': !!own && Object.keys(own).length === 0, 'PR 104': deny?.permissionDecision === 'deny' && /write_stdin/.test(deny.permissionDecisionReason ?? '') };
 }
 
 /** Part A's probe results: { step, status: pass|fail|skip, detail }. */

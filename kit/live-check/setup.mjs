@@ -4,9 +4,13 @@
 //     [--herdr <label>] [--workspace <herdr workspace>] [--codex-model <m>] [--agy-model <m>] [--opencode-model <m>]
 // It makes <dir> a git repo with a few synthetic files and one commit, writes <dir>.squad.json beside it (never inside
 // the repo), and prints the commands that follow. Nothing here starts a seat or writes to the board.
+// Where it may go (PR 108 review K1): never inside a git repo (a client's files could reach a seat), and never under a
+// root in CB_SCRATCH_DENY unless under one in CB_SCRATCH_ALLOW (each a path list, ; on Windows, : elsewhere). The roots
+// are the owner's, set in his terminal, so no name or path of his is in this repo. An existing <dir>.squad.json is never
+// overwritten, and a setup that fails removes what it made (K5).
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // Explicit models (squad up refuses a model its agent cannot take); change them to what this machine's CLIs offer.
@@ -39,28 +43,65 @@ export function squadFile({ machine, repo, board, herdr = null, workspace, model
   };
 }
 
-function git(dir, ...args) {
-  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true });
-  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${(r.stderr || r.stdout || '').trim()}`);
+function git(dir, args, bin = 'git', env = process.env) {
+  const r = spawnSync(bin, ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, env });
+  if (r.error || r.status !== 0) throw new Error(`git ${args.join(' ')}: ${(r.error?.message || r.stderr || r.stdout || '').trim()}`);
+  return r.stdout;
 }
 
-/** Makes the scratch repo and the squad file; returns { repo, squadPath }. Refuses a folder that exists and is not empty. */
-export function setup(o) {
-  const repo = resolve(o.dir);
-  if (existsSync(repo) && readdirSync(repo).length) throw new Error(`${repo} is not empty: give a new folder (the scratch repo is made from nothing)`);
-  for (const k of ['machine', 'board']) if (!o[k]) throw new Error(`--${k} is required`);
-  for (const [path, text] of Object.entries(FILES)) {
-    mkdirSync(dirname(join(repo, path)), { recursive: true });
-    writeFileSync(join(repo, path), text);
+const roots = (v) => String(v ?? '').split(delimiter).map((s) => s.trim()).filter(Boolean).map((s) => resolve(s));
+const under = (p, root, win) => {
+  const rel = relative(win ? root.toLowerCase() : root, win ? p.toLowerCase() : p);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+};
+
+/** Why the scratch repo may not go at dir (K1), or null. A folder that does not exist yet is judged by its nearest
+ *  existing parent. */
+export function placeProblem(dir, env = process.env, platform = process.platform) {
+  const p = resolve(dir), win = platform === 'win32';
+  let near = p;
+  while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
+  // the repo's own variables would answer for another repo
+  const gitEnv = { ...env };
+  for (const k of Object.keys(gitEnv)) if (/^GIT_(?:DIR|WORK_TREE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)$/i.test(k)) delete gitEnv[k];
+  const top = spawnSync('git', ['-C', near, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', windowsHide: true, env: gitEnv });
+  if (top.status === 0 && top.stdout.trim()) return `${p} is inside the git repo ${top.stdout.trim()}: make the scratch repo outside any repo, so no other project's files sit where a seat works`;
+  const deny = roots(env.CB_SCRATCH_DENY).find((r) => under(p, r, win));
+  if (deny && !roots(env.CB_SCRATCH_ALLOW).some((r) => under(p, r, win))) {
+    return `${p} is under ${deny}, which CB_SCRATCH_DENY names (client work), and under no root CB_SCRATCH_ALLOW names: make the scratch repo elsewhere`;
   }
-  git(repo, 'init', '-q', '-b', 'main');
-  // a scratch identity in this repo only: never the machine's own
-  git(repo, 'config', 'user.name', 'Live Check');
-  git(repo, 'config', 'user.email', 'live-check@example.invalid');
-  git(repo, 'add', '-A');
-  git(repo, 'commit', '-q', '-m', 'scratch: synthetic files for the live check');
+  return null;
+}
+
+/** Makes the scratch repo and the squad file; returns { repo, squadPath }. Refuses a folder that exists and is not empty,
+ *  a place placeProblem refuses, and an existing squad file; on a failure it removes what it made. */
+export function setup(o) {
+  const repo = resolve(o.dir), env = o.env ?? process.env, bin = o.gitBin ?? 'git';
+  for (const k of ['machine', 'board']) if (!o[k]) throw new Error(`--${k} is required`);
+  const existed = existsSync(repo);
+  if (existed && readdirSync(repo).length) throw new Error(`${repo} is not empty: give a new folder (the scratch repo is made from nothing)`);
   const squadPath = `${repo}.squad.json`;
-  writeFileSync(squadPath, `${JSON.stringify(squadFile({ ...o, repo, board: resolve(o.board) }), null, 2)}\n`);
+  if (existsSync(squadPath)) throw new Error(`${squadPath} already exists: remove it or give another folder (setup never overwrites one)`);
+  const why = placeProblem(repo, env);
+  if (why) throw new Error(why);
+  try {
+    for (const [path, text] of Object.entries(FILES)) {
+      mkdirSync(dirname(join(repo, path)), { recursive: true });
+      writeFileSync(join(repo, path), text);
+    }
+    git(repo, ['init', '-q', '-b', 'main'], bin, env);
+    // a scratch identity in this repo only: never the machine's own
+    git(repo, ['config', 'user.name', 'Live Check'], bin, env);
+    git(repo, ['config', 'user.email', 'live-check@example.invalid'], bin, env);
+    git(repo, ['add', '-A'], bin, env);
+    git(repo, ['commit', '-q', '-m', 'scratch: synthetic files for the live check'], bin, env);
+    writeFileSync(squadPath, `${JSON.stringify(squadFile({ ...o, repo, board: resolve(o.board) }), null, 2)}\n`, { flag: 'wx' });
+  } catch (e) {
+    // only what this run made: the folder if it made it, else what it wrote into the empty one
+    if (existed) for (const f of readdirSync(repo)) rmSync(join(repo, f), { recursive: true, force: true });
+    else rmSync(repo, { recursive: true, force: true });
+    throw e;
+  }
   return { repo, squadPath };
 }
 
@@ -89,6 +130,8 @@ if (isMain()) {
     console.log(`  cb squad set ${PROJECT} -f "${r.squadPath}"                                                   # Ahmed or the lead`);
     console.log(`  cb squad trust ${PROJECT}                                                                        # Ahmed, own terminal`);
     console.log(`  node kit/live-check/check.mjs --guard ~/.claude-board/guard --seat "${r.repo}"                  # part A, no seat starts`);
+    console.log('\nAfterwards (K4): close the seats, then remove the scratch folder, its squad file and report:');
+    console.log(`  "${r.repo}", "${r.squadPath}", "${r.repo}.live-check.md"   (and archive the ${PROJECT} project, or keep it for the next check)`);
   } catch (e) {
     console.error(`setup failed: ${e?.message ?? e}`);
     process.exit(1);

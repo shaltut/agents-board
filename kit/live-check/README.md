@@ -20,7 +20,10 @@ in squad files.
 cd <board checkout>
 git pull --ff-only
 
-# 1. scratch repo and squad file (synthetic; change the models to what your CLIs offer)
+# 1. scratch repo and squad file (synthetic; change the models to what your CLIs offer). setup refuses a folder inside
+#    any git repo, and one under a root in CB_SCRATCH_DENY unless it is under one in CB_SCRATCH_ALLOW (; between paths):
+#    name the folders that hold client work there, in this terminal
+$env:CB_SCRATCH_DENY = '<folder with client repos>'; $env:CB_SCRATCH_ALLOW = '<a folder under it that is yours>'
 node kit/live-check/setup.mjs --dir <scratch> --machine <machine> --board (Get-Location).Path --workspace "Live Check" `
   --codex-model gpt-6.1-sol --agy-model gemini-3-pro --opencode-model anthropic/claude-opus-5-5
 
@@ -48,4 +51,14 @@ node kit/live-check/check.mjs --guard $HOME\.claude-board\guard --seat <scratch>
 
 The install steps are those of [maintain.md](../../docs/ops/maintain.md) ("Codex, agy and OpenCode seats"): each shim
 is copied into the installed guard and probed there before anything is swapped in; a second run changes nothing.
-Afterwards: close the seats (`/exit`, then the panes), and either keep the project for the next check or archive it.
+Part A tells which of PR 96 and PR 104 the installed guard has by asking its Codex shim (a tool it does not judge,
+outside a seat; an interactive python, in one), and reports a rule it lacks as a skip that names the PR.
+
+Afterwards (setup prints the same paths):
+
+```powershell
+# 7. close each seat (/exit, then its pane), then remove what setup and check made. The guard stays installed
+Remove-Item -Recurse -Force <scratch>
+Remove-Item <scratch>.squad.json, <scratch>.live-check.md
+# and archive the live-check project on the board, or keep it for the next check
+```
