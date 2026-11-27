@@ -285,6 +285,10 @@ test('cb ask: a stored question exits 0 even when the board drops right after, a
     assert.equal(again.code, 0, again.err);
     assert.match(again.out, /^Q1 is already on the board/);
     assert.deepEqual((await sql`select id, asked_by from cb.questions`).map((q: any) => [q.id, q.asked_by]), [['1', 'W5@test']], 'one question, not two');
+    // --json says it was a resend (#4453); the relay read failed, so whether a relay listens is unknown, not false
+    const json = await ask('-o', 'Yes', '-o', 'No', '--json');
+    assert.equal(json.code, 0, json.err);
+    assert.deepEqual(JSON.parse(json.out), { id: 1, duplicate: true, parent: null, if_answer: null, relay_live: null });
     // other options are another question; so is the same one once the first is withdrawn
     const other = await ask('-o', 'Yes', '-o', 'Tomorrow');
     assert.match(other.out, /^Q2 posted/, other.err);
@@ -295,5 +299,7 @@ test('cb ask: a stored question exits 0 even when the board drops right after, a
     const follow = await ask('-o', 'Yes', '-o', 'No', '--after', 'Q2', '--if', 'Yes');
     assert.equal(follow.code, 0, follow.err);
     assert.match(follow.out, /^Q4 posted as a follow-up to Q2: it opens only if Q2 is answered "Yes"/);
+    const fj = await ask('-o', 'Yes', '-o', 'No', '--after', 'Q2', '--if', 'Yes', '--json'); // the parent from what was asked, still a number
+    assert.deepEqual(JSON.parse(fj.out), { id: 4, duplicate: true, parent: 2, if_answer: 'Yes', relay_live: null }, fj.err);
   } finally { await stop(); }
 });

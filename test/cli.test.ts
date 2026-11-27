@@ -114,6 +114,13 @@ test('cb ask again while the same question is open returns it; any field that di
   assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'Yes']), /^Q9 posted as a follow-up to Q3/);
   assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'yes']), /^Q9 is already/, 'a follow-up, resent');
   assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'No']), /^Q10 posted/, 'another --if');
+  // --json tells a resend from a new post (#4453); the stored id is the same either way
+  assert.deepEqual(JSON.parse(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--json'])),
+    { id: 5, duplicate: true, parent: null, if_answer: null, relay_live: false });
+  assert.deepEqual(JSON.parse(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'yes', '--json'])),
+    { id: 9, duplicate: true, parent: 3, if_answer: 'Yes', relay_live: false });
+  assert.deepEqual(JSON.parse(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--reply-to', 'pc:w1:p2', '--json'])),
+    { id: 7, duplicate: true, parent: null, if_answer: null, relay_live: null }, 'with --reply-to no relay is checked');
   assert.equal((await sql`select count(*)::int as n from cb.questions`)[0].n, 10);
   // pictures: always posted, so new ones are never dropped behind an old question's
   const dir = mkdtempSync(join(tmpdir(), 'cb-3331-'));
@@ -237,11 +244,17 @@ test('cb tell sends to one session and says whether it is live', async () => {
   assert.match(r.out, /message #\d+ to W2@macbook \(relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start\)/);
   const [e] = await sql`select actor, summary from cb.events where kind = 'message'`;
   assert.deepEqual([e.actor, e.summary], ['W1@test', 'take #19 next']);
+  // --json carries the same state as fixed words, next to the id (#4453)
+  const json = (to: string) => { const j = cb(['tell', to, 'json', '--json']); assert.equal(j.code, 0, j.err); return JSON.parse(j.out); };
+  const nj = json('W2@macbook');
+  assert.equal(typeof nj.id, 'number');
+  assert.deepEqual({ ...nj, id: 0 }, { id: 0, to: 'W2@macbook', delivery: 'not_seen', last_wrote_mins: null, waits_hours: 24 });
   // still writing to the board: only its relay is down, and the sender is told so (#4341)
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('W2@macbook', 'demo', 'note', 'working', now() - interval '4 minutes')`;
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
+  assert.deepEqual({ ...json('W2@macbook'), id: 0 }, { id: 0, to: 'W2@macbook', delivery: 'relay_down', last_wrote_mins: 4, waits_hours: 24 });
   // #4379: a new Claude took its pane (another session id): the name has no session row now, a re-bound pane, never
   // "its relay is down" (#4421 wording for a name with no row that wrote lately)
   await sql`update cb.sessions set session_id = 'S1' where actor = 'W2@macbook'`;
@@ -255,12 +268,16 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const v = cb(['tell', 'V1@vps', 'ping']);
   assert.equal(v.code, 0, v.err);
   assert.match(v.out, /\(no relay session on the board under this name, but it last wrote to the board 3m ago: the message waits up to 24h for a relay under this name\)/);
+  assert.deepEqual({ ...json('V1@vps'), id: 0 }, { id: 0, to: 'V1@vps', delivery: 'no_session', last_wrote_mins: 3, waits_hours: 24 });
   // a session name with no '@' and no row (a session that runs cb with --as, no relay) gets the same, never "its relay is down"
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('ops-bot', 'demo', 'note', 'working', now() - interval '2 minutes')`;
   const o = cb(['tell', 'ops-bot', 'ping']);
   assert.equal(o.code, 0, o.err);
   assert.match(o.out, /\(no relay session on the board under this name, but it last wrote to the board 2m ago/);
   assert.doesNotMatch(o.out, /its relay is down/);
+  await sql`select cb.iam('pc', 'w9:p1', 'L1@pc', 'demo')`; // a relay seen just now
+  const live = json('L1@pc');
+  assert.deepEqual({ ...live, id: 0, last_wrote_mins: 0 }, { id: 0, to: 'L1@pc', delivery: 'live', last_wrote_mins: 0, waits_hours: null });
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
