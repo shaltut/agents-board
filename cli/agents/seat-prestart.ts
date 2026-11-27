@@ -139,6 +139,11 @@ export function samePath(a: string, b: string, platform: NodeJS.Platform = proce
 export function seatRefusal(agent: string, machine: string, pane: string, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), home = homedir(), platform: NodeJS.Platform = process.platform): string | null {
   const left = Object.keys(env).filter(isClaudeOnly);
   if (left.length) return `the pane still holds Claude-only env (${left.sort().join(', ')})`;
+  // PR 96 review r2 I3: the guard applies its seat rules (role, fence, secrets, unknown tools) only where CB_ROLE and
+  // CB_AGENT are set, so a pane missing either, or naming another agent, would start an agent with the dangerous-command
+  // rules alone. cb squad up sets both on every pane; anything else is a broken launch.
+  if (!String(env.CB_ROLE ?? '').trim()) return 'CB_ROLE is not set in this pane, so the guard would apply no seat rule: start the seat with cb squad up, which sets it';
+  if (String(env.CB_AGENT ?? '').trim() !== agent) return `CB_AGENT is ${env.CB_AGENT ? JSON.stringify(String(env.CB_AGENT).slice(0, 40)) : 'not set'} in this pane, not ${agent}: start the seat with cb squad up, which sets it`;
   if (agent === 'codex') return codexRefusal(env, cwd, home, platform);
   if (agent === 'agy') {
     const hook = agyHookRefusal(cwd, home, platform);

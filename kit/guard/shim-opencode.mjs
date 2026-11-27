@@ -56,12 +56,11 @@ export function runOpencodeShim(raw, env = process.env) {
     const role = String(env.CB_ROLE ?? '').trim();
     // CB_AGENT without CB_ROLE blocks (a broken seat launch, #4002); an edit carries its targets for the fence and secret rule
     const agent = String(env.CB_AGENT ?? '').trim() || null;
-    // PR 96 review I3: the plugin is machine-wide, so outside a board seat (neither CB_ROLE nor CB_AGENT) the owner's own
-    // OpenCode keeps its tools (webfetch, task, todowrite, skill, lsp, MCP) and its questions; the base rules (dangerous commands)
-    // still apply to every shell command, exactly as for Claude
+    // PR 96 review I3 and its r2 ruling: the plugin is machine-wide, so outside a board seat (neither CB_ROLE nor CB_AGENT)
+    // OpenCode gets exactly what Claude gets there: its other tools (webfetch, task, todowrite, skill, lsp, MCP) pass,
+    // shell commands get the dangerous-command rules only, and a question follows CB_ALLOW_ASK as AskUserQuestion does
     const seat = !!(role || agent);
     if (!p.ok) return !seat && p.unknown ? {} : block(`Blocked: ${p.reason}`);
-    if (!seat && p.tool === 'ask') return {};
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const paths = p.tool === 'edit' || p.tool === 'read' ? core.editTargets(p.args ?? null) : undefined;
     // a file glob names files too: grep's include and glob's pattern (grep's own pattern is the text searched for)

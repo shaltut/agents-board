@@ -1,6 +1,6 @@
 // Codex PreToolUse hook (#4002 phase 2), wired in ~/.codex/hooks.json by node kit/guard/install.mjs --agents codex with a
 // catch-all matcher (#4609): every tool reaches this file. In a board seat (CB_ROLE or CB_AGENT set) a tool it does not
-// judge is denied; outside one it is allowed, since the hook is machine-wide (PR 96 review I3). Reads the hook input on
+// judge is denied; outside one it passes, and Codex gets exactly what Claude gets there (PR 96 review I3, r2). Reads the hook input on
 // stdin and CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env,
 // asks core.mjs, and prints {} (allow: Codex rejects an explicit permissionDecision:allow) or Codex's deny object, exit 0:
 //   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}
@@ -71,12 +71,12 @@ export function runCodexShim(raw, env = process.env) {
     const p = parseCodexInput(raw);
     const role = String(env.CB_ROLE ?? '').trim();
     const agent = String(env.CB_AGENT ?? '').trim() || null;
-    // PR 96 review I3: the hook is machine-wide (~/.codex/hooks.json), so outside a board seat (neither CB_ROLE nor
-    // CB_AGENT) the owner's own Codex keeps its tools: a tool this shim does not judge, and its questions, are allowed
-    // there; the base rules (dangerous commands) still apply to every shell command, exactly as for Claude
+    // PR 96 review I3 and its r2 ruling: the hook is machine-wide (~/.codex/hooks.json), so outside a board seat (neither
+    // CB_ROLE nor CB_AGENT) Codex gets exactly what Claude gets there: a tool this shim does not judge passes (Claude's
+    // other tools never reach the guard), shell commands get the dangerous-command rules only, and a question follows
+    // CB_ALLOW_ASK as AskUserQuestion does
     const seat = !!(role || agent);
     if (!p.ok) return !seat && p.unknown ? {} : deny(`Blocked: ${p.reason}`);
-    if (!seat && p.tool === 'ask') return {};
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const paths = p.tool === 'edit' ? editPaths(p.input, p.cwd) : undefined;
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths });

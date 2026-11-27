@@ -225,10 +225,13 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
   call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
 
 **These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
-OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, a tool the shim does not judge (Codex `update_plan`,
-`spawn_agent`, `view_image`, MCP tools; OpenCode `webfetch`, `websearch`, `task`, `todowrite`, `skill`, `lsp`) and a
-question are allowed, and only the base rules apply (dangerous commands), exactly as for Claude. In a board seat every
-tool the shim does not judge is denied.
+OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
+seat: the dangerous-command rules only. A tool the shim does not judge (Codex `update_plan`, `spawn_agent`, MCP tools;
+OpenCode `webfetch`, `websearch`, `task`, `todowrite`, `skill`, `lsp`) passes, as Claude's tools that never reach the
+guard do; no role, fence or secret rule applies; and a question follows `CB_ALLOW_ASK`, as Claude's `AskUserQuestion`
+does. In a board seat every tool the shim does not judge is denied, and a seat may not change `CB_ROLE` or `CB_AGENT`
+(PR 96 review r2): the seat prestart also refuses to start an agent in a pane where either is missing or names
+another agent.
 
 `--agents` also installs the whole guard folder: Claude's shim and `core.mjs` there are replaced with this checkout's,
 exactly as a plain install does, so every agent on the machine runs the same rules.

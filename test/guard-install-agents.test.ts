@@ -45,7 +45,7 @@ function opencodeRefusal(w: World) {
   Object.assign(process.env, { TMPDIR: w.tmp, TEMP: w.tmp, TMP: w.tmp });
   try {
     writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: 'synthetic-password-for-a-test' });
-    return seatRefusal('opencode', 'm', 'w9:p1', { ...w.env, OPENCODE_SERVER_PASSWORD: 'synthetic-password-for-a-test' } as NodeJS.ProcessEnv, w.seat, w.home);
+    return seatRefusal('opencode', 'm', 'w9:p1', { ...w.env, CB_ROLE: 'builder', CB_AGENT: 'opencode', OPENCODE_SERVER_PASSWORD: 'synthetic-password-for-a-test' } as NodeJS.ProcessEnv, w.seat, w.home);
   } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 }
 
@@ -57,8 +57,8 @@ test('a fresh install for all three agents passes each seat prestart check (temp
   const r = wire(w);
   assert.ok(r.ok, r.problems.join('\n'));
   trustSeat(w); // trusting the folder stays a person's step in agy
-  assert.equal(seatRefusal('codex', 'm', 'w9:p1', w.env as NodeJS.ProcessEnv, w.seat, w.home), null);
-  assert.equal(seatRefusal('agy', 'm', 'w9:p1', w.env as NodeJS.ProcessEnv, w.seat, w.home), null);
+  assert.equal(seatRefusal('codex', 'm', 'w9:p1', { ...w.env, CB_ROLE: 'builder', CB_AGENT: 'codex' } as NodeJS.ProcessEnv, w.seat, w.home), null);
+  assert.equal(seatRefusal('agy', 'm', 'w9:p1', { ...w.env, CB_ROLE: 'builder', CB_AGENT: 'agy' } as NodeJS.ProcessEnv, w.seat, w.home), null);
   assert.equal(opencodeRefusal(w), null);
   // every hook runs the installed copy, never the checkout's kit/guard
   for (const f of [codexFile(w), agyFile(w), pluginFile(w)]) {

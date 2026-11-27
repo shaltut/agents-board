@@ -70,8 +70,12 @@ test('in a seat, unknown tools, including web fetch, subagents and MCP names, ar
   assert.equal(run(JSON.stringify({ tool: 7, args: {} })).out.decision, 'block');
 });
 
-test('outside a seat (the plugin is machine-wide) the owner\'s own OpenCode keeps its tools and questions; base rules still apply (PR 96 review I3)', () => {
-  for (const tool of ['webfetch', 'websearch', 'task', 'todowrite', 'skill', 'lsp', 'server_tool', 'question']) {
+// PR 96 review r2 ruling on I3: outside a seat OpenCode gets exactly what Claude gets there: its other tools pass,
+// shell commands get the dangerous-command rules only, and a question follows CB_ALLOW_ASK as AskUserQuestion does
+test('outside a seat (the plugin is machine-wide) the owner\'s own OpenCode gets what Claude gets there (PR 96 review I3, r2 ruling)', () => {
+  assert.equal(run(JSON.stringify({ tool: 'question', args: {} })).out.decision, 'block', 'a question without CB_ALLOW_ASK, as for Claude');
+  assert.equal(run(JSON.stringify({ tool: 'question', args: {} }), { CB_ALLOW_ASK: '1' }).raw, '{}');
+  for (const tool of ['webfetch', 'websearch', 'task', 'todowrite', 'skill', 'lsp', 'server_tool']) {
     assert.equal(run(JSON.stringify({ tool, args: {} })).raw, '{}', tool);
     assert.equal(run(JSON.stringify({ tool, args: {} }), { CB_AGENT: 'opencode' }).out.decision, 'block', `${tool} in a seat launched without a role`);
   }

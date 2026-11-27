@@ -98,12 +98,23 @@ test('in a seat, unknown tools block, including a missing tool_name and an MCP t
   }
 });
 
-test('outside a seat (the hook is machine-wide) the owner\'s own Codex keeps its tools and questions; base rules still apply (PR 96 review I3)', () => {
-  for (const [name, input] of [['update_plan', { plan: [] }], ['view_image', { path: 'a.png' }], ['spawn_agent', { message: 'x' }], ['mcp__postman__run', {}], ['request_user_input', { questions: [] }]] as [string, unknown][]) {
+// PR 96 review r2 ruling on I3: outside a seat Codex gets exactly what Claude gets there: its other tools pass (Claude's
+// never reach the guard), shell commands get the dangerous-command rules only, and a question follows CB_ALLOW_ASK
+test('outside a seat (the hook is machine-wide) the owner\'s own Codex gets what Claude gets there (PR 96 review I3, r2 ruling)', () => {
+  for (const [name, input] of [['update_plan', { plan: [] }], ['view_image', { path: 'a.png' }], ['spawn_agent', { message: 'x' }], ['mcp__postman__run', {}]] as [string, unknown][]) {
     assert.equal(run(call(name, input)).stdout, '{}', name);
     assert.equal(run(call(name, input), { CB_AGENT: 'codex' }).out.hookSpecificOutput?.permissionDecision, 'deny', `${name} in a seat launched without a role`);
   }
   assert.equal(run(bash('git reset --hard')).out.hookSpecificOutput?.permissionDecision, 'deny');
+  // parity with Claude's shim, outside a seat: the same verdict for a question (with and without CB_ALLOW_ASK), a
+  // dangerous command, a seat-only rule (writing the fence) and an ordinary command
+  const claude = (tool_name: string, tool_input: unknown, env: Record<string, string> = {}) => !('decision' in run(JSON.stringify({ tool_name, tool_input }), env, join(GUARD, 'shim-claude.mjs')).out);
+  const codex = (input: string, env: Record<string, string> = {}) => run(input, env).stdout === '{}';
+  for (const env of [{}, { CB_ALLOW_ASK: '1' }]) {
+    assert.equal(codex(call('request_user_input', { questions: [] }), env), claude('AskUserQuestion', { questions: [] }, env), `a question, ${JSON.stringify(env)}`);
+    assert.equal(codex(call('request_user_input', { questions: [] }), env), 'CB_ALLOW_ASK' in env);
+  }
+  for (const command of ['git reset --hard', 'echo x > ~/.claude/settings.json', 'ls']) assert.equal(codex(bash(command)), claude('Bash', { command }), command);
   // unreadable input is never an unknown tool, seat or not
   for (const input of [call('', { command: 'ls' }), JSON.stringify({ tool_input: {} }), JSON.stringify({ tool_name: 5, tool_input: {} }), call('Bash', {}), 'nope']) {
     assert.equal(run(input).out.hookSpecificOutput?.permissionDecision, 'deny', input);

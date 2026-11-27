@@ -317,6 +317,52 @@ test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by
   for (const c of ['echo x > ~/.claude/settings.json', 'node kit/guard/install.mjs']) assert.deepEqual(shell(c), {}, c);
 });
 
+// PR 96 review r2 (1): CB_ROLE and CB_AGENT are what make a pane a seat: with them the guard applies its seat rules and the
+// installer refuses to run. A seat that clears or sets them, in front of a hidden installer path or a child CLI, ran
+// that command with the dangerous-command rules only. Any assign, unset or removal is blocked; reading them is not.
+const seatVarChanges = [
+  'CB_ROLE= CB_AGENT= node kit/guard/inst*.mjs --agents codex', 'CB_ROLE= node "kit/guard/inst""all.mjs" --agents codex',
+  'CB_ROLE= codex exec "fix it"', 'CB_AGENT= opencode run x', 'CB_ROLE=lead claude -p x', 'CB_ROLE+=x agy', 'export CB_ROLE=lead',
+  'env -u CB_ROLE claude -p x', 'env -uCB_AGENT codex exec x', 'env --unset=CB_ROLE codex', 'env --unset CB_AGENT codex',
+  'env -i PATH=/usr/bin agy', 'env - codex exec x', 'env --ignore-environment codex', '/usr/bin/env -i codex', 'env -u $V codex',
+  'unset CB_ROLE', 'unset -v CB_AGENT; codex exec x', 'unset $N; codex exec x', 'unset ${!CB_@}', 'export -n CB_ROLE',
+  'declare +x CB_AGENT', 'typeset +x CB_ROLE', 'set -e CB_ROLE', 'set -gx CB_AGENT x', 'set CB_ROLE=', 'setx CB_ROLE ""',
+  'Remove-Item Env:CB_ROLE', String.raw`Remove-Item Env:\CB_AGENT; codex exec x`, 'ri env:CB_ROLE', 'Remove-Item -Path Env:CB_*',
+  'Remove-Item ("Env:" + $n)', 'Set-Item Env:CB_ROLE lead', 'Clear-Item Env:CB_ROLE', 'rm env:cb_agent',
+  '[Environment]::SetEnvironmentVariable("CB_ROLE", $null)', "[System.Environment]::SetEnvironmentVariable('CB_AGENT', '', 'Process')",
+  '[Environment]::SetEnvironmentVariable($n, $null)', '$env:CB_ROLE=$null; codex exec x', '$env:CB_AGENT = ""', '$Env:cb_role=""',
+  `node -e "delete process.env.CB_ROLE; require('child_process').spawnSync('codex')"`, `node -e "process.env.CB_AGENT=''"`,
+  `python -c "import os; os.environ.pop('CB_ROLE'); os.system('codex')"`, `python3 -c "import os; del os.environ['CB_AGENT']"`,
+  `bash -c "unset CB_ROLE; codex exec x"`, `sh -c 'CB_ROLE= codex'`, 'eval "unset CB_ROLE"', 'cmd /c "set CB_ROLE= && codex exec x"',
+  'exec -c codex', 'Start-Process codex -UseNewEnvironment', `python -c "import os; os.environ.clear(); os.system('agy')"`,
+];
+const seatVarReads = [
+  'echo $CB_ROLE', 'printenv CB_ROLE CB_AGENT', 'echo "role: $CB_ROLE"', 'env | grep CB_', 'echo ${CB_ROLE:-none}', '$env:CB_ROLE',
+  'Get-ChildItem Env:CB_*', 'Get-Item Env:CB_ROLE', 'test "$CB_ROLE" = builder', '[ "$CB_AGENT" == codex ]', 'grep -rn "CB_ROLE=" cli/',
+  `grep -rn 'unset CB_ROLE' .`, 'git log --grep CB_AGENT', 'git commit -m "unset CB_ROLE in the test helper"',
+  `node -e "console.log(process.env.CB_ROLE)"`, `python -c "import os; print(os.environ['CB_ROLE'])"`,
+  'unset FOO', 'env -u FOO node x.js', 'env FOO=1 node x.js', 'Remove-Item Env:FOO', '[Environment]::SetEnvironmentVariable("FOO", "1")',
+  'export FOO=1', 'set -euo pipefail', 'rm -f out.txt', 'exec node server.js',
+];
+test('PR 96 r2: no seat assigns, unsets or removes CB_ROLE or CB_AGENT, or clears its environment; reading them passes', () => {
+  blocksByRole('builder', seatVarChanges); // through the shim once; every role through evaluate
+  for (const role of ROLES) for (const c of seatVarChanges) assert.equal(evaluate({ tool: 'shell', command: c, role }).kind, 'role', `${role}: ${c}`);
+  passes('builder', seatVarReads);
+  for (const c of seatVarChanges.slice(0, 3)) assert.deepEqual(shell(c, {}), {}, `outside a seat the variables are not set: ${c}`);
+  assert.match(evaluate({ tool: 'shell', command: 'unset CB_ROLE', role: 'builder' }).reason, /CB_ROLE or CB_AGENT/);
+});
+
+// PR 96 review r2 (minor): the installer fence judged a name, so reading or staging any install.mjs was blocked in every
+// repo. Only a run counts now: a JS runner anywhere in the command (a pipe or < feeds it too), the file as the command
+// word, or a command word the guard cannot read, or a launcher, in front of it.
+test('PR 96 r2: reading or staging an install.mjs passes; running the guard installer, however spelled, stays blocked', () => {
+  passes('builder', ['cat install.mjs', 'git add install.mjs', 'git add kit/guard/install.mjs', 'cat kit/guard/install.mjs',
+    'grep -n tomlLine kit/guard/install.mjs', 'git diff kit/guard/install.mjs', 'less scripts/install.mjs', 'git log -p -- kit/guard/install.mjs']);
+  blocksByRole('builder', ['cat install.mjs | node', 'node < kit/guard/install.mjs', '$N kit/guard/install.mjs', '"$(which node)" kit/guard/install.mjs',
+    './install.mjs --agents codex', 'kit/guard/install.mjs', 'exec kit/guard/install.mjs', 'xargs -a list kit/guard/install.mjs',
+    `python -c "import subprocess; subprocess.run(['node', 'kit/guard/install.mjs'])"`, 'cat kit/guard/install.mjs; node install.mjs']);
+});
+
 test('role parity and evaluate(edit/ask)', () => {
   assert.deepEqual([...ROLES], ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);
   assert.deepEqual([...READ_ONLY_ROLES], ['reviewer', 'qa', 'investigator']);
@@ -527,6 +573,10 @@ test('long commands stay fast', () => {
     // #4587: line continuations are joined in one pass; a long run of backslashes is read once, not from each one
     ['fence, 200 KB of continued fence paths', asBuilder(kb200('cat \\\n ~/.claude/settings.json ') + '; cp a b')],
     ['fence, 200 KB of backslashes then a newline', asBuilder('cat ~/.claude/settings.json ' + '\\'.repeat(200000) + '\n')],
+    // PR 96 r2: the seat-variable rule reads each segment once (many env words with options, many removers, many names)
+    ['seat vars, 200 KB of env -a words', asBuilder(kb200('env -a -b '))],
+    ['seat vars, 200 KB of unset words then a name', asBuilder(kb200('unset x ') + 'CB_ROLE')],
+    ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

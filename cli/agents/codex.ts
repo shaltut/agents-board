@@ -125,8 +125,8 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
 
     // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open). #4609: a
     // catch-all, so a tool Codex adds later still reaches the shim. In a board seat the shim denies every tool it does not
-    // judge (HANDLED_TOOLS); outside one it allows them, since the hook is machine-wide and the owner's own Codex keeps its
-    // tools (PR 96 review I3). Codex 0.160's exec_command arrives as Bash, and write_stdin fires no hook (#4618, #4626).
+    // judge (HANDLED_TOOLS); outside one the hook is machine-wide, so Codex gets exactly what Claude gets there: those tools
+    // pass and shell commands get the dangerous-command rules only (PR 96 review I3, r2 ruling). Codex 0.160's exec_command arrives as Bash, and write_stdin fires no hook (#4618, #4626).
     // node kit/guard/install.mjs --agents codex writes this entry, pointing at the installed shim (AGENT_MATCHERS there).
     guardInstallSpec(boardDir) {
       return {

@@ -44,21 +44,44 @@ function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean;
   writeFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ trustedWorkspaces: o.agyTrusted === false ? [root] : [join(root, 'elsewhere'), ws] }));
   if (o.plugin !== false) writeFileSync(join(home, '.config', 'opencode', 'plugins', 'cb-guard.js'), PLUGIN_GOOD);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp };
+  // a pane cb squad up started holds CB_ROLE (and CB_AGENT, set per agent where a check runs: seatEnv)
+  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CB_ROLE: 'builder' };
   for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_SERVER_PASSWORD']) delete env[k];
   return { root, home, ws, env };
 }
+const seatEnv = (env: Record<string, string | undefined>, agent: string) => ({ ...env, CB_AGENT: agent }) as NodeJS.ProcessEnv;
+
+// PR 96 review r2 I3: the prestart is where a seat is known to be a seat, so a pane without both variables (CB_ROLE set,
+// CB_AGENT the agent being started) is refused there: outside a seat the guard keeps only its dangerous-command rules
+test('seatRefusal (PR 96 r2 I3): CB_ROLE must be set and CB_AGENT must name the agent being started', (t) => {
+  const w = world(t), env = { ...w.env };
+  for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
+  const r = (e: Record<string, string | undefined>) => seatRefusal('codex', 'm', 'w9:p1', e as NodeJS.ProcessEnv, w.ws, w.home);
+  assert.equal(r({ ...env, CB_AGENT: 'codex' }), null, 'a real seat passes');
+  for (const [what, e] of [
+    ['no CB_ROLE', { ...env, CB_ROLE: undefined, CB_AGENT: 'codex' }],
+    ['an empty CB_ROLE', { ...env, CB_ROLE: '  ', CB_AGENT: 'codex' }],
+    ['no CB_AGENT', { ...env, CB_AGENT: undefined }],
+    ['CB_AGENT names another agent', { ...env, CB_AGENT: 'opencode' }],
+    ['an empty CB_AGENT', { ...env, CB_AGENT: '' }],
+  ] as const) assert.match(r(e) ?? '', /CB_ROLE|CB_AGENT/, what);
+});
 
 const ok = (o: unknown) => ({ status: 0, stdout: JSON.stringify(o), stderr: '' });
 /** herdr, faked: one pane whose shell is a real bash; every typed line (pane run, then the agent) runs in that one shell. */
-function pane(env: Record<string, string | undefined>, cwd: string, shell = 'bash') {
+function pane(env0: Record<string, string | undefined>, cwd: string, shell = 'bash') {
   const calls: string[][] = [], typed: string[] = [];
+  const env = { ...env0 };
   let out = '', agent: { names: string[]; password: string | null; tmp: string } | null = null;
   const sh = (script: string) => spawnSync('bash', ['-c', script], { env: env as NodeJS.ProcessEnv, cwd, encoding: 'utf8' });
   const run: Runner = (_m, args) => {
     calls.push(args);
     const [a, b] = args;
-    if (a === 'tab' && b === 'create') return ok({ result: { pane: { pane_id: 'w9:p1' } } });
+    if (a === 'tab' && b === 'create') {
+      // as herdr does: each --env K=V is set in the new pane's shell (it only adds; the pane inherits the rest)
+      args.forEach((x, i) => { if (x === '--env') { const kv = args[i + 1]!; env[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1); } });
+      return ok({ result: { pane: { pane_id: 'w9:p1' } } });
+    }
     if (a === 'pane' && b === 'process-info') return ok({ result: { process_info: { foreground_processes: [{ argv0: `/usr/bin/${shell}`, name: shell }] } } });
     if (a === 'pane' && b === 'run') { typed.push(args[3]!); out = sh(typed.join('\n')).stdout; return ok({ result: { type: 'ok' } }); }
     if (a === 'pane' && b === 'wait-output') {
@@ -100,7 +123,7 @@ test('one Claude-only list: every adapter strips it from its launch env, and bot
 for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
   test(`prestart.sh in a real ${sh}: the Claude-only names leave the shell itself, a child sees none, the rest stays`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
-    const r = spawnSync(sh, ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(sh, ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce1$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -110,7 +133,7 @@ for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
 
 test('prestart.ps1 in a real pwsh: the same', { skip: !pwshOk && 'no pwsh' }, (t) => {
   const w = world(t);
-  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce2'])}; node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce2'])}; node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
   assert.match(r.stdout, /^cb-seat-ready:n0nce2$/m, r.stdout + r.stderr);
   const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
   assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -125,7 +148,7 @@ for (const [sh, has, on] of [['bash', bashOk, 'shopt -s expand_aliases'], ['zsh'
   test(`prestart.sh in a ${sh} whose aliases and functions shadow grep, env, sed and node: still strips, still ready`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
     const script = `${on}\n${SHADOWS}${prestartLine('posix', BOARD, ['opencode', 'm', 'w9:p1', 'n0nce3', '41234'])}\ncommand node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(',') + ' PW ' + (process.env.OPENCODE_SERVER_PASSWORD || '').length)"`;
-    const r = spawnSync(sh, ['-c', script], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(sh, ['-c', script], { env: seatEnv(w.env, 'opencode'), cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce3$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6, r.stdout.indexOf(' PW ')).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -137,7 +160,7 @@ for (const [sh, has, on] of [['bash', bashOk, 'shopt -s expand_aliases'], ['zsh'
 test('prestart.ps1 in a pwsh whose functions and aliases shadow node, Get-Command and Remove-Variable: still strips, still ready', { skip: !pwshOk && 'no pwsh' }, (t) => {
   const w = world(t);
   const shadows = "function node { 'junk' }; function Get-Command { $null }; function Remove-Item { throw 'shadowed' }; Set-Alias -Name Remove-Variable -Value Write-Error -Scope Global";
-  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${shadows}; ${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce4'])}; & (Microsoft.PowerShell.Core\\Get-Command node -CommandType Application)[0].Source -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${shadows}; ${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce4'])}; & (Microsoft.PowerShell.Core\\Get-Command node -CommandType Application)[0].Source -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
   assert.match(r.stdout, /^cb-seat-ready:n0nce4$/m, r.stdout + r.stderr);
   const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
   assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -150,7 +173,7 @@ test('seatRefusal reads the guard files, never a substring: crafted Codex, agy a
   const w = world(t), env = { ...w.env };
   for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
   const codexFile = join(w.home, '.codex', 'hooks.json'), cfg = join(w.home, '.codex', 'config.toml');
-  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', env as NodeJS.ProcessEnv, w.ws, w.home);
+  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', seatEnv(env, agent), w.ws, w.home);
   assert.equal(refusal('codex'), null, 'the real shape passes');
   const hook = (command: string) => [{ type: 'command', command }];
   const codexCases: [string, string][] = [
@@ -210,7 +233,7 @@ test('seatRefusal reads the guard files, never a substring: crafted Codex, agy a
     try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   };
   withTmp(() => writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: pw }));
-  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', { ...env, OPENCODE_SERVER_PASSWORD: pw } as NodeJS.ProcessEnv, w.ws, w.home));
+  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', seatEnv({ ...env, OPENCODE_SERVER_PASSWORD: pw }, 'opencode'), w.ws, w.home));
   assert.equal(ocRefusal(), null, 'the real plugin shape passes');
   for (const [what, src] of [
     ['an empty plugin', ''],
@@ -322,7 +345,7 @@ test('startOne sends the first prompt through the adapter\'s promptText', { skip
 function seatWorld(t: { after: (fn: () => void) => void }) {
   const w = world(t), env = { ...w.env };
   for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
-  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', env as NodeJS.ProcessEnv, w.ws, w.home);
+  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', seatEnv(env, agent), w.ws, w.home);
   return { ...w, env, refusal, codexFile: join(w.home, '.codex', 'hooks.json'), cfg: join(w.home, '.codex', 'config.toml'), agyFile: join(w.ws, '.agents', 'hooks.json') };
 }
 
@@ -371,7 +394,7 @@ test('seatRefusal (70-M2): the shim and the core.mjs it loads must be this board
     try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   };
   withTmp(() => writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: pw }));
-  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', { ...w.env, OPENCODE_SERVER_PASSWORD: pw } as NodeJS.ProcessEnv, w.ws, w.home));
+  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', seatEnv({ ...w.env, OPENCODE_SERVER_PASSWORD: pw }, 'opencode'), w.ws, w.home));
   assert.equal(ocRefusal(), null, 'the real plugin passes');
   writeFileSync(plugin, PLUGIN_GOOD.replace(`${BOARD}/kit/guard`, folder('ocfake', 'shim-opencode.mjs').replace(/\\/g, '/')));
   assert.match(ocRefusal() ?? 'READY', /does not register tool\.execute\.before/, 'a fake OpenCode shim');
