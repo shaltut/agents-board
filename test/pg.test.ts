@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
@@ -115,13 +115,14 @@ test('spawnWithin: a child that never exits fails fast in words; one that exits 
 // Bash with output piped (node --test ... | tail), that included the pipe the shell reads: the run that started a
 // worktree's cluster never returned, its tests long done, until the cluster stopped; a rerun (cluster up) passed. Here a
 // stray inheritable pipe (cmd.exe's fd 3) sits above the start: it must close when the start ends, the cluster still up.
-test('a worktree cluster holds no handle of the run that started it', { timeout: 240_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+// #4491: the 5434 dev cluster's start (adopt) too, on a scratch folder and a free port: never the PC's own 5434.
+for (const adopt of [false, true]) test(`${adopt ? 'the dev cluster' : 'a worktree cluster'} holds no handle of the run that started it`, { timeout: 240_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
   const tree = join(tmp, 'tree'), dir = join(tree, '.pgdata').replace(/\\/g, '/');
   mkdirSync(tree); writeFileSync(join(tree, '.git'), 'gitdir: elsewhere\n');
   const port = testPgPort(tree, 'win32');
   const pgCtl = join(process.env.CB_PG_BIN ?? 'C:/Program Files/PostgreSQL/16/bin', 'pg_ctl.exe');
-  const js = `import('${new URL('../db/pg.ts', import.meta.url).href}').then((m) => { m.ensurePg('${dir}', ${port}, false); console.log('started'); })`;
+  const js = `import('${new URL('../db/pg.ts', import.meta.url).href}').then((m) => { m.ensurePg('${dir}', ${port}, ${adopt}); console.log('started'); })`;
   try {
     const c = spawn('cmd.exe', ['/d', '/s', '/c', `node -e "${js}"`], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'], windowsVerbatimArguments: true });
     let out = '';
@@ -132,8 +133,31 @@ test('a worktree cluster holds no handle of the run that started it', { timeout:
     assert.equal(await Promise.race([closed, new Promise<boolean>((r) => setTimeout(() => r(false), 10_000))]), true,
       'the postmaster still holds a pipe of the run that started it');
     assert.equal(spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status, 0, 'the cluster is still up');
+    if (adopt) { // a dev cluster already up is adopted as it is, never restarted
+      const pid = () => readFileSync(join(dir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[0];
+      const before = pid();
+      ensurePg(dir, port, true);
+      assert.equal(pid(), before);
+    }
   } finally {
     spawnSync(pgCtl, ['-D', dir, 'stop', '-m', 'immediate', '-w'], { stdio: 'ignore' });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// #4491 M2: a PowerShell that cannot run read as "could not start Postgres ...; see server.log", a log with nothing in
+// it about that. PowerShell is called by its full System32 path; here SystemRoot names a folder with none.
+test('a start with no PowerShell to run says so, with the reason', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
+  const dir = join(tmp, '.pgdata').replace(/\\/g, '/'), noWindows = join(tmp, 'no-windows').replace(/\\/g, '/');
+  mkdirSync(dir); writeFileSync(join(dir, 'PG_VERSION'), '16\n'); // looks made: no initdb, pg_ctl status says not running
+  try {
+    // set inside the child: Node itself cannot start without the real SystemRoot
+    const js = `process.env.SystemRoot = '${noWindows}'; import('./db/pg.ts').then((m) => m.ensurePg('${dir}', ${testPortStart(tmp)}, false)).catch((e) => console.log(e.message))`;
+    const r = spawnSync(process.execPath, ['-e', js], { encoding: 'utf8', timeout: 60_000 });
+    assert.match(r.stdout, /could not start Postgres in .*: .*no-windows.*powershell\.exe did not run \(.*ENOENT/s, r.stdout + r.stderr);
+    assert.doesNotMatch(r.stdout, /see .*server\.log/);
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
