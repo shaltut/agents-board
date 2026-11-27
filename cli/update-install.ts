@@ -16,6 +16,8 @@
 // running from the copy would not, so the update refuses while one runs (--force goes ahead and leaves it on the old
 // code until it is restarted by its pid). Nothing is killed, ever, and never by name.
 // A git checkout (the PC) is refused: git pull --ff-only updates it.
+// The schema gate. Before anything is written, the board's database must have the schema the release needs (the
+// sha256 of its db/schema.sql, cb.schema_covers): otherwise the new cb would call functions the board lacks.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
   symlinkSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
@@ -237,7 +239,34 @@ function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.P
   }
 }
 
-export async function install(o: { root: string; from: string; force?: boolean; procs?: () => Proc[]; env?: NodeJS.ProcessEnv; timeoutMs?: number }) {
+/** What the board's database says of a schema: covers, whether it has it (cb.schema_covers); null when it cannot say
+ *  (a board from before the gate); current, the schema it runs. */
+export type SchemaAnswer = { covers: boolean | null; current: string | null };
+/** Asks the database this cb uses (the board's) about the schema `need` (a sha256 of db/schema.sql). */
+export async function askSchema(sql: any, need: string): Promise<SchemaAnswer> {
+  try {
+    const [r] = await sql`select cb.schema_covers(${need}) as covers, cb.schema_applied() ->> 'current' as current`;
+    return { covers: !!r.covers, current: r.current ?? null };
+  } catch (e: any) {
+    if (e?.code === '42883') return { covers: null, current: null }; // undefined_function: the board predates the gate
+    throw new Error(`cannot read the board's schema (${e?.code ?? e?.message ?? e}): cb update checks it before installing; try again when the board answers`);
+  }
+}
+
+/** Refuses, writing nothing, a release whose schema (the sha256 of its db/schema.sql) the board's database does not
+ *  have: the new cb would call functions the board does not have yet. Schema before code (CLAUDE.md, Releasing). */
+async function schemaGate(m: Manifest, ask: (need: string) => Promise<SchemaAnswer>) {
+  const need = m.files['db/schema.sql'];
+  if (!need) return; // a release with no schema needs none
+  const a = await ask(need);
+  const deploy = `deploy release ${short(m.sha)} to the board first (docs/ops/maintain.md, Upgrade: the board and its schema go first), then cb update again`;
+  if (a.covers === null) throw new Error(`the board's database does not say which schema it runs (it runs a board from before cb update's schema check): ${deploy}`);
+  if (!a.covers) throw new Error(`the board's database runs an older schema than release ${short(m.sha)} needs `
+    + `(the release's db/schema.sql ${need.slice(0, 8)}, the board's ${a.current ? a.current.slice(0, 8) : 'unknown'}): ${deploy}`);
+}
+
+export async function install(o: { root: string; from: string; force?: boolean; procs?: () => Proc[]; env?: NodeJS.ProcessEnv; timeoutMs?: number;
+  schema: (need: string) => Promise<SchemaAnswer> }) {
   const L = layout(o.root);
   const repaired = preflight(L);
   const base = boardBase(needAddress(o.from));
@@ -257,6 +286,8 @@ export async function install(o: { root: string; from: string; force?: boolean; 
     }
     return { ok: true, lines: [...lines, `update: already on ${short(m.sha)}`], json: { ok: true, release: m.sha, current: m.sha, changed: false } };
   }
+
+  await schemaGate(m, o.schema);
 
   // packages: reused from the copy when the lockfile is the same; never installed or touched here
   const want = f.served?.deps?.[LOCKFILE];

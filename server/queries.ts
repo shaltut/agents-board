@@ -108,15 +108,17 @@ export function events(f: { project?: string; actor?: string; kind?: string; not
     order by at desc, id desc limit ${Math.min(f.limit ?? 100, 500)}`;
 }
 
-export async function today(project: string | undefined, since: string) {
-  const [[counts], evs] = await Promise.all([
+/** board: the commit this board serves as its release (server/release.ts); null serves none, so no seat line (#4352). */
+export async function today(project: string | undefined, since: string, board: string | null = null) {
+  const [[counts], evs, code] = await Promise.all([
     sql`select
         (select count(*)::int from cb.tasks where status = 'done' and done_at > ${since} ${proj(project)}) as done,
         (select count(*)::int from cb.tasks where status = 'in_progress' ${proj(project)}) as active,
         (select count(*)::int from cb.tasks where status = 'blocked' ${proj(project)}) as blocked`,
     events({ project, since, limit: 500, notKind: 'huddle' }), // huddle chatter lives on its task and the Huddles page
+    board ? sql`select cb.seats_code(${board}, ${project ?? null}) as c`.then(([r]: any) => r.c) : null,
   ]);
-  return { since, counts, events: evs };
+  return { since, counts, events: evs, code };
 }
 
 export async function lastSeen() {

@@ -78,6 +78,32 @@ test('today counts', async () => {
   assert.equal(body.events.length, 2);
 });
 
+test('today: live seats whose relay runs other code than the board\'s release, by machine; none when all match or no release is served (#4352)', async () => {
+  const sql = await db();
+  const { setRelease } = await import('../server/release.ts');
+  const { seatsCodeLine } = await import('../web/src/lib/seats-code.ts');
+  const board = 'b'.repeat(40), old = 'a'.repeat(40);
+  const today = async (q = '') => (await (await app.request(`/api/today${q}`)).json()).code;
+  assert.equal(await today(), null, 'no release served: no seat line');
+  setRelease({ manifest: { format: 'cb.release.v1', sha: board, files: {} }, tgz: Buffer.alloc(0), sha256: '0'.repeat(64) });
+  try {
+    for (const [m, p] of [['mac', 'p1'], ['mac', 'p2'], ['pc', 'p1'], ['pc', 'p2'], ['pc', 'p3']]) await sql`select cb.inbox(${m}, ${p})`;
+    assert.equal((await sql`select cb.seat_code('MAC', 'p1', ${old}) as ok`)[0].ok, true, 'machine names compare as cb.iam does');
+    await sql`select cb.seat_code('pc', 'p1', ${board}), cb.seat_code('pc', 'p2', ${board}), cb.seat_code('pc', 'p3', 'not-a-sha')`;
+    assert.equal((await sql`select cb.seat_code('nobox', 'p9', ${board}) as ok`)[0].ok, false, 'no row: the relay sends again later');
+    // mac p2 never said its code (a relay from before this) and pc p3 sent no sha: both count as other code
+    let code = await today();
+    assert.deepEqual(code, { board, live: 5, off: [{ machine: 'mac', seats: 2 }, { machine: 'pc', seats: 1 }] });
+    assert.equal(seatsCodeLine(code), '3 seats run other code than the board (bbbbbbb): mac 2, pc 1');
+    await sql`select cb.seat_code('mac', 'p1', ${board}), cb.seat_code('mac', 'p2', ${board}), cb.seat_code('pc', 'p3', ${board})`;
+    await sql`update cb.sessions set last_seen = now() - interval '5 minutes', code_sha = ${old} where machine = 'pc' and pane = 'p2'`; // not live
+    code = await today();
+    assert.deepEqual(code, { board, live: 4, off: [] });
+    assert.equal(seatsCodeLine(code), null, 'all live seats match: no line');
+    assert.equal((await today('?project=nosuch')).live, 0, 'an unknown project shows no seats, never an error');
+  } finally { setRelease(null); }
+});
+
 test('set-returning rpc gives an array', async () => {
   await db();
   await rpc('task_add', { project: 'demo', title: 'A', status: 'next' });

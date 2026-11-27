@@ -27,7 +27,7 @@ import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } f
 import { doctorCmd } from './doctor.ts';
 import { startedAs } from './started-as.ts';
 import { needAddress, updateCheck } from './update.ts';
-import { install, rollback } from './update-install.ts';
+import { askSchema, install, rollback } from './update-install.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -90,8 +90,8 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
 const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
 let sql: any = direct;
-// doctor and update look at this machine (and the board's web address), never the board's database: they must work on
-// a stale worker and while the database is down
+// doctor and update look at this machine (and the board's web address), never through a relay: they must work on a
+// stale worker and while the database is down (cb update reads the board's schema once, directly, before installing)
 const offline = cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
 if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
   for (const k of relayKeys()) {
@@ -881,7 +881,8 @@ ${body}`, json: pg };
       if (o.rollback) { const r = rollback({ root, force: !!o.force }); return { out: r.lines.join('\n'), json: r.json }; }
       const from = o.from || process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '';
       if (o.check) { const r = await updateCheck({ root, from: needAddress(from) }); return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 }; }
-      const r = await install({ root, from, force: !!o.force }); // checks the copy before it needs the address
+      // checks the copy before it needs the address; the schema gate is its one read of the board's database
+      const r = await install({ root, from, force: !!o.force, schema: (need) => askSchema(sql, need) });
       return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {

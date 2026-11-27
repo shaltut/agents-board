@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { get, rpc } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { ROLE_TEXT_CAP, actorLabel, handEdited, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
+import { ROLE_TEXT_CAP, actorLabel, charCount, handEdited, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
 import { Notice } from './bits'
 
 const useRoleTexts = () => useQuery({ queryKey: ['role-texts'], queryFn: () => rpc<RoleTextPage>('role_text_page', {}) })
@@ -137,7 +137,7 @@ function Edits({ edits }: { edits: RoleTextPage['edits'] }) {
             <span className="font-medium">{roleTextLabel(e.role)}</span>
             <span className="text-muted-foreground" title={e.actor}>by {actorLabel(e.actor)}</span>
             <time dateTime={e.at} className="text-muted-foreground">{ago(e.at)}</time>
-            <span className="text-xs text-muted-foreground tabular-nums">{(e.before ?? '').length.toLocaleString()} → {e.after.length.toLocaleString()} characters</span>
+            <span className="text-xs text-muted-foreground tabular-nums">{charCount(e.before ?? '').toLocaleString()} → {charCount(e.after).toLocaleString()} characters</span>
             <Button variant="ghost" size="xs" className="ml-auto" aria-expanded={open === e.id} onClick={() => setOpen(open === e.id ? null : e.id)}>
               {open === e.id ? 'Hide' : 'Before and after'}
             </Button>
