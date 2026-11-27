@@ -336,6 +336,74 @@ test('a card per PR: created once, reused, closed on merge or close with a note 
   assert.deepEqual(closing.slice(1, 3), ['  PR #7 "Date parse" → card #2 (closed): merged', '  PR #8 "Old idea" → card #3 (closed): closed']);
 });
 
+test('cardRefs: the cards a PR names, from its branch, then its title, then "card N" in its body; a bare #N in the body is no card', () => {
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'fix/101-102-date-parse' }, title: 'fix: x (cards 101, 102)', body: 'card 9' }),
+    [[101, 102], [101, 102], [9]]);
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'fix/214-export' }, title: 'fix(export): page the rows (214)' }), [[214], [214]]);
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'hotfix-prod' }, title: 'fix: totals (hotfix)', body: 'For card #263; fixes #5800' }), [[263]]);
+  assert.deepEqual(gh.cardRefs({ title: 'feat: y (#3555)', body: 'see #5800, discard 3 rows' }), [[3555]]);
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'release/2026-11-27' }, title: 'Release' }), [], 'only a conventional branch prefix names a card');
+  assert.deepEqual(gh.cardRefs(pr(1)), []);
+});
+
+test('a PR naming a card in a watched project logs on that card: no card of its own, the merge noted there, the card never moved (#4334)', async () => {
+  const { sql, watch } = await board();
+  await sql`select cb.ensure_project('iris-squad'), cb.ensure_project('elsewhere')`;
+  await sql`update cb.settings set value = value || ${sql.json({ card_projects: ['iris-squad'] })} where key = ${'github:' + R}`;
+  const work = Number((await sql`select cb.task_add(project => 'iris-squad', title => 'Date parse', status => 'next', actor => 'W1@pc') as id`)[0].id);
+  const other = Number((await sql`select cb.task_add(project => 'elsewhere', title => 'Not watched', actor => 'W1@pc') as id`)[0].id);
+  await sql`insert into cb.settings (key, value) values ('github-muted', ${sql.json(['shaltut'])})`;
+  const W = { user: { login: 'shaltut' } };
+  let pulls = [pr(90, { ...W, title: `fix: parse (card ${work})`, head: { ref: `fix/${work}-date-parse` } }),
+    pr(91, { title: 'Other', head: { ref: `fix/${other}-x` } })];  // names a card in a project the repo is not watched for
+  let issueComments = [comment(90, at(5), 'breaks 1399 dates', 'ana'), comment(91, at(6), 'hm')];
+  const f = fakeGh({
+    [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? pulls : [],
+    [`repos/${R}/issues/comments`]: () => issueComments,
+    [`repos/${R}/pulls/90/reviews`]: () => [review('CHANGES_REQUESTED', at(7), 'wrong month', 'cai-x')],
+  });
+  await poll(f, watch);
+  assert.deepEqual((await sql`select title from cb.tasks where project = 'iris' order by id`).map((c: any) => c.title), ['GitHub PR #91: Other'],
+    'a card of its own only for the PR naming a card outside the watched projects');
+  const mirror = Number((await sql`select id from cb.tasks where project = 'iris'`)[0].id);
+  assert.deepEqual((await state(sql)).prs, { 91: mirror });
+  const log = await notes(sql, work);
+  assert.equal(log.length, 2, log.join('\n'));
+  assert.match(log[0], /^\[GitHub · untrusted\] widgets PR #90: comment by ana \(MEMBER\): "breaks 1399 dates" /);
+  assert.match(log[1], /PR #90: change request by cai-x \(CONTRIBUTOR\): "wrong month" /);
+  assert.deepEqual(await notes(sql, other), [], 'nothing written in a project the repo is not watched for');
+  assert.equal((await sql`select project from cb.events where task_id = ${work} and kind = 'note' limit 1`)[0].project, 'iris-squad');
+  const [m] = await tells(sql);
+  assert.match(m, new RegExp(`^  PR #90 "fix: parse \\(card ${work}\\)" → card #${work}: 1 comment, 1 change request by ana, cai-x$`, 'm'));
+
+  // the muted author merges it: logged on the named card with its commit; the card stays where its squad put it
+  pulls = [pr(90, { ...W, title: `fix: parse (card ${work})`, head: { ref: `fix/${work}-date-parse` }, state: 'closed',
+    merged_at: at(180.5), closed_at: at(180.5), updated_at: at(180.5), merge_commit_sha: 'abc1234def' })];
+  issueComments = [];
+  await poll(f, watch, new Date(+NOW + 60_000));
+  assert.match((await notes(sql, work)).at(-1)!, /^\[GitHub\] widgets PR #90 merged at abc1234def$/);
+  assert.equal((await sql`select status from cb.tasks where id = ${work}`)[0].status, 'next', 'never moved or closed by the watch');
+  assert.match((await tells(sql))[1], new RegExp(`^  PR #90 .* → card #${work}: merged$`, 'm'));
+  assert.equal((await sql`select count(*)::int as n from cb.tasks where project = 'iris'`)[0].n, 1, 'still no card of its own');
+});
+
+test('a PR with a card of its own from before #4334 that names a card: both log, its own card closes on merge, the named card stays', async () => {
+  const { sql, watch } = await board();
+  const work = Number((await sql`select cb.task_add(project => 'iris', title => 'Export', status => 'next', actor => 'W1@pc') as id`)[0].id);
+  const mirror = Number((await sql`select cb.task_add(project => 'iris', title => 'GitHub PR #95: Export', status => 'review', actor => 'github') as id`)[0].id);
+  await sql`update cb.settings set value = value || ${sql.json({ prs: { 95: mirror } })} where key = ${'github:' + R}`;
+  const f = fakeGh({
+    [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [pr(95, { title: `fix: export (#${work})`, state: 'closed', merged_at: at(20), closed_at: at(20), merge_commit_sha: 'beef' })] : [],
+    [`repos/${R}/issues/comments`]: () => [comment(95, at(10), 'ship it')],
+  });
+  await poll(f, watch);
+  assert.deepEqual((await sql`select id, status from cb.tasks where id in (${work}, ${mirror}) order by id`).map((c: any) => c.status), ['next', 'done']);
+  assert.deepEqual((await state(sql)).prs, {});
+  assert.match((await notes(sql, work)).join('\n'), /comment by AlexMorgan16 \(MEMBER\): "ship it"[^]*\[GitHub\] widgets PR #95 merged at beef$/);
+  assert.match((await notes(sql, mirror)).join('\n'), /"ship it"/);
+  assert.match((await tells(sql))[0], new RegExp(`^  PR #95 .* → card #${work}: merged, 1 comment by AlexMorgan16$`, 'm'));
+});
+
 test("forged metadata: a title or a git author name can't pose as who did what", async () => {
   const { sql, watch } = await board();
   const f = fakeGh({
@@ -613,12 +681,20 @@ test('cb github: anyone lists; only Ahmed adds and removes; a new repo starts at
   for (const bad of ['../..', '.github/x', 'acme/..']) assert.match(cb(['github', 'add', bad], AHMED).err, /is not owner\/repo/, bad);
   assert.match(cb(['github', 'add', 'acme/worker-service', '--project', 'nope'], AHMED).err, /unknown project/);
   assert.equal(cb(['github', 'add', 'acme/worker-service', '--to', 'orch@macbook'], AHMED).code, 0);
+  // --cards-in (#4334): more projects whose cards a PR may name; re-adding keeps the checkpoint and the rest
+  assert.match(cb(['github', 'add', 'acme/worker-service', '--cards-in', 'nope'], AHMED).err, /unknown project/);
+  await sql`select cb.ensure_project('iris-squad')`;
+  const also = cb(['github', 'add', 'acme/worker-service', '--cards-in', 'iris-squad'], AHMED);
+  assert.equal(also.code, 0, also.err);
+  assert.match(also.out, /PR cards go in ihop \(a PR naming a card in ihop, iris-squad logs on that card\)/);
 
   await sql`update cb.settings set value = value || ${sql.json({ prs: { 3452: 9 }, last_error: { at: T0, message: 'gh: HTTP 401' } })} where key = ${'github:' + R}`;
   const list = cb(['github']);
   assert.equal(list.code, 0, list.err);
   assert.match(list.out, /^acme\/widgets → orch@shaltoot \((ihop)\) · last poll never · since \S+ · last error: gh: HTTP 401 \(since 2026-11-11T10:00:00\.000Z\)\n {2}open PR cards: PR #3452 → card #9$/m);
-  assert.match(list.out, /^acme\/worker-service → orch@macbook \((ihop)\) · last poll never · since \S+$/m);
+  assert.match(list.out, /^acme\/worker-service → orch@macbook \(ihop; named cards also in iris-squad\) · last poll never · since \S+$/m);
+  assert.equal(cb(['github', 'add', 'acme/worker-service', '--cards-in', ''], AHMED).code, 0, '"" clears them');
+  assert.match(cb(['github']).out, /^acme\/worker-service → orch@macbook \(ihop\) · /m);
 
   assert.match(cb(['github', 'remove', R]).err, /only Ahmed adds or removes watched repos: ask him/);
   assert.equal(cb(['github', 'remove', R], AHMED).code, 0);
