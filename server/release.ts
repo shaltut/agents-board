@@ -37,9 +37,9 @@ const none = (c: any) => c.json({ ok: false, error: "this board serves no releas
 export const releaseApp = new Hono();
 releaseApp.get('/release/current.json', (c) => {
   if (!current) return none(c);
-  const { manifest, tgz, sha256 } = current;
+  const { manifest, tgz, sha256, deps } = current;
   c.header('Cache-Control', 'no-store');
-  return c.json({ ...manifest, archive: { name: `${manifest.sha}.tgz`, sha256, bytes: tgz.length } });
+  return c.json({ ...manifest, archive: { name: `${manifest.sha}.tgz`, sha256, bytes: tgz.length }, deps: deps ?? null });
 });
 releaseApp.get('/release/:file', (c) => {
   if (!current) return none(c);

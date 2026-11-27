@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { hostname, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { callFn, useDb } from '../server/rpc.ts';
@@ -22,7 +22,9 @@ import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
-import { updateCheck } from './update.ts';
+import { startedAs } from './started-as.ts';
+import { needAddress, updateCheck } from './update.ts';
+import { install, rollback } from './update-install.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -38,7 +40,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' },
-  root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' },
+  root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -666,7 +668,8 @@ async function run(): Promise<unknown> {
         (await sql`select agent from cb.sessions where machine = ${machine()} and pane = ${pane}`.catch(() => []))[0]?.agent || 'claude';
       getAdapter(agent); // an agent cb cannot serve yet fails here, by name
       if (agent === 'claude' && !claudeInbox()) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
-      const r = spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
+      // through the path cb was started with, not its real one: a release flip then restarts the relay (started-as.ts)
+      const r = spawnSync(process.execPath, [join(dirname(startedAs(process.argv[1], import.meta.filename)), 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
       // #4429: a relay that refused this seat exits 1 (and told the project on the board when it could); never "relay on"
       if (r.status !== 0) throw new Error(`the relay did not start (exit ${r.status ?? r.signal}); its reason is in the relay log, cb-relay-*.log in this machine's temp folder. Without a relay, run cb mine and cb pending between steps`);
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session`, json: { machine: machine(), pane, agent, relay: 'on' } };
@@ -868,11 +871,13 @@ ${body}`, json: pg };
     case 'doctor':
       return doctorCmd({ root: o.root, manifest: o.manifest });
     case 'update': {
-      if (!o.check) throw new Error('cb update does not install a release yet: run cb update --check (it compares this machine with the release the board serves and writes nothing)');
-      const from = o.from || process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL');
-      if (!from) throw new Error("no board web address: pass --from <url> (the board's https address), or set CB_PUBLIC_URL or PUBLIC_URL in this checkout's .env");
-      const r = await updateCheck({ root: o.root ?? join(import.meta.dirname, '..'), from });
-      return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 };
+      // the copy's path as cb was started (a link after the first install), not the real folder of the version in use
+      const root = o.root ?? resolve(dirname(startedAs(process.argv[1], import.meta.filename)), '..');
+      if (o.rollback) { const r = rollback({ root, force: !!o.force }); return { out: r.lines.join('\n'), json: r.json }; }
+      const from = o.from || process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '';
+      if (o.check) { const r = await updateCheck({ root, from: needAddress(from) }); return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 }; }
+      const r = await install({ root, from, force: !!o.force }); // checks the copy before it needs the address
+      return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');

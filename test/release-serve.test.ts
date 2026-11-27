@@ -206,9 +206,11 @@ test('cb update --check: a tampered archive is caught; no address and bare cb up
   assert.equal(j.archive.verified, false);
   assert.match(j.archive.problem, /its sha256 is not the one the manifest names/);
 
-  const bare = await cb(['update']);
+  const bare = await cb(['update']); // this cb's own folder is a git checkout: never installed over
   assert.equal(bare.code, 1);
-  assert.match(bare.err, /cb update does not install a release yet: run cb update --check/);
+  assert.match(bare.err, /is a git checkout: update it with git pull --ff-only/);
+  const noAddress = await cb(['update', '--check']);
+  assert.match(noAddress.err, /no board web address: pass --from <url>/);
   const away = await cb(['update', '--check', '--from', 'http://127.0.0.1:9']); // nothing listens on the discard port
   assert.equal(away.code, 1);
   assert.match(away.err, /cannot reach http:\/\/127\.0\.0\.1:9\/release\/current\.json/);

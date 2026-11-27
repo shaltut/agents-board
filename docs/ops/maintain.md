@@ -70,6 +70,26 @@ Then the workers, right away, because their `cb` must match the schema:
   `/release/current.json` and `/release/<sha>.tgz` (no sign-in: the public repo's tracked files only; the board refuses
   an archive holding an env file or node_modules), verifies the archive, and compares the worker's files the same way.
   It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
+- **Install the release on a copy** (#4352): `cb update --from <board https address>` on the worker (the Mac),
+  instead of the tar lines above. A git checkout (the PC) is refused: it updates with `git pull --ff-only`.
+  - First run: the copy moves to `<copy>.home` and `<copy>` becomes a link to it (a symlink; a junction on Windows),
+    the same code. Each release goes in `<copy>.home/versions/<sha>`: written from the verified archive, `bin/cb` made
+    executable (git stores it 644), checked file by file against the manifest, then `cb help` and `cb sessions` run
+    from it. Only then `<copy>` is pointed at it (macOS: a new link renamed over the old one, atomic). A probe that
+    fails leaves `<copy>` on the old code and nothing staged.
+  - Packages: `node_modules`, `package.json`, `pnpm-lock.yaml` and `.env` stay in `<copy>.home` and are never touched;
+    a version finds them by Node's upward lookup (and `.env` through server/db.ts). The board's `current.json` names
+    the release's lockfile hash; a different one is refused: update the packages in `<copy>.home` by hand
+    (`pnpm install --frozen-lockfile`), then `cb update` again. Absolute links into the copy (pnpm on Windows) are
+    refused before anything moves (`--config.node-linker=hoisted` avoids them).
+  - The safe point: a running process keeps the modules it loaded, and no version is ever deleted, so nothing breaks
+    mid-flip. Relays notice their code path now points at new files and restart into it (once each on the first
+    rollout of this change). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
+    pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
+    Nothing is stopped by `cb update`.
+  - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
+    run it again to go forward. `<copy>.home/versions/state.json` holds `{current, previous}`. One update at a time
+    per copy (`<copy>.update.lock`, taken over when its pid is gone). Old versions stay until removed by hand.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac

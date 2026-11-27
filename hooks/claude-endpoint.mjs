@@ -8,7 +8,7 @@ if (socket && token && pane) {
   try {
     const { spawn } = await import('node:child_process');
     const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
+    const { basename, dirname, join, resolve } = await import('node:path');
     const { machine } = await import('../server/db.ts');
     const { seatKey, seatLockHolder } = await import('../cli/bridge.ts');
     const { claudeAdapter, readClaudeEndpoint, writeClaudeEndpoint } = await import('../cli/agents/claude.ts');
@@ -18,9 +18,12 @@ if (socket && token && pane) {
     if (!ep || ep.socket === socket || !(await claudeAdapter.isAlive({ machine: m, pane, agent: 'claude' }).catch(() => true)))
       writeClaudeEndpoint(m, pane, { socket, token, pid: process.ppid, sessionId: process.env.CLAUDE_CODE_SESSION_ID }); // #4379
     // a relay holds the seat while its lock is fresh and its pid answers (cli/bridge.ts seatLockHolder)
-    if (!seatLockHolder(join(tmpdir(), `cb-relay-${seatKey(m, pane)}.pid`)))
-      spawn(process.execPath, [join(import.meta.dirname, '..', 'cli', 'relay.ts'), '--pane', pane, '--agent', 'claude'],
+    if (!seatLockHolder(join(tmpdir(), `cb-relay-${seatKey(m, pane)}.pid`))) {
+      // the hook's path as started, not its real one, so a release flip (cb update) restarts the relay into new code
+      const here = process.argv[1] && basename(process.argv[1]) === basename(import.meta.filename) ? dirname(resolve(process.argv[1])) : import.meta.dirname;
+      spawn(process.execPath, [join(here, '..', 'cli', 'relay.ts'), '--pane', pane, '--agent', 'claude'],
         { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    }
   } catch {}
 }
 process.exit(0);
