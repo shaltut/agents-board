@@ -291,3 +291,18 @@ test('the fence judges a shell-filled word before a writing git subcommand as gi
     for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
   }
 });
+
+// PR 77 round 3: after a shell-filled word, the next word that is not an option decides: any git command (or a filled
+// one) is judged with the command-position rule, so merge-file, stage, a read's --output and $SUB write.
+test('the fence judges a filled word followed by any git command with the command-position rule', () => {
+  const writes = ['caffeinate $GIT merge-file opencode.json a b', 'caffeinate $GIT diff --output=opencode.json',
+    'caffeinate $GIT log --output=opencode.json', 'caffeinate $GIT show --output=opencode.json HEAD', 'caffeinate $GIT $SUB -- opencode.json',
+    'caffeinate $GIT stage opencode.json', 'caffeinate $GIT -C . checkout -- opencode.json', 'caffeinate ${GIT:-git} checkout -- opencode.json',
+    'caffeinate $(which git) checkout -- opencode.json'];
+  const reads = ['caffeinate $GIT log -- opencode.json', 'caffeinate $GIT show HEAD:opencode.json', 'arch -arm64 $GIT diff opencode.json',
+    '$PAGER opencode.json', 'echo $HOME opencode.json', 'echo $HOME is opencode.json', 'cat $HOME/.codex/config.toml', 'echo `date` opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});

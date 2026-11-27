@@ -726,22 +726,57 @@ const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 
   'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
   'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
 const PS_ASSIGN = /^\$[\w:.{}]+(?:[+\-*/]?=.*)?$/;
-// git subcommands that write (or run a program): a shell-filled word before one of them is judged as git, in any position
-const GIT_WRITE_SUBS = new Set(['add', 'am', 'apply', 'archive', 'bisect', 'branch', 'bundle', 'checkout', 'checkout-index', 'cherry-pick',
-  'clean', 'clone', 'commit', 'config', 'difftool', 'fetch', 'filter-branch', 'format-patch', 'gc', 'hash-object', 'init', 'lfs', 'merge',
-  'mergetool', 'mv', 'notes', 'prune', 'pull', 'push', 'read-tree', 'rebase', 'replace', 'reset', 'restore', 'revert', 'rm', 'sparse-checkout',
-  'stash', 'submodule', 'switch', 'symbolic-ref', 'tag', 'update-index', 'update-ref', 'worktree', 'write-tree']);
-const hasWriteSub = (raw, from) => raw.slice(from).some((x) => GIT_WRITE_SUBS.has(unquote(x).toLowerCase()));
+// Every git command name, read or write (PR 77 round 3: a list of only the writing ones missed merge-file, stage and a
+// read's --output). A shell-filled word, in ANY position, whose next word that is not an option is one of these, or is
+// filled in itself ($SUB, a backtick), is git, judged with the command-position rule: an unknown subcommand writes, a read
+// is still checked for --output. Anything else after it is not git ($PAGER opencode.json, echo $HOME opencode.json).
+const GIT_COMMANDS = new Set([...GIT_READS, 'add', 'am', 'apply', 'archive', 'bisect', 'branch', 'bugreport', 'bundle', 'check-attr',
+  'check-ignore', 'check-mailmap', 'check-ref-format', 'checkout', 'checkout-index', 'cherry', 'cherry-pick', 'citool', 'clean', 'clone',
+  'column', 'commit', 'commit-graph', 'commit-tree', 'config', 'count-objects', 'credential', 'daemon', 'diagnose', 'difftool',
+  'fast-export', 'fast-import', 'fetch', 'fetch-pack', 'filter-branch', 'fmt-merge-msg', 'for-each-ref', 'for-each-repo', 'format-patch',
+  'fsck', 'gc', 'get-tar-commit-id', 'gui', 'hash-object', 'hook', 'http-backend', 'index-pack', 'init', 'instaweb', 'interpret-trailers',
+  'lfs', 'ls-remote', 'mailinfo', 'mailsplit', 'maintenance', 'merge', 'merge-base', 'merge-file', 'merge-index', 'merge-one-file',
+  'merge-tree', 'mergetool', 'mktag', 'mktree', 'multi-pack-index', 'mv', 'notes', 'pack-objects', 'pack-redundant', 'pack-refs',
+  'patch-id', 'prune', 'prune-packed', 'pull', 'push', 'range-diff', 'read-tree', 'rebase', 'receive-pack', 'reflog', 'refs', 'remote',
+  'repack', 'replace', 'replay', 'request-pull', 'rerere', 'reset', 'restore', 'revert', 'rm', 'send-email', 'send-pack', 'show-branch',
+  'show-index', 'sparse-checkout', 'stage', 'stash', 'stripspace', 'submodule', 'svn', 'switch', 'symbolic-ref', 'tag', 'unpack-file',
+  'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'upload-archive', 'upload-pack', 'var', 'verify-commit',
+  'verify-pack', 'verify-tag', 'worktree', 'write-tree']);
+// the index just past the filled word at raw[k]: past a whole ${...}, $(...) or backtick group
+function filledEnd(raw, k) {
+  const open = raw[k] === '`' ? '`' : raw[k] === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? raw[k + 1] : null;
+  if (!open) return k + 1;
+  if (open === '`') { const j = raw.indexOf('`', k + 1); return j < 0 ? raw.length : j + 1; }
+  const close = open === '(' ? ')' : '}';
+  for (let j = k + 2, depth = 1; j < raw.length; j++) {
+    if (raw[j] === open) depth++;
+    else if (raw[j] === close && --depth === 0) return j + 1;
+  }
+  return raw.length;
+}
+// a filled word at raw[k] (any position): true when it is a git call that writes
+function filledWrites(raw, k, runsEnv) {
+  const after = filledEnd(raw, k);
+  for (let j = after; j < raw.length; j++) {
+    const x = raw[j];
+    if (/^[(){}]$/.test(x)) continue;
+    const v = unquote(x);
+    if (x !== '`' && v.startsWith('-')) { if (GIT_OPT_ARG.has(v)) j++; continue; }
+    if (x !== '`' && !v.startsWith('$') && !GIT_COMMANDS.has(v.toLowerCase())) return false;
+    return gitCallWrites(['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true, runsEnv);
+  }
+  return false;
+}
 const gitWrites = (seg) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
-  let start = true, runsEnv = false, launched = false;
+  let start = true, runsEnv = false, launched = false, ticks = 0;
   const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
   for (let k = 0; k < raw.length; k++) {
     const t = raw[k];
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
       if (t === '`' && start && gitCallWrites(['`', ...rest(k + 1)], true, runsEnv)) return true;
-      if (t === '`' && hasWriteSub(raw, k + 1)) return true; // anywhere: caffeinate `which git` checkout ...
+      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, runsEnv)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
       continue;
     }
@@ -764,9 +799,9 @@ const gitWrites = (seg) => {
     // a filled word takes the argument-position rule ($PAGER opencode.json is no git call; $GIT $SUB still blocks)
     const isGit = cmdName(t) === 'git';
     if ((isGit || filled) && gitCallWrites(rest(k), start && isGit, runsEnv)) return true;
-    // round 2: a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper
-    // list to fall behind) is git when a later word in the segment is a git subcommand that writes
-    if (u.startsWith('$') && hasWriteSub(raw, k + 1)) return true;
+    // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
+    // behind), judged by the word after it (GIT_COMMANDS)
+    if (u.startsWith('$') && filledWrites(raw, k, runsEnv)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
