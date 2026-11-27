@@ -18,7 +18,7 @@ import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
-import { herdrNameForPane, watchdogStep, type Watch } from './relay-seat.ts';
+import { HERDR_NAMED, herdrNameForPane, namelessDead, watchdogStep, type Watch } from './relay-seat.ts';
 import { realRun } from './squad-up.ts';
 import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
@@ -77,11 +77,15 @@ const touch = () => { if (lockPid() !== process.pid) return; const now = new Dat
 // #4610: codex and agy read liveness and deliver through herdr by the seat's agent name, which this relay learns from this
 // machine's herdr by its pane (the relay runs where the seat runs). Until herdr lists an agent in the pane, it stays unset.
 const learnHerdrName = () => {
-  if (claude || seat.herdrName) return;
-  try { const r = realRun(null, ['agent', 'list'], 10_000); if (r.status === 0) seat.herdrName = herdrNameForPane(JSON.parse(r.stdout ?? ''), PANE) ?? undefined; } catch {}
+  if (!HERDR_NAMED.has(adapter.kind) || seat.herdrName) return;
+  try { const r = realRun(null, ['agent', 'list'], 10_000); if (r.status === 0) seat.herdrName = herdrNameForPane(JSON.parse(r.stdout ?? ''), PANE, adapter.kind) ?? undefined; } catch {}
   if (seat.herdrName) log(`herdr agent in this pane: ${seat.herdrName}`);
 };
-const aliveNow = async () => { learnHerdrName(); try { return await adapter.isAlive(seat); } catch { return true; } };
+const aliveNow = async () => {
+  learnHerdrName();
+  if (namelessDead(adapter.kind, seat.herdrName)) return false; // review 98 I1: no name, no agent to reach
+  try { return await adapter.isAlive(seat); } catch { return true; }
+};
 const relaunch = () => spawn(process.execPath, [SELF, '--child', '--pane', PANE, '--agent', adapter.kind],
   { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
 /** The env inbox answers: its socket is there (statSync, never a connect to a Windows pipe) and, on POSIX, accepts a
@@ -125,7 +129,7 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
-  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts')];
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts')]; // review 98 L4
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay

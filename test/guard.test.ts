@@ -246,6 +246,15 @@ const fenceWrites = [
   'Set-Location C:\\tmp\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'Set-Location C:\\tmp\\\r\nCopy-Item evil.json $HOME\\.claude\\settings.json',
   'Get-ChildItem C:\\work\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'cd C:\\tmp\\\nSet-Content $HOME\\.claude\\settings.json x',
   'echo a\\\ncp x ~/.claude/settings.json', 'ls # x\\\ncp evil.json ~/.claude/settings.json',
+  // #4595: an option after the cd target (or a valued option before it) does not hide that the cd enters the fence
+  String.raw`Set-Location $HOME\.claude -PassThru; Set-Content settings.json x`, 'sl ~/.claude -ea 0; echo x > settings.json',
+  'cd ~/.claude -- && echo x > settings.json', String.raw`Set-Location -Path $HOME\.claude -PassThru; Set-Content settings.json x`,
+  String.raw`Set-Location -LiteralPath $HOME\.claude -ErrorAction Stop; Set-Content settings.json x`,
+  String.raw`Set-Location -Path:$HOME\.claude; Set-Content settings.json x`, String.raw`Set-Location -ErrorAction 0 $HOME\.claude; Set-Content settings.json x`,
+  'cd "/Users/my name/.claude" -P; echo x > settings.json', 'pushd ~/.claude-board -n; echo x > runner.json',
+  // #4594: >| (bash's noclobber override) is a redirect, not a pipe: the target was cut off into its own segment
+  'echo x >| ~/.claude/settings.json', 'echo x 2>| ~/.claude/settings.json', 'echo x 1>| ~/.claude/settings.json',
+  'echo x >|~/.claude-board/runner.json', 'cd ~/.claude && echo x >| settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -270,6 +279,11 @@ const fenceReads = [
   'cd ~/.claude && cat settings.json',
   // #4587: a continued read stays a read
   'cat \\\n  ~/.claude/settings.json', 'git diff \\\n  -- opencode.json', 'cp a.json \\\n  b.json',
+  // #4595: an option after a cd into the fence that only reads, and options after a cd elsewhere
+  String.raw`Set-Location $HOME\.claude -PassThru; Get-Content settings.json`, 'cd /tmp -P; echo x > settings.json',
+  'sl ~/work -ea 0; echo x > notes.txt', 'cd ~/.claude -- && cat settings.json',
+  // #4594: a >| to an ordinary file, and a real pipe after a read
+  'echo x >| /tmp/out.txt', 'cat ~/.claude/settings.json | grep hooks',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
@@ -321,6 +335,7 @@ test('role parity and evaluate(edit/ask)', () => {
   const ask = evaluate({ tool: 'ask', allowAsk: false });
   assert.equal(ask.allow, false);
   assert.match(ask.reason, /cb ask/);
+  assert.match(ask.reason, /Ask on Agents Board instead/, 'the product name (#4531) rides with the guard reinstall');
   assert.deepEqual(evaluate({ tool: 'ask', allowAsk: true }), { allow: true });
   assert.match(runClaudeShim('{"tool_name":"AskUserQuestion","tool_input":{"questions":[]}}', {}).reason, /^Blocked: .*cb ask/s);
   assert.deepEqual(runClaudeShim('{"tool_name":"AskUserQuestion","tool_input":{"questions":[]}}', { CB_ALLOW_ASK: '1' }), {});
@@ -503,6 +518,15 @@ test('long commands stay fast', () => {
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
     ['16 az repos pr update (the cap), then 100 KB, as a builder', asBuilder('az repos pr update '.repeat(16) + tail100KB)],
+    // PR 77 round 4 (I5): a filled word judges the words after it; a segment judges at most 16 git calls, then blocks
+    ['fence, 140 KB of echo $A log then a fence path, as a builder', asBuilder('echo ' + '$A log '.repeat(20000) + 'opencode.json')],
+    ['fence, 140 KB of $A log after an unknown program then a fence path', asBuilder('caffeinate ' + '$A log '.repeat(20000) + 'opencode.json')],
+    ['fence, 120 KB of $A -c after an unknown program then a fence path', asBuilder('caffeinate ' + '$A -c '.repeat(20000) + 'opencode.json')],
+    ['fence, 140 KB of $A ./x (paths, never git) then a fence path', asBuilder('caffeinate ' + '$A ./x '.repeat(20000) + 'opencode.json')],
+    ['fence, 200 KB of quoted "$A log" words then a fence path', asBuilder('caffeinate ' + kb200('"$A log" ') + 'opencode.json')],
+    // PR 77 round 5 (I1): group ends are found once per segment, so 300 KB of unclosed $( groups inside quotes stays linear
+    ["fence, 300 KB of unclosed $( groups in a quoted word, then a copy, as a builder", asBuilder("echo '" + '$( a '.repeat(60000) + "opencode.json'; cp /tmp/x opencode.json")],
+    ["fence, 300 KB of unclosed ${ groups after a comment, then a copy, as a builder", asBuilder('echo ok # ' + '${ a '.repeat(60000) + 'opencode.json\ncp /tmp/x opencode.json')],
     ['an unterminated quoted heredoc header, then 600 KB', () => check(heredocThen600KB)],
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],
