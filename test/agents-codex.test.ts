@@ -30,10 +30,22 @@ test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a bu
     args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '-s', 'workspace-write',
       '-c', 'sandbox_workspace_write.network_access=true',
       '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
+      '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
     env: { CB_ROLE: 'builder', CB_AGENT: 'codex' },
   });
+});
+
+test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; config.toml servers are an install gate', () => {
+  const m = codexAdapter.mcpOff('C:/w/board');
+  assert.deepEqual([m.args, m.env], [['--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install'], {}]);
+  assert.match(m.gate ?? '', /\[mcp_servers\]/);
+  assert.match(m.gate ?? '', /merges/);
+  for (const role of ['builder', 'reviewer']) {
+    const a = codexAdapter.buildLaunch(input({ role })).args.join('\u0000');
+    assert.ok(a.includes(m.args.join('\u0000')), role);
+  }
 });
 
 test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no network opening; other roles workspace-write', () => {

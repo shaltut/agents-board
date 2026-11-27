@@ -6,7 +6,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind, mcpGateRefusal } from '../cli/agents/index.ts';
 import { checkRoleSettings, claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
@@ -84,6 +84,25 @@ test('buildLaunch refuses a role with no permission file, or one that is malform
     assert.doesNotThrow(() => checkRoleSettings('builder', dir));
   } finally { rmSync(dir, { recursive: true, force: true }); }
   for (const r of ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) assert.doesNotThrow(() => checkRoleSettings(r), r);
+});
+
+test('mcpOff (#4392): claude turns every MCP source off for the run, its launch carries exactly those args', () => {
+  const m = claudeAdapter.mcpOff('C:/work/board/');
+  assert.deepEqual([m.args, m.env, m.gate], [['--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], {}, null]);
+  const a = claudeAdapter.buildLaunch({ name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/work/board/', cwd: 'C:/w/x' }).args;
+  assert.deepEqual(a.slice(-3), m.args);
+});
+
+test('mcpOff (#4392): every adapter declares one; an adapter with an open gate is refused by name, never installed silently with MCP', () => {
+  for (const k of AGENT_KINDS) {
+    const m = ADAPTERS[k].mcpOff('/b');
+    assert.ok(Array.isArray(m.args) && typeof m.env === 'object' && typeof m.note === 'string' && m.note, k);
+    if (m.gate === null) { assert.equal(mcpGateRefusal(ADAPTERS[k]), null, k); continue; }
+    assert.ok(m.gate.length > 20, k);
+    assert.match(mcpGateRefusal(ADAPTERS[k]) ?? '', new RegExp(`agent "${k}" cannot start a seat with MCP off for one run: `), k);
+  }
+  assert.equal(mcpGateRefusal(claudeAdapter), null);
+  for (const k of ['codex', 'opencode', 'agy'] as const) assert.notEqual(ADAPTERS[k].mcpOff('/b').gate, null, k);
 });
 
 test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file left', () => {

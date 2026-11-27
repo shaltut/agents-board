@@ -36,6 +36,13 @@ test('buildLaunch: --mode auto, this session only settings, the model; never --d
   assert.deepEqual(l.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 
+test('mcpOff (#4392): agy has no per-run MCP off, so nothing is added and the gate names mcp_config.json and plugins', () => {
+  const m = agyAdapter.mcpOff('C:/w/board');
+  assert.deepEqual([m.args, m.env], [[], {}]);
+  assert.match(m.gate ?? '', /mcp_config\.json/);
+  assert.match(m.gate ?? '', /plugin/);
+});
+
 test('buildLaunch: env keeps the squad env, adds the auto-update pin, strips Claude-only secrets and markers (any case)', () => {
   const l = agyAdapter.buildLaunch(input({ env: {
     CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*',

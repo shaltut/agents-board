@@ -21,8 +21,19 @@ export const ADAPTERS: Readonly<Record<AgentKind, AgentAdapter>> = {
  *  refuse it exactly as before it was written. */
 const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude']);
 
+/** #4392: an adapter whose CLI cannot start a seat with no MCP server for one run is refused by name, not started with
+ *  whatever servers the user's own config enables. Null when its mcpOff() covers every source. */
+export function mcpGateRefusal(a: AgentAdapter): string | null {
+  const gate = a.mcpOff('').gate;
+  return gate ? `agent "${a.kind}" cannot start a seat with MCP off for one run: ${gate}` : null;
+}
+
 export function getAdapter(kind: string): AgentAdapter {
-  if (isAgentKind(kind) && INSTALLED.has(kind)) return ADAPTERS[kind];
+  if (isAgentKind(kind) && INSTALLED.has(kind)) {
+    const refused = mcpGateRefusal(ADAPTERS[kind]);
+    if (refused) throw new Error(refused);
+    return ADAPTERS[kind];
+  }
   if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (phase 1 supports claude only)`);
   throw new Error(`unknown agent "${kind}"`);
 }

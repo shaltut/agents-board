@@ -9,7 +9,10 @@
 // shell call without a string CommandLine, an unknown CB_ROLE, a missing or broken core.mjs, or any error denies. No
 // static local imports: core.mjs loads dynamically, so a shim copied without it still denies.
 // A pane with neither CB_ROLE nor CB_AGENT is not a board seat: this hook is deployed per seat, so it denies and names
-// the board guard rather than auto-approving a hand-started session.
+// the board guard rather than auto-approving a hand-started session. A pane with CB_AGENT but no CB_ROLE is denied too
+// (#4392): cb squad up always sets both, and core applies no secret or fence rule to a null role.
+// agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
+// every path arg, as given and as resolved (a link named notes.txt can lead to .env).
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -118,6 +121,23 @@ export function checkPath(call, input, mode = 'edit', platform = process.platfor
 }
 export const checkEditPath = (call, input, platform = process.platform) => checkPath(call, input, 'edit', platform);
 
+// null, or the reason a read or edit names a secret file. Runs after checkPath, which has confirmed a string path and a cwd.
+function secretTarget(call, input, mode) {
+  if (typeof core.secretPath !== 'function') return 'the guard core has no secretPath check';
+  const args = isObject(call.args) ? call.args : {};
+  const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
+  const ws = Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' ? input.workspacePaths[0] : null;
+  const base = resolve(cwd ?? ws ?? '.');
+  for (const k of PATH_ARGS) {
+    const v = args[k];
+    if (typeof v !== 'string') continue;
+    if (core.secretPath(v) || core.secretPath(real(isAbsolute(v) ? resolve(v) : resolve(base, v)))) {
+      return `${mode === 'read' ? 'reading' : 'editing'} a secret file (${k}): what a seat reads goes to the model provider (#4347), so no seat opens .env, a private key or a credentials file. Use the file where it lives and name where a value lives instead; .env.example shows the keys. A value you need: cb ask`;
+    }
+  }
+  return null;
+}
+
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
   try {
@@ -128,15 +148,16 @@ export function runAgyShim(raw, env = process.env) {
     if (!role && !String(env.CB_AGENT ?? '').trim()) {
       return deny('Blocked: this pane is not a board seat (neither CB_ROLE nor CB_AGENT is set), and the board guard is deployed per seat: start the session with cb squad up, or run agy without this hook file');
     }
-    if (p.tool === 'read') { // a listed read tool: core has no rule for it, so the path confinement is the whole check
-      const why = checkPath(p.call, p.input, 'read');
+    if (!role) return deny('Blocked: CB_ROLE is not set in this board seat (CB_AGENT is), so no role rule could apply: start the session with cb squad up, which sets both');
+    if (p.tool === 'read') { // a listed read tool: core has no rule for it, so path confinement and secretPath are the check
+      const why = checkPath(p.call, p.input, 'read') ?? secretTarget(p.call, p.input, 'read');
       return why ? deny(`Blocked: ${why}`) : { decision: 'allow' };
     }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
+    const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
     if (v?.allow === true) {
       if (p.tool === 'edit') {
-        const why = checkEditPath(p.call, p.input);
+        const why = checkEditPath(p.call, p.input) ?? secretTarget(p.call, p.input, 'edit');
         if (why) return deny(`Blocked: ${why}`);
       }
       return { decision: 'allow' };

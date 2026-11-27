@@ -64,6 +64,7 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
           ...(readOnly ? [] : ['-c', 'sandbox_workspace_write.network_access=true']),
           '-c', EXCLUDE,
+          ...adapter.mcpOff(l.board).args,
           ...adapter.trustSpec([l.cwd], process.platform).extraArgs,
           ...adapter.instructionMapping(l).extraArgs,
         ],
@@ -144,6 +145,26 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
 
     disableAskSpec() {
       return { toolName: 'request_user_input', mechanism: 'hook', target: 'kit/guard/shim-codex.mjs' };
+    },
+
+    // #4392. Codex gets MCP servers from three places. Plugins (a plugin bundles servers) and apps (connectors, served as
+    // MCP) are features: --disable turns them off for this run, and an unknown feature name is a startup error, so a
+    // rename fails loudly. skill_mcp_dependency_install would offer to add a skill's servers to config.toml. The third,
+    // [mcp_servers] in ~/.codex/config.toml (or a trusted repo's .codex/config.toml), has no per-run off: -c merges into
+    // the table (-c mcp_servers={} keeps a configured server), only -c mcp_servers.<name>.enabled=false turns one off,
+    // and a name not in the config is a config error; the launch is built on the orchestrating machine, so it cannot
+    // know the seat machine's names. --ignore-user-config exists on `codex exec` only, and a per-seat CODEX_HOME would
+    // lose the login and the guard's hooks.json. Checked with codex mcp list on 0.160 against a throwaway CODEX_HOME
+    // (not a live session).
+    mcpOff() {
+      return {
+        args: ['--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install'],
+        env: {},
+        gate: "no enabled [mcp_servers] entry in ~/.codex/config.toml or the repo's .codex/config.toml on the seat's machine " +
+          "(check: codex mcp list --disable plugins --disable apps, from the seat's folder, lists none): Codex has no per-run " +
+          'way to drop them, -c merges into that table',
+        note: 'plugin, connector (apps) and skill-install MCP are off for the run; servers in config.toml are the install gate',
+      };
     },
   };
   return adapter;
