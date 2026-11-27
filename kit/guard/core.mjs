@@ -661,9 +661,11 @@ const fenceDir = (seg) => {
   const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim().replace(/^["']|["']$/g, '');
   return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
 };
-const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
-// a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device
-const REDIRECT_TARGET = /(?<![-\d&])\d?>>?[ \t]*["']?(\S*)/g;
+// #4631: Push-Location is pushd's PowerShell name
+const CD = /^\s*(?:cd|pushd|chdir|set-location|push-location|sl)\s+/i;
+// a redirect whose target is a fence path, or (after a cd into one) any redirect but to the null device.
+// #4631: any fd number (Git Bash opens and truncates the target of 10>)
+const REDIRECT_TARGET = /(?<![-\d&])\d*>>?[ \t]*["']?(\S*)/g;
 const NULL_DEVICE = /^(?:\/dev\/null|\$null|nul)(?![\w/.\\-])/i;
 const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync', 'dd', 'truncate', 'touch', 'chmod', 'chown',
   'curl', 'wget', 'sponge', 'patch', 'tar', 'unzip', '7z', 'set-content', 'sc', 'add-content', 'ac', 'out-file',
@@ -933,12 +935,17 @@ const rawAndJoined = (check) => (raw) => {
   return check(raw) ?? (joined === raw ? null : check(joined));
 };
 // #4594: >| (n>| too) is bash's noclobber override, a redirect: read as > before the split, or its | cut the target off
-// into a segment of its own. &>| and >>| are syntax errors in bash, left as they are. Rewriting only merges, never hides.
-const NOCLOBBER = /(?<![>&])>\|/g;
+// into a segment of its own. #4631: zsh's clobber forms too (Mac seat panes run zsh): >!, >>|, >>!, &>|, &>!, >&|,
+// &>>|, each read as the redirect without its | or !. In bash &>| and >>| are syntax errors and >! writes a file named
+// !, so nothing bash runs is read as a write it is not. Rewriting only merges, never hides.
+const NOCLOBBER = /(&?>>?&?)[|!]/g;
+// #4631: >&word sends both streams to the file word, unless word is an fd number or - (>&1, >&-: a duplication). Read
+// as > before the split, or its & cut the target off into a segment of its own
+const BOTH_TO = />&(?![ \t]*[\d-])/g;
 const fenceWrite = rawAndJoined(fenceWriteOne);
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
-  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
+  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '$1 ').replace(BOTH_TO, '> ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
