@@ -537,13 +537,14 @@ test('stage_stalls_due: a builder at build with a PR linked keeps a quiet card f
   // parts: the same rule on the part's own holder and stage
   const [{ id: pid }] = await sql`select cb.task_add(project => 'demo', title => 'Parts', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`;
   await sql`update cb.tasks set status = 'in_progress', stage = 'build' where id = ${pid}`;
-  const part = (repo: string, stage: string, who: string) => sql`insert into cb.task_parts (task_id, repo, stage, status, assignee, pr, since, nudged_at)
-    values (${pid}, ${repo}, ${stage}, 'in_progress', ${who}, ${PR(6001)}, now() - interval '110 minutes', now() - interval '70 minutes')`;
-  await part('api', 'build', 'B1@mac'); await part('db', 'build', 'R1@mac'); await part('ui', 'review', 'B1@mac');
+  const part = (repo: string, stage: string, who: string, pr: string | null = PR(6001)) => sql`insert into cb.task_parts (task_id, repo, stage, status, assignee, pr, since, nudged_at)
+    values (${pid}, ${repo}, ${stage}, 'in_progress', ${who}, ${pr}, now() - interval '110 minutes', now() - interval '70 minutes')`;
+  // the r3 review's M1: a builder part at build with no PR pins the part loop's PR clause
+  await part('api', 'build', 'B1@mac'); await part('db', 'build', 'R1@mac'); await part('ui', 'review', 'B1@mac'); await part('cli', 'build', 'B1@mac', null);
   await idle('110 minutes', ['B1@mac', 'R1@mac']); await quiet('110 minutes', [Number(pid)]);
   await sweep();
   const parts = await sql`select repo, assignee from cb.task_parts where task_id = ${pid} order by repo`;
-  assert.deepEqual(parts.map((r: any) => [r.repo, r.assignee]), [['api', 'B1@mac'], ['db', null], ['ui', null]],
+  assert.deepEqual(parts.map((r: any) => [r.repo, r.assignee]), [['api', 'B1@mac'], ['cli', null], ['db', null], ['ui', null]],
     'only the builder part at build is kept');
   await sql`update cb.task_parts set since = now() - interval '25 hours', nudged_at = now() - interval '24 hours 30 minutes' where task_id = ${pid} and repo = 'api'`;
   await idle('25 hours', ['B1@mac']); await quiet('25 hours', [Number(pid)]);
