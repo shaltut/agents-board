@@ -111,6 +111,7 @@ test('--json: cb mine rows say open or closed/moved off you; cb start gives an o
   await sql`select cb.task_done('3', 'done', '{}'::jsonb, 'W1@test')`;
   const rows = j(['mine']) as any[];
   assert.deepEqual(rows.map((t) => [Number(t.id), t.open]).sort(), [[1, true], [2, false], [3, false]]);
+  assert.deepEqual(rows.map((t) => t.stage_words), [null, null, null]); // unstaged: null (staged cards: squad-stages.test.ts)
   // the text still splits them under the heading
   assert.match(cb(['mine']).out, /^#1 \[in_progress\] .*\n\nCLOSED OR MOVED OFF YOU/);
   // cb start: was text even with --json
@@ -129,6 +130,6 @@ test('cb help says exactly what --json gives: OUTPUT, the flag, cb help json, cb
     'asks add', 'assign', 'huddle open', 'huddle say', 'huddle close', 'page set', 'iam', 'relay', 'start', 'mine'])
     assert.match(page, new RegExp(`(^|  )${w} +[{(a-z]`, 'm'), `cb help json has no entry for ${w}`);
   assert.match(page, /^  add +\{id, project, status, stage\}/m);
-  assert.match(page, /^  mine +task rows, each with open: true .* or false \(closed or moved off you in the last 24h\)$/m);
-  assert.match(help('mine')!, /--json gives the task rows, each with open: true \(yours to work on\) or false/);
+  assert.match(page, /^  mine +task rows, each with stage_words \(null when not staged\) and open: true .* or false\n +\(closed or moved off you in the last 24h\)$/m);
+  assert.match(help('mine')!, /--json gives the task rows, each with stage_words \(.*\) and open: true \(yours to work on\) or false/);
 });

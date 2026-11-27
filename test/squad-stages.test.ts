@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { stageWordsFor } from '../cli/stage-words.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -754,4 +755,52 @@ test('text brief: in progress, blocked and review cards say their stage; a block
   assert.match(lineOf(restated), / · demo · Building — why: reason B$/);
   assert.doesNotMatch(r.out, /→|\p{Cc}(?<!\n)/u);
   assert.equal(r.out.split('\n').filter((l) => /^x+/.test(l.trim()) || l.trim() === 'second line').length, 0, 'a note cannot add a line');
+});
+
+test('cb show and cb mine say the stage in words where brief does; show --json carries stage_words (#4512)', async () => {
+  const sql = await setup();
+  const atReview = await addCard(sql); await toStage(sql, atReview, 'review');
+  await sql`update cb.tasks set status = 'in_progress', assignee = null where id = ${atReview}`;
+  const held = await addCard(sql); await toStage(sql, held, 'build');
+  await sql`update cb.tasks set status = 'in_progress', assignee = 'B1@mac' where id = ${held}`;
+  const plain = Number((await sql`select cb.task_add(project => 'demo', title => 'pr', type => 'feature', status => 'next', actor => 'github') as id`)[0].id);
+  const first = (id: number) => { const r = cb(['show', String(id)]); assert.equal(r.code, 0, r.err); return r.out.split('\n')[0]; };
+  const json = (id: number) => JSON.parse(cb(['show', String(id), '--json']).out);
+  // an unheld in-progress card at review reads as waiting for review, not as abandoned work; the holder stays where it was
+  assert.equal(first(atReview), `#${atReview} [in_progress] P2 feature: c · demo · In review`);
+  assert.equal(first(held), `#${held} [in_progress] P2 feature: c (B1@mac) · demo · Building`);
+  assert.deepEqual([json(atReview).stage, json(atReview).stage_words], ['review', 'In review']);
+  assert.equal(cb(['mine']).out, `#${held} [in_progress] P2 feature: c (B1@mac) · demo · Building`);
+  // #4513: cb mine --json rows carry the same words, next to open
+  assert.deepEqual(JSON.parse(cb(['mine', '--json']).out).map((t: any) => [Number(t.id), t.stage_words, t.open]), [[held, 'Building', true]]);
+  // an unstaged card: no words, never the "not staged" placeholder
+  assert.equal(first(plain), `#${plain} [next] P2 feature: pr · demo`);
+  assert.equal(json(plain).stage_words, null);
+  // Next names every stage but build, Design included, and the help says so (it said "only past build")
+  const design = await addCard(sql);
+  assert.match(cb(['brief', 'demo']).out.split('\n').find((l) => l.trim().startsWith(`#${design} `)) ?? '', / · demo · Design$/);
+  const brief = cb(['help', 'brief']).out;
+  assert.match(brief, /Next at every stage but build, Design included/);
+  assert.doesNotMatch(brief, /only past build/);
+  assert.match(cb(['help', 'show']).out, /stage_words/);
+  // pipeline off: staged cards behave as normal cards, so no stage is shown
+  await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
+  assert.equal(first(atReview), `#${atReview} [in_progress] P2 feature: c · demo`);
+  assert.equal(json(atReview).stage_words, null);
+  assert.equal(cb(['mine']).out, `#${held} [in_progress] P2 feature: c (B1@mac) · demo`);
+  assert.doesNotMatch(cb(['show', String(atReview)]).out + cb(['mine']).out, /Not staged/);
+});
+
+test('cb mine and cb start read the stage words of a whole list in one query, not one per card (#4512 review I1)', async () => {
+  const sql = await setup();
+  await sql`select cb.ensure_project('old')`; // pipeline off
+  const rows = [{ project: 'demo', stage: 'review' }, { project: 'demo', stage: 'build' }, { project: 'demo', stage: 'qa' },
+    { project: 'demo', stage: 'review' }, { project: 'demo', stage: null }, { project: 'old', stage: 'build' }, { project: 'demo', stage: 'design' }];
+  let n = 0;
+  const counted = (s: any, ...v: any[]) => { n++; return sql(s, ...v); };
+  assert.deepEqual(await stageWordsFor(counted, rows),
+    ['In review', 'Building', 'Checking on dev against the design', 'In review', null, null, 'Design']);
+  assert.equal(n, 1);
+  assert.deepEqual(await stageWordsFor(counted, [{ project: 'demo', stage: null }]), [null]);
+  assert.equal(n, 1, 'no staged card: no query');
 });

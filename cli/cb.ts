@@ -16,6 +16,7 @@ import { squadUp } from './squad-up.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
+import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 
@@ -174,13 +175,17 @@ async function partShown(rows: any[], who: string) {
 const MOVED_OFF = 'CLOSED OR MOVED OFF YOU IN THE LAST 24H (shown for a day so you see it: not yours to work on)';
 const openFor = (who: string) => (t: any) => t.assignee === who && !['done', 'cancelled'].includes(t.status);
 async function mineLines(rows: any[], who: string, indent: string) {
-  const isOpen = rows.map(openFor(who)), shown = (await partShown(rows, who)).map((t) => indent + line(t));
+  const isOpen = rows.map(openFor(who)), words = await stageWordsFor(sql, rows); // #4512: one query for the list
+  const shown = (await partShown(rows, who)).map((t, i) => indent + withStage({ ...t, stage_words: words[i] }));
   const gone = shown.filter((_, i) => !isOpen[i]);
-  return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [] };
+  return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [], words };
 }
 
 const line = (t: any) =>
   `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
+// #4454: a staged card says its stage in words, so an unheld in-progress card at review reads as waiting for review, not
+// as abandoned work. cb brief, cb show and cb mine (#4512) print it the same way.
+const withStage = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
 
 // Shared memory (#167). One line per entry: kind code, id, title, who stands behind it. Team = a teammate's note.
 const KIND_CODE: Record<string, string> = { rule: 'R', ruling: 'RU', fact: 'F', gotcha: 'G', runbook: 'RB' };
@@ -218,16 +223,13 @@ function printBrief(b: any) {
     for (const r of rows) console.log('  ' + fmt(r));
   };
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
-  // #4454: a staged card says its stage in every section, so an unheld in-progress card at review reads as waiting
-  // for review, not as abandoned work
-  const staged = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
-  sec('IN PROGRESS', b.in_progress, staged);
+  sec('IN PROGRESS', b.in_progress, withStage);
   // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
   sec('NEXT (take with `cb next`)', b.next, (t) => `${line(t)}${t.stage && t.stage !== 'build' ? ` · ${t.stage_words}` : ''}`);
-  sec('BLOCKED', b.blocked, (t) => `${staged(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}` +
+  sec('BLOCKED', b.blocked, (t) => `${withStage(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}` +
     (t.blocked_on || t.waits_on?.length ? '' : t.block_note ? ` — why: ${clip(t.block_note)}`
       : ` — no reason given${t.last_note ? `; last note: ${clip(t.last_note)}` : ''}`));
-  sec('REVIEW', b.review, staged);
+  sec('REVIEW', b.review, withStage);
   sec('WAITING ON AHMED', b.open_questions, (q) => `Q${q.id}${q.blocking ? ' [blocking]' : ''} ${q.body}${q.assigned_to ? ` (for ${q.assigned_to})` : ''} · ${q.project}`);
   sec('BROADCASTS (24h)', b.broadcasts ?? [], (x) => `${x.actor}${x.project ? ` to ${x.project}` : ' to everyone'}: ${x.summary}`);
   sec('ANSWERED — DELIVER THESE', b.answered_pending, (q) =>
@@ -875,7 +877,9 @@ ${body}`, json: pg };
       need(1, 'show <task id>   e.g. cb show 42');
       if (!/^#?\d{1,15}$/.test(args[0])) throw new Error(`"${args[0]}" is not a task id: give the number, e.g. cb show 42`);
       const n = Number(args[0].replace('#', ''));
-      const [t] = await sql`select * from cb.tasks where id = ${n}`;
+      // #4512: the stage in words, as cb brief prints it (cb._brief_tasks: pipeline on and a stage set), in the same read
+      const [t] = await sql`select t.*, case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end as stage_words
+        from cb.tasks t where t.id = ${n}`;
       if (!t) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
       // #4448: the last 10 notes by default; --all prints every one, and the NOTES line says how many are hidden
       const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit ${o.all ? null : 10}`; // limit null = no limit; never a sql`` fragment (the relay bridge cannot carry one)
@@ -884,7 +888,7 @@ ${body}`, json: pg };
       const goals = await sql`select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = ${n} and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank`;
       const [{ parts }] = await sql`select cb._parts_words(${n}) as parts`; // a parts card (#3703): its parts in plain words
-      return { out: [line(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
+      return { out: [withStage(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
         t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first${hidden})`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
         .filter(Boolean).join('\n'), json: { ...t, notes, notes_total } };
@@ -916,10 +920,11 @@ ${body}`, json: pg };
     case 'mine': {
       const rows: any = await callFn('mine', { actor });
       if (!rows.length) return { out: 'no tasks assigned to ' + actor, json: rows };
-      const { open, gone } = await mineLines(rows, actor, '');
-      // --json (#4513): open false = closed or moved off you in the last 24h, the text's second heading
+      const { open, gone, words } = await mineLines(rows, actor, '');
+      // --json (#4513): open false = closed or moved off you in the last 24h, the text's second heading; stage_words as the
+      // text prints them (the same one query, #4512)
       return { out: [...(open.length ? open : [`no open tasks assigned to ${actor}`]), ...(gone.length ? ['', ...gone] : [])].join('\n'),
-        json: rows.map((t: any) => ({ ...t, open: openFor(actor)(t) })) };
+        json: rows.map((t: any, i: number) => ({ ...t, stage_words: words[i], open: openFor(actor)(t) })) };
     }
     case 'ask': {
       need(2, 'ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>"');
