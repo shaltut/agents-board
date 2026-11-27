@@ -4,7 +4,7 @@
 // Design note: docs/superpowers/specs/2026-11-26-agy-adapter-design.md (what is verified on agy 1.5.17 and what is not).
 import { classifyAgentGet, realRun, type Runner } from '../squad-up.ts';
 import type { AgentAdapter, AgentState, DisableAskSpec, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
-import { stripClaudeOnly } from './env.ts';
+import { stripClaudeOnly, withNoPrompt } from './env.ts';
 import { agyPreseed } from './trust.ts';
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
@@ -44,7 +44,7 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     // the board connection, #4583) and the earlier denial of this flag. --settings is this session only.
     buildLaunch(l: LaunchInput) {
       checkAgyModel(l.model);
-      const env = stripClaudeOnly(l.env);
+      const env = withNoPrompt(stripClaudeOnly(l.env)); // PR 104 review B3: no editor or pager waits for input
       env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true'; // a pinned version: herdr's screen rules are tuned per version
       return {
         kind: 'agy',

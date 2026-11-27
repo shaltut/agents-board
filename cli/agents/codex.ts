@@ -6,7 +6,7 @@ import { classifyAgentGet, realRun } from '../squad-up.ts';
 import type { Runner } from '../squad-up.ts';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
-import { stripClaudeOnly } from './env.ts';
+import { stripClaudeOnly, withNoPrompt } from './env.ts';
 import { codexPreseed } from './trust.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
@@ -56,7 +56,7 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
-      const env = stripClaudeOnly(l.env);
+      const env = withNoPrompt(stripClaudeOnly(l.env));
       return {
         kind: 'codex',
         args: [
@@ -73,6 +73,9 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           // failed and the seat never bound. A reviewer, qa or investigator seat is fenced as a Claude one is: the guard's
           // read-only role rules block its apply_patch, Edit and Write, commits and pushes
           '-s', 'danger-full-access',
+          // PR 104 review B3: exec_command runs without a terminal, so an editor, pager or prompt that wants one fails
+          // instead of waiting for write_stdin, which no hook sees (#4626). An unknown feature name is a startup error
+          '--disable', 'unified_exec_tty',
           '-c', EXCLUDE,
           ...adapter.mcpOff(l.board).args,
           ...adapter.trustSpec([l.cwd], process.platform).extraArgs,

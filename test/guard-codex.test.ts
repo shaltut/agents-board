@@ -185,11 +185,21 @@ const SESSIONS = [
   'docker exec -it web sh', 'docker run -it alpine', 'docker run -i alpine sh', 'podman attach c', 'docker compose exec web sh',
   'kubectl exec -it pod -- sh', 'kubectl exec --stdin pod -- sh', 'kubectl attach pod -i',
   'vim notes.md', 'less log.txt', 'man git', 'nano x', 'ed x',
+  'grep foo | sh', 'grep -e x | sh', 'grep foo - | sh', 'tr a b | sh', 'head -n 5 | sh', 'sed s/a/b/ | bash', 'cut -f1 | sh',
   'cat | sh', 'cat | python', 'tee x | bash', 'head -c 9 | node', 'xargs git', "awk '{system($0)}'", 'read x; eval $x', 'select x in a b; do echo $x; done', 'echo $(python)', 'echo "$(bash)"', 'read -r cmd && git $cmd',
   'Read-Host "cmd"', '$c = [Console]::ReadLine(); iex $c', 'foreach ($l in $input) { iex $l }', '$host.UI.ReadLine()',
   'env FOO=1 python', 'sudo bash', 'sudo -u web bash', 'nohup bash -i', 'FOO=1 node', 'timeout 60 python', 'cd /tmp && python', 'ls; bash', 'bash -c "python"', 'cat x.txt > /dev/tty',
   '/usr/bin/python3', 'C:\\Python311\\python.exe', '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"', 'if true; then bash; fi',
   'git status &&\\\nbash',
+  // PR 104 review B1: a variable, a substitution or eval as the command word (a literal assignment earlier is read through)
+  'X=bash; $X', 'X=bash; "$X"', 'X=vim; ${X} notes.txt', '$SHELL', '"$EDITOR" notes.md', 'eval bash', 'eval "python"', 'eval $cmd', '$(echo bash)', '`echo bash`',
+  'exec $X',
+  // B2: an explicit read of the seat's own input is no feed
+  'bash <&0', 'exec 3<&0; bash <&3', 'bash < /dev/stdin', 'bash </dev/fd/0', 'python3 0<&0',
+  // B3: a program that opens the terminal whatever feeds it, and git's and crontab's interactive modes
+  'ls | vim -', 'git log | less', 'cat x | more', 'fzf', 'git ls-files | fzf', 'tig', 'htop', 'top', 'crontab -e', 'git add -p', 'git add --patch x',
+  'git add -i', 'git checkout -p', 'git reset -p', 'git restore -p x', 'git stash -p', 'git commit --interactive', 'git rebase -i HEAD~3',
+  'git rebase --interactive main', 'git clean -i', 'git -C wt add -p',
 ];
 const ONE_SHOTS = [
   'bash -c "ls"', 'bash -lc "git status"', 'bash -ic "ls"', 'bash -c "python x.py" < /dev/null', 'sh script.sh', 'bash -e ./build.sh arg', 'zsh -c "echo hi"',
@@ -202,6 +212,12 @@ const ONE_SHOTS = [
   'dd if=a of=b', 'tee < in.txt out.txt', 'echo hi | python', 'cat script.sh | bash', 'git log 2>&1 | head', 'nc -z host 80', 'python --version', 'vim --version',
   'while read l; do echo $l; done < f.txt', 'git log | while read l; do echo $l; done', "bash <<'EOF'\nls\nEOF", 'python <<EOF\nprint(1)\nEOF', 'python < script.py', 'bash <<< "ls"',
   'echo python', 'grep -rn bash .', 'git commit -m "run bash later"', 'git status', 'npm test', 'which python', 'Get-Content x.txt', 'Write-Host "Read-Host is a cmdlet"',
+  // PR 104 review B4: grep, sed, head, tail and cut given a file read the file, not the seat's input
+  'grep foo file | awk "{print}"', 'grep -rl x | xargs sed -i s/a/b/', 'head -n 5 file | sh', 'head -5 f | sh', 'sed -e s/a/b/ f | bash', 'sed s/a/b/ f | bash',
+  'cut -d: -f1 /etc/passwd | xargs echo', 'grep -e x file | sh', 'tail -n 20 log | sh', 'grep -A3 -i foo a.txt b.txt | xargs echo', 'grep -r TODO | xargs echo',
+  // B1: a variable read through to a one-shot, eval of a one-shot; B3: git's and crontab's other modes
+  'X=python3; $X x.py', 'P=node; "$P" -e 1', 'eval "ls -la"', 'eval git status', 'crontab -l', 'top -b -n 1', 'git checkout -b feat/x', 'git add -A',
+  'git rebase main', 'git stash push -m x', 'git log --oneline -5', 'git clean -fd', 'git commit -am x', 'vim --version | head -1',
 ];
 
 test('a board seat may not open an interactive session (shell, REPL, client, remote, editor, stdin reader): write_stdin is never hooked (#4626)', () => {

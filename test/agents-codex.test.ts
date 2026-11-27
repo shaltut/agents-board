@@ -29,11 +29,12 @@ test('buildLaunch: --no-daemon first, model, never ask, no sandbox for a builder
   assert.deepEqual(codexAdapter.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
     kind: 'codex',
     args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'danger-full-access',
+      '--disable', 'unified_exec_tty',
       '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
       '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
-    env: { CB_ROLE: 'builder', CB_AGENT: 'codex' },
+    env: { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_AGENT: 'codex' },
     prestart: { args: [] },
   });
 });
@@ -84,8 +85,8 @@ test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN, CLAUDE_CODE_*, ANTHROPIC_* and 
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't',
     ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'e', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' } })).env;
-  assert.deepEqual(env, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
-  assert.deepEqual(codexAdapter.buildLaunch(input()).env, {});
+  assert.deepEqual(env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
+  assert.deepEqual(codexAdapter.buildLaunch(input()).env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' });
 });
 
 test('buildLaunch: an empty model leaves -m out (Codex uses its own default); Claude names and bad names throw', () => {
@@ -193,4 +194,24 @@ test('trustSpec: pre-empts Update available; names the folder trust dialog; hook
 
 test('disableAskSpec: request_user_input denied by the hook shim', () => {
   assert.deepEqual(codexAdapter.disableAskSpec(), { toolName: 'request_user_input', mechanism: 'hook', target: 'kit/guard/shim-codex.mjs' });
+});
+
+// PR 104 review B3: an editor or pager another program opens (git commit with no -m, git rebase -i, git log, gh pr
+// create, man) would wait in the terminal for write_stdin. Codex seats run their commands without a terminal, and every
+// non-Claude seat's pane gets an editor that fails at once and a pager that only prints.
+test('B3: Codex seats run exec without a terminal; codex, agy and opencode seats get the no-prompt editor and pager env', () => {
+  const base = { name: 'x@m', role: 'builder', repo: 'main', model: '', board: '/b', cwd: '/w/x' };
+  const NO_PROMPT = { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
+    MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' };
+  const codex = ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } } as LaunchInput);
+  const at = codex.args.indexOf('unified_exec_tty');
+  assert.ok(at > 0 && codex.args[at - 1] === '--disable', codex.args.join(' '));
+  const agy = ADAPTERS.agy.buildLaunch({ ...base, agent: 'agy', env: { CB_ROLE: 'builder', CB_AGENT: 'agy' } } as LaunchInput);
+  const opencode = ADAPTERS.opencode.buildLaunch({ ...base, agent: 'opencode', model: 'anthropic/claude-opus-5-5', env: { CB_ROLE: 'builder', CB_AGENT: 'opencode', CB_OPENCODE_PORT: '41234' } } as LaunchInput);
+  for (const [kind, l] of [['codex', codex], ['agy', agy], ['opencode', opencode]] as const) {
+    for (const [k, v] of Object.entries(NO_PROMPT)) assert.equal(l.env[k], v, `${kind} ${k}`);
+    assert.equal(l.env.CB_AGENT, kind, `${kind} keeps the seat's own env`);
+  }
+  // a seat's own setting wins (a squad that sets EDITOR on purpose keeps it)
+  assert.equal(ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex', PAGER: 'less -F' } } as LaunchInput).env.PAGER, 'less -F');
 });

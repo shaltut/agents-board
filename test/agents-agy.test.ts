@@ -34,7 +34,7 @@ test('buildLaunch (Q3023): no sandbox and no asking like a Claude seat, this ses
   assert.deepEqual(l.args, ['--dangerously-skip-permissions', '--settings', 'C:/w/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh']);
   assert.equal(l.kind, 'agy');
   assert.ok(!l.args.includes('--sandbox') && !l.args.includes('--mode'));
-  assert.deepEqual(l.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
+  assert.deepEqual(l.env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', AGY_CLI_DISABLE_AUTO_UPDATE: 'true' }); // PR 104 review B3
 });
 
 test('mcpOff (#4392): agy has no per-run MCP off, so nothing is added and the gate names mcp_config.json and plugins', () => {
@@ -51,7 +51,7 @@ test('buildLaunch: env keeps the squad env, adds the auto-update pin, strips Cla
     CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't', claude_code_entrypoint: 'e', CLAUDECODE: '1', claudecode: '1',
     ANTHROPIC_API_KEY: 'k', anthropic_base_url: 'u', ANTHROPIC_AUTH_TOKEN: 't', ANTHROPICAL: 'keep-not-prefix',
   } }));
-  assert.deepEqual(l.env, { CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*', ANTHROPICAL: 'keep-not-prefix', AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
+  assert.deepEqual(l.env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_AGENT: 'agy', CB_PROTECTED_BRANCHES: 'main,release/*', ANTHROPICAL: 'keep-not-prefix', AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 
 test('buildLaunch: an empty model passes no --model; a Claude alias or a bad id throws', () => {

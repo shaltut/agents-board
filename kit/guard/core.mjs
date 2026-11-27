@@ -1154,6 +1154,7 @@ const SESSION_CLIENT = {
   emacs: /^(?:--batch|-batch|--script|-script|--version|--help)(?:=|$)/,
   gdb: /^(?:-batch|--batch|--version|--help)(?:=|$)/,
   sftp: /^-b$/,
+  top: /^-[A-Za-z]*b|^--batch/,
   nc: /^-[A-Za-z]*z/, ncat: /^-[A-Za-z]*z/, netcat: /^-[A-Za-z]*z/,
 };
 // one-shot once a word that is not an option follows (the SQL, the command); options here take a value
@@ -1179,6 +1180,21 @@ const RUNS_INPUT = new Set([...POSIX_SHELLS, 'pwsh', 'powershell', 'cmd', 'node'
   'rscript', 'iex', 'invoke-expression', 'xargs', 'awk', 'gawk', 'mawk', 'nawk', 'source', '.', 'psql', 'mysql', 'mariadb', 'sqlite3', 'sqlcmd',
   'mongosh', 'redis-cli', 'ssh', 'su', 'sudo', 'doas', 'expect']);
 const STDIN_DEV = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
+const STDIN_REDIR = /\d*<&[ \t]*\d+|\d*<[ \t]*(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)(?![\w/])/g;
+// a redirect word (<&0, 2>&1, >out, and a bare < or > whose target is the next word): never an argument to judge
+const REDIR_WORD = /^\d*(?:<<?<?|>>?|<>|>\||&>>?|[<>]&)(.*)$/;
+const dropRedirects = (args) => { const out = []; for (let i = 0; i < args.length; i++) { const m = REDIR_WORD.exec(args[i]); if (!m) out.push(args[i]); else if (!m[1]) i++; } return out; };
+// B3: these take the terminal whatever feeds them (ls | vim -, git log | less), so a pipe or < is no way out
+const SESSION_TTY = new Set(['vim', 'vi', 'nvim', 'view', 'vimdiff', 'nano', 'pico', 'micro', 'joe', 'less', 'more', 'most', 'pg', 'man', 'info', 'mc',
+  'tmux', 'screen', 'byobu', 'fzf', 'sk', 'peco', 'tig', 'htop', 'btop', 'lazygit', 'ranger', 'nnn', 'lynx', 'w3m', 'dialog', 'whiptail']);
+// B3: git's interactive modes read hunks or a todo list from the seat (add -p, rebase -i): short letters and long names
+const GIT_INTERACTIVE = { add: ['ipe', ['--interactive', '--patch', '--edit']], commit: ['p', ['--interactive', '--patch']], clean: ['i', ['--interactive']],
+  rebase: ['i', ['--interactive']], checkout: ['p', ['--patch']], reset: ['p', ['--patch']], restore: ['p', ['--patch']], stash: ['p', ['--patch']] };
+// B1: a literal assignment earlier in the command (X=bash, export X="python -i"), read through when $X is the command word
+const VAR_SET = /(?:^|[\s;&|(])(?:(?:export|local|readonly|declare|typeset)[ \t]+(?:-\w+[ \t]+)*)?([A-Za-z_]\w*)=('[^']*'|"[^"$`\\]*"|[^\s;&|()$`'"\\]*)/g;
+const VAR_WORD = /^\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})$/;
+// B1: a substitution as the command word ($(echo bash), `echo bash`), past assignments and a few wrappers
+const SUBST_CMD = /^[\s{(!]*(?:(?:[A-Za-z_]\w*=\S*|exec|command|builtin|eval|sudo|env|nohup|time|then|do|else)[ \t]+)*["']?(?:\$\(|`)/;
 const PS_READ = /(?<![\w-])read-host(?![\w-])|\[(?:system\.)?console\]::(?:readline|readkey|read|in|openstandardinput)(?!\w)|\$host\.ui\.(?:readline|rawui\.readkey)|\$input\s*\||\bin\s+\$input(?!\w)/i;
 // a segment's words, quote-aware; ( ) and a backtick end a piece (a new command position: $(...), (...), `...`)
 const SESSION_TOKEN = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\[\s\S]|[()`]|\s+|[^\s()`"'\\]+/g;
@@ -1186,12 +1202,16 @@ const SESSION_TOKEN = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\[\s\S]|[()`]|\s+|[^\s()`"'\
 const SESSION = (what) => `${what} opens an interactive session, and what a seat types into it later (Codex write_stdin) is never checked by the guard (#4626). Run it one-shot instead: bash -c "...", python x.py or -c, psql -c, ssh -n host cmd, or give it its input with < file or a heredoc`;
 /** The interactive session a command opens, as a short name, or null (see above). */
 export function stdinSession(command) {
-  return sessionIn(String(command ?? ''), false, 0);
+  const cmd = String(command ?? ''), vars = new Map();
+  for (const m of cmd.matchAll(VAR_SET)) vars.set(m[1], m[2].replace(/^(['"])([^]*)\1$/, '$2'));
+  return sessionIn(cmd, false, 0, vars);
 }
 
-function sessionIn(cmd, fed, depth) {
+function sessionIn(cmd, fed, depth, vars = new Map()) {
   if (depth > SESSION_DEPTH) return 'a command nested deeper than the guard reads';
-  const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ');
+  // B2: a stdin copy (<&0, exec 3<&0; <&3, < /dev/stdin) goes before the split (its & would cut the segment): removing it
+  // only takes a feed away, never adds one
+  const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(STDIN_REDIR, ' ');
   if (PS_READ.test(text.replace(/'[^']*'/g, "''").replace(/"(?:\\.|[^"\\$`])*"/g, '""'))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
   const segs = [...text.matchAll(SEGMENT)].map((m) => ({ start: m.index, end: m.index + m[0].length, s: m[0] }));
   const n = segs.length;
@@ -1204,7 +1224,9 @@ function sessionIn(cmd, fed, depth) {
     // | or |& carries the pipeline on (a blank stage before a newline too); & right after > or < is 2>&1, not a new command
     joined[k] = k > 0 && (/^\|&?$/.test(gap) || (gap === '&' && /[<>]\s*$/.test(segs[k - 1].s)) || (/^\n+$/.test(gap) && !segs[k - 1].s.trim() && joined[k - 1]));
     piped[k] = joined[k] && (gap !== '&' || piped[k - 1]);
-    redir[k] = /</.test(segs[k].s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '').replace(/<\(/g, ''));
+    // PR 104 review B2: <&0, <&3 (a copy of some descriptor, maybe the input: exec 3<&0) and < /dev/stdin read the seat's
+    // own input, so they are no feed (fail closed on any <&N)
+    redir[k] = /</.test(segs[k].s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '').replace(/<\(/g, '').replace(STDIN_REDIR, ''));
     const w0 = lead(k);
     if (LOOP_START.has(w0)) stack.push(k);
     else if (w0 === 'done' && stack.length) { const j = stack.pop(); loopFed[j] = redir[k] || piped[j]; }
@@ -1212,22 +1234,34 @@ function sessionIn(cmd, fed, depth) {
   const loops = [];
   let feeding = 0, pass = null;
   for (let k = 0; k < n; k++) {
+    if (SUBST_CMD.test(segs[k].s)) return 'a command named by a substitution ($(...) or `...` as the command word)';
     const w0 = lead(k);
     if (LOOP_START.has(w0)) { loops.push(loopFed[k]); feeding += loopFed[k]; }
     const here = fed || piped[k] || redir[k] || feeding > 0;
     if (w0 === 'done' && loops.length) feeding -= loops.pop();
     if (!joined[k]) pass = null;
     for (const p of pieces[k]) {
-      for (const q of p.inner) { const r = sessionIn(q, here, depth + 1); if (r) return r; }
+      for (const q of p.inner) { const r = sessionIn(q, here, depth + 1, vars); if (r) return r; }
       if (p.w.some((x) => x === '/dev/tty')) return '/dev/tty';
       if (!here && p.w.some((x) => STDIN_DEV.test(x))) return p.w.find((x) => STDIN_DEV.test(x));
       const at = commandAt(p);
       if (at.shell) { if (!here) return at.shell; continue; }
+      if (at.subst) return 'a command named by a substitution ($(...) or `...` as the command word)';
       if (at.i < 0) continue;
-      const name = cmdName(p.raw[at.i]), args = p.w.slice(at.i + 1);
+      let name = cmdName(p.raw[at.i]), args = dropRedirects(p.w.slice(at.i + 1));
+      if (/[$`]/.test(p.w[at.i])) {
+        // B1: $X read through a literal assignment in the command; any other variable or expansion is unreadable
+        const v = VAR_WORD.exec(p.w[at.i]), val = v && vars.get(v[1] ?? v[2]);
+        if (val === undefined || val === null) return `a command named by a variable (${p.w[at.i].slice(0, 40)}), which the guard cannot read: name the program`;
+        const words = val.trim().split(/[ \t]+/).filter(Boolean);
+        if (!words.length) continue;
+        name = cmdName(words[0]);
+        args = [...words.slice(1), ...args];
+        if (/[$`]/.test(words[0])) return `a command named by a variable (${p.w[at.i].slice(0, 40)}), which the guard cannot read: name the program`;
+      }
       if (pass && (RUNS_INPUT.has(name) || PYTHON.test(name))) return `${pass} | ${name}`;
       if (!here && !joined[k] && PASS_THROUGH.has(name) && passReads(name, args)) pass = name;
-      const r = judge(name, args, here, depth);
+      const r = judge(name, args, here, depth, vars);
       if (r) return r;
     }
   }
@@ -1258,6 +1292,7 @@ function commandAt({ raw, w }) {
   let i = 0, shell = null;
   while (i < w.length) {
     const lower = cmdName(raw[i]);
+    if (w[i] === '$' && i === w.length - 1 && raw[i] === '$') return { subst: true, i: -1 }; // $( as the command word
     if (ASSIGNMENT.test(w[i]) || SHELL_KEYWORD.has(lower) || LOOP_START.has(lower) && lower !== 'select' || w[i] === '$' || w[i] === '{' || w[i] === '}') { i++; continue; }
     const spec = SESSION_WRAP[lower];
     if (!spec) return { i };
@@ -1277,11 +1312,53 @@ function commandAt({ raw, w }) {
 }
 
 // does a pass-through stage read its input (no file given)?
+// PR 104 review B4: grep, sed, head, tail and cut are read option by option, so a file after the pattern, script or count
+// is a file (grep foo file | awk); -r with no file searches the folder. tr never takes a file. Unknown: reads (fail closed)
+const PASS_ARGS = {
+  grep: { val: 'mABCdD', code: 'ef', lval: ['--max-count', '--after-context', '--before-context', '--context', '--devices', '--directories', '--label', '--include', '--exclude', '--exclude-dir', '--color', '--colour', '--binary-files'], lcode: ['--regexp', '--file'] },
+  sed: { val: 'l', code: 'ef', lval: ['--line-length'], lcode: ['--expression', '--file'], suffix: 'i' },
+  head: { val: 'nc', code: '', lval: ['--lines', '--bytes'], lcode: [], count: true },
+  tail: { val: 'ncs', code: '', lval: ['--lines', '--bytes', '--sleep-interval', '--pid', '--max-unchanged-stats'], lcode: [], count: true },
+  cut: { val: 'dfcb', code: '', lval: ['--delimiter', '--fields', '--characters', '--bytes', '--output-delimiter'], lcode: [] },
+};
+PASS_ARGS.egrep = PASS_ARGS.grep; PASS_ARGS.fgrep = PASS_ARGS.grep;
+function passOperands(spec, args) {
+  const pos = [];
+  let code = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') { pos.push(...args.slice(i + 1)); break; }
+    if (spec.count && /^[-+]\d+$/.test(a)) continue; // head -5, tail +5
+    if (a.startsWith('--')) {
+      const n = a.split('=')[0];
+      if (spec.lcode.includes(n)) code = true;
+      if ((spec.lval.includes(n) || spec.lcode.includes(n)) && !a.includes('=')) i++;
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      for (let c = 1; c < a.length; c++) {
+        const ch = a[c];
+        if (ch === spec.suffix) break; // sed -i.bak: the rest is the suffix
+        if (spec.code.includes(ch)) code = true;
+        if (spec.val.includes(ch) || spec.code.includes(ch)) { if (c === a.length - 1) i++; break; }
+      }
+      continue;
+    }
+    pos.push(a);
+  }
+  return { pos, code };
+}
 function passReads(name, args) {
-  if (name === 'tee') return true;
+  if (name === 'tee' || name === 'tr') return true;
   if (name === 'dd') return !args.some((a) => /^if=/.test(a));
   if (PASS_FILES.has(name)) return !args.some((a) => a !== '-' && !a.startsWith('-')) || args.includes('-');
-  return true; // grep, sed, head ...: their first word may be a pattern or a count, so read as input (fail closed)
+  const spec = PASS_ARGS[name];
+  if (!spec) return true;
+  const { pos, code } = passOperands(spec, args);
+  const files = (name === 'grep' || name === 'egrep' || name === 'fgrep' || name === 'sed') && !code ? pos.slice(1) : pos;
+  if (files.includes('-')) return true;
+  if (files.length) return false;
+  return !((name === 'grep' || name === 'egrep' || name === 'fgrep') && args.some((a) => /^-[A-Za-z]*[rR]/.test(a) && !a.startsWith('--') || a === '--recursive' || a === '--dereference-recursive'));
 }
 
 // an interpreter's options: 'session', 'oneshot', or the index of its script word
@@ -1344,9 +1421,11 @@ const firstWord = (args, from, valued) => {
 };
 
 // a session's name, or null; inner commands (bash -c, ssh host cmd, docker exec -i c cmd) are read the same way
-function judge(name, args, fed, depth) {
+function judge(name, args, fed, depth, vars = new Map()) {
   if (args[0] === '--version' || args[0] === '--help') return null;
-  const inner = (text) => (text === null || !text.trim() ? null : sessionIn(text, fed, depth + 1));
+  const inner = (text) => (text === null || !text.trim() ? null : sessionIn(text, fed, depth + 1, vars));
+  if (name === 'eval') return inner(args.join(' ')); // B1: eval's words are a command
+  if (SESSION_TTY.has(name)) return name; // B3: fed or not
   if (name === 'read' || name === 'mapfile' || name === 'readarray' || name === 'select') return fed ? null : name;
   if (POSIX_SHELLS.has(name)) {
     for (let i = 0; i < args.length; i++) {
@@ -1439,6 +1518,17 @@ function judge(name, args, fed, depth) {
   }
   if (fed) return null;
   if (SESSION_ALWAYS.has(name)) return name;
+  if (name === 'git') {
+    const w = ['git', ...args], j = gitSub(w, 0), spec = GIT_INTERACTIVE[w[j]];
+    if (spec) {
+      for (const a of w.slice(j + 1)) {
+        if (a === '--') break;
+        if (a.startsWith('--') ? spec[1].includes(a.split('=')[0]) : /^-[A-Za-z]+$/.test(a) && [...a.slice(1)].some((c) => spec[0].includes(c))) return `git ${w[j]} ${a}`;
+      }
+    }
+    return null;
+  }
+  if (name === 'crontab') return args.some((a) => /^-[A-Za-z]*e/.test(a)) ? 'crontab -e' : null;
   const interp = INTERP_OF(name);
   if (interp) return interpMode(SESSION_INTERP[interp], args) === 'session' ? name : null;
   if (name === 'deno' || name === 'bun') {
