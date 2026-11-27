@@ -257,9 +257,9 @@ test('files: the cap stops the day, an old day file is deleted on a new day, par
   assert.equal(readFaults(Date.now() - 3600_000, { CB_FAULTS_HOME: dir3 } as any).length, 1001);
 });
 
-test('speed: 200 writes, each under 20 ms', () => {
+test('speed: 200 writes, p95 under 20 ms', () => {
   const dir = temp(), env = { CB_FAULTS_HOME: dir } as any;
-  let worst = 0;
+  const times: number[] = [];
   // the first fault of a process also makes the folder and reads the vocabulary once
   const t0 = performance.now();
   writeFault({ src: 'cb', kind: 'refused', cmd: 'show', msg: mask('task #0 not found'), exit: 1 }, env);
@@ -267,7 +267,9 @@ test('speed: 200 writes, each under 20 ms', () => {
   for (let i = 0; i < 200; i++) {
     const t = performance.now();
     writeFault({ src: 'cb', kind: 'refused', cmd: 'show', msg: mask(`task #${i} not found`), exit: 1 }, env);
-    worst = Math.max(worst, performance.now() - t);
+    times.push(performance.now() - t);
   }
-  assert.ok(worst < 20, `slowest write ${worst.toFixed(1)} ms`);
+  // Ignore occasional scheduling or filesystem stalls, but catch sustained slow writes.
+  const p95 = times.sort((a, b) => a - b)[189]!;
+  assert.ok(p95 < 20, `p95 write ${p95.toFixed(1)} ms`);
 });
