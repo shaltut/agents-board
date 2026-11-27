@@ -89,6 +89,9 @@ export function ProjectsList() {
   )
 }
 
+/** A project's board, fresh: no card, session, huddle, epic or goal carried over. */
+const boardHref = (slug: string) => href({ view: 'board', project: slug })
+
 const PILL: Record<State, string> = {
   enabled: 'bg-raised text-foreground',
   disabled: 'bg-lamp-soft text-lamp-ink',
@@ -102,7 +105,8 @@ function Row({ p, busy, onAct }: { p: Project; busy: boolean; onAct: (a: Action)
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <ProjectDot slug={p.slug} />
-          <span className="truncate font-medium">{p.name}</span>
+          {/* every state opens its board: a disabled or archived project's cards stay readable (design §3, §6) */}
+          <a href={boardHref(p.slug)} className="truncate font-medium underline-offset-4 hover:underline">{p.name}</a>
           <StatePill state={p.state} />
         </div>
         <p className="mt-0.5 text-[13px] text-muted-foreground text-pretty">

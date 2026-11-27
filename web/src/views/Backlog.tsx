@@ -60,8 +60,8 @@ function List({ status, tasks, children, empty }: { status: Status; tasks: ListT
 
 export function Backlog({ route }: { route: Route }) {
   const qc = useQueryClient()
-  const { data: nextAll = [] } = useTasks(route.project, 'next')
-  const { data: backlogAll = [] } = useTasks(route.project, 'backlog')
+  const { data: nextAll = [] } = useTasks(route.project, 'next', true)
+  const { data: backlogAll = [] } = useTasks(route.project, 'backlog', true)
   const tagged = (ts: ListTask[]) => ts.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type))
   const next = useMemo(() => tagged(nextAll), [nextAll, route.tag, route.type])
   const backlog = useMemo(() => tagged(backlogAll), [backlogAll, route.tag, route.type])

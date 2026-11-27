@@ -20,7 +20,7 @@ const src = (...p: string[]) => readFileSync(join(root, 'web', 'src', ...p), 'ut
 const AT = '2026-11-27T14:05:00Z';
 const RAW = /_|\bundefined\b|\bnull\b|\bNaN\b|\[object/; // a key, or a value that never got its words
 const row = (o: Partial<any> = {}) => ({ slug: 'cedar', name: 'Cedar', state: 'enabled', state_by: null, state_at: null,
-  open_count: 9, in_progress_count: 2, seats_live: 3, question_count: 1, ...o }) as any;
+  open_count: 9, in_progress_count: 2, seats_live: 3, question_count: 1, cards_count: 12, ...o }) as any;
 const pv = (o: Partial<Preview> = {}): Preview => ({ name: 'Cedar', seats_live: 4, open: 9, in_progress: 2, held: 2,
   jobs_waiting: 3, jobs_running: 1, questions: 1, github_watches: 1, ...o });
 
@@ -33,7 +33,8 @@ test('each state reads in Ahmed\'s words: who and when on a disabled row, the da
   assert.equal(countsLine(row()), '9 open · 2 in progress · 3 seats live · 1 question for you');
   assert.equal(countsLine(row({ question_count: 0, seats_live: 1 })), '9 open · 2 in progress · 1 seat live');
   assert.equal(countsLine(row({ state: 'disabled', question_count: 0 })), '9 open · 2 in progress, held and waiting · 3 seats still live');
-  assert.equal(countsLine(row({ state: 'archived', open_count: 41 })), '41 open cards kept, readable');
+  assert.match(stateLine(row({ state: 'archived', state_by: 'ahmed', state_at: AT })), /^Archived by Ahmed on \d{1,2} Nov$/, 'who archived it (review N7)');
+  assert.equal(countsLine(row({ state: 'archived', open_count: 0, cards_count: 41 })), '41 cards kept, readable', 'every card, done ones too (review N7)');
 });
 
 test('the buttons: Disable asks first; Enable and Archive on a disabled one; an archived one only unarchives, back to disabled', () => {
@@ -62,7 +63,8 @@ test('the confirm dialog says what disabling touches, from the preview, and prom
   const a = confirmText('archived', pv({ open: 41 }));
   assert.equal(a.title, 'Archive Cedar?');
   assert.equal(a.button, 'Archive Cedar');
-  assert.match(a.lines.join(' '), /41 open cards stay readable/);
+  assert.match(a.lines.join(' '), /Every card stays readable/);
+  assert.doesNotMatch(a.lines.join(' '), /\d/, 'no count: the row and the preview count open cards differently (review N1)');
   assert.match(a.lines.join(' '), /Unarchive brings it back as disabled/);
   for (const t of [d, one, none, a].flatMap((x) => [x.title, x.lead, x.button, ...x.lines])) {
     assert.doesNotMatch(t, /supervisor|closes? (them|it)/i, 'slice 3 (the supervisor closing idle seats) is not shipped yet');
@@ -100,19 +102,34 @@ test('the header and every picker list enabled projects only; the Settings menu 
   assert.match(sw, /const projects = liveOnly\(all\)/);
   assert.match(sw, /const current = all\.find/, 'the open project is found in every state, so its name and pill show');
   assert.match(sw, /current\.state !== 'enabled' && <StatePill/);
-  for (const f of [['components', 'CommandMenu.tsx'], ['components', 'NewTask.tsx'], ['views', 'Backlog.tsx'], ['views', 'Epics.tsx'],
+  for (const f of [['components', 'NewTask.tsx'], ['views', 'Backlog.tsx'], ['views', 'Epics.tsx'],
     ['views', 'Goals.tsx'], ['views', 'Huddles.tsx'], ['views', 'Memory.tsx']]) {
     const text = src(...f);
     assert.match(text, /const projects = useLiveProjects\(\)/, f.join('/'));
     assert.doesNotMatch(text, /useProjects\(\)/, `${f.join('/')}: no full list`);
   }
   assert.match(src('components', 'settings', 'GitHub.tsx'), /others=\{liveOnly\(projects\)/);
+  const menu = src('components', 'CommandMenu.tsx');
+  assert.match(menu, /const projects = liveOnly\(all\)/, 'the command menu\'s project list');
+  assert.match(menu, /const \{ data: tasks = \[\] \} = useTasks\(\)/, 'its card search reads every card (review S1)');
+  assert.ok(menu.includes('{t.project}{off.has(t.project) && ` · ${off.get(t.project)}`}'), 'and names a disabled or archived project\'s state in words');
+  assert.match(menu, /\[p\.slug, STATE_LABEL\[p\.state\]\]/, 'the words come from STATE_LABEL, never the stored value');
+  assert.match(src('views', 'People.tsx'), /const projects = useLiveProjects\(\)/, 'the Access add-to-project list (review N2)');
+  assert.match(sw, /\{settings && all\.length > projects\.length &&/, 'the Projects page pointer only for the owner, who gets the page (review N3)');
   assert.match(src('views', 'Settings.tsx'), /if \(!route\.project\) return <ProjectsList \/>/);
   assert.ok(NO_ACTOR.has('project_state_preview') && !NO_ACTOR.has('project_state'), 'the change carries Ahmed as actor; the read takes none');
   const page = src('components', 'projects', 'ProjectsList.tsx');
   assert.match(page, /rpc\('project_state', \{ project: p\.slug, state: to \}\)/);
   assert.match(page, /rpc<Preview>\('project_state_preview', \{ project: p\.slug \}\)/);
   assert.doesNotMatch(page, />\s*\{(p\.state|state|a\.to|asking\.to)\}/, 'the stored state is never printed as text');
+  // review B1: every row's name opens that project's board, archived rows too (the same Row renders both lists)
+  assert.match(page, /<a href=\{boardHref\(p\.slug\)\}[^>]*>\{p\.name\}<\/a>/);
+  assert.match(page, /const boardHref = \(slug: string\) => href\(\{ view: 'board', project: slug \}\)/);
+  assert.match(page, /archived\.map\(\(p\) => <Row /);
+  // review S1, S2: only Board and Backlog ask for the leave-out; a seat's page reads every card
+  assert.match(src('views', 'Board.tsx'), /useTasks\(route\.project, undefined, true\)/);
+  assert.match(src('views', 'Backlog.tsx'), /useTasks\(route\.project, 'next', true\)[\s\S]*useTasks\(route\.project, 'backlog', true\)/);
+  assert.match(src('views', 'Sessions.tsx'), /const \{ data: tasks = \[\] \} = useTasks\(route\.project\)/);
 });
 
 test('All projects reads (Board, Backlog, Today, Sessions) leave a disabled or archived project out; chosen, it shows', async () => {
@@ -128,7 +145,10 @@ test('All projects reads (Board, Backlog, Today, Sessions) leave a disabled or a
   assert.deepEqual([cedar.in_progress_count, cedar.seats_live], [1, 1], 'the row counts');
 
   await sql`select cb.project_state('cedar', 'disabled', 'ahmed'), cb.project_state('oldpilot', 'disabled', 'ahmed'), cb.project_state('oldpilot', 'archived', 'ahmed')`;
-  assert.deepEqual((await get('/api/tasks')).map((t: any) => t.project), ['atlas'], 'Board and Backlog, all projects');
+  assert.deepEqual((await get('/api/tasks?live=1')).map((t: any) => t.project), ['atlas'], 'Board and Backlog, all projects');
+  assert.deepEqual((await get('/api/tasks')).map((t: any) => t.project).sort(), ['atlas', 'cedar', 'oldpilot'],
+    'card search and a seat\'s page read every card: a held card keeps its holder in sight (review S1, S2)');
+  assert.deepEqual((await get('/api/tasks?live=1&project=oldpilot')).map((t: any) => t.title), ['old card'], 'chosen, an archived one shows');
   assert.deepEqual((await get('/api/tasks?project=cedar')).map((t: any) => t.title), ['cedar card'], 'chosen, it shows');
   const today = await get('/api/today');
   assert.deepEqual([today.counts.active, today.counts.blocked], [1, 0], 'Today\'s counts: atlas only');

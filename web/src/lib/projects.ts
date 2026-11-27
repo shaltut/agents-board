@@ -16,16 +16,16 @@ const dayOf = (iso: string) => { const d = new Date(iso); return `${d.getDate()}
 /** Who changed it: Ahmed, or nobody named (the board's one-time mapping of an already archived project). */
 const by = (p: Pick<Project, 'state_by'>) => (p.state_by === 'ahmed' ? ' by Ahmed' : '')
 
-/** The row's line under the name: "Enabled", "Disabled by Ahmed on 27 Nov 14:05", "Archived on 2 Nov". */
+/** The row's line under the name: "Enabled", "Disabled by Ahmed on 27 Nov 14:05", "Archived by Ahmed on 2 Nov". */
 export function stateLine(p: Pick<Project, 'state' | 'state_by' | 'state_at'>): string {
   if (p.state === 'disabled') return `Disabled${by(p)}${p.state_at ? ` on ${when(p.state_at)}` : ''}`
-  if (p.state === 'archived') return `Archived${p.state_at ? ` on ${dayOf(p.state_at)}` : ''}`
+  if (p.state === 'archived') return `Archived${by(p)}${p.state_at ? ` on ${dayOf(p.state_at)}` : ''}`
   return 'Enabled'
 }
 
 /** The row's counts: what is going on there, or, once disabled, what is waiting. */
-export function countsLine(p: Pick<Project, 'state' | 'open_count' | 'in_progress_count' | 'seats_live' | 'question_count'>): string {
-  if (p.state === 'archived') return `${plural(p.open_count, 'open card')} kept, readable`
+export function countsLine(p: Pick<Project, 'state' | 'open_count' | 'in_progress_count' | 'seats_live' | 'question_count' | 'cards_count'>): string {
+  if (p.state === 'archived') return `${plural(p.cards_count, 'card')} kept, readable` // every card, done ones too
   if (p.state === 'disabled') return [`${p.open_count} open`, p.in_progress_count > 0 && `${p.in_progress_count} in progress, held and waiting`,
     p.seats_live > 0 && `${plural(p.seats_live, 'seat')} still live`].filter(Boolean).join(' · ')
   return [`${p.open_count} open`, `${p.in_progress_count} in progress`, `${plural(p.seats_live, 'seat')} live`,
@@ -64,7 +64,7 @@ export function confirmText(to: 'disabled' | 'archived', pv: Preview): { title: 
       title: `Archive ${n}?`,
       lead: 'Nothing new may be filed there, by anyone. Nothing is deleted.',
       lines: [
-        `${plural(pv.open, 'open card')} ${pv.open === 1 ? 'stays' : 'stay'} readable, with every page, memory and the squad.`,
+        'Every card stays readable, with every page, memory and the squad.', // no count: the row and the preview count open cards differently
         `It folds away under Archived on this page and leaves every project list.`,
         `Unarchive brings it back as disabled; enable it after that.`,
       ],

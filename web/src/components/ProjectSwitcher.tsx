@@ -49,7 +49,7 @@ export function ProjectSwitcher({ project, settings }: { project?: string; setti
                   </CommandItem>
                 ))}
               </CommandGroup>
-              {all.length > projects.length && (
+              {settings && all.length > projects.length && ( /* the owner's page: another admin does not get it */
                 <p className="border-t px-3 py-2 text-xs text-muted-foreground">Disabled and archived projects: on the Projects page.</p>
               )}
             </CommandList>

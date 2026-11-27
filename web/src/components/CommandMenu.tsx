@@ -1,12 +1,16 @@
 import { Plus, Layers, Milestone } from 'lucide-react'
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from '@/components/ui/command'
-import { useEpics, useLiveProjects, useTasks } from '@/lib/api'
+import { liveOnly, useEpics, useProjects, useTasks } from '@/lib/api'
+import { STATE_LABEL } from '@/lib/projects'
 import { go, GROUPS, openPage, type Page } from '@/lib/route'
 import { ProjectDot, StatusDot, TaskId } from './Chips'
 import { PageKeys } from './NavMenus'
 
 export function CommandMenu({ open, onOpenChange, onNewTask, pages }: { open: boolean; onOpenChange: (o: boolean) => void; onNewTask: () => void; pages: readonly Page[] }) {
-  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
+  const { data: all = [] } = useProjects()
+  const projects = liveOnly(all) // the project list: enabled ones only (#4559)
+  // card search finds every card, a disabled or archived project's too, and says so in words (#4559)
+  const off = new Map(all.filter((p) => p.state !== 'enabled').map((p) => [p.slug, STATE_LABEL[p.state]]))
   const { data: tasks = [] } = useTasks()
   const { data: epics = [] } = useEpics()
   const run = (fn: () => void) => { onOpenChange(false); fn() }
@@ -26,7 +30,7 @@ export function CommandMenu({ open, onOpenChange, onNewTask, pages }: { open: bo
                 <StatusDot status={t.status} />
                 <TaskId id={t.id} className="w-9 shrink-0" />
                 <span className="min-w-0 flex-1 truncate">{t.title}</span>
-                <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">{t.project}</span>
+                <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">{t.project}{off.has(t.project) && ` · ${off.get(t.project)}`}</span>
               </CommandItem>
             ))}
           </CommandGroup>
