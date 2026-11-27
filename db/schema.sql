@@ -5394,7 +5394,7 @@ declare s text := trim(coalesce(q, '')); p text := cb.read_project(project); tq 
 begin
   if s = '' then raise exception 'what to look for is required: cb search <project> "<words>"'; end if;
   tq := websearch_to_tsquery('english', s);
-  pat := '%' || replace(replace(replace(s, '\', '\'), '%', '\%'), '_', '\_') || '%';
+  pat := '%' || replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_') || '%';
   return (with hit as (
     select t.id, t.project, t.status, t.stage, t.priority, t.type, t.assignee, t.title,
            row_number() over (order by t.status in ('done', 'cancelled'), t.id desc) as n

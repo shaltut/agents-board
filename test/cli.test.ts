@@ -347,6 +347,12 @@ test('cb search (#4339): finds a card by its words, with stage and holder; a pro
   assert.match(cb(['search']).err, /usage: cb search/);
   assert.match(cb(['search', 'relay', 'drops']).err, /^cb: "relay" is not a project: quote the words, cb search "relay drops", or name the project first/,
     'unquoted words: the next step is to quote them, not to bind a project');
+  // #660: a pane bound to demo finds nothing there: it widens once and says so; a named project stays put
+  await sql`select cb.iam('pc', 'w1:p2', 'W1@test', 'demo')`;
+  const env = { HERDR_PANE_ID: 'w1:p2', CB_MACHINE: 'pc', CB_ACTOR: '' };
+  assert.match(cb(['search', 'receipts'], env).out, /^no card in demo matches "receipts"; in every project:\n#3 .*· pipe$/);
+  assert.match(cb(['search', 'nothing-like-this'], env).out, /^no card in demo or any other project matches "nothing-like-this"/);
+  assert.match(cb(['search', 'receipts', '--project', 'demo'], env).out, /^no card in demo matches "receipts" \(/, 'an explicit --project stays put');
 });
 
 test('cb mem find: nothing in the bound project searches every project and says so (#660)', async () => {

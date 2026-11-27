@@ -289,6 +289,10 @@ test('cb.task_find (#4339): titles and bodies, notes on request, open cards firs
   assert.ok((await find('relay drops', 'demo', true)).cards.some((t: any) => Number(t.id) === noted), 'with notes: a note matches');
   assert.ok((await find('relay drops', null)).cards.some((t: any) => Number(t.id) === other), 'no project: every project');
   assert.equal((await find('%', 'demo')).cards.length, 1, 'a % is the character, not a wildcard');
+  const slash = await add('bs', 'zz\\yy in a path');
+  await add('bs', 'mmXnn');
+  assert.deepEqual((await find('z\\y', 'bs')).cards.map((t: any) => Number(t.id)), [slash], 'a \\ is the character');
+  assert.equal((await find('mm\\Xnn', 'bs')).cards.length, 0, 'a \\ does not escape the next character');
   const capped = await find('relay', 'demo', false, 1);
   assert.equal(capped.cards.length, 1);
   assert.equal(capped.total, 3, 'total counts past the cap');

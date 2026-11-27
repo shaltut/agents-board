@@ -840,14 +840,23 @@ ${body}`, json: pg };
       // two or more words: the first is the project (as cb mem add); one: --project, else this pane's, else every project
       const project = o.project ?? (args.length > 1 ? args[0] : sessionProject);
       const q = (o.project || args.length < 2 ? args : args.slice(1)).join(' ');
-      const r: any = await callFn('task_find', { q, project: project ?? null, notes: !!o.notes, lim: o.all ? null : 20 }).catch((e: any) => {
+      const find = (p: string | null) => callFn('task_find', { q, project: p, notes: !!o.notes, lim: o.all ? null : 20 });
+      let r: any = await find(project ?? null).catch((e: any) => {
         // cb search relay drops: the first word was taken as a project, not as the start of the words
         if (o.project || args.length < 2 || !/^unknown project /.test(e?.message ?? '')) throw e;
         throw new Error(`"${args[0]}" is not a project: quote the words, cb search "${args.join(' ')}", or name the project first, cb search <project> "<words>" (known: ${String(e.message).split('known: ')[1] ?? 'none'})`);
       });
-      const where = project ? ` in ${project}` : '';
-      if (!r.cards.length) return { out: `no card${where} matches "${q}"${o.notes ? '' : ' (--notes searches the notes too)'}`, json: r };
-      return { out: [...r.cards.map((t: any) => line({ ...t, status: t.stage ? `${t.status}, ${t.stage}` : t.status })),
+      const notesHint = o.notes ? '' : ' (--notes searches the notes too)';
+      let head: string[] = [];
+      // #660: a pane's inherited project is searched without the session naming it: on no match widen once, and say so.
+      // A project the session named (--project, or the first word) stays put.
+      if (!r.cards.length && project && !o.project && args.length < 2) {
+        const wide: any = await find(null);
+        if (!wide.cards.length) return { out: `no card in ${project} or any other project matches "${q}"${notesHint}`, json: wide };
+        r = wide;
+        head = [`no card in ${project} matches "${q}"; in every project:`];
+      } else if (!r.cards.length) return { out: `no card${project ? ` in ${project}` : ''} matches "${q}"${notesHint}`, json: r };
+      return { out: [...head, ...r.cards.map((t: any) => line({ ...t, status: t.stage ? `${t.status}, ${t.stage}` : t.status })),
         ...(r.total > r.cards.length ? [`(${r.cards.length} of ${r.total} shown: --all lists every one)`] : [])].join('\n'), json: r };
     }
     case 'mine': {
