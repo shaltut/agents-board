@@ -5,7 +5,7 @@
 // .gitattributes pins eol=lf, and *.cmd eol=crlf everywhere.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -73,7 +73,9 @@ export function compareManifest(root: string, m: Manifest) {
   return { missing, changed, total: Object.keys(m.files).length };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// run directly, also through a symlinked path (macOS /tmp, a linked checkout): compare real paths, as install.mjs does
+const isMain = (() => { try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? '')).href; } catch { return false; } })();
+if (isMain) {
   const args = process.argv.slice(2);
   const root = resolve(import.meta.dirname, '..');
   const i = args.indexOf('--out');
