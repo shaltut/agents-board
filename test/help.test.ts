@@ -70,7 +70,7 @@ test('cb help <topic> and cb help <command> print the detailed page; -h on a com
 test('cb help <unknown> exits 1 and lists the topics and commands', () => {
   const r = cb(['help', 'queue']);
   assert.equal(r.code, 1);
-  assert.match(r.err, /no help for "queue"\. Topics: start, work, ask, huddle, relay, orchestrate, project, rules, memory\. Commands: .*next/);
+  assert.match(r.err, /no help for "queue"\. Topics: start, work, ask, huddle, relay, orchestrate, project, rules, memory, json\. Commands: .*next/);
 });
 
 test('cb help iam documents --agent; cb help squad documents agent, seats and fallback (#4002)', () => {
