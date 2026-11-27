@@ -12,7 +12,8 @@ type Props = { t: ListTask; showProject?: boolean; dragging?: boolean; overlay?:
  *  question to Ahmed, red for P0. */
 export const TaskCard = forwardRef<HTMLDivElement, Props>(function TaskCard({ t, showProject, dragging, overlay, className, ...rest }, ref) {
   const l = t.links ?? {}
-  const { data: open = [] } = useQuestions(undefined, 'open')
+  // its own project's open questions: the all-projects list leaves a disabled project's out (#4559), its board keeps the edge
+  const { data: open = [] } = useQuestions(t.project, 'open')
   const pipeline = usePipeline(t.project)
   const holding = t.status === 'blocked' && t.blocked_on != null && open.some((q) => q.id === t.blocked_on && !q.assigned_to)
   const waits = t.status === 'done' || t.status === 'cancelled' ? [] : t.waits_on ?? []

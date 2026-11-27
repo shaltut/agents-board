@@ -215,7 +215,9 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
 // admin sees the page read-only; the local dashboard (no admin) is Ahmed. The SQL guards stay as they are (squad_set
 // also lets the lead's cb squad set through; the rest are dashboard_only): this narrows only which signed-in admin may
 // call them. The pipeline switch and the reminders keep their guard (any admin, as on Board and Backlog).
-const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'role_text_import', 'project_role_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
+// #4559: a project's state (enabled, disabled, archived) is Ahmed's alone too
+const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'role_text_import', 'project_role_set', 'github_watch_add', 'github_watch_remove', 'github_mute',
+  'project_state']);
 // The Runners page (#4527) is for every admin to read (Q2978); managing the queue is Ahmed's and each project's lead's
 // (Q2982), and a lead is a session (cb job ...), never a signed-in admin. The SQL checks the same (cb._is_owner: exactly
 // ahmed on the dashboard; cb._is_lead); this refuses another admin before the database is asked.
@@ -407,7 +409,8 @@ app.get('*', (c) =>
     ? c.html(readFileSync(join(DIST, 'index.html'), 'utf8'))
     : c.text('UI not built yet: run `pnpm build`', 503));
 
-/** The Telegram bot (#683) rides the same LISTEN as the pages: a question change reconciles the chat. */
+/** The Telegram bot (#683) rides the same LISTEN as the pages: a question change reconciles the chat (cb.project_state
+ *  sends one too: a project's questions leave or come back, #4559). */
 export async function startBot(token: string, api: string) {
   startTelegram({ token, api });
   clients.add((table) => { if (table === 'questions' || table === 'listen') reconcile(); });
