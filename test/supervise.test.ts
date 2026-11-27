@@ -364,7 +364,8 @@ test('a started session whose first prompt failed is blocked: the lead gets the 
   assert.equal((await events(sql, 'failed')).length, 0);
   const t = await tells(sql);
   assert.equal(t.length, 1);
-  assert.match(t[0].summary, /sv-B1@macbook .*first prompt was not sent.*herdr --machine macbook agent prompt sv-b1-macbook "cb iam sv-B1@macbook sv/);
+  // PR 117 S2: both sends may have landed, so the lead checks the pane before sending
+  assert.match(t[0].summary, /sv-B1@macbook .*first prompt may not have landed: check the pane, then send it if it is not there: herdr --machine macbook agent prompt sv-b1-macbook "cb iam sv-B1@macbook sv/);
   assert.ok(!d.memory.failedAt.has('sv-B1@macbook'));
 });
 
