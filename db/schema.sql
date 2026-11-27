@@ -2026,14 +2026,20 @@ begin
     select t.id, t.project, left(t.title, 80) as title, nullif(trim(t.assignee), '') as assignee, t.status,  -- unassigned cards hold '' as well as null; a title is cut: GitHub cards carry strangers' text
            -- #4559: quiet time counts from the project's last enable (state_at; greatest skips a null), so an enable is no burst
            t.stage, greatest(t.updated_at, coalesce((select max(e.at) from cb.events e where e.task_id = t.id and not (e.data ? 'nudge')), t.updated_at),
-                             (select pr.state_at from cb.projects pr where pr.slug = t.project)) as last_at
+                             (select pr.state_at from cb.projects pr where pr.slug = t.project)) as last_at,
+           p.last_ping_at
       from cb.task_pings p join cb.tasks t on t.id = p.task_id
      where t.status not in ('done', 'cancelled')
+       -- #4665: parked cards are not silence: review waits on Ahmed by definition, an unassigned backlog card on purpose
+       and t.status <> 'review' and not (t.status = 'backlog' and nullif(trim(t.assignee), '') is null)
        and cb._live(t.project)  -- #4559: a project that gets no work is not asked about; its reminder rows are kept
        and (p.last_ping_at is null or p.last_ping_at < now() - interval '30 minutes')
        and not exists (select 1 from cb.questions q where q.task_id = t.id and q.status = 'open')  -- waiting on a person is not silence (Q2357)
   loop
     continue when r.last_at > now() - interval '1 hour';
+    -- #4665: an in_progress card nobody holds is asked about once per quiet stretch (the fix is to move it back), not
+    -- every 30 minutes; an update starts a new stretch
+    continue when r.status = 'in_progress' and r.assignee is null and r.last_ping_at >= r.last_at;
     mins := floor(extract(epoch from now() - r.last_at) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
     live := r.assignee is not null and exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
@@ -2048,9 +2054,11 @@ begin
                  and not (r.stage is not null and cb._pipeline(r.project)) loop  -- a staged card's lead copy is the digest's
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
-              format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
+              case when r.status = 'in_progress' and r.assignee is null
+                then format('Card #%s "%s" (unassigned, in_progress) has had no update for %s, and nobody holds it: move it back (cb move %s next) or assign it. Asked once until it changes.', r.id, r.title, idle, r.id)
+                else format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
                      case when r.assignee is null then 'unassigned' else 'assigned to ' || r.assignee end, r.status, idle,
-                     case when r.assignee is null or live then '' else ' and its session has not checked in for 10 minutes' end),
+                     case when r.assignee is null or live then '' else ' and its session has not checked in for 10 minutes' end) end,
               jsonb_build_object('to', o, 'nudge', true));
       n := n + 1;
     end loop;
