@@ -79,6 +79,10 @@ test('mask: URLs, emails, session names, paths, dotted hosts, echoed lists and u
     ['title \u201cpatient member claim\u201d is long', 'title "‹v›" is long'],
     ['unknown project "iris"; known: iris, board, show', 'unknown project "‹v›"; known: ‹v›'],
     ['C:\\Users\\someone\\shot.png: no such file', '‹v› no such file'],
+    // review r2: a path with spaces is masked whole, up to its file name
+    ['C:\\Users\\Some Person\\My Board\\cli\\cb.ts: no such file', '‹v› no such file'],
+    ['C:/Program Files/node/node.exe failed', '‹v› failed'],
+    ['\\\\server\\share name\\dir\\x.txt missing', '‹v› missing'],
     ['see cli/cb.ts:120 and docs/ops/maintain.md', 'see cli/cb.ts:N and docs/ops/maintain.md'],
   ];
   for (const [raw, want] of cases) assert.equal(mask(raw), want, raw);

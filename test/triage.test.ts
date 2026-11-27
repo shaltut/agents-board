@@ -3,7 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
@@ -151,6 +151,10 @@ test('the judge\'s answer is checked: garbage, a hang and a spent budget file no
   assert.equal(redactionProblem('see C:\\Users\\x\\y'), 'a path outside the repo');
   assert.equal(redactionProblem('W1@macbook said so'), 'a session name');
   assert.equal(redactionProblem('token abcd01ef23gh45ij67kl89mn01'), 'a token-like string');
+  // review r2: provider tokens by prefix, even with no digit or under 24 characters
+  for (const tok of ['ghp_' + 'Ab'.repeat(10), 'gho_' + 'xY'.repeat(9), 'github_pat_' + 'Q_'.repeat(8), 'glpat-' + 'abcdEFGH'])
+    assert.equal(redactionProblem(`push with ${tok} failed`, []), 'a token-like string', tok.slice(0, 4));
+  assert.equal(redactionProblem('the risk-assessment step', []), null);
   assert.equal(redactionProblem('on mybox it fails', ['mybox']), 'a machine name');
   assert.equal(redactionProblem('cli/cb.ts:120 throws at 09:12 UTC'), null);
 });
@@ -235,19 +239,41 @@ test('two machines triaging the same new fault at once make one card', async () 
   assert.equal((await notes(sql, cards[0].id)).length, 1);
 });
 
-test('the judge\'s folder: tracked files only, never .env, untracked scratch or a secret-shaped tracked file', () => {
+test('the judge\'s folder: tracked files only, never .env, untracked scratch, a secret-shaped tracked file or a link out', (t) => {
   const repo = temp();
   const git = (...a: string[]) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
-  git('init', '-q');
-  mkdirSync(join(repo, 'cli'), { recursive: true }); mkdirSync(join(repo, 'deploy'), { recursive: true });
+  git('init', '-q'); git('config', 'core.symlinks', 'true');
+  // review r2: a canary outside the repo, reachable only through a link
+  const outside = temp();
+  writeFileSync(join(outside, 'canary.md'), 'CANARY-OUTSIDE\n');
+  mkdirSync(join(repo, 'cli'), { recursive: true }); mkdirSync(join(repo, 'deploy'), { recursive: true }); mkdirSync(join(repo, 'docs'), { recursive: true });
   writeFileSync(join(repo, 'cli', 'cb.ts'), '// code\n'); writeFileSync(join(repo, 'cli', '.env.example'), 'X=1\n');
+  writeFileSync(join(repo, 'cli', 'secrets.json'), '{}\n'); writeFileSync(join(repo, 'cli', 'token.txt'), 'x\n');
   writeFileSync(join(repo, 'deploy', 'env.template'), 'X=1\n');
-  git('add', 'cli', 'deploy');
+  symlinkSync(outside, join(repo, 'docs', 'linked'), 'junction');
+  let fileLink = true;
+  try { symlinkSync(join(outside, 'canary.md'), join(repo, 'cli', 'notes.md'), 'file'); } catch { fileLink = false; t.diagnostic('this OS cannot make a file symlink here: the tracked-symlink case is skipped'); }
+  git('add', 'cli', 'deploy', 'docs');
+  if (fileLink) assert.match(git('ls-files', '-s', 'cli/notes.md').stdout, /^120000 /);
   writeFileSync(join(repo, '.env'), 'DATABASE_URL=secret\n'); writeFileSync(join(repo, 'cli', 'scratch.ts'), '// untracked\n');
+  const holdsCanary = (d: string): boolean => readdirSync(d, { withFileTypes: true }).some((e) =>
+    e.isDirectory() ? holdsCanary(join(d, e.name)) : readFileSync(join(d, e.name), 'utf8').includes('CANARY'));
   const out = exportTree(repo);
   temps.push(out);
   assert.equal(existsSync(join(out, 'cli', 'cb.ts')), true);
-  for (const f of ['.env', 'cli/scratch.ts', 'cli/.env.example', 'deploy/env.template']) assert.equal(existsSync(join(out, f)), false, f);
+  for (const f of ['.env', 'cli/scratch.ts', 'cli/.env.example', 'cli/secrets.json', 'cli/token.txt', 'deploy/env.template', 'cli/notes.md', 'docs/linked/canary.md'])
+    assert.equal(existsSync(join(out, f)), false, f);
+  assert.equal(holdsCanary(out), false);
+  // a release copy (no .git): the walk never descends into a junction
+  const rel = temp();
+  mkdirSync(join(rel, 'cli'), { recursive: true });
+  writeFileSync(join(rel, 'cli', 'cb.ts'), '// code\n');
+  symlinkSync(outside, join(rel, 'cli', 'linked'), 'junction');
+  const out2 = exportTree(rel);
+  temps.push(out2);
+  assert.equal(existsSync(join(out2, 'cli', 'cb.ts')), true);
+  assert.equal(existsSync(join(out2, 'cli', 'linked')), false);
+  assert.equal(holdsCanary(out2), false);
 });
 
 test('review I1: the whole card as filed passes the last check; a message that survives masking but names this machine holds the group', async () => {

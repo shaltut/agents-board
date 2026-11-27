@@ -124,6 +124,8 @@ export function redactionProblem(text: string, names: string[] = [machine(), hos
   if (/\b[\w-]+@[a-z0-9][a-z0-9.-]*\b/i.test(t)) return 'a session name';
   if (/(?:^|[^\w])[A-Za-z]:[\\/]|\\\\[\w.-]+\\|(?:^|[\s"'(`=])(?:~\/|\/(?:Users|home|root|tmp|var|etc|private|mnt|opt)\/)/.test(t)) return 'a path outside the repo';
   if (/\d{8,}/.test(t)) return 'a run of 8 or more digits';
+  // provider tokens by their prefix, whatever their length or letters (ghp_, gho_, github_pat_, glpat-, xoxb-, sk-...)
+  if (/(?:^|[^A-Za-z0-9])(?:gh[pousr]_|github_pat_|glpat-|xox[abposr]-|sk-(?:ant-)?|AKIA|ASIA)[A-Za-z0-9_-]{8,}/.test(t)) return 'a token-like string';
   if (/(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}/.test(t)) return 'a token-like string';
   for (const n of names) if (n && n.length >= 3 && new RegExp(`(?:^|[^a-z0-9])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|[^a-z0-9])`, 'i').test(t)) return 'a machine name';
   return null;

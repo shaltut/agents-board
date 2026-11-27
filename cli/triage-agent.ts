@@ -4,9 +4,9 @@
 // server, no settings (so no hooks: a Stop hook would report to the board), no board access. Ahmed's Q3000: Claude
 // Opus by default. cb (cli/triage.ts) does every board read and write itself.
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 
 export const DEFAULT_MODEL = 'opus';
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -28,28 +28,49 @@ export function claudeArgs(o: { model: string; budget: number; schema: object; b
 
 // What the judge may read: the code and its docs, never deploy/ (env templates) or anything outside these.
 export const JUDGE_PATHS = ['bin', 'cli', 'db', 'prompts', 'server', 'hooks', 'kit', 'docs', 'CLAUDE.md', 'README.md'];
-const SECRET = /(?:^|[\\/])(?:\.env[^\\/]*|[^\\/]*\.(?:pem|key|p12|pfx|keystore|jks)|id_[a-z0-9]+|[^\\/]*credentials[^\\/]*|\.npmrc|\.netrc)$/i;
+const SECRET = /(?:^|[\\/])(?:\.env[^\\/]*|[^\\/]*\.(?:pem|key|p12|pfx|keystore|jks)|id_[a-z0-9]+|[^\\/]*(?:credential|secret|token|passw|apikey|api[-_]key)[^\\/]*|\.npmrc|\.netrc|\.pgpass)$/i;
 
 /** A temporary copy of the tracked code for the judge to run in (#4535 review I2). A checkout's root holds the board's
  *  .env, and Read needs no approval inside the working folder, while the prompt carries untrusted card titles. In a
  *  git checkout only tracked files are copied (git ls-files: no .env, no untracked scratch); a release copy holds only
- *  release files. Secret-shaped names are skipped either way. The caller removes the folder. */
+ *  release files. Secret-shaped names are skipped either way, and so is anything that is not a regular file inside
+ *  the board: symlinks (git mode 120000), junctions, and files reached through one (review I-r2). The caller removes
+ *  the folder. */
 export function exportTree(board: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'cb-judge-'));
-  let files: string[] = [];
-  const git = existsSync(join(board, '.git')) ? spawnSync('git', ['-C', board, 'ls-files', '-z', '--', ...JUDGE_PATHS], { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }) : null;
-  if (git?.status === 0) files = git.stdout.split('\0').filter(Boolean);
-  else {
+  let root: string;
+  try { root = realpathSync.native(board); } catch { return dir; }
+  const files: string[] = [];
+  // -s gives each entry's mode: 120000 is a symlink, 160000 a submodule; neither is copied (review I-r2)
+  const git = existsSync(join(board, '.git')) ? spawnSync('git', ['-C', board, 'ls-files', '-s', '-z', '--', ...JUDGE_PATHS], { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }) : null;
+  if (git?.status === 0) {
+    for (const e of git.stdout.split('\0')) {
+      const m = /^(\d{6}) [0-9a-f]+ \d+\t([^]+)$/.exec(e);
+      if (m && m[1] !== '120000' && m[1] !== '160000') files.push(m[2]!);
+    }
+  } else {
+    // lstat: a symlink or junction is never followed, so the walk stays inside the copy
     const walk = (p: string): void => {
-      let st; try { st = statSync(p); } catch { return; }
+      let st; try { st = lstatSync(p); } catch { return; }
+      if (st.isSymbolicLink()) return;
       if (st.isDirectory()) { for (const n of readdirSync(p)) if (n !== 'node_modules' && n !== '.git') walk(join(p, n)); }
       else if (st.isFile()) files.push(relative(board, p));
     };
     for (const p of JUDGE_PATHS) walk(join(board, p));
   }
+  const inside = root.endsWith(sep) ? root : root + sep;
   for (const f of files) {
     if (SECRET.test(f)) continue;
-    try { mkdirSync(dirname(join(dir, f)), { recursive: true }); copyFileSync(join(board, f), join(dir, f)); } catch {}
+    const src = join(board, f);
+    try {
+      // a regular file whose real path is inside the board: a link anywhere on the way (a junction folder git
+      // walked into) resolves outside and is skipped
+      if (!lstatSync(src).isFile()) continue;
+      const real = realpathSync.native(src);
+      if (!real.startsWith(inside)) continue;
+      mkdirSync(dirname(join(dir, f)), { recursive: true });
+      copyFileSync(real, join(dir, f));
+    } catch {}
   }
   return dir;
 }

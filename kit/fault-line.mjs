@@ -58,7 +58,8 @@ export function mask(s, values = []) {
   // shapes that are values whatever their words: URLs, emails and session names (NAME@machine), paths, dotted hosts
   t = t.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]*/gi, M)
     .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*/g, M)
-    .replace(/\b[A-Za-z]:[\\/][^\s"'`]*|\\\\[^\s"'`]+|~[\\/][^\s"'`]*|(?<![\w.\/])\/[\w.-]+(?:\/[\w.-]*)+/g, M)
+    // a drive, UNC or ~ path to its last separator even across spaces (C:\Users\Some Person\...), then its file name
+    .replace(/(?:\b[A-Za-z]:[\\/]|\\\\|~[\\/])(?:[^\\/\n"'`<>|:*?]{0,64}[\\/])*[^\s"'`]*|(?<![\w.\/])\/[\w.-]+(?:\/[\w.-]*)+/g, M)
     .replace(/\b[\w-]+(?:\.[\w-]+){2,}\b/g, M);
   // lists cb echoes unquoted: "known: <projects>", "is not one of Q12's options: <labels>"
   t = t.replace(/\b(known|options)(\s*:\s*)[^.)\n]*/gi, `$1$2${M}`);
