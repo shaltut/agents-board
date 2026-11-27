@@ -260,17 +260,34 @@ const READS_INPUT = /^(?:format-(?:table|list|wide|custom)|f[tlwc]|out-(?:file|s
 const DEFINES = new Set(['function', 'filter', 'set-alias', 'new-alias', 'sal', 'nal']);
 const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until']);
 
+// a stop's arguments end at a redirection
+const stopArgs = (rest) => { const cut = rest.findIndex((x) => /^\d*[<>&]/.test(x)); return cut >= 0 ? rest.slice(0, cut) : rest; };
+const dryRun = (rest) => rest.some((x) => /^-whatif(?::\$true)?$/i.test(x));
+// a stop's options that name the image: Stop-Process -Name, kill -n node (PowerShell's kill is Stop-Process; bash's kill
+// -n takes a signal number), taskkill /IM or a filter other than PID eq; kill -9 -1, kill -- -1: every process you own
+// (kill -1 1234 is SIGHUP to 1234)
+function namesImage(n, rest) {
+  if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
+  if (n === 'kill' && rest.some((x, k) => /^-(?:name|processname)(?::|$)/i.test(x) || (/^-n[a-z]*$/i.test(x) && !/^\d+$/.test(rest[k + 1] ?? '')))) return true;
+  if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x)
+    || (/^(?:\/\/?|-)fi$/i.test(x) && !/^\s*pid\s+eq\s+(?:\d+|\$\w+)\s*$/i.test(rest[k + 1] ?? '')))) return true;
+  return n === 'kill' && rest.some((x, k) => k > 0 && x === '-1' && !/^-[sn]$/.test(rest[k - 1]));
+}
+
 // seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; seen.splat: a Terminate named in a
 // hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
 // stop's arguments
 function scanKills(text, seen, inArgs) {
-  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments (it carries past the ${...})
-  let dollarClose = -1, dollarAfter = false, lastAfter = false;
+  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments or a stop's, and which stop
+  // (they carry past the ${...})
+  let dollarClose = -1, dollarAfter = false, lastAfter = false, dollarArgs = false, lastArgs = false;
+  let dollarStop = null, lastStop = null;
   for (const m of text.matchAll(KILL_SEGMENT)) {
     const raw = m[0].match(WORD) ?? [];
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
     let argsEnd = -1; // the last word of a stop's arguments in this segment
+    let openStop = null; // the stop those arguments are for
     // once per segment, not once per word (#4002: per word, both re-read the whole segment: 200 KB took 7 to 16 s)
     let one; // oneProcess(w): the segment's ProcessId filter names one process
     const isOne = () => (one ??= oneProcess(w));
@@ -284,19 +301,32 @@ function scanKills(text, seen, inArgs) {
     // Invoke-Command { ... } -ArgumentList (...), ForEach-Object { ... } -InputObject (...). The } of a parameter
     // expansion is no block (echo "stopped ${pid}, left: $(pgrep -c node)"): after it, the text before its ${ decides
     // (& { Stop-Process -Id $ids } ${x} (Get-Process node).Id; & { Stop-Process -Id $ids; ${x}} (Get-Process node).Id)
-    const afterBlock = text[m.index - 1] === '}' && m.index - 1 === dollarClose ? dollarAfter
-      : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
-    if (text[m.index - 1] === '{' && text[m.index - 2] === '$') { // this segment is the inside of ${...}
+    const afterDollar = text[m.index - 1] === '}' && m.index - 1 === dollarClose;
+    const afterBlock = afterDollar ? dollarAfter : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
+    const inDollar = text[m.index - 1] === '{' && text[m.index - 2] === '$'; // this segment is the inside of ${...}
+    if (inDollar) {
       dollarClose = text[m.index + m[0].length] === '}' ? m.index + m[0].length : -1;
       dollarAfter = lastAfter;
+      dollarArgs = lastArgs;
+      dollarStop = lastStop;
     }
     lastAfter = afterBlock;
+    // a stop's arguments run on through a ${...} and past it (#4436): kill -9 ${MAIN_PID} $(pgrep -f relay),
+    // Stop-Process -Id ${pid}, (Get-Process node).Id, kill ${x:-$(pgrep node)}. Only the single-segment ${name} counts
+    // as closed (above); bash and PowerShell end a nested one differently, so any other } stays a block's close.
+    const segArgs = inArgs || ((inDollar || afterDollar) && dollarArgs);
+    const segStop = inDollar || afterDollar ? dollarStop : null;
+    // ... its options too: taskkill //PID ${PID} //IM node.exe, Stop-Process -Id ${pid} -Name node, kill -s ${SIG} -1
+    if (afterDollar && segStop) {
+      const rest = stopArgs(['$', ...w.slice(0, ARGS)]);
+      if (!dryRun(rest) && namesImage(segStop, rest)) return true;
+    }
     let fed = false; // an earlier word feeds stdin: < <(...), done < ..., done <<< ... (a here-string, glued or not)
     let shell = false; // an earlier word of the segment is a shell: powershell -NoProfile -ExecutionPolicy Bypass -Command
     for (let i = 0; i < w.length; i++) {
       if (i > 0 && (((w[i - 1] === '<' || w[i - 1] === '<<<') && (w[i - 2] === '<' || name[i - 2] === 'done'))
         || (name[i - 1] === 'done' && w[i].startsWith('<<<')))) fed = true;
-      const args = inArgs || i <= argsEnd;
+      const args = segArgs || i <= argsEnd;
       // a quoted here-string of a lookup is fed to the loop's earlier stop: done <<< "$(pgrep node)"
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args || (fed && seen.stop))) return true;
       const n = name[i], prev = name[i - 1];
@@ -316,18 +346,10 @@ function scanKills(text, seen, inArgs) {
       if (DEFINES.has(n)) seen.defines = true; // function Format-Table { ... }, Set-Alias ft Stop-Process
       if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate|foreach)$/.test(n) && !n.includes('getprocessesbyname')) continue;
       if (NOT_RUN.has(prev) || (prev === '-v' && name[i - 2] === 'command')) continue; // which pkill, command -v pkill
-      let rest = w.slice(i + 1, i + 1 + ARGS);
-      const cut = rest.findIndex((x) => /^\d*[<>&]/.test(x)); // a redirection ends the arguments
-      if (cut >= 0) rest = rest.slice(0, cut);
-      if (/^--(?:help|version)$/.test(rest[0] ?? '') || rest.some((x) => /^-whatif(?::\$true)?$/i.test(x))) continue;
-      if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
-      // PowerShell's kill is Stop-Process: kill -n node is -Name; bash's kill -n takes a signal number
-      if (n === 'kill' && rest.some((x, k) => /^-(?:name|processname)(?::|$)/i.test(x) || (/^-n[a-z]*$/i.test(x) && !/^\d+$/.test(rest[k + 1] ?? '')))) return true;
-      if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x)
-        || (/^(?:\/\/?|-)fi$/i.test(x) && !/^\s*pid\s+eq\s+(?:\d+|\$\w+)\s*$/i.test(rest[k + 1] ?? '')))) return true;
+      const rest = stopArgs(w.slice(i + 1, i + 1 + ARGS));
+      if (/^--(?:help|version)$/.test(rest[0] ?? '') || dryRun(rest)) continue;
+      if (namesImage(n, rest)) return true;
       if (n === 'killall' || (n === 'pkill' && !narrow(rest))) return true;
-      // kill -9 -1, kill -- -1: every process you own (kill -1 1234 is SIGHUP to 1234)
-      if (n === 'kill' && rest.some((x, k) => k > 0 && x === '-1' && !/^-[sn]$/.test(rest[k - 1]))) return true;
       const byId = rest.some((x) => /^(?:-id|-p|--pid|-q)(?::|=|$)/i.test(x) || (n === 'ps' && /^-[a-zA-Z]*p\d*$/.test(x))); // ps -fp $PID
       const lookup = ((n === 'get-process' || n === 'gps' || (n === 'ps' && (prev === undefined || PS_BEFORE.has(prev)))) && !byId)
         || (n === 'pgrep' && !narrow(rest)) || n === 'pidof' || n === 'tasklist'
@@ -354,8 +376,12 @@ function scanKills(text, seen, inArgs) {
         seen.stop = true;
         // to the window's end, past a redirection: kill 2>/dev/null $(pgrep node)
         argsEnd = Math.max(argsEnd, n === 'pkill' ? w.length : Math.min(w.length - 1, i + ARGS));
+        openStop = n;
       }
     }
+    const endsInArgs = argsEnd >= 0 && argsEnd >= w.length - 1; // the segment ends inside a stop's arguments
+    lastArgs = segArgs || endsInArgs;
+    lastStop = endsInArgs && openStop ? openStop : segStop;
   }
   return false;
 }
