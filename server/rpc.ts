@@ -10,6 +10,8 @@ export const RPC_FUNCTIONS = [
   'goal_create', 'goal_update', 'goal_status', 'goal_tick', 'goal_opened', 'goal_preview', 'goal_propose', 'goals_list',
   'ask_open', 'ask_record', 'ask_say', 'ask_reply', 'ask_close', 'ask_reroute', 'asks_list',
   'page_set', 'page_get', 'stage_set', 'stage_pass', 'stage_fail', 'digest', 'resume', 'next_step', 'task_queue', 'project_pipeline', 'role_text', 'squad_set', 'squad_get',
+  // the project settings page (#4332); the github_* writes are cb github's too
+  'squad_options', 'squad_page', 'role_text_set', 'role_text_page', 'github_watch_add', 'github_watch_remove', 'github_mute', 'github_watches',
 ];
 const SETOF = new Set(['task_claim', 'mine', 'answers_pending', 'task_queue']);
 

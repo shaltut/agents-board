@@ -29,8 +29,10 @@ test('role texts load from prompts/roles and survive freshDb', async () => {
   assert.equal(t, common + '\n\n' + readFileSync('prompts/roles/builder.md', 'utf8').trim());
 });
 
-test('loadRoleTexts updates and deletes', async () => {
+// #4332 (Q2969): the database owns the role texts (edited on the project settings page); the files only seed a missing role
+test('loadRoleTexts seeds a missing role and never overwrites or deletes one', async () => {
   const sql = await db();
+  await sql`truncate cb.role_texts`; // freshDb reseeds from the files: start empty here
   const dir = mkdtempSync(join(tmpdir(), 'roles-'));
   try {
     writeFileSync(join(dir, '_common.md'), 'common\n');
@@ -39,16 +41,20 @@ test('loadRoleTexts updates and deletes', async () => {
     assert.equal((await sql`select cb.role_text('builder') as t`)[0].t, 'common\n\none');
     writeFileSync(join(dir, 'builder.md'), 'two\n');
     await loadRoleTexts(sql, dir);
-    assert.equal((await sql`select cb.role_text('builder') as t`)[0].t, 'common\n\ntwo');
+    assert.equal((await sql`select cb.role_text('builder') as t`)[0].t, 'common\n\none', 'a changed file does not replace the stored text');
+    await sql`select cb.role_text_set('builder', 'edited on the page', 'ahmed')`;
+    await loadRoleTexts(sql, dir);
+    assert.equal((await sql`select cb.role_text('builder') as t`)[0].t, 'common\n\nedited on the page', 'setup keeps an edited text');
+    writeFileSync(join(dir, 'reviewer.md'), 'new role\n');
+    await loadRoleTexts(sql, dir);
+    assert.equal((await sql`select cb.role_text('reviewer') as t`)[0].t, 'common\n\nnew role', 'a role with no row is seeded');
     unlinkSync(join(dir, 'builder.md'));
     await loadRoleTexts(sql, dir);
-    assert.equal((await sql`select count(*)::int as n from cb.role_texts where role = 'builder'`)[0].n, 0);
-    assert.equal((await sql`select count(*)::int as n from cb.role_texts`)[0].n, 1);
+    assert.equal((await sql`select count(*)::int as n from cb.role_texts where role = 'builder'`)[0].n, 1, 'a file gone deletes nothing');
     await loadRoleTexts(sql, join(dir, 'missing')); // a missing folder leaves the texts alone and does not throw
-    assert.equal((await sql`select count(*)::int as n from cb.role_texts`)[0].n, 1);
+    assert.equal((await sql`select count(*)::int as n from cb.role_texts`)[0].n, 3);
   } finally {
     rmSync(dir, { recursive: true });
-    await loadRoleTexts(sql, 'prompts/roles'); // put the real texts back for later tests
   }
 });
 
@@ -250,7 +256,7 @@ test('squad_set saves complete: areas [] and models filled; show prints', async 
   assert.equal(saved.roles.lead.model, 'opus');
   assert.equal(saved.roles.builder.model, 'sonnet');
   assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved);
-  assert.deepEqual((await sql`select data from cb.events where summary = 'squad updated'`)[0].data, { squad: saved });
+  assert.deepEqual((await sql`select data from cb.events where summary = 'squad updated'`)[0].data, { squad: saved, version: 1, via: 'page' });
   const show = cb(['squad', 'show', 'demo']);
   assert.equal(show.code, 0, show.err);
   assert.equal(show.out, 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nreviewer  1 × opus on macbook\nareas: none');
@@ -279,7 +285,7 @@ test('cb squad set / show', async () => {
     assert.equal(show.code, 0, show.err);
     assert.match(show.out, /builder {2}3 × sonnet on macbook/);
     assert.match(show.out, /areas: claims, preauth/);
-    assert.deepEqual(JSON.parse(cb(['squad', 'show', 'demo', '--json']).out), SQUAD);
+    assert.deepEqual(JSON.parse(cb(['squad', 'show', 'demo', '--json']).out), { ...SQUAD, version: 1 }); // #4332: the version set takes back
   } finally { rmSync(dir, { recursive: true }); }
 });
 

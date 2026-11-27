@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { testDbUrl } from '../db/pg.ts';
+import { loadRoleTexts } from '../db/roles.ts';
 
 // CB_TEST_DB lets parallel worktrees test without wiping each other's data. On Windows a worktree also gets its own
 // cluster and port (#4413: they shared 5434 and its 100 connections); the main checkout and other platforms use 5434.
@@ -43,12 +44,15 @@ export async function freshDb() {
   }
   // tests seed as Ahmed too: they connect as his dashboard does (sessions can't act as ahmed)
   const sql = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'cb-web' } });
-  const tables = await sql`select tablename from pg_tables where schemaname = 'cb' and tablename <> 'role_texts'`; // role_texts is filled by setup, not by tests
+  const tables = await sql`select tablename from pg_tables where schemaname = 'cb'`;
   // #4482: a lock held by a connection left from an earlier test fails the wipe in a minute instead of waiting forever
   if (tables.length) await sql.begin(async (tx: any) => {
     await tx`set local lock_timeout = '60s'`;
     await tx.unsafe(`truncate ${tables.map((t) => 'cb.' + t.tablename).join(', ')} restart identity cascade`);
   });
+  // role texts as the files say (#4332): setup only seeds a missing role, so a test database kept from an older checkout
+  // would otherwise hold old texts forever, and a test that edits one would leak it into the next
+  await loadRoleTexts(sql, join(import.meta.dirname, '..', 'prompts', 'roles'));
   return sql;
 }
 

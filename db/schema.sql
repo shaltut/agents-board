@@ -4613,13 +4613,28 @@ end $$;
 
 -- ---------------------------------------------------------------- Squad kit (#3599)
 drop function if exists cb.role_text cascade;
+drop function if exists cb.role_text_set cascade;
+drop function if exists cb.role_text_page cascade;
 
--- Role texts: filled from prompts/roles/*.md by db/roles.ts whenever setup runs; never truncated by tests.
+-- Role texts, board-wide. The database owns them (#4332, Q2969): Ahmed edits them on the project settings page
+-- (cb.role_text_set). db/roles.ts seeds a role that has no row from prompts/roles/*.md at setup and never overwrites or
+-- deletes one. Tests reseed them from the files in freshDb.
 create table if not exists cb.role_texts (
   role text primary key,
   body text not null,
   updated_at timestamptz not null default now()
 );
+alter table cb.role_texts add column if not exists updated_by text;
+-- Every edit of a role text, with the text before and after (#4332). Seeding a missing role is not an edit.
+create table if not exists cb.role_text_edits (
+  id     bigint generated always as identity primary key,
+  role   text not null,
+  before text,
+  after  text not null,
+  actor  text not null,
+  at     timestamptz not null default now()
+);
+create index if not exists role_text_edits_role on cb.role_text_edits (role, id desc);
 
 -- What cb role prints: the rules every role follows, a blank line, then the role's own text.
 create function cb.role_text(role text) returns text language plpgsql stable as $$
@@ -4633,6 +4648,49 @@ begin
   return coalesce((select c.body || E'\n\n' from cb.role_texts c where c.role = '_common'), '') || t;
 end $$;
 
+-- Ahmed replaces one role's text, or _common (the rules every role follows), for every project (#4332, Q2969). Dashboard
+-- only. Kept as given apart from blank lines and spaces at either end. A text the same as the saved one writes nothing.
+-- Every change keeps the old and new text (cb.role_text_edits) and writes an event. Seats read the new text at their next
+-- cb role. The cap keeps what every seat reads at start short: the longest file is about 4,000 characters.
+create function cb.role_text_set(role text, body text, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare a text; b text := btrim(coalesce(body, ''), E' \t\r\n'); old text; r cb.role_texts;
+begin
+  perform cb.dashboard_only('Project settings');
+  a := cb.set_actor(actor);
+  if role is null or role not in ('_common', 'lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator') then
+    raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator, or _common for the rules every role follows', coalesce(role, 'null');
+  end if;
+  if b = '' then raise exception 'the text for % is empty: write what this role does', role; end if;
+  if length(b) > 8000 then
+    raise exception 'the text for % is % characters; the most is 8000 (every seat reads it when it starts: keep it short)', role, length(b);
+  end if;
+  select x.body into old from cb.role_texts x where x.role = role for update;
+  if old is not distinct from b then
+    select * into r from cb.role_texts x where x.role = role;
+    return jsonb_build_object('role', role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by, 'changed', false);
+  end if;
+  insert into cb.role_texts as x (role, body, updated_at, updated_by) values (role, b, now(), a)
+    on conflict on constraint role_texts_pkey do update set body = excluded.body, updated_at = excluded.updated_at, updated_by = excluded.updated_by
+    returning * into r;
+  insert into cb.role_text_edits (role, before, after, actor) values (role, old, b, a);
+  insert into cb.events (actor, project, kind, summary, data)
+    values (a, null, 'updated', 'role text updated', jsonb_build_object('role', role, 'before', old, 'after', b));
+  return jsonb_build_object('role', role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by, 'changed', true);
+end $$;
+
+-- The role texts as stored, for the settings page's editor (cb.role_text joins _common to a role's text, so it can't be
+-- edited from): every role's raw text with when and by whom it last changed (updated_by null = seeded from the files),
+-- and the last 20 edits with the text before and after.
+create function cb.role_text_page() returns jsonb language sql stable as $$
+  select jsonb_build_object(
+    'roles', coalesce((select jsonb_agg(jsonb_build_object('role', r.role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by)
+                                order by r.role <> '_common', array_position(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'], r.role))
+                         from cb.role_texts r), '[]'),
+    'edits', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'role', e.role, 'actor', e.actor, 'at', e.at, 'before', e.before, 'after', e.after) order by e.id desc)
+                         from (select * from cb.role_text_edits x order by x.id desc limit 20) e), '[]'))
+$$;
+
 -- The squad file: who runs a project's squad, on which machines. null = no squad. Task 4's cb squad up reads it.
 drop function if exists cb.squad_set cascade;
 drop function if exists cb.squad_get cascade;
@@ -4644,10 +4702,18 @@ drop function if exists cb._check_repos cascade;
 drop function if exists cb._repo_list cascade;
 drop function if exists cb._check_model cascade;
 drop function if exists cb._check_seat cascade;
+drop function if exists cb._agents_main cascade;
 alter table cb.projects add column if not exists squad jsonb;
+-- #4332: raised by one on every save that changes the squad; cb.squad_set's base refuses a save made from an older copy
+alter table cb.projects add column if not exists squad_version int not null default 0;
+-- the History list on the project settings page and the supervisor's last-20-snapshots read (#4332): events has no
+-- project index
+create index if not exists events_squad_history on cb.events (project, id desc) where kind = 'updated' and summary = 'squad updated';
 
-create function cb.squad_get(project text) returns jsonb language sql stable as $$
-  select p.squad from cb.projects p where p.slug = cb.read_project(project)
+-- with_version (#4332): the squad with its "version" key (cb squad show --json, edited and given back to cb squad set)
+create function cb.squad_get(project text, with_version boolean default false) returns jsonb language sql stable as $$
+  select case when with_version and p.squad is not null then p.squad || jsonb_build_object('version', p.squad_version) else p.squad end
+    from cb.projects p where p.slug = cb.read_project(project)
 $$;
 
 -- A project's repos (#3703), home first, then by name. A squad without repos (or no squad) is one repo: main.
@@ -4716,6 +4782,11 @@ begin
   end case;
 end $$;
 
+-- The agents a seat may run as its main agent (#4332): the save gate's one list (_check_seat), read by the settings page
+-- (cb.squad_options). The launch gate is INSTALLED in cli/agents/index.ts; test/settings.test.ts fails when the two differ,
+-- so phase 2 adds an agent to both.
+create function cb._agents_main() returns text[] language sql immutable as $$ select array['claude']::text[] $$;
+
 -- One seat's agent, model and fallback (#4002): a role's own, or a seat's override of its role. ag and mo are what it
 -- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
 -- the inherited one (so claude, the default, is never written), the model only when given, the fallback only when it
@@ -4731,9 +4802,9 @@ begin
     a := spec->>'agent';
     -- phase 1 starts claude only: a saved codex seat would be started as claude by a cb without its adapter (or a
     -- rolled-back one), and retried by the supervisor every 10 minutes. A fallback may name any agent: nothing
-    -- switches to it yet. Phase 2 adds its agent here.
-    if a not in ('claude') then
-      raise exception '% agent "%" cannot be assigned as a primary seat yet (phase 1 supports claude only; non-Claude agents are allowed in fallback)', label, a;
+    -- switches to it yet. Phase 2 adds its agent to cb._agents_main.
+    if a <> all(cb._agents_main()) then
+      raise exception '% agent "%" cannot be assigned as a primary seat yet (phase 1 supports % only; non-Claude agents are allowed in fallback)', label, a, array_to_string(cb._agents_main(), ', ');
     end if;
   end if;
   if spec ? 'model' then
@@ -4770,8 +4841,11 @@ begin
 end $$;
 
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
--- Every refusal names the field.
-create function cb.squad_set(project text, squad jsonb, actor text default null) returns jsonb language plpgsql as $$
+-- Every refusal names the field. base (#4332): the version the caller's copy was taken at (cb.squad_get with_version,
+-- cb.squad_page); another version is refused, so a page or a file can't silently undo a save made since. null skips the
+-- check (a CLI from before it, cb squad set --overwrite). A save that changes nothing writes nothing and keeps the version.
+-- base is after actor: callers pass actor third by position.
+create function cb.squad_set(project text, squad jsonb, actor text default null, base int default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare
   a text := cb.set_actor(actor); p text := cb.read_project(project);
@@ -4782,6 +4856,7 @@ declare
   busy text;  -- the open cards that hold a repo the new squad drops
   -- #4002: rv a role's agent, model and fallback as saved; st its seats as saved, sk the seat keys it has; se, sv a seat
   rv jsonb; st jsonb; sk text[]; se record; sv jsonb;
+  cur jsonb; ver int;  -- #4332: the squad and version saved now
 begin
   if not cb._is_dashboard() and cb._role(a) is distinct from 'lead' then raise exception 'only Ahmed or the lead sets the squad'; end if;
   if p is null then raise exception 'project is required'; end if;
@@ -5008,10 +5083,237 @@ begin
         || case when rp is not null then jsonb_build_object('repos', rs) else '{}'::jsonb end
         || case when squad ? 'supervise' then jsonb_build_object('supervise', squad->'supervise') else '{}'::jsonb end
         || case when squad ? 'protected' then jsonb_build_object('protected', squad->'protected') else '{}'::jsonb end;
-  update cb.projects pr set squad = ns where pr.slug = p;
-  -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is
-  insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated', jsonb_build_object('squad', ns));
+  -- the row lock makes the version check and the save one step: two saves from the same version can't both pass
+  select pr.squad, pr.squad_version into cur, ver from cb.projects pr where pr.slug = p for update;
+  if base is not null and base <> ver then
+    raise exception 'Someone changed this squad since your copy was taken (it is now version %, your copy is version %). Load it again (reopen the page, or cb squad show % --json), make your change there and save.', ver, base, p;
+  end if;
+  -- nothing changed: no event (the supervisor's 20-snapshot window keeps real versions only) and the same version
+  if cur is not distinct from ns then return ns; end if;
+  update cb.projects pr set squad = ns, squad_version = ver + 1 where pr.slug = p;
+  -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is. via: the dashboard (page) or a session (cli)
+  insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated',
+    jsonb_build_object('squad', ns, 'version', ver + 1, 'via', case when cb._is_dashboard() then 'page' else 'cli' end));
   return ns;
+end $$;
+
+-- ---------------------------------------------------------------- Project settings page (#4332)
+-- The page reads cb.squad_options and cb.squad_page and saves the squad through cb.squad_set (with base), role texts
+-- through cb.role_text_set, the pipeline through cb.project_pipeline, reminders through cb.task_ping_bulk and GitHub
+-- watches through the cb.github_* functions below (shared with cb github, #4523).
+drop function if exists cb._seat_want cascade;
+drop function if exists cb.squad_options cascade;
+drop function if exists cb.squad_page cascade;
+drop function if exists cb._github_guard cascade;
+drop function if exists cb.github_watch_add cascade;
+drop function if exists cb.github_watch_remove cascade;
+drop function if exists cb.github_mute cascade;
+drop function if exists cb.github_watches cascade;
+
+-- What a session's seat should run: its seat key (as cb._expected_model reads it), the seat's agent (else the role's, else
+-- claude) and the seat's model (else the role's, else the role default for that agent). Unlike cb._expected_model it
+-- answers for any agent, so the page can say "should be Codex" when a seat runs Claude.
+create function cb._seat_want(project text, actor text, role text, area text, repo text) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare sq jsonb := (select pr.squad from cb.projects pr where pr.slug = project); k text; ag text;
+begin
+  if role is null then return null; end if;
+  if role = 'lead' then k := '1';
+  elsif role = 'owner' then k := area;
+  else
+    k := (regexp_match(actor, '[ABRQI]([0-9]+)@'))[1];
+    if sq->'repos' is not null and role in ('builder', 'reviewer') then
+      k := coalesce(nullif(repo, ''), (select h.key from jsonb_each(sq->'repos') h where h.value->>'home' = 'true' limit 1)) || ':' || k;
+    end if;
+  end if;
+  ag := coalesce(sq->'roles'->role->'seats'->k->>'agent', sq->'roles'->role->>'agent', 'claude');
+  return jsonb_build_object('seat', k, 'agent', ag,
+    'model', coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, ag)));
+end $$;
+
+-- What the page's form offers, with the same limits as cb.squad_set: the roles, the agents (main = may run a seat now;
+-- any may be a backup), Claude's models, each role's default model, the limits, the patterns machine keys, repo names and
+-- paths must match, the model names already used in any squad (per agent, for suggestions) and the machines already
+-- used in any squad (to add one to another project).
+create function cb.squad_options() returns jsonb language sql stable as $$
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
+  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
+  specs as (
+    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
+    union all
+    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
+      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
+  ),
+  pairs as (
+    select s.agent, s.model from specs s where s.model is not null
+    union
+    select f->>'agent', f->>'model' from specs s
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
+     where f->>'agent' is not null and f->>'model' is not null
+  )
+  select jsonb_build_object(
+    'roles', to_jsonb(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']),
+    'repo_bound_roles', to_jsonb(array['builder', 'reviewer']),
+    'agents', (select jsonb_agg(jsonb_build_object('agent', g, 'main', g = any(cb._agents_main())) order by n)
+                 from unnest(array['claude', 'codex', 'opencode', 'agy']) with ordinality u(g, n)),
+    'claude_models', to_jsonb(array['opus', 'sonnet', 'haiku', 'fable']),
+    'default_models', (select jsonb_object_agg(x, cb._role_model(x)) from unnest(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) x),
+    'limits', jsonb_build_object('count_min', 1, 'count_max', 8, 'lead_count', 1, 'macbook_seats', 8, 'fallbacks', 5,
+                                 'session_name', 32, 'protected', 30, 'protected_length', 100, 'workspace_length', 64),
+    'patterns', jsonb_build_object('slug', '^[a-z][a-z0-9-]{0,31}$', 'area', '^[a-z][a-z0-9-]*$',
+                                   'path', '^(/|[A-Za-z]:[/\\])', 'path_forbidden', '[[:space:];&|$`<>()''"*?~]',
+                                   'codex_model', '^[a-z0-9][a-z0-9._-]{0,63}$',
+                                   'opencode_model', '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$',
+                                   'agy_model', '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+    'models_used', coalesce((select jsonb_object_agg(z.agent, z.models) from
+                     (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}'),
+    'machines_used', coalesce((select jsonb_agg(distinct jsonb_build_object('key', m.key) || m.value)
+                                 from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'machines') = 'object' then sq.squad->'machines' else '{}' end) m), '[]'))
+$$;
+
+-- Everything the page shows for one project: the squad and its version (give it back as cb.squad_set's base), the
+-- pipeline and supervisor switches, the live seats (seen in the last 90 s) with what each runs and should run, the last
+-- 20 saved squads (newest first; version and via are null on saves from before #4332) and the reminder counts.
+create function cb.squad_page(project text) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); sq jsonb; v int;
+begin
+  if p is null then raise exception 'project is required'; end if;
+  select pr.squad, pr.squad_version into sq, v from cb.projects pr where pr.slug = p;
+  return jsonb_build_object(
+    'project', p, 'squad', sq, 'version', v,
+    'pipeline', cb._pipeline(p),
+    'supervise', coalesce(sq->>'supervise' = 'true', false),
+    'seats', coalesce((select jsonb_agg(jsonb_build_object(
+        'actor', s.actor, 'machine', s.machine, 'role', s.role, 'area', s.area, 'repo', s.repo,
+        'agent', s.agent, 'model', s.model,
+        'in_squad', coalesce(sq->'roles' ? s.role, false),
+        'want_agent', w.want->>'agent', 'want_model', w.want->>'model',
+        -- a seat bound without --model is not judged on its model
+        'same', case when w.want is null then null
+                     else s.agent = w.want->>'agent' and (s.model is null or s.model = w.want->>'model') end,
+        'holds', (select count(*) from cb.tasks t where t.assignee = s.actor and t.status not in ('done', 'cancelled')),
+        'last_seen', s.last_seen) order by s.role nulls last, s.actor)
+      from cb.sessions s
+      cross join lateral (select cb._seat_want(p, s.actor, s.role, s.area, s.repo) as want) w
+      where s.project = p and s.last_seen > now() - interval '90 seconds'), '[]'),
+    'history', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'at', e.at, 'actor', e.actor,
+        'version', e.data->'version', 'via', e.data->'via', 'squad', e.data->'squad') order by e.id desc)
+      from (select * from cb.events x where x.project = p and x.kind = 'updated' and x.summary = 'squad updated'
+             order by x.id desc limit 20) e), '[]'),
+    'reminders', (select jsonb_build_object('open', count(*), 'on', count(tp.task_id))
+                    from cb.tasks t left join cb.task_pings tp on tp.task_id = t.id
+                   where t.project = p and t.status not in ('done', 'cancelled')));
+end $$;
+
+-- GitHub watches (#1207, moved here from cli/cb.ts by #4523/#4332): one cb.settings row per repo, 'github:<owner/repo>',
+-- and the muted logins in 'github-muted'; the board server polls them (server/github.ts). What the board watches and whom
+-- it tells is Ahmed's call: the same guard as his People and Epics pages (a session pointing it at another repo his gh
+-- reads would pour that text onto a board guests see). The refusal never names the way past it: a session (or a comment
+-- steering one) would learn it here.
+create function cb._github_guard(refusal text) returns void language plpgsql as $$
+begin
+  perform cb.dashboard_only('GitHub');
+exception when raise_exception then
+  raise exception '%', refusal;
+end $$;
+
+-- Watch a repo, or change a watched one. project: the project its PR cards go in (a new repo needs one: project, else
+-- default_project, the project of the pane cb github ran in); tell: the session told (default: the project's one lead);
+-- cards_in: more projects whose cards a PR may name (null leaves them, [] clears them). Adding a watched repo again
+-- changes only what is given and keeps its checkpoint. A new repo starts now (no backfill). Returns the stored watch.
+create function cb.github_watch_add(repo text, project text default null, tell text default null, cards_in jsonb default null,
+                                    default_project text default null, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare k text := 'github:' || coalesce(repo, ''); had boolean; proj text; p text; t text := nullif(trim(tell), '');
+        leads text[]; also jsonb; patch jsonb; v jsonb; known text;
+begin
+  -- no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
+  if repo is null or repo !~ '^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$' then
+    raise exception '"%" is not owner/repo, e.g. cb github add acme/widgets', coalesce(repo, '');
+  end if;
+  perform cb._github_guard('only Ahmed adds or removes watched repos: ask him to (cb ask), saying which repo and why');
+  perform cb.set_actor(actor);
+  perform 1 from cb.settings s where s.key = k for update;
+  had := found;
+  proj := coalesce(nullif(trim(project), ''), case when not had then nullif(trim(default_project), '') end);
+  if not had and proj is null then
+    select string_agg(x.slug, ', ' order by x.slug) into known from cb.projects x;
+    raise exception 'name the project its PR cards go in: cb github add % --project <project> (known: %)', repo, coalesce(known, 'none yet');
+  end if;
+  p := case when proj is not null then cb.read_project(proj) end;
+  if not had and t is null then
+    leads := array(select distinct s.actor from cb.sessions s where s.project = p and cb._is_lead(s.actor, p) order by s.actor);
+    if cardinality(leads) > 1 then
+      raise exception '% has several leads (%): say which one is told: cb github add % --project % --to <session>', p, array_to_string(leads, ', '), repo, p;
+    end if;
+    if cardinality(leads) = 0 then
+      raise exception '% has no lead session to tell: cb github add % --project % --to <session> (cb sessions lists them)', p, repo, p;
+    end if;
+    t := leads[1];
+  end if;
+  if cards_in is not null then
+    if jsonb_typeof(cards_in) is distinct from 'array' then raise exception 'cards_in is a list of projects, like ["demo"]'; end if;
+    select coalesce(jsonb_agg(cb.read_project(trim(x.v)) order by x.n), '[]') into also
+      from jsonb_array_elements_text(cards_in) with ordinality x(v, n) where trim(x.v) <> '';
+  end if;
+  patch := case when nullif(trim(tell), '') is not null then jsonb_build_object('to', t) else '{}' end
+        || case when nullif(trim(project), '') is not null then jsonb_build_object('project', p) else '{}' end
+        || case when also is not null then jsonb_build_object('card_projects', also) else '{}' end;
+  insert into cb.settings as st (key, value)
+    values (k, jsonb_build_object('since', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'to', t, 'project', p)
+               || case when also is not null then jsonb_build_object('card_projects', also) else '{}' end
+               || jsonb_build_object('last_ok', null, 'last_error', null, 'prs', '{}'::jsonb))
+    on conflict on constraint settings_pkey do update set value = st.value || patch
+    returning st.value into v;
+  return v;
+end $$;
+
+-- Stop watching a repo; its cards stay on the board.
+create function cb.github_watch_remove(repo text, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+begin
+  if repo is null or repo !~ '^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$' then
+    raise exception '"%" is not owner/repo, e.g. cb github add acme/widgets', coalesce(repo, '');
+  end if;
+  perform cb._github_guard('only Ahmed adds or removes watched repos: ask him to (cb ask), saying which repo and why');
+  perform cb.set_actor(actor);
+  delete from cb.settings s where s.key = 'github:' || repo;
+  if not found then raise exception '% is not watched: cb github lists the repos', repo; end if;
+  return jsonb_build_object('repo', repo, 'watched', false);
+end $$;
+
+-- Mute (mute true) or unmute a GitHub login: its PRs, comments, reviews and commits no longer reach the watch (failed CI
+-- runs still do). Ahmed's own workers post as one. Logins are kept lower case, once, sorted. Returns the muted list.
+create function cb.github_mute(login text, mute boolean default true, actor text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare l text := lower(coalesce(login, '')); cur jsonb; nxt jsonb;
+begin
+  if l !~ '^[a-z0-9][a-z0-9-]{0,38}$' then raise exception '"%" is not a GitHub login', coalesce(login, ''); end if;
+  perform cb._github_guard('only Ahmed mutes or unmutes GitHub logins: ask him to (cb ask), saying which login and why');
+  perform cb.set_actor(actor);
+  select coalesce(s.value, '[]') into cur from cb.settings s where s.key = 'github-muted' for update;
+  cur := coalesce(cur, '[]');
+  if not mute and not (cur ? l) then raise exception '% is not muted: cb github lists the muted logins', l; end if;
+  select coalesce(jsonb_agg(x order by x collate "C"), '[]') into nxt
+    from (select jsonb_array_elements_text(cur) as x union select l where mute) y where mute or y.x <> l;
+  insert into cb.settings as st (key, value) values ('github-muted', nxt)
+    on conflict on constraint settings_pkey do update set value = excluded.value;
+  return nxt;
+end $$;
+
+-- The watches (the repo plus its stored state: to, project, card_projects, since, last_ok, last_error, prs) and the muted
+-- logins. project: only the watches whose cards go in it or that log on its cards (cards_in); null: all. Anyone reads.
+create function cb.github_watches(project text default null) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := case when nullif(trim(project), '') is not null then cb.read_project(project) end;
+begin
+  return jsonb_build_object(
+    'watches', coalesce((select jsonb_agg(jsonb_build_object('repo', substr(s.key, 8)) || s.value order by s.key)
+                           from cb.settings s
+                          where s.key like 'github:%' and s.key not like 'github:outbox:%'
+                            and (p is null or s.value->>'project' = p or coalesce(s.value->'card_projects', '[]') ? p)), '[]'),
+    'muted', coalesce((select s.value from cb.settings s where s.key = 'github-muted'), '[]'));
 end $$;
 
 -- Build parts (#3703): a card of several repos is built, reviewed and merged one part per repo. The card's stage is its
