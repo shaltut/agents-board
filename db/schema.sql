@@ -1505,6 +1505,13 @@ begin
            t.epic_id, cb._waits_on(t.id) as waits_on,
            case when cb._pipeline(t.project) then t.stage end as stage,
            case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end as stage_words,
+           -- #4454: why a Blocked card waits when no question or card holds it. block_note = the note given with
+           -- cb move <id> blocked "<why>" on its newest move there (null when none: the summary is then "<from> → blocked");
+           -- last_note = its newest cb log note, shown in its place, labelled as a note, not a reason
+           case when t.status = 'blocked' then (select nullif(e.summary, (e.data ->> 'from') || ' → blocked') from cb.events e
+                 where e.task_id = t.id and e.kind = 'moved' and e.data ->> 'to' = 'blocked' order by e.id desc limit 1) end as block_note,
+           case when t.status = 'blocked' then (select e.summary from cb.events e
+                 where e.task_id = t.id and e.kind = 'note' order by e.id desc limit 1) end as last_note,
            row_number() over (order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last,
                                        t.priority, t.rank, t.id) as o
       from cb.tasks t where t.status = s and (p is null or t.project = p) and (tg is null or tg = any(t.labels))

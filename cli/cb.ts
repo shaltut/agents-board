@@ -205,17 +205,28 @@ function packText(p: any): string {
     ...(p.entries.some((e: any) => e.authority !== 'ahmed') ? ["team = a teammate's note, not Ahmed's approval"] : [])].join('\n');
 }
 
+/** A note on one short line (#4454): every line break and run of spaces is one space, cut at 100 characters. */
+const clip = (s: unknown, n = 100) => {
+  const c = [...String(s ?? '').replace(/[\s\u0085]+/g, ' ').trim()];
+  return c.length > n ? `${c.slice(0, n - 1).join('').trimEnd()}…` : c.join('');
+};
+
 function printBrief(b: any) {
   const sec = (name: string, rows: any[], fmt: (r: any) => string) => {
     console.log(`${name} (${rows.length})`);
     for (const r of rows) console.log('  ' + fmt(r));
   };
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
-  sec('IN PROGRESS', b.in_progress, line);
+  // #4454: a staged card says its stage in every section, so an unheld in-progress card at review reads as waiting
+  // for review, not as abandoned work
+  const staged = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
+  sec('IN PROGRESS', b.in_progress, staged);
   // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
   sec('NEXT (take with `cb next`)', b.next, (t) => `${line(t)}${t.stage && t.stage !== 'build' ? ` · ${t.stage_words}` : ''}`);
-  sec('BLOCKED', b.blocked, (t) => `${line(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}`);
-  sec('REVIEW', b.review, line);
+  sec('BLOCKED', b.blocked, (t) => `${staged(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}` +
+    (t.blocked_on || t.waits_on?.length ? '' : t.block_note ? ` — why: ${clip(t.block_note)}`
+      : ` — no reason given${t.last_note ? `; last note: ${clip(t.last_note)}` : ''}`));
+  sec('REVIEW', b.review, staged);
   sec('WAITING ON AHMED', b.open_questions, (q) => `Q${q.id}${q.blocking ? ' [blocking]' : ''} ${q.body}${q.assigned_to ? ` (for ${q.assigned_to})` : ''} · ${q.project}`);
   sec('BROADCASTS (24h)', b.broadcasts ?? [], (x) => `${x.actor}${x.project ? ` to ${x.project}` : ' to everyone'}: ${x.summary}`);
   sec('ANSWERED — DELIVER THESE', b.answered_pending, (q) =>
