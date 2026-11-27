@@ -257,27 +257,16 @@ const INPUT_OBJECT = /^-inp(?:u(?:t(?:o(?:b(?:j(?:e(?:c(?:t)?)?)?)?)?)?)?)?:?$/;
 const READS_INPUT = /^(?:format-(?:table|list|wide|custom)|f[tlwc]|out-(?:file|string|null|host|default|gridview|printer)|measure-object|measure|select-object|select|get-member|gm|sort-object|sort|group-object|group|convertto-(?:json|csv|xml|html)|export-(?:csv|clixml)|write-output|write|echo|write-host|tee-object|tee|compare-object|compare)$/;
 // a segment after a block's closing brace that starts another branch, or a do loop's condition: its words are not that
 // block's arguments (Stop-Process -Id $id; do { Start-Sleep 1 } while (Get-Process node))
-const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until']);
-// words that define a command: a function, filter or alias can take a read-only cmdlet's name
-// (function Format-Table { ... }, Set-Alias ft Stop-Process), so after one no cmdlet name is trusted as read-only
 const DEFINES = new Set(['function', 'filter', 'set-alias', 'new-alias', 'sal', 'nal']);
-const BLOCK_CLOSE = 'block';
+const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until']);
 
 // seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; seen.splat: a Terminate named in a
-// hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; seen.defines: a function,
-// filter or alias was defined; inArgs: this text is inside a stop's arguments
+// hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
+// stop's arguments
 function scanKills(text, seen, inArgs) {
-  // the open braces between segments: null for a block, { after } for a ${...} (after: whether the text before its ${
-  // was a block's arguments; that carries past the ${...}, nested ones too: ${a:-${b}})
-  const open = [];
-  let pos = 0, lastAfter = false;
+  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments (it carries past the ${...})
+  let dollarClose = -1, dollarAfter = false, lastAfter = false;
   for (const m of text.matchAll(KILL_SEGMENT)) {
-    let close = null; // what the last } before this segment closed: BLOCK_CLOSE, or a ${...}'s after
-    for (let j = pos; j < m.index; j++) {
-      if (text[j] === '{') open.push(text[j - 1] === '$' ? { after: lastAfter } : null);
-      else if (text[j] === '}') close = open.pop()?.after ?? BLOCK_CLOSE;
-    }
-    pos = m.index + m[0].length;
     const raw = m[0].match(WORD) ?? [];
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
@@ -295,7 +284,12 @@ function scanKills(text, seen, inArgs) {
     // Invoke-Command { ... } -ArgumentList (...), ForEach-Object { ... } -InputObject (...). The } of a parameter
     // expansion is no block (echo "stopped ${pid}, left: $(pgrep -c node)"): after it, the text before its ${ decides
     // (& { Stop-Process -Id $ids } ${x} (Get-Process node).Id; & { Stop-Process -Id $ids; ${x}} (Get-Process node).Id)
-    const afterBlock = text[m.index - 1] === '}' && (close === BLOCK_CLOSE ? !BRANCH.has(name[0]) : close === true);
+    const afterBlock = text[m.index - 1] === '}' && m.index - 1 === dollarClose ? dollarAfter
+      : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
+    if (text[m.index - 1] === '{' && text[m.index - 2] === '$') { // this segment is the inside of ${...}
+      dollarClose = text[m.index + m[0].length] === '}' ? m.index + m[0].length : -1;
+      dollarAfter = lastAfter;
+    }
     lastAfter = afterBlock;
     let fed = false; // an earlier word feeds stdin: < <(...), done < ..., done <<< ... (a here-string, glued or not)
     let shell = false; // an earlier word of the segment is a shell: powershell -NoProfile -ExecutionPolicy Bypass -Command

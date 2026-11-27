@@ -310,6 +310,14 @@ const killBlocked = [
   '& { param($ids) Stop-Process -Id $ids; ${x}} (Get-Process node).Id',
   'Invoke-Command { param($ids) Stop-Process -Id $ids; ${null}} -ArgumentList (,(Get-Process node).Id)',
   '& { param($a, $ids) Stop-Process -Id $ids } ${x} (Get-Process node).Id',
+  // ... a PowerShell braced name ends at its first } (a { or ${ inside it is literal), so the next } closes the block
+  '& { param($ids) Stop-Process -Id $ids; ${a:-${b}} (Get-Process node).Id',
+  '& { param($ids) Stop-Process -Id $ids; ${a{b} } (Get-Process node).Id',
+  '& { param($ids) Stop-Process -Id $ids; ${{} } (Get-Process node).Id',
+  'Invoke-Command { param($ids) Stop-Process -Id $ids; ${a{} } -ArgumentList (,(Get-Process node).Id)',
+  // harmless, but blocked (fails closed): bash nests ${a:-${b}}, PowerShell ends the name at the first }, and the guard
+  // cannot tell the shells apart, so the second } reads as a block's close
+  'kill $pid; echo ${a:-${b}} $(pgrep -c node)',
   // #3883 n2: options between the shell and -Command / -c / /c, values included
   'powershell -NoProfile -Command "Stop-Process" -Name node',
   'pwsh -NoProfile -c "Stop-Process" -Name node',
@@ -423,7 +431,6 @@ const killPassed = [
   'kill $pid; echo "stopped ${pid}, remaining $(pgrep -c node)"',
   'kill $pid; echo "${name} left: $(pgrep -fl node)"',
   'kill "$SERVER_PID"; printf "%s\\n" ${PORT} $(pgrep -f vite)',
-  'kill $pid; echo ${a:-${b}} $(pgrep -c node)',
   // #3883 n3: = 'Terminate' under another key is not a MethodName
   `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
   // #3883 n3: a splat or a Terminate that names one process, then a by-name listing
