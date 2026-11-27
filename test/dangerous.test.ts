@@ -302,6 +302,10 @@ const killBlocked = [
   'function Out-Kill { param($InputObject) Stop-Process -Id $InputObject.Id }; Out-Kill -InputObject (Get-Process node)',
   'function Export-X { param($InputObject) $InputObject | Stop-Process }; Export-X -InputObject (Get-Process node)',
   'function Format-Y { process { Stop-Process -Id $_.Id } }; Format-Y -InputObject (Get-Process node)',
+  // ... or a function, filter or alias that takes a read-only built-in's own name
+  'function Format-Table { Stop-Process -Id $args[1].Id }; Format-Table -InputObject (Get-Process node)',
+  'filter Out-String { Stop-Process -Id $_.Id }; Out-String -InputObject (Get-Process node)',
+  'Set-Alias ft Stop-Process; ft -InputObject (Get-Process node)',
   // ... and a ${...} inside the block or between it and its arguments ends nothing
   '& { param($ids) Stop-Process -Id $ids; ${x}} (Get-Process node).Id',
   'Invoke-Command { param($ids) Stop-Process -Id $ids; ${null}} -ArgumentList (,(Get-Process node).Id)',
@@ -419,6 +423,7 @@ const killPassed = [
   'kill $pid; echo "stopped ${pid}, remaining $(pgrep -c node)"',
   'kill $pid; echo "${name} left: $(pgrep -fl node)"',
   'kill "$SERVER_PID"; printf "%s\\n" ${PORT} $(pgrep -f vite)',
+  'kill $pid; echo ${a:-${b}} $(pgrep -c node)',
   // #3883 n3: = 'Terminate' under another key is not a MethodName
   `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
   // #3883 n3: a splat or a Terminate that names one process, then a by-name listing

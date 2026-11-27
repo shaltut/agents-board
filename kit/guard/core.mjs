@@ -258,14 +258,26 @@ const READS_INPUT = /^(?:format-(?:table|list|wide|custom)|f[tlwc]|out-(?:file|s
 // a segment after a block's closing brace that starts another branch, or a do loop's condition: its words are not that
 // block's arguments (Stop-Process -Id $id; do { Start-Sleep 1 } while (Get-Process node))
 const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until']);
+// words that define a command: a function, filter or alias can take a read-only cmdlet's name
+// (function Format-Table { ... }, Set-Alias ft Stop-Process), so after one no cmdlet name is trusted as read-only
+const DEFINES = new Set(['function', 'filter', 'set-alias', 'new-alias', 'sal', 'nal']);
+const BLOCK_CLOSE = 'block';
 
 // seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; seen.splat: a Terminate named in a
-// hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
-// stop's arguments
+// hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; seen.defines: a function,
+// filter or alias was defined; inArgs: this text is inside a stop's arguments
 function scanKills(text, seen, inArgs) {
-  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments (it carries past the ${...})
-  let dollarClose = -1, dollarAfter = false, lastAfter = false;
+  // the open braces between segments: null for a block, { after } for a ${...} (after: whether the text before its ${
+  // was a block's arguments; that carries past the ${...}, nested ones too: ${a:-${b}})
+  const open = [];
+  let pos = 0, lastAfter = false;
   for (const m of text.matchAll(KILL_SEGMENT)) {
+    let close = null; // what the last } before this segment closed: BLOCK_CLOSE, or a ${...}'s after
+    for (let j = pos; j < m.index; j++) {
+      if (text[j] === '{') open.push(text[j - 1] === '$' ? { after: lastAfter } : null);
+      else if (text[j] === '}') close = open.pop()?.after ?? BLOCK_CLOSE;
+    }
+    pos = m.index + m[0].length;
     const raw = m[0].match(WORD) ?? [];
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
@@ -277,18 +289,13 @@ function scanKills(text, seen, inArgs) {
     let reads;
     const readsInput = () => (reads ??= (() => {
       const k = name.findIndex((x) => !x.startsWith('$') && x !== '=');
-      return k >= 0 && READS_INPUT.test(name[k]) && !w.slice(k + 1).some((x) => x.includes('$')) && text[m.index + m[0].length] !== '{';
+      return k >= 0 && !seen.defines && READS_INPUT.test(name[k]) && !w.slice(k + 1).some((x) => x.includes('$')) && text[m.index + m[0].length] !== '{';
     })());
     // right after a block's closing brace, not another branch: & { Stop-Process -Id $args } (Get-Process node).Id,
     // Invoke-Command { ... } -ArgumentList (...), ForEach-Object { ... } -InputObject (...). The } of a parameter
     // expansion is no block (echo "stopped ${pid}, left: $(pgrep -c node)"): after it, the text before its ${ decides
     // (& { Stop-Process -Id $ids } ${x} (Get-Process node).Id; & { Stop-Process -Id $ids; ${x}} (Get-Process node).Id)
-    const afterBlock = text[m.index - 1] === '}' && m.index - 1 === dollarClose ? dollarAfter
-      : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
-    if (text[m.index - 1] === '{' && text[m.index - 2] === '$') { // this segment is the inside of ${...}
-      dollarClose = text[m.index + m[0].length] === '}' ? m.index + m[0].length : -1;
-      dollarAfter = lastAfter;
-    }
+    const afterBlock = text[m.index - 1] === '}' && (close === BLOCK_CLOSE ? !BRANCH.has(name[0]) : close === true);
     lastAfter = afterBlock;
     let fed = false; // an earlier word feeds stdin: < <(...), done < ..., done <<< ... (a here-string, glued or not)
     let shell = false; // an earlier word of the segment is a shell: powershell -NoProfile -ExecutionPolicy Bypass -Command
@@ -312,6 +319,7 @@ function scanKills(text, seen, inArgs) {
       // the word after a shell's -c / -Command / /c, with the shell's options between (cmd /d /c "taskkill" /IM node.exe)
       if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !(RUNS_NEXT.has(prev) && shell)) { shell ||= SHELLS.has(n); continue; }
       shell ||= SHELLS.has(n);
+      if (DEFINES.has(n)) seen.defines = true; // function Format-Table { ... }, Set-Alias ft Stop-Process
       if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate|foreach)$/.test(n) && !n.includes('getprocessesbyname')) continue;
       if (NOT_RUN.has(prev) || (prev === '-v' && name[i - 2] === 'command')) continue; // which pkill, command -v pkill
       let rest = w.slice(i + 1, i + 1 + ARGS);
