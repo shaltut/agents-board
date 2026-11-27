@@ -174,13 +174,21 @@ async function partShown(rows: any[], who: string) {
 const MOVED_OFF = 'CLOSED OR MOVED OFF YOU IN THE LAST 24H (shown for a day so you see it: not yours to work on)';
 const openFor = (who: string) => (t: any) => t.assignee === who && !['done', 'cancelled'].includes(t.status);
 async function mineLines(rows: any[], who: string, indent: string) {
-  const isOpen = rows.map(openFor(who)), shown = (await partShown(rows, who)).map((t) => indent + line(t));
+  const isOpen = rows.map(openFor(who)), shown: string[] = [];
+  for (const t of await partShown(rows, who)) shown.push(indent + withStage({ ...t, stage_words: await stageWordsOf(t) }));
   const gone = shown.filter((_, i) => !isOpen[i]);
   return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [] };
 }
 
 const line = (t: any) =>
   `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
+// #4454: a staged card says its stage in words, so an unheld in-progress card at review reads as waiting for review, not
+// as abandoned work. cb brief, cb show and cb mine (#4512) print it the same way.
+const withStage = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
+/** A card's stage words as cb brief's rows carry them (cb._brief_tasks): cb._stage_words, only with the project's pipeline
+ *  on and a stage set (never "Not staged"). A part holder's cb.mine row carries its part's stage. */
+const stageWordsOf = async (t: any): Promise<string | null> => t.stage
+  ? (await sql`select case when cb._pipeline(${t.project}) then cb._stage_words(${t.stage}) end as w`)[0].w : null;
 
 // Shared memory (#167). One line per entry: kind code, id, title, who stands behind it. Team = a teammate's note.
 const KIND_CODE: Record<string, string> = { rule: 'R', ruling: 'RU', fact: 'F', gotcha: 'G', runbook: 'RB' };
@@ -218,16 +226,13 @@ function printBrief(b: any) {
     for (const r of rows) console.log('  ' + fmt(r));
   };
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
-  // #4454: a staged card says its stage in every section, so an unheld in-progress card at review reads as waiting
-  // for review, not as abandoned work
-  const staged = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
-  sec('IN PROGRESS', b.in_progress, staged);
+  sec('IN PROGRESS', b.in_progress, withStage);
   // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
   sec('NEXT (take with `cb next`)', b.next, (t) => `${line(t)}${t.stage && t.stage !== 'build' ? ` · ${t.stage_words}` : ''}`);
-  sec('BLOCKED', b.blocked, (t) => `${staged(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}` +
+  sec('BLOCKED', b.blocked, (t) => `${withStage(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}` +
     (t.blocked_on || t.waits_on?.length ? '' : t.block_note ? ` — why: ${clip(t.block_note)}`
       : ` — no reason given${t.last_note ? `; last note: ${clip(t.last_note)}` : ''}`));
-  sec('REVIEW', b.review, staged);
+  sec('REVIEW', b.review, withStage);
   sec('WAITING ON AHMED', b.open_questions, (q) => `Q${q.id}${q.blocking ? ' [blocking]' : ''} ${q.body}${q.assigned_to ? ` (for ${q.assigned_to})` : ''} · ${q.project}`);
   sec('BROADCASTS (24h)', b.broadcasts ?? [], (x) => `${x.actor}${x.project ? ` to ${x.project}` : ' to everyone'}: ${x.summary}`);
   sec('ANSWERED — DELIVER THESE', b.answered_pending, (q) =>
@@ -859,8 +864,9 @@ ${body}`, json: pg };
       need(1, 'show <task id>   e.g. cb show 42');
       if (!/^#?\d{1,15}$/.test(args[0])) throw new Error(`"${args[0]}" is not a task id: give the number, e.g. cb show 42`);
       const n = Number(args[0].replace('#', ''));
-      const [t] = await sql`select * from cb.tasks where id = ${n}`;
-      if (!t) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
+      const [row] = await sql`select * from cb.tasks where id = ${n}`;
+      if (!row) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
+      const t = { ...row, stage_words: await stageWordsOf(row) }; // #4512: the stage in words, as cb brief prints it
       // #4448: the last 10 notes by default; --all prints every one, and the NOTES line says how many are hidden
       const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit ${o.all ? null : 10}`; // limit null = no limit; never a sql`` fragment (the relay bridge cannot carry one)
       const [{ notes_total }] = await sql`select count(*)::int as notes_total from cb.events where task_id = ${n} and kind in ('note', 'done')`;
@@ -868,7 +874,7 @@ ${body}`, json: pg };
       const goals = await sql`select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = ${n} and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank`;
       const [{ parts }] = await sql`select cb._parts_words(${n}) as parts`; // a parts card (#3703): its parts in plain words
-      return { out: [line(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
+      return { out: [withStage(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
         t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first${hidden})`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
         .filter(Boolean).join('\n'), json: { ...t, notes, notes_total } };
