@@ -258,7 +258,9 @@ next vs mine: mine = what you already hold (read-only). next = claim a new task 
 
 Resumed, cleared or compacted session: run cb start again. The binding is per herdr pane and survives;
 the relay restarts by itself (SessionStart hook) and cb start says if it did not. If the binding names
-someone else (a previous session in this pane), rebind: cb iam <name> <project>.
+someone else (a previous session in this pane), rebind: cb iam <name> <project>. A new Claude in the
+pane (another session id, claude --resume of another session too) starts unbound once its relay sees
+it: run cb start, then cb iam.
 
 No herdr pane ($HERDR_PANE_ID empty): you cannot bind or relay. Put --as <name> on every command (or
 export CB_ACTOR=<name>), name the project in each command (cb next iris), and run cb mine and cb pending
@@ -439,7 +441,7 @@ Start   the SessionStart hook starts it. cb relay starts it by hand (harmless if
         cb relay --restart replaces it.
 Needs   a herdr pane ($HERDR_PANE_ID) and the session's inbox: Claude Code 2.1.234+ ($CLAUDE_CODE_MESSAGING_SOCKET),
         handed to the relay in cb-seat-<id>.claude.json in the OS temp folder. A new session in the same pane
-        is served by the same relay.
+        is served by the same relay, and its pane's binding starts again (the session id changed).
 Stops   by itself when the session ends (its inbox stops answering): no more "live" for that pane.
 Check   cb start says whether it is running. Log: cb-relay-<id>.log in the OS temp folder.
 

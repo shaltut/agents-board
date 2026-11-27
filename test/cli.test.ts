@@ -203,6 +203,14 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
+  // #4379: a new Claude took its pane (another session id): the name has no session row now, a re-bound pane, never
+  // "its relay is down" (#4421 wording for a name with no row that wrote lately)
+  await sql`update cb.sessions set session_id = 'S1' where actor = 'W2@macbook'`;
+  await sql`select cb.inbox('mac', 'w1:p3', 0, 'S2')`;
+  const g = cb(['tell', 'W2@macbook', 'anyone?']);
+  assert.equal(g.code, 0, g.err);
+  assert.match(g.out, /\(no relay session on the board under this name, but it last wrote to the board 4m ago/);
+  assert.doesNotMatch(g.out, /its relay is down/);
   // #4421: no session row at all (a session that never started a relay), yet it wrote lately: not "it may be gone"
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
   const v = cb(['tell', 'V1@vps', 'ping']);

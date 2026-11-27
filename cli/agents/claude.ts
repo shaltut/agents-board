@@ -8,17 +8,23 @@ import { join } from 'node:path';
 import { seatKey } from '../bridge.ts';
 import type { AgentAdapter, AgentState, QuotaSignal, SeatHandle } from './types.ts';
 
-export type ClaudeEndpoint = { socket: string; token: string; pid?: number; updatedAt: number };
+export type ClaudeEndpoint = { socket: string; token: string; pid?: number; sessionId?: string; updatedAt: number };
 
 export const claudeEndpointPath = (machine: string, pane: string) => join(tmpdir(), `cb-seat-${seatKey(machine, pane)}.claude.json`);
 
-/** Atomic: a reader sees the old file or the new one, never half of it. `pid` is for people reading the file only. */
-export function writeClaudeEndpoint(machine: string, pane: string, ep: { socket: string; token: string; pid?: number }): void {
+/** Atomic: a reader sees the old file or the new one, never half of it. `pid` is for people reading the file only.
+ *  `sessionId` (#4379): the Claude session that owns the inbox ($CLAUDE_CODE_SESSION_ID, the same id its hooks and its
+ *  Bash tool see); the relay hands it to cb.inbox, which resets the pane's row when another session holds the seat. The
+ *  same socket is the same Claude process: a /clear or a /resume in it keeps the id the file already has, so the
+ *  binding survives them, as cb help start says. */
+export function writeClaudeEndpoint(machine: string, pane: string, ep: { socket: string; token: string; pid?: number; sessionId?: string }): void {
   const file = claudeEndpointPath(machine, pane), tmp = `${file}.tmp.${process.pid}`;
+  const was = parseEndpoint(file);
+  const sessionId = (was?.socket === ep.socket && was.sessionId) || ep.sessionId?.trim() || undefined;
   try {
     // Always a fresh file: `mode` only applies on create, so a leftover temp file would keep its old (maybe wider) mode.
     rmSync(tmp, { force: true });
-    writeFileSync(tmp, JSON.stringify({ socket: ep.socket, token: ep.token, pid: ep.pid, updatedAt: Date.now() }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(tmp, JSON.stringify({ socket: ep.socket, token: ep.token, pid: ep.pid, sessionId, updatedAt: Date.now() }), { mode: 0o600, flag: 'wx' });
     renameSync(tmp, file);
   } catch (e) {
     try { rmSync(tmp, { force: true }); } catch {}
@@ -30,7 +36,8 @@ function parseEndpoint(file: string): ClaudeEndpoint | null {
   try {
     const o = JSON.parse(readFileSync(file, 'utf8'));
     if (!o || typeof o.socket !== 'string' || typeof o.token !== 'string' || !o.socket || !o.token) return null;
-    return { socket: o.socket, token: o.token, pid: typeof o.pid === 'number' ? o.pid : undefined, updatedAt: Number(o.updatedAt) || 0 };
+    return { socket: o.socket, token: o.token, pid: typeof o.pid === 'number' ? o.pid : undefined,
+             sessionId: typeof o.sessionId === 'string' && o.sessionId ? o.sessionId : undefined, updatedAt: Number(o.updatedAt) || 0 };
   } catch { return null; }
 }
 
@@ -155,6 +162,10 @@ export const claudeAdapter: AgentAdapter = {
   // A dead owner on macOS can leave its unix socket file behind, so on POSIX a file is not enough: connect and send
   // nothing. Unknown outcomes count as alive, so a slow machine never kills a healthy relay. A Windows pipe vanishes
   // with its owner.
+  sessionId(seat) {
+    return readClaudeEndpoint(seat.machine, seat.pane)?.sessionId ?? null;
+  },
+
   async isAlive(seat) {
     const ep = readClaudeEndpoint(seat.machine, seat.pane);
     if (!ep || !socketExists(ep.socket)) return false;

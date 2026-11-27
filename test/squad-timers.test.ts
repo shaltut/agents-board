@@ -287,6 +287,18 @@ test('an unheld review card whose only live reviewer built it is named; a down h
   assert.ok(lines.some((l) => /^W7@mac is down and holds #3:/.test(l)), lines.join('\n'));
 });
 
+// #4379 with #4341: a new Claude in the holder's pane resets the pane's row, so the name has no session row: a
+// re-bound pane, down, whatever it wrote to the board minutes ago
+test('a holder whose pane a new session took (another session id) is down, not relay down (#4379)', async () => {
+  const { sql } = await setup();
+  await sql`update cb.sessions set last_seen = now() - interval '20 minutes', session_id = 'S1' where actor = 'B1@mac'`;
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, at) values ('B1@mac', 'demo', 1, 'note', 'working', now() - interval '5 minutes')`;
+  const holder = async () => ((await sql`select cb.digest('demo') as d`)[0].d as string[]).filter((l) => l.includes('B1@mac'));
+  assert.deepEqual(await holder(), [`B1@mac's relay is down, but the session last wrote to the board 5m ago; it holds #1: have it run cb relay --restart (a cb tell to it waits for its relay)`]);
+  await sql`select cb.inbox('mac', 'p2', 0, 'S2')`;
+  assert.deepEqual(await holder(), ['B1@mac is down and holds #1: restore it, or cb edit 1 --assignee <session>']);
+});
+
 test('a holder whose relay is down but who still writes to the board is not called down (#4341)', async () => {
   const { sql } = await setup();
   await sql`update cb.sessions set last_seen = now() - interval '20 minutes' where actor = 'B1@mac'`;

@@ -344,6 +344,46 @@ test('broadcasts older than 24 h are never pushed, so a reused pane gets no days
   assert.deepEqual(i.broadcasts.map((b: any) => b.summary), ['23 h ago, still in the window', 'fresh: relay is live']);
 });
 
+// #4379: a reused herdr pane id kept the last session's row (actor, project, broadcasts read) for a new session there.
+// The relay now hands cb.inbox the agent's session id; another id than the row's starts the row again.
+test('inbox: another session id in a pane starts its row again; the same id, none, or a row with none keep it (#4379)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('iris')`;
+  const row = async () => ({ ...(await sql`select actor, project, role, session_id from cb.sessions where machine = 'pc' and pane = 'w9:p1'`)[0] });
+  const inbox = async (sid?: string | null) => (sid === undefined
+    ? await sql`select cb.inbox('pc', 'w9:p1', 0) as i` // a relay from before #4379: three arguments
+    : await sql`select cb.inbox('pc', 'w9:p1', 0, ${sid}) as i`)[0].i;
+  // a row with no id (from before #4379, or bound by cb iam) takes the first one it is given as it is
+  await sql`select cb.iam('pc', 'w9:p1', 'W1@pc', 'iris', 'builder')`;
+  let i = await inbox('S1');
+  assert.deepEqual([i.actor, i.project], ['W1@pc', 'iris']);
+  assert.deepEqual(await row(), { actor: 'W1@pc', project: 'iris', role: 'builder', session_id: 'S1' });
+  // the same session (the PC slept, the relay restarted), a relay that names none, an old relay: all keep it
+  await inbox('S1'); await inbox(null); await inbox('');
+  await inbox();
+  assert.deepEqual(await row(), { actor: 'W1@pc', project: 'iris', role: 'builder', session_id: 'S1' });
+  // a new Claude in the pane: back to the relay's own name, unbound, from now
+  await sql`select cb.broadcast('before the new session: not for it', 'iris', 'orch')`;
+  i = await inbox('S2');
+  assert.deepEqual([i.actor, i.project, i.broadcasts], ['w9:p1@pc', null, []]);
+  assert.deepEqual(await row(), { actor: 'w9:p1@pc', project: null, role: null, session_id: 'S2' });
+  // it binds (the first bind keeps the relay row's mark): the broadcast from before the reset still never reaches it,
+  // one sent between the reset and the bind does
+  await sql`select cb.broadcast('after the reset, before the bind', 'iris', 'orch')`;
+  await sql`select cb.iam('pc', 'w9:p1', 'W2@pc', 'iris')`;
+  i = await inbox('S2');
+  assert.deepEqual([i.actor, i.project, i.broadcasts.map((b: any) => b.summary)], ['W2@pc', 'iris', ['after the reset, before the bind']]);
+  await sql`select cb.broadcast_seen('pc', 'w9:p1', ${i.broadcasts.at(-1).id})`;
+  // the next session binds before its relay has seen it: cb iam leaves no id, so that check keeps the new binding
+  await sql`select cb.broadcast('for W2, unread: never for the name that takes the pane', 'iris', 'orch')`;
+  await sql`select cb.iam('pc', 'w9:p1', 'W3@pc', 'iris')`;
+  i = await inbox('S3');
+  assert.deepEqual([i.actor, i.project, i.broadcasts], ['W3@pc', 'iris', []]);
+  assert.deepEqual(await row(), { actor: 'W3@pc', project: 'iris', role: null, session_id: 'S3' });
+  await sql`select cb.broadcast('fresh', 'iris', 'orch')`;
+  assert.deepEqual((await inbox('S3')).broadcasts.map((b: any) => b.summary), ['fresh']);
+});
+
 test('inbox: a task created for me, and new Next work when I am idle', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'iris', title => 'seed')`;
@@ -653,6 +693,7 @@ const sockPath = (name: string) => process.platform === 'win32' ? String.raw`\\.
 function seatEnv(pane: string | null, inbox?: string, token = 'tok'): Record<string, string> {
   const env: Record<string, string> = { ...(process.env as Record<string, string>), CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, CB_AGENT: '', PGAPPNAME: '' };
   delete env.HERDR_PANE_ID; delete env.CLAUDE_CODE_MESSAGING_SOCKET; delete env.CLAUDE_CODE_MESSAGING_TOKEN; delete env.CB_ACTOR;
+  delete env.CLAUDE_CODE_SESSION_ID; // #4379: the id the relay writes into an endpoint it hands over
   if (pane) env.HERDR_PANE_ID = pane;
   if (inbox) { env.CLAUDE_CODE_MESSAGING_SOCKET = inbox; env.CLAUDE_CODE_MESSAGING_TOKEN = token; }
   return env;
@@ -835,6 +876,67 @@ test('same pane, new Claude: the endpoint rewritten to a second live socket as t
     assert.equal(boxA.got.length, 0);
   } finally {
     await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+// #4379: the relay hands the endpoint's session id to cb.inbox and, when a new Claude rewrites the endpoint, checks at
+// once (its 2 s watchdog), not at the next 30 s poll: the pane's row starts again before the new session's first cb call.
+test('same pane, new Claude session: the relay resets the pane\'s binding within seconds; the old session\'s never', { timeout: 40_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-sid-${process.pid}`, first = sockPath('sid-a'), second = sockPath('sid-b'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2');
+  await Promise.all([boxA.ready, boxB.ready]);
+  const row = async () => ({ ...(await sql`select actor, project, session_id from cb.sessions where machine = ${M} and pane = ${pane}`)[0] });
+  await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+  writeClaudeEndpoint(M, pane, { socket: first, token: 'tok', sessionId: 'S1' });
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    let r: any = {};
+    for (const t = Date.now(); r.session_id !== 'S1' && Date.now() - t < 5000; await wait(100)) r = await row();
+    assert.deepEqual(r, { actor: 'W1@test', project: 'demo', session_id: 'S1' }, 'the bound session is adopted, not reset');
+    await wait(2500); // a watchdog tick with the same session: nothing changes
+    assert.deepEqual(await row(), { actor: 'W1@test', project: 'demo', session_id: 'S1' });
+    // a new Claude in the pane: its SessionStart rewrites the endpoint with its own socket and session
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2', sessionId: 'S2' });
+    await boxA.close();
+    for (const t = Date.now(); r.session_id !== 'S2' && Date.now() - t < 8000; await wait(100)) r = await row();
+    assert.deepEqual(r, { actor: `${pane}@${M}`, project: null, session_id: 'S2' }, 'reset well before the 30 s poll');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+// #4379 review M1: a relay with a session id against a board older than #4379 (only the 3-argument cb.inbox) is
+// refused with undefined_function once, then asks the old way and still delivers.
+test('a relay with a session id on a board with only the 3-argument cb.inbox falls back to it and delivers', { timeout: 30_000 }, async () => {
+  const sql = await db();
+  const pane = `p-old-${process.pid}`, path = sockPath('old-board'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  // the board as it was: cb.inbox(machine, pane, after_event), nothing that takes a 4th argument
+  await sql`alter function cb.inbox(text, text, bigint, text) rename to inbox_4379`;
+  await sql.unsafe(`create function cb.inbox(machine text, pane text, after_event bigint default 0) returns jsonb language sql
+                    as $$ select cb.inbox_4379($1, $2, $3, null) $$`);
+  let relay: ReturnType<typeof spawn> | undefined;
+  try {
+    await sql`select cb.ask(project => 'demo', body => 'Old board?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+    writeClaudeEndpoint(M, pane, { socket: path, token: 'tok', sessionId: 'S1' });
+    relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    await sql`select cb.answer('1', 'still served')`;
+    assert.ok(await until(() => inbox.got.length > 0, 8000), 'the answer reached the session');
+    assert.match(inbox.got[0].message.content, /Q1.*still served/s);
+    assert.match(fs.readFileSync(f.log, 'utf8'), /check failed: .*cb\.inbox/, 'the 4-argument call was refused first');
+  } finally {
+    await sql`drop function if exists cb.inbox(text, text, bigint)`;
+    await sql`alter function cb.inbox_4379(text, text, bigint, text) rename to inbox`;
+    await inbox.close();
     await stopSeat(pane, relay);
   }
 });

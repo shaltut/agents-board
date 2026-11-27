@@ -24,6 +24,9 @@ export interface AgentAdapter {
   buildLaunch(launch: LaunchInput): LaunchSpec;
   deliver(seat: SeatHandle, text: string, opts?: { raw?: boolean }): Promise<void>;
   isAlive(seat: SeatHandle): Promise<boolean>;
+  /** The agent session serving the seat now (#4379), handed to cb.inbox: another id than the pane's row has means a new
+   *  session in a reused pane, and the row starts again. Optional: an agent without one keeps the row as it is. */
+  sessionId?(seat: SeatHandle): string | null;
   readStatus(seat: SeatHandle, herdrAgent: { agent_status?: string } | null): Promise<AgentStatus>;
   close(seat: SeatHandle, run: Runner): Promise<'sent' | 'failed'>;
   detectQuotaStop(seat: SeatHandle, herdrAgent: { agent_status?: string } | null, paneTail?: string): QuotaSignal | null;
