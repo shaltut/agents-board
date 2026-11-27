@@ -1,7 +1,7 @@
 // cb squad up: start a project's missing squad sessions through herdr. planSquad is pure (tested);
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
-import { getAdapter, type AgentKind } from './agents/index.ts';
+import { getAdapter, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
@@ -19,7 +19,8 @@ export type Squad = { machines: Record<string, Machine>; roles: Record<string, R
 // seatKey: the lead 1, an owner its area, builders and reviewers <repo>:<n> in a squad with repos, else the number
 // (as cb.squad_set saves seats and cb._expected_model reads them)
 export type Want = { name: string; role: string; area?: string; repo: string; seatKey: string };
-// env: set in the session's pane (herdr --env), so the agent and its hooks inherit it: always CB_ROLE and CB_AGENT, and
+// env: set in the session's pane (herdr --env), so the agent and its hooks inherit it: always CB_ROLE and CB_AGENT,
+// CB_MCP_GATE_OK for another agent than claude when it is set where the launch is planned (gateEnv), and
 // CB_PROTECTED_BRANCHES when the squad has a list. board: the board checkout on the machine (the adapter's kit path)
 export type Launch = { name: string; role: string; area?: string; repo: string; seatKey: string; agent: AgentKind; model: string; fallback?: Fallback;
   machine: string; herdr: string | null; board: string; cwd: string; settings: string; prompt: string; workspace?: string; env: Record<string, string> };
@@ -110,7 +111,16 @@ export function promptCommand(l: { herdr: string | null; name: string; prompt: s
   return `herdr${l.herdr ? ` --machine ${l.herdr}` : ''} agent prompt ${herdrName(l.name)} "${l.prompt}"`;
 }
 
-export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next'): Launch {
+/** #4429: the seat's relay runs getAdapter in the seat's own env, so a non-claude seat carries the launching machine's
+ *  CB_MCP_GATE_OK (normalised as mcpGateOk reads it). Unset or empty: nothing, never a default. A Claude seat: nothing
+ *  (claude has no MCP gate), so its launch stays as it was. */
+export function gateEnv(agent: AgentKind, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const ok = [...mcpGateOk(env)].join(',');
+  return agent !== 'claude' && ok ? { CB_MCP_GATE_OK: ok } : {};
+}
+
+// env: where CB_MCP_GATE_OK is read (gateEnv); squad up and the supervisor pass none, so it is this machine's
+export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next', env: NodeJS.ProcessEnv = process.env): Launch {
   const machine = w.name.split('@')[1], mc = squad.machines[machine], repos = reposOf(squad), { agent, model, fallback } = seatSpec(squad, w);
   // with repos: the session names its repo, and the architect and qa (who read across repos) get every repo's folder
   const across = squad.repos && (w.role === 'architect' || w.role === 'qa')
@@ -119,7 +129,7 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     ...w, agent, model, ...(fallback ? { fallback } : {}), machine, herdr: mc.herdr, board: mc.board, cwd: repos[w.repo]?.paths[machine] ?? '',
     ...(mc.workspace ? { workspace: mc.workspace } : {}),
     // CB_PROTECTED_BRANCHES last: the pane-making call ends with it, as before #4002
-    env: { CB_ROLE: w.role, CB_AGENT: agent, ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
+    env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     // --agent only for another agent than claude: a Claude seat's cb iam stays the 8-argument call (cli/iam-args.ts)
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${model}${squad.repos ? ` --repo ${w.repo}` : ''}${agent !== 'claude' ? ` --agent ${agent}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
@@ -276,9 +286,11 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   for (const l of plan.start) if (unknown.has(l.name)) lines.push(`skip ${l.name}: could not check herdr on ${l.machine}`);
   const q = plan.quietLead;
   // neither squad up nor the supervisor starts it, so its pane gets no env from them: the line says how (#3746, #4002): the
-  // role (the guard reads CB_ROLE), the agent (the lead role's, claude by default) and the protected list, in launchFor's order.
+  // role (the guard reads CB_ROLE), the agent (the lead role's, claude by default), a non-claude lead's CB_MCP_GATE_OK and the
+  // protected list, in launchFor's order.
   // Single-quoted: no shell expands the * (zsh would refuse an unmatched glob); list entries never hold a quote
-  const envFlags = [`CB_ROLE=lead`, `CB_AGENT=${squad.roles.lead?.agent ?? 'claude'}`, ...(squad.protected?.length ? [`CB_PROTECTED_BRANCHES=${squad.protected.join(',')}`] : [])];
+  const leadAgent = squad.roles.lead?.agent ?? 'claude';
+  const envFlags = [`CB_ROLE=lead`, `CB_AGENT=${leadAgent}`, ...Object.entries(gateEnv(leadAgent)).map(([k, v]) => `${k}=${v}`), ...(squad.protected?.length ? [`CB_PROTECTED_BRANCHES=${squad.protected.join(',')}`] : [])];
   const how = `in a tab made with herdr tab create ${envFlags.map((e) => `--env '${e}'`).join(' ')}`;
   if (q) lines.push(`skip lead: ${q.actor} leads ${project} but is not live (last seen ${minsAgo(q.mins)}): restart it by hand ${how}, or cb iam <name> ${project} --role lead`);
   const herdrOnly = new Set(plan.herdrOnly.map((l) => l.name));

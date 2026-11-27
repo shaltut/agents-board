@@ -2,6 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
 import { squadShow } from '../cli/squad-show.ts';
+import { ADAPTERS } from '../cli/agents/index.ts';
+import { opencodeEnv } from '../cli/agents/opencode.ts';
+
+// launchFor reads CB_MCP_GATE_OK from this process (#4429): unset here, so a machine that lifts the gate runs these tests the same
+delete process.env.CB_MCP_GATE_OK;
 
 const mach = (herdr: string | null, board: string) => ({ herdr, repo: '/Users/me/Work/demo', board });
 const squad = {
@@ -666,6 +671,38 @@ test('seatSpec resolves per-seat overrides and non-Claude prompt includes --agen
   assert.equal(seatSpec(q, qw('zed-B1@macbook')).model, 'sonnet');
   assert.equal(seatSpec(q, qw('zed-B2@macbook')).model, 'opus');
   assert.equal(seatSpec(q, qw('zed-dashboard-B1@macbook')).model, 'haiku');
+});
+
+test('launchFor (#4429): a non-claude seat carries the launching machine\'s CB_MCP_GATE_OK into its pane env; unset, empty or a Claude seat: none', async () => {
+  const b3 = mixedWant('demo-B3@macbook'), b1 = mixedWant('demo-B1@macbook'), agy = mixedWant('demo-O-claims@macbook');
+  const prot = { ...MIXED, protected: ['main'] };
+  // injected env: forwarded as mcpGateOk reads it (trimmed, lowercased), before CB_PROTECTED_BRANCHES, which stays last
+  assert.deepEqual(launchFor('demo', prot, b3, 'next', { CB_MCP_GATE_OK: ' Codex, agy ' }).env,
+    { CB_ROLE: 'builder', CB_AGENT: 'codex', CB_MCP_GATE_OK: 'codex,agy', CB_PROTECTED_BRANCHES: 'main' });
+  assert.deepEqual(Object.keys(launchFor('demo', prot, b3, 'next', { CB_MCP_GATE_OK: 'codex' }).env).at(-1), 'CB_PROTECTED_BRANCHES');
+  assert.equal(launchFor('demo', MIXED, agy, 'next', { CB_MCP_GATE_OK: 'agy' }).env.CB_MCP_GATE_OK, 'agy');
+  // never a default: unset, empty or only commas give no key
+  for (const env of [{}, { CB_MCP_GATE_OK: '' }, { CB_MCP_GATE_OK: ' , ' }]) assert.deepEqual(launchFor('demo', MIXED, b3, 'next', env).env, { CB_ROLE: 'builder', CB_AGENT: 'codex' });
+  // a Claude seat: claude has no MCP gate, its launch stays byte-identical
+  assert.deepEqual(launchFor('demo', MIXED, b1, 'next', { CB_MCP_GATE_OK: 'codex' }).env, { CB_ROLE: 'builder', CB_AGENT: 'claude' });
+  // squad up (planSquad) and the supervisor (supervise-plan) pass no env: this process's is read, so the PC's or the Mac's
+  // value rides on the herdr --env of a local or a --machine launch alike
+  process.env.CB_MCP_GATE_OK = 'codex';
+  try {
+    const plan = planSquad('demo', MIXED, [], {});
+    assert.equal(plan.start.find((l) => l.name === 'demo-B3@macbook')!.env.CB_MCP_GATE_OK, 'codex');
+    assert.equal(plan.start.find((l) => l.name === 'demo-B1@macbook')!.env.CB_MCP_GATE_OK, undefined);
+    const env = launchFor('demo', MIXED, b3).env;
+    // the second hop: each non-claude adapter keeps it in the env startOne puts on the pane
+    for (const k of ['codex', 'agy'] as const) assert.equal(ADAPTERS[k].buildLaunch({ name: 'demo-B3@macbook', role: 'builder', repo: 'main', agent: k,
+      model: k === 'codex' ? 'gpt-6.1-sol' : 'gemini-4-neon-xhigh', board: '/b', cwd: '/r', env }).env.CB_MCP_GATE_OK, 'codex', k);
+    assert.equal(opencodeEnv(env).CB_MCP_GATE_OK, 'codex');
+    // a non-claude lead restarted by hand: the hint carries it too, in launchFor's order
+    const lead = { ...squad, roles: { ...squad.roles, lead: { ...squad.roles.lead, agent: 'codex' } } };
+    const out = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? lead
+      : [{ actor: 'QO@shaltoot', project: 'demo', live: false, machine: 'shaltoot', role: 'lead', last_seen: ago(10) }]), fake(() => GONE).run);
+    assert.match(out, /herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=codex' --env 'CB_MCP_GATE_OK=codex', or cb iam/);
+  } finally { delete process.env.CB_MCP_GATE_OK; }
 });
 
 test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as before', async () => {
