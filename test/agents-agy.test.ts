@@ -155,7 +155,9 @@ test('instructionMapping, trustSpec, disableAskSpec', () => {
   assert.ok(!m.nativeFiles.some((f) => /CLAUDE\.md/.test(f)));
   assert.deepEqual([m.extraArgs, m.env], [[], {}]);
   assert.match(m.note, /does not read CLAUDE\.md/);
-  assert.deepEqual(agyAdapter.trustSpec(['C:/w/x'], 'win32'), { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] });
+  const { preseed, ...t } = agyAdapter.trustSpec(['C:/w/x'], 'win32');
+  assert.deepEqual(t, { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] });
+  assert.equal(preseed?.file, '.gemini/antigravity-cli/settings.json'); // #4575: cb squad trust writes it
   assert.deepEqual(agyAdapter.disableAskSpec(), { toolName: 'ask_question', mechanism: 'hook', target: 'kit/guard/shim-agy.mjs' });
 });
 

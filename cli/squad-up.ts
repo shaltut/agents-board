@@ -174,7 +174,7 @@ export function planSquad(project: string, squad: Squad, live: Live[], herdrAgen
 
 type Res = { status: number | null; stdout?: string | null; stderr?: string | null; error?: Error };
 export type Runner = (m: string | null, args: string[], timeout?: number) => Res;
-export const realRun: Runner = (m, args, timeout = 180_000) => spawnSync('herdr', [...(m ? ['--machine', m] : []), ...args], { encoding: 'utf8', timeout });
+export const realRun: Runner = (m, args, timeout = 180_000) => spawnSync('herdr', [...(m ? ['--machine', m] : []), ...args], { encoding: 'utf8', timeout, windowsHide: true }); // review 98 I2: a relay has no console, and herdr.exe is a console program: without it every call opens a window
 
 // `herdr agent get <name>`: exit 0 = running, agent_not_found = not running, anything else = could not tell.
 export function classifyAgentGet(r: { status: number | null; stderr?: string | null; error?: unknown }): 'live' | 'absent' | 'unknown' {
