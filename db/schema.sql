@@ -214,6 +214,10 @@ alter table cb.sessions add column if not exists role text;
 alter table cb.sessions add column if not exists agent text not null default 'claude';
 alter table cb.sessions drop constraint if exists sessions_agent_check;
 alter table cb.sessions add constraint sessions_agent_check check (agent in ('claude','codex','opencode','agy'));
+-- the agent session in this pane (#4379), as its relay last saw it (Claude: the session id its SessionStart hook wrote
+-- with the endpoint). Another id in the same pane is another session: cb.inbox resets the row. Null (a row from before
+-- it, or one a cb iam just bound) takes the next id as it is
+alter table cb.sessions add column if not exists session_id text;
 
 create table if not exists cb.settings (
   key   text primary key,
@@ -263,6 +267,7 @@ drop function if exists cb.log cascade;
 drop function if exists cb.guest_text cascade;
 drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
+drop function if exists cb._seat_name cascade;
 drop function if exists cb.iam cascade;
 drop function if exists cb.inbox cascade;
 drop function if exists cb.broadcast cascade;
@@ -1513,6 +1518,12 @@ begin
                   now() - interval '24 hours');
 end $$;
 
+-- The name a pane's row has before any cb iam: <pane>@<machine>. A pane or machine named like ahmed must not make a
+-- session named like him. Positional: m is the machine already lower-cased and trimmed.
+create function cb._seat_name(m text, pane text) returns text language sql stable as $$
+  select case when cb.ahmed_like($2 || '@' || $1) then 'session-' || left(md5($2 || '@' || $1), 8) else $2 || '@' || $1 end
+$$;
+
 -- Bind a session (machine + herdr pane) to an actor. Machine names compare case-insensitively.
 create function cb.iam(machine text, pane text, actor text, project text default null, role text default null, area text default null, model text default null, repo text default null, agent text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
@@ -1550,7 +1561,14 @@ begin
         agent = case when excluded.actor = cb.sessions.actor then coalesce(ag, cb.sessions.agent) else coalesce(ag, 'claude') end,
         -- a repo belongs to its project: moving to another project drops it
         repo = case when excluded.actor = cb.sessions.actor and coalesce(excluded.project, cb.sessions.project) is not distinct from cb.sessions.project
-                    then coalesce(excluded.repo, cb.sessions.repo) else excluded.repo end;
+                    then coalesce(excluded.repo, cb.sessions.repo) else excluded.repo end,
+        -- a pane taken over by another name starts from now, as a new row does (#4379); the first bind after the
+        -- relay's own row (still its pane@machine name) keeps that row's mark, set when the relay started
+        broadcast_seen = case when excluded.actor = cb.sessions.actor or cb.sessions.actor = cb._seat_name(lower(trim(machine)), trim(pane))
+                              then cb.sessions.broadcast_seen else excluded.broadcast_seen end,
+        -- the relay's next check takes its session id as it is (#4379): the session that bound may be one its relay
+        -- has not seen yet, and must not be reset to the relay's own name a moment after it bound
+        session_id = null;
   -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
   update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
   return trim(actor);
@@ -1558,16 +1576,29 @@ end $$;
 
 -- What the relay pushes into a session: answers addressed to its pane, and changes other people
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
-create function cb.inbox(machine text, pane text, after_event bigint default 0) returns jsonb language plpgsql as $$
+-- session: the agent session the relay serves (#4379; Claude: its session id), or null when its agent names none.
+create function cb.inbox(machine text, pane text, after_event bigint default 0, session text default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
-declare m text := lower(trim(machine)); me text; proj text; seen bigint; myrepo text; am_lead boolean; ag text;
+declare m text := lower(trim(machine)); sid text := nullif(trim(session), ''); me text; proj text; seen bigint; myrepo text; am_lead boolean; ag text;
 begin
-  -- a new session (relay before cb iam) starts from now; until it joins a project it hears no broadcasts
-  insert into cb.sessions (machine, pane, actor, broadcast_seen)
-  -- a pane or machine named like ahmed must not make a session named like him
-  values (m, pane, case when cb.ahmed_like(pane || '@' || m) then 'session-' || left(md5(pane || '@' || m), 8) else pane || '@' || m end,
-          coalesce((select max(e.id) from cb.events e), 0))
-  on conflict on constraint sessions_pkey do update set last_seen = now()
+  -- a new session (relay before cb iam) starts from now; until it joins a project it hears no broadcasts.
+  -- #4379: so does another session in a reused pane id. A session id other than the row's is not the row's session:
+  -- the row starts again as the relay's own (its name, no project or role, broadcasts from now). The same id (the PC
+  -- woke up, the relay restarted), no id, or a row with none yet (from before #4379, or a cb iam since) keep it.
+  -- `sid <> ...` is null, so keeps, when either side is null.
+  insert into cb.sessions (machine, pane, actor, broadcast_seen, session_id)
+  values (m, pane, cb._seat_name(m, pane), coalesce((select max(e.id) from cb.events e), 0), sid)
+  on conflict on constraint sessions_pkey do update
+    set last_seen = now(), session_id = coalesce(sid, cb.sessions.session_id),
+        actor = case when sid <> cb.sessions.session_id then excluded.actor else cb.sessions.actor end,
+        project = case when sid <> cb.sessions.session_id then null else cb.sessions.project end,
+        role = case when sid <> cb.sessions.session_id then null else cb.sessions.role end,
+        area = case when sid <> cb.sessions.session_id then null else cb.sessions.area end,
+        model = case when sid <> cb.sessions.session_id then null else cb.sessions.model end,
+        repo = case when sid <> cb.sessions.session_id then null else cb.sessions.repo end,
+        broadcast_seen = case when sid <> cb.sessions.session_id then excluded.broadcast_seen else cb.sessions.broadcast_seen end,
+        started_at = case when sid <> cb.sessions.session_id then now() else cb.sessions.started_at end,
+        closing_at = case when sid <> cb.sessions.session_id then null else cb.sessions.closing_at end
   returning cb.sessions.actor, cb.sessions.project, cb.sessions.broadcast_seen, cb.sessions.agent into me, proj, seen, ag;
   myrepo := cb._repo(me);  -- once, not per event row (next_work)
   am_lead := cb._is_lead(me, proj);  -- once too (answer_copies)

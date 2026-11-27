@@ -106,6 +106,24 @@ test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file l
   } finally { cleanup(pane); }
 });
 
+// #4379: the session id rides with the socket; the same socket is the same Claude (a /clear, a /resume), so it keeps
+// the id the file has, and a new socket brings its own
+test('writeClaudeEndpoint: the session id goes with its socket; the same socket keeps the first one', () => {
+  const pane = fresh(); cleanup(pane);
+  try {
+    writeClaudeEndpoint(M, pane, { socket: 'S1', token: 'T1', sessionId: 'id-1' });
+    assert.equal(readClaudeEndpoint(M, pane)!.sessionId, 'id-1');
+    assert.equal(claudeAdapter.sessionId!({ machine: M, pane, agent: 'claude' }), 'id-1');
+    writeClaudeEndpoint(M, pane, { socket: 'S1', token: 'T1', sessionId: 'id-after-clear' });
+    assert.equal(readClaudeEndpoint(M, pane)!.sessionId, 'id-1', 'same socket: same session');
+    writeClaudeEndpoint(M, pane, { socket: 'S2', token: 'T2', sessionId: 'id-2' });
+    assert.equal(readClaudeEndpoint(M, pane)!.sessionId, 'id-2');
+    writeClaudeEndpoint(M, pane, { socket: 'S3', token: 'T3' });
+    assert.equal(readClaudeEndpoint(M, pane)!.sessionId, undefined, 'a Claude that names none: none');
+    assert.equal(claudeAdapter.sessionId!({ machine: M, pane, agent: 'claude' }), null);
+  } finally { cleanup(pane); }
+});
+
 test('clearClaudeEndpoint: only when the socket matches, if one is given', () => {
   const pane = fresh(); cleanup(pane);
   try {

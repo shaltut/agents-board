@@ -55,7 +55,7 @@ const envInboxAnswers = async () => socketExists(SOCKET) && (process.platform ==
 const liveEndpoint = () => { const ep = readClaudeEndpoint(M, PANE); return !!ep && socketExists(ep.socket); };
 const handOver = (pid?: number) => {
   // the error's code only: the token is in the file, never in the log
-  try { writeClaudeEndpoint(M, PANE, { socket: SOCKET, token: TOKEN, pid }); return true; }
+  try { writeClaudeEndpoint(M, PANE, { socket: SOCKET, token: TOKEN, pid, sessionId: process.env.CLAUDE_CODE_SESSION_ID }); return true; }
   catch (e: any) { log(`endpoint not written: ${e?.code ?? 'error'}`); return false; }
 };
 /** A SessionStart never takes the seat from a live agent on another socket: a nested `claude -p` in this pane gets no
@@ -92,6 +92,11 @@ const CODE = [import.meta.filename, join(import.meta.dirname, 'bridge.ts'), join
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
+// #4379: the agent session in the seat (the adapter's answer; Claude: the id its SessionStart wrote with the endpoint),
+// handed to cb.inbox, which resets the pane's row when it is not the row's session. null: the board keeps the row.
+const sessionNow = () => { try { return adapter.sessionId?.(seat) || null; } catch { return null; } };
+let lastSession: string | null | undefined; // the id the last inbox read was made with
+let inboxTakesSession = true; // false once a board older than #4379 (a 3-argument cb.inbox) refused the 4th
 let busy = false, again = false;
 
 // This pane's binding (cb iam), handed to its cb calls with the bridge's hello so a call skips its own lookup (#3256).
@@ -248,8 +253,11 @@ async function check() {
       // a dead agent gets no heartbeat and no delivery; the watchdog (below) decides when the relay leaves
       if (!(await agentAlive())) { if (!deadLogged) log('check: agent not alive; no heartbeat'); deadLogged = true; break; }
       deadLogged = false;
-      const gen = bindGen, ping = `ping:${ME}#${++pings}`;
-      const [{ i }] = await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
+      const gen = bindGen, ping = `ping:${ME}#${++pings}`, sid = sessionNow();
+      lastSession = sid;
+      const [{ i }] = sid && inboxTakesSession
+        ? await sql`select cb.inbox(${M}, ${PANE}, ${after}, ${sid}) as i, pg_notify('cb_bind', ${ping})`
+        : await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
@@ -285,6 +293,8 @@ async function check() {
     } while (again);
   } catch (e: any) {
     log(`check failed: ${e?.message}`); // board asleep or inbox busy: the next notify or poll retries
+    // undefined_function: a board without #4379's cb.inbox; ask it the old way from now on, at once
+    if (e?.code === '42883' && inboxTakesSession && /cb\.inbox/.test(String(e?.message))) { inboxTakesSession = false; soon(); }
   } finally {
     busy = false;
   }
@@ -334,7 +344,12 @@ setInterval(async () => {
   try {
     if (lockPid() !== process.pid) { leaving = true; await leave(true); return; }
     touch();
-    if (await agentAlive()) dead = 0;
+    if (await agentAlive()) {
+      dead = 0;
+      // #4379: another session took the seat (a new Claude in this pane): drop the binding held for the last one at
+      // once, so no cb call of the new session is handed it, and let the board reset the row now, not at the next poll
+      if (lastSession !== undefined && sessionNow() !== lastSession) { log('a new session in the seat; checking'); forget(); check(); }
+    }
     else if (++dead === 1) log('watchdog: agent not alive (leaves if the next reading agrees)');
     if (dead >= 2) { leaving = true; await leave(); return; }
     const v = version();

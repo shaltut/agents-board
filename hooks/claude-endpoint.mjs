@@ -16,7 +16,7 @@ if (socket && token && pane) {
     const ep = readClaudeEndpoint(m, pane);
     // same socket (a /clear, a resume) or a dead agent: this session takes the seat; an unknown answer counts as alive
     if (!ep || ep.socket === socket || !(await claudeAdapter.isAlive({ machine: m, pane, agent: 'claude' }).catch(() => true)))
-      writeClaudeEndpoint(m, pane, { socket, token, pid: process.ppid });
+      writeClaudeEndpoint(m, pane, { socket, token, pid: process.ppid, sessionId: process.env.CLAUDE_CODE_SESSION_ID }); // #4379
     // a relay holds the seat while its lock is fresh and its pid answers (cli/bridge.ts seatLockHolder)
     if (!seatLockHolder(join(tmpdir(), `cb-relay-${seatKey(m, pane)}.pid`)))
       spawn(process.execPath, [join(import.meta.dirname, '..', 'cli', 'relay.ts'), '--pane', pane, '--agent', 'claude'],
