@@ -89,3 +89,12 @@ test('a worktree never adopts another Postgres on its port', { timeout: 180_000,
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// #4413 review: --stop without --test ran the full dev setup (schema and PATH) against CB_DATABASE_URL's board.
+test('setup --stop without --test refuses and touches no database', () => {
+  const r = spawnSync(process.execPath, ['db/setup.ts', '--stop'],
+    { encoding: 'utf8', env: { ...process.env, CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_stop' } });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--stop only stops a worktree's test cluster: run node db\/setup\.ts --test --stop/);
+  assert.doesNotMatch(r.stderr, /ECONNREFUSED/, 'it never tried to connect');
+});

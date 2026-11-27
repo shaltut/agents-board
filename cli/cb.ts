@@ -1038,7 +1038,9 @@ async function main() {
     if (e.code !== 'ECONNREFUSED') throw e;
     // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
     const pg = await import('../db/pg.ts');
-    if (!pg.ownsPg(databaseUrl())) throw e;
+    // say so in words: a refused 'localhost' (both ::1 and 127.0.0.1) is an AggregateError with an empty message
+    const port = new URL(databaseUrl()).port || '5432';
+    if (!pg.ownsPg(databaseUrl())) throw new Error(`board refused the connection at ${boardHost}:${port} (ECONNREFUSED): ${ran}. Is Postgres running there?`);
     pg.ensurePg();
     r = await run();
   }
