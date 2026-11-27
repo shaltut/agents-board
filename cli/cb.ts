@@ -9,7 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
-import { withConnectRetry, neverSent, ranWords, checkFirst } from './connect-retry.ts';
+import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -350,10 +350,11 @@ async function start(): Promise<{ out: string; json: unknown }> {
 }
 
 /** After a task finishes: the tasks it held, and where each stands now (the DB released the free ones), as text and
- *  as --json (#4513) with the card's own status read back (cb.task_move normalises the word given). */
+ *  as --json (#4513) with the card's own status read back (cb.task_move normalises the word given). That read runs only
+ *  under --json: a text move or done keeps its one query (a round trip each from a remote machine). */
 async function released(id: string) {
   const n = Number(id.replace(/^#/, ''));
-  const [{ status }] = await sql`select status from cb.tasks where id = ${n}`;
+  const [{ status }] = o.json ? await sql`select status from cb.tasks where id = ${n}` : [{ status: null }];
   const rows = await sql`select t.id, t.status, t.blocked_on, cb._waits_on(t.id) as waits from cb.task_blockers b join cb.tasks t on t.id = b.task
     where b.blocker = ${n} and t.status not in ('done', 'cancelled') order by t.id`;
   return { text: rows.map((t: any) => t.status !== 'blocked' ? `\n#${t.id} unblocked: now ${t.status}`
@@ -1108,7 +1109,7 @@ const HINTS: [RegExp, string][] = [
 /** Every error ends with something to run. */
 function actionable(m: string) {
   for (const [re, hint] of HINTS) if (re.test(m)) m += `. ${hint}`;
-  if (namesCommand(m) || /keep working/.test(m)) return m;
+  if (namesCommand(m) || /keep working/i.test(m)) return m; // #4515: "Keep working meanwhile." too (a lost read names no check)
   return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
 }
 
@@ -1125,16 +1126,20 @@ async function main() {
       return;
     }
     // Whether the command ran is said plainly (#4337): a resend of one that may have run does it twice (#3331).
-    const ran = ranWords(e, sql.answered ?? 0, checkFirst(cmd, args, actor));
+    // #4515: a command that only reads saved nothing, whichever of its steps the board answered: running it again is safe
+    const reads = onlyReads(cmd, args);
+    const ran = ranWords(e, reads ? 0 : sql.answered ?? 0, checkFirst(cmd, args, actor));
     if (!ran) throw e;
     const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
+    // a read on a board on another machine exits 3 too, connection lost or not (this machine's own board never gives 3)
+    const again = !localBoard && reads ? { exit: 3 } : {};
     // the connection dropped after a statement was sent (reset, closed, the relay lost): the board may have run it
-    if (!neverSent(e)) throw new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`);
+    if (!neverSent(e)) throw Object.assign(new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`), again);
     // A remote board (another machine) can't be started from here: say so and let the session carry on.
     // exit 3 (#4450): nothing of the command reached the board (the retry wrapper counts what it answered; it wraps
-    // every remote board), so a script may run it again unchanged. Exit 1 when it may have run.
+    // every remote board), so a script may run it again unchanged; so may a read (#4515). Exit 1 when it may have run.
     if (!localBoard) throw Object.assign(new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`),
-      sql.answered === 0 ? { exit: 3 } : {});
+      sql.answered === 0 ? { exit: 3 } : again);
     if (e.code !== 'ECONNREFUSED') throw e;
     // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
     const pg = await import('../db/pg.ts');

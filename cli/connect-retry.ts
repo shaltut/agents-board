@@ -7,6 +7,7 @@
 
 import { isNetworkError } from './survive.ts';
 import { titleBody } from './title-body.ts';
+import { COMMANDS } from './help.ts';
 
 // The connection never opened, whatever the syscall: refused, DNS, postgres.js's own connect timer (it is cancelled at
 // the first ReadyForQuery, before postgres.js executes the query that opened the connection).
@@ -40,10 +41,17 @@ export function ranWords(e: unknown, answered: number, check: string): string | 
   return null;
 }
 
+/** True when this command line only reads (#4515: marked `reads` on its cli/help.ts entry, the one list): it calls only
+ *  selects or stable functions, so running it again changes nothing. */
+export function onlyReads(cmd: string | undefined, args: string[]): boolean {
+  const r = cmd && Object.hasOwn(COMMANDS, cmd) ? COMMANDS[cmd]!.reads : undefined;
+  const first = /^#?\d{1,15}$/.test(args[0] ?? '') ? '#' : args[0] ?? '';
+  return r === true || (Array.isArray(r) && r.includes(first));
+}
+
 // #4450: "check with cb before running it again" named no command, so a session could not act on it (it passed the
 // every-error-names-a-command check only because "cb before" looked like a command). Name the one that shows whether
-// this command landed. READS call only selects or stable functions, so running one again changes nothing.
-const READS = new Set(['show', 'search', 'session', 'sessions', 'digest']);
+// this command landed.
 // the first argument is the card they change. cb show <id> prints its status, labels, fields, notes and done summary;
 // a stage move is an 'updated' event it does not print, so the stage is read from --json (a card in parts: its parts line)
 const ON_CARD = new Set(['tag', 'move', 'done', 'edit', 'log', 'block', 'unblock']);
@@ -52,7 +60,7 @@ const STAGED = new Set(['stage', 'pass', 'fail']);
 /** What to do before running again a command that may have run: a blind resend of a write runs it twice (#3331).
  *  me: who this pane acts as. Only a numeric id and the title's first words are echoed back. */
 export function checkFirst(cmd: string | undefined, args: string[], me: string): string {
-  if (cmd && READS.has(cmd)) return 'it only reads, so running it again is safe';
+  if (onlyReads(cmd, args)) return 'it only reads, so running it again is safe';
   // #3331: an unchanged resend of a question still open returns it; one with pictures always posts
   if (cmd === 'ask') return `send the same cb ask again, unchanged: a question still open is returned, not asked twice (with pictures it posts again: check cb brief ${args[0] ?? '<project>'} first)`;
   const id = /^#?\d{1,15}$/.test(args[0] ?? '') ? args[0]!.replace('#', '') : null;

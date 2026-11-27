@@ -92,8 +92,8 @@ entries marked (Ahmed) carry his authority. Never put secrets or personal data i
 ## When things stop
 19. On the MacBook, `cb` reaches the board on shaltoot over Tailscale. If it says "board unreachable",
     keep working and register what you did once the board is back. Never stop because the board is down.
-    It says whether your command ran: "did not run" (exit 3) is safe to run again; "may have run" names the check to
-    run first (`cb show <id>`, `cb search ...`), because a blind resend would save a write twice.
+    It says whether your command ran: "did not run" or "it only reads" (exit 3) is safe to run again; "may have run"
+    names the check to run first (`cb show <id>`, `cb search ...`), because a blind resend would save a write twice.
 20. If nothing at all can continue, say so in one line and end your turn. Don't idle.
 21. When Ahmed asks you something in this terminal that wants a result back (a status, a check, a decision),
     record it first with `cb asks add "<his ask>"`, then answer with `cb reply A<id> "..."` (`--done` with the
