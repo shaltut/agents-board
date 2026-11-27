@@ -29,14 +29,37 @@ export function neverSent(e: unknown): boolean {
 
 /** What cb tells the caller about whether its command ran, for a network failure (null: not one). answered: the
  *  command's statements the board already answered. A failed read after a committed write must never read as "it did
- *  not run" (#3331): the caller would send the write again. */
-export function ranWords(e: unknown, answered: number): string | null {
+ *  not run" (#3331): the caller would send the write again. check: what to do before running it again (checkFirst). */
+export function ranWords(e: unknown, answered: number, check: string): string | null {
   if (neverSent(e)) return answered
-    ? 'the call that failed never reached it, but an earlier step of this command did and may have saved your change: check with cb before running it again'
+    ? `the call that failed never reached it, but an earlier step of this command did and may have saved your change: ${check}`
     : 'the call that failed never reached it, so this command did not run';
   if (isNetworkError(e) || (e as any)?.code === 'RELAY_LOST')
-    return 'the call that failed may have reached it, so this command may have run: check with cb before running it again';
+    return `the call that failed may have reached it, so this command may have run: ${check}`;
   return null;
+}
+
+// #4450: "check with cb before running it again" named no command, so a session could not act on it (it passed the
+// every-error-names-a-command check only because "cb before" looked like a command). Name the one that shows whether
+// this command landed. READS call only selects or stable functions, so running one again changes nothing.
+const READS = new Set(['show', 'search', 'session', 'sessions', 'digest']);
+// the first argument is the card they change: cb show <id> shows the change and its note
+const ON_CARD = new Set(['tag', 'stage', 'pass', 'fail', 'move', 'done', 'edit', 'log', 'block', 'unblock']);
+
+/** What to do before running again a command that may have run: a blind resend of a write runs it twice (#3331).
+ *  me: who this pane acts as. Only a numeric id and the title's first words are echoed back. */
+export function checkFirst(cmd: string | undefined, args: string[], me: string): string {
+  if (cmd && READS.has(cmd)) return 'it only reads, so running it again is safe';
+  // #3331: an unchanged resend of a question still open returns it; one with pictures always posts
+  if (cmd === 'ask') return `send the same cb ask again, unchanged: a question still open is returned, not asked twice (with pictures it posts again: check cb brief ${args[0] ?? '<project>'} first)`;
+  const id = /^#?\d{1,15}$/.test(args[0] ?? '') ? args[0]!.replace('#', '') : null;
+  const words = String(args[1] ?? '').replace(/["`$\\]/g, ' ').trim().split(/\s+/).slice(0, 6).join(' ');
+  const check = id && ON_CARD.has(cmd ?? '') ? `cb show ${id}`
+    : (cmd === 'add' || cmd === 'bug') && args[0] ? `cb search ${args[0]} "${words || '<title words>'}"`
+    // cb.tell records the message as an event of its sender, and cb session lists a name's recent events
+    : cmd === 'tell' ? `cb session ${me} (the messages you sent are in its RECENT list)`
+    : 'cb mine';
+  return `check with ${check} before running it again`;
 }
 
 export type RetryOpts = { budgetMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number };

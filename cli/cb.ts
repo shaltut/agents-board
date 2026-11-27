@@ -9,7 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
-import { withConnectRetry, neverSent, ranWords } from './connect-retry.ts';
+import { withConnectRetry, neverSent, ranWords, checkFirst } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -17,7 +17,7 @@ import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
-import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
+import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -1059,7 +1059,7 @@ const HINTS: [RegExp, string][] = [
 /** Every error ends with something to run. */
 function actionable(m: string) {
   for (const [re, hint] of HINTS) if (re.test(m)) m += `. ${hint}`;
-  if (/\bcb [a-z]/.test(m) || /keep working/.test(m)) return m;
+  if (namesCommand(m) || /keep working/.test(m)) return m;
   return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
 }
 
@@ -1072,13 +1072,16 @@ async function main() {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
     // Whether the command ran is said plainly (#4337): a resend of one that may have run does it twice (#3331).
-    const ran = ranWords(e, sql.answered ?? 0);
+    const ran = ranWords(e, sql.answered ?? 0, checkFirst(cmd, args, actor));
     if (!ran) throw e;
     const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
     // the connection dropped after a statement was sent (reset, closed, the relay lost): the board may have run it
     if (!neverSent(e)) throw new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`);
     // A remote board (another machine) can't be started from here: say so and let the session carry on.
-    if (!localBoard) throw new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`);
+    // exit 3 (#4450): nothing of the command reached the board (the retry wrapper counts what it answered; it wraps
+    // every remote board), so a script may run it again unchanged. Exit 1 when it may have run.
+    if (!localBoard) throw Object.assign(new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`),
+      sql.answered === 0 ? { exit: 3 } : {});
     if (e.code !== 'ECONNREFUSED') throw e;
     // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
     const pg = await import('../db/pg.ts');
@@ -1097,7 +1100,7 @@ try {
   await main();
 } catch (e: any) {
   console.error(`cb: ${actionable(String(e?.message ?? e))}`);
-  process.exitCode = 1;
+  process.exitCode = e?.exit ?? 1;
 } finally {
   await sql.end({ timeout: 1 });
 }

@@ -5,7 +5,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { neverSent, ranWords, withConnectRetry } from '../cli/connect-retry.ts';
+import { neverSent, ranWords, withConnectRetry, checkFirst } from '../cli/connect-retry.ts';
+import { namesCommand } from '../cli/help.ts';
 import { serveBridge, openBridge } from '../cli/bridge.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
@@ -79,14 +80,37 @@ test('withConnectRetry: a transaction is retried only if its body never started'
 });
 
 test('ranWords: "did not run" only when nothing of the command reached the board; "may have run" after a send', () => {
-  assert.match(ranWords(err('ECONNREFUSED', 'connect'), 0)!, /never reached it, so this command did not run/);
+  const check = 'check with cb show 42 before running it again';
+  assert.match(ranWords(err('ECONNREFUSED', 'connect'), 0, check)!, /never reached it, so this command did not run$/);
   // a committed write, then a read that never got through (cb tell, done, bug, run): never "did not run" (#3331)
-  const later = ranWords(err('CONNECT_TIMEOUT'), 1)!;
+  const later = ranWords(err('CONNECT_TIMEOUT'), 1, check)!;
   assert.doesNotMatch(later, /did not run/);
-  assert.match(later, /an earlier step of this command did and may have saved your change: check with cb before running it again/);
+  assert.match(later, /an earlier step of this command did and may have saved your change: check with cb show 42 before running it again$/);
   for (const e of [err('ECONNRESET'), err('EPIPE', 'write'), err('ETIMEDOUT', 'read'), err('CONNECTION_CLOSED'), err('CONNECTION_DESTROYED'), err('RELAY_LOST'), err('57P01')])
-    for (const n of [0, 3]) assert.match(ranWords(e, n)!, /may have reached it, so this command may have run: check with cb/, `${e.code} ${n}`);
-  for (const e of [new TypeError('x'), err('23505'), null]) assert.equal(ranWords(e, 0), null);
+    for (const n of [0, 3]) assert.match(ranWords(e, n, check)!, /may have reached it, so this command may have run: check with cb show 42 before/, `${e.code} ${n}`);
+  for (const e of [new TypeError('x'), err('23505'), null]) assert.equal(ranWords(e, 0, check), null);
+});
+
+// #4450: "check with cb before running it again" named no command, and passed the names-a-command check by accident
+test('checkFirst names the command that shows whether this one landed, and every answer passes the names-a-command check', () => {
+  const me = 'W1@test';
+  for (const [cmd, args, want] of [
+    ['done', ['#42', 'fixed'], 'check with cb show 42 before running it again'],
+    ['log', ['42', 'note'], 'check with cb show 42 before running it again'],
+    ['move', ['42', 'review'], 'check with cb show 42 before running it again'],
+    ['add', ['demo', 'Fix the "month" parse  in rows', 'body'], 'check with cb search demo "Fix the month parse in rows" before running it again'],
+    ['bug', ['demo', 'one two three four five six seven eight'], 'check with cb search demo "one two three four five six" before running it again'],
+    ['tell', ['W2@test', 'hi'], 'check with cb session W1@test (the messages you sent are in its RECENT list) before running it again'],
+    ['next', [], 'check with cb mine before running it again'],
+    ['show', ['42'], 'it only reads, so running it again is safe'],
+  ] as const) assert.equal(checkFirst(cmd, [...args], me), want, cmd);
+  assert.match(checkFirst('ask', ['demo', 'q?'], me), /^send the same cb ask again, unchanged: a question still open is returned, not asked twice \(with pictures it posts again: check cb brief demo first\)$/);
+  for (const cmd of ['done', 'add', 'bug', 'tell', 'ask', 'next', 'iam', 'mem', undefined])
+    assert.ok(namesCommand(ranWords(err('ECONNRESET'), 0, checkFirst(cmd, ['42', 'x'], me))!), String(cmd));
+  // the old words, and anything else where a plain word follows "cb", no longer count as naming a command
+  assert.equal(namesCommand('the call that failed may have reached it, so this command may have run: check with cb before running it again'), false);
+  assert.equal(namesCommand('cb briefly said no'), false);
+  for (const m of ['Run: cb help done', 'check the id: cb mine lists yours', 'use `cb ask`', 'cb mem find "x"']) assert.ok(namesCommand(m), m);
 });
 
 test('withConnectRetry: answered counts what the board answered, so a later unreachable read never reads as "did not run"', async () => {
@@ -97,7 +121,7 @@ test('withConnectRetry: answered counts what the board answered, so a later unre
   const e = await sql`select live from cb.sessions`.catch((x: any) => x); // the follow-up read: the board went away
   assert.equal(e.code, 'ECONNREFUSED');
   assert.equal(sql.answered, 1);
-  assert.doesNotMatch(ranWords(e, sql.answered)!, /did not run/);
+  assert.doesNotMatch(ranWords(e, sql.answered, 'check with cb mine before running it again')!, /did not run/);
 });
 
 test('the relay bridge forwards syscall: a connect timeout is retried through it, a read timeout is not', async () => {
@@ -164,7 +188,7 @@ test('a statement asked while nothing listens waits until the board is back, on 
 test('cb says it tried and that the call never reached a board that stays away', { skip: noAlias }, async () => {
   const port = await freePort(); // nothing ever listens
   const r = await cbAsync(['add', 'demo', 'Never sent'], port);
-  assert.equal(r.code, 1, r.out);
+  assert.equal(r.code, 3, r.out); // #4450: did not run has its own exit code, so a script need not parse the words
   assert.match(r.err, /board unreachable at 127\.0\.0\.2 \(ECONNREFUSED, tried \d+ times over \d+ s\): the call that failed never reached it, so this command did not run/);
   assert.match(r.err, /keep working/);
 });
@@ -180,7 +204,8 @@ test('cb never resends a write whose connection dropped after it was sent', { sk
     const r = await cbAsync(['add', 'demo', 'Sent once'], port);
     assert.equal(r.code, 1, r.out);
     assert.doesNotMatch(r.err, /tried \d+ times|never reached/);
-    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): the call that failed may have reached it, so this command may have run: check with cb before running it again/);
+    // #4450: the check is a command the session can run, not "check with cb"
+    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): the call that failed may have reached it, so this command may have run: check with cb search demo "Sent once" before running it again\. Keep working meanwhile\.$/);
     // the board ran it (the write reached it before the drop); give it a moment to commit
     let n = 0;
     for (let i = 0; i < 20 && n === 0; i++) { n = (await sql`select count(*)::int as n from cb.tasks`)[0].n; if (!n) await new Promise((x) => setTimeout(x, 100)); }

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { COMMANDS, TOPIC_NAMES, OVERVIEW_TEXT, SNIPPET } from '../cli/help.ts';
+import { COMMANDS, TOPIC_NAMES, OVERVIEW_TEXT, SNIPPET, help } from '../cli/help.ts';
 import { seatKey } from '../cli/bridge.ts';
 import { claudeEndpointPath, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
@@ -44,6 +44,12 @@ test('cb help is the manual: overview, rules, topics, grouped commands with exam
   assert.match(r.out, /e\.g\. cb done 42 /);
   for (const t of ['start', 'project', 'ask', 'orchestrate', 'huddle', 'relay', 'rules']) assert.ok(TOPIC_NAMES.includes(t), t);
   assert.equal(cb([]).out, r.out); // bare cb prints the same
+});
+
+// #4450: rule 10 said only "keep working"; the exit codes and the check before a resend are documented
+test('cb help documents exit 3 (did not run) and rule 10 says to run the named check before a resend', () => {
+  assert.match(OVERVIEW_TEXT, /^ +Exit 3 = the board was unreachable and nothing of the command reached it: safe to run again unchanged\.$/m);
+  assert.match(help('rules')!, /^10\. Board unreachable: keep working\. .*Did not run \(exit 3\): run it\n +again once the board is back\. May have run \(exit 1\): run the check it names \(cb show <id>, cb search \.\.\.\) first,/m);
 });
 
 test('cb help <topic> and cb help <command> print the detailed page; -h on a command too', () => {
