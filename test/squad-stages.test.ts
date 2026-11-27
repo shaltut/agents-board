@@ -703,3 +703,16 @@ test('brief: every card carries its stage, so a Next card at merge or qa is not 
   const off = (await sql`select cb.brief('demo') as b`)[0].b.next.find((t: any) => Number(t.id) === qa);
   assert.deepEqual([off.stage, off.stage_words], [null, null]);
 });
+
+test('text brief: a Next card at merge or qa says its stage; build work stays a plain line (#4340)', async () => {
+  const sql = await setup();
+  const build = await addCard(sql); await toStage(sql, build, 'build');
+  const merge = await addCard(sql); await toStage(sql, merge, 'merge');
+  const qa = await addCard(sql); await toStage(sql, qa, 'qa');
+  const r = cb(['brief', 'demo']);
+  assert.equal(r.code, 0, r.err);
+  const lineOf = (id: number) => r.out.split('\n').find((l) => l.trim().startsWith(`#${id} `)) ?? '';
+  assert.match(lineOf(merge), / · demo · Merging to dev$/);
+  assert.match(lineOf(qa), / · demo · Checking on dev against the design$/);
+  assert.match(lineOf(build), / · demo$/);
+});

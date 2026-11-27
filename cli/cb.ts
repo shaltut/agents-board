@@ -201,7 +201,8 @@ function printBrief(b: any) {
   };
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
   sec('IN PROGRESS', b.in_progress, line);
-  sec('NEXT (take with `cb next`)', b.next, line);
+  // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
+  sec('NEXT (take with `cb next`)', b.next, (t) => `${line(t)}${t.stage && t.stage !== 'build' ? ` · ${t.stage_words}` : ''}`);
   sec('BLOCKED', b.blocked, (t) => `${line(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}`);
   sec('REVIEW', b.review, line);
   sec('WAITING ON AHMED', b.open_questions, (q) => `Q${q.id}${q.blocking ? ' [blocking]' : ''} ${q.body}${q.assigned_to ? ` (for ${q.assigned_to})` : ''} · ${q.project}`);
