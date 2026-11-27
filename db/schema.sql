@@ -1489,16 +1489,22 @@ begin
 end $$;
 
 drop function if exists cb._brief_tasks cascade;
-create function cb._brief_tasks(p text, tg text, s text, lim int, ty text default null) returns jsonb language sql stable as $$
-  select coalesce(jsonb_agg(to_jsonb(x) - 'o' order by x.o), '[]') from (
+-- stage (#4340): a card's pipeline stage, as cb.tick's prs list gives it (null when unstaged or the pipeline is off), so a
+-- reader of Next tells build work from a card already merged (merge) or on dev (qa). plpgsql: the stage column and
+-- cb._pipeline are created further down this file, and a sql function's body is checked when it is created.
+create function cb._brief_tasks(p text, tg text, s text, lim int, ty text default null) returns jsonb language plpgsql stable as $$
+begin
+  return (select coalesce(jsonb_agg(to_jsonb(x) - 'o' order by x.o), '[]') from (
     select t.id, t.project, t.title, t.priority, t.assignee, t.updated_at, t.blocked_on, t.rank, t.labels, t.type,
            t.epic_id, cb._waits_on(t.id) as waits_on,
+           case when cb._pipeline(t.project) then t.stage end as stage,
+           case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end as stage_words,
            row_number() over (order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last,
                                        t.priority, t.rank, t.id) as o
       from cb.tasks t where t.status = s and (p is null or t.project = p) and (tg is null or tg = any(t.labels))
                         and (ty is null or t.type = ty)
-     order by o limit lim) x
-$$;
+     order by o limit lim) x);
+end $$;
 
 create function cb.seen(at timestamptz default now()) returns void language plpgsql as $$
 #variable_conflict use_variable

@@ -117,6 +117,15 @@ test('unreachable remote board fails within its retry budget with a clear messag
   assert.ok(Date.now() - t0 < 25_000, `took ${Date.now() - t0}ms`);
 });
 
+// #4413 review: a refused 'localhost' (not the board's own 5434) is an AggregateError with an empty message: it printed
+// "cb: . Run: cb help". Say what was refused.
+test('a refused local board that is not the board cluster says so in words', () => {
+  const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@localhost:1/claude_board_test_refused' });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /board refused the connection at localhost:1 \(ECONNREFUSED\): the call that failed never reached it/);
+  assert.match(r.err, /Is Postgres running there\?/);
+});
+
 test('unknown flag fails with a readable message, no stack', async () => {
   await db();
   const r = cb(['add', 'demo', 'x', '--label', 'foo']);
@@ -198,7 +207,13 @@ test('cb tell sends to one session and says whether it is live', async () => {
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
   const v = cb(['tell', 'V1@vps', 'ping']);
   assert.equal(v.code, 0, v.err);
-  assert.match(v.out, /\(no session on the board under this name, but it last wrote to the board 3m ago \(a session with no relay, or its pane now runs another name\): the message waits up to 24h for a relay under this name\)/);
+  assert.match(v.out, /\(no relay session on the board under this name, but it last wrote to the board 3m ago: the message waits up to 24h for a relay under this name\)/);
+  // a session name with no '@' and no row (a session that runs cb with --as, no relay) gets the same, never "its relay is down"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('ops-bot', 'demo', 'note', 'working', now() - interval '2 minutes')`;
+  const o = cb(['tell', 'ops-bot', 'ping']);
+  assert.equal(o.code, 0, o.err);
+  assert.match(o.out, /\(no relay session on the board under this name, but it last wrote to the board 2m ago/);
+  assert.doesNotMatch(o.out, /its relay is down/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {

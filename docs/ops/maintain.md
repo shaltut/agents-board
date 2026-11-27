@@ -254,9 +254,16 @@ Set up, once, on the PC:
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
-     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "5544{lane}"`,
-     `"TEST_STACK_REDIS_PORT": "5638{lane}"`, `"TEST_STACK_S3_PORT": "5901{lane}"`. Keep lane ports off the old
+     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "2544{lane}"`,
+     `"TEST_STACK_REDIS_PORT": "2638{lane}"`, `"TEST_STACK_S3_PORT": "2901{lane}"`. Keep lane ports off the old
      single-stack ports (55432, 56379, 59000) and any stack you start by hand.
+   - Keep lane ports below 32768 (#4417). Docker Desktop binds a published port inside its Linux VM, where 32768-60999
+     is the range the kernel hands to outgoing connections, so a fixed port in it is sometimes held by a connection at
+     the moment a lane's `up` binds it: `failed to bind host port 0.0.0.0:<port>/tcp: address already in use`, and the
+     job fails in seconds. A Windows port reservation (`netsh ... add excludedportrange`) reaches that VM only when
+     Docker Desktop starts (it copies them to the VM's reserved ports then), so one added later protects nothing there
+     until Docker Desktop restarts. Check the VM's view with
+     `docker run --rm --network host redis:7 cat /proc/sys/net/ipv4/ip_local_port_range /proc/sys/net/ipv4/ip_local_reserved_ports`.
    - With `dbLanes` above 1, `laneEnv` names those env values. Every DB recipe must set each of them with `{lane}`,
      and all DB recipes must write each one the same way, so lane n is one stack whichever recipe runs in it. The
      runner refuses to start otherwise.
@@ -300,6 +307,7 @@ What each result means:
 | `error: bad job row` | the job row is malformed | `cb job show <id>`; report it |
 | `error: runner fault: see cb job log <id>` | the runner itself failed | read the log, then the runner's pane |
 | `no tests ran: <summary>` | the command exited 0 but ran nothing | the file list or app is wrong |
+| `step <n> of <m> (<program>) exited <code>, but no test failed. Its last lines: ...` | the step's test counts show no failure, yet it exited non-zero (a crash after the run, a hook runner's own failure); the lines are that step's last output (stdout and stderr share the log) | read them, then `cb job log <id>`; queue again if it looks like a flake |
 | `summary withheld: see cb job log <id>` | the output looked sensitive, so none of it went to the board | read the log from the PC or the MacBook |
 
 ## Supervisor
@@ -328,6 +336,15 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 - closes a squad session idle 20 minutes that holds nothing (no card, question, job or open dashboard ask), that herdr
   shows ready for input (`idle`, or `done` for a pane nobody looked at), when its role has no waiting work: it marks
   it closing, finds its pane, checks again (board and herdr), sends `/exit`, then closes the pane (not gone in 60 s: the pane stays and the mark lapses in 5 minutes);
+- treats a seat an earlier saved version of the squad file generated but this one does not (the role moved machine,
+  its count went down, the role or repo left; read from the last 20 `squad updated` events) as leaving (#3770): it
+  counts toward no role's slots and cancels no waiting work, so the new seats start; once idle as above it is closed
+  even while its role has waiting work, at most 2 a tick. A hand-started name no saved version generated (`foo@m`, an
+  extra `<project>-B5@m` past any count) is never leaving. Busy (holding a card, question, job or ask, or mid-turn), down
+  holding cards, or on a machine that is not one of the squad's, it is kept and said in its log once per reason
+  (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
+  the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
+  under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
@@ -336,7 +353,8 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 
 It never:
 
-- starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
+- starts, closes or restores the lead (`orch@*`) or a name no version of the squad file generated (a hand-started
+  session); it starts and restores only names the squad file generates now, and closes a leaving one only as above;
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
   live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
   the first prompt afterwards (the same when a session started but its first prompt was not sent);

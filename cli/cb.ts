@@ -31,7 +31,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
-  repo: { type: 'string' }, agent: { type: 'string' }, notes: { type: 'boolean' },
+  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -201,7 +201,8 @@ function printBrief(b: any) {
   };
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
   sec('IN PROGRESS', b.in_progress, line);
-  sec('NEXT (take with `cb next`)', b.next, line);
+  // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
+  sec('NEXT (take with `cb next`)', b.next, (t) => `${line(t)}${t.stage && t.stage !== 'build' ? ` · ${t.stage_words}` : ''}`);
   sec('BLOCKED', b.blocked, (t) => `${line(t)}${t.blocked_on ? ` — on Q${t.blocked_on}` : ''}${t.waits_on?.length ? ` — waits on #${t.waits_on.join(', #')}` : ''}`);
   sec('REVIEW', b.review, line);
   sec('WAITING ON AHMED', b.open_questions, (q) => `Q${q.id}${q.blocking ? ' [blocking]' : ''} ${q.body}${q.assigned_to ? ` (for ${q.assigned_to})` : ''} · ${q.project}`);
@@ -447,7 +448,7 @@ async function run(): Promise<unknown> {
       // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts).
       const sub = args[0];
       if (sub === 'add' || sub === 'remove') {
-        need(2, 'github add <owner/repo> [--project <project>] [--to <session>]   or   cb github remove <owner/repo>');
+        need(2, 'github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]   or   cb github remove <owner/repo>');
         const repo = args[1], key = `github:${repo}`;
         // no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
         if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add acme/widgets`);
@@ -479,12 +480,16 @@ async function run(): Promise<unknown> {
               : `${p} has no lead session to tell: cb github add ${repo} --project ${p} --to <session> (cb sessions lists them)`);
             to = leads[0];
           }
-          const patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}) };
+          // --cards-in (#4334): more projects whose cards a PR may name (fix/<card>-..., "(card <n>)"); "" clears them
+          const also = o['cards-in'] === undefined ? undefined : await Promise.all(String(o['cards-in']).split(',').map((x) => x.trim())
+            .filter(Boolean).map(async (x) => (await tx`select cb.read_project(${x}) as p`)[0].p as string));
+          const patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}), ...(also ? { card_projects: also } : {}) };
           // a new repo starts now (no backfill)
           const [r] = await tx`insert into cb.settings (key, value)
-            values (${key}, ${tx.json({ since: new Date().toISOString(), to, project: p, last_ok: null, last_error: null, prs: {} })})
+            values (${key}, ${tx.json({ since: new Date().toISOString(), to, project: p, ...(also ? { card_projects: also } : {}), last_ok: null, last_error: null, prs: {} })})
             on conflict (key) do update set value = cb.settings.value || ${tx.json(patch)} returning value`;
-          return { out: `watching ${repo}: ${r.value.to} is told, PR cards go in ${r.value.project}, events from ${r.value.since} on`, json: r.value };
+          return { out: `watching ${repo}: ${r.value.to} is told, PR cards go in ${r.value.project}${r.value.card_projects?.length
+            ? ` (a PR naming a card in ${[r.value.project, ...r.value.card_projects].join(', ')} logs on that card)` : ''}, events from ${r.value.since} on`, json: r.value };
         });
       }
       if (sub === 'mute' || sub === 'unmute') {
@@ -511,7 +516,7 @@ async function run(): Promise<unknown> {
       const [mu] = await sql`select value from cb.settings where key = 'github-muted'`;
       const out = rows.map(({ key, value: v }: any) => {
         const cards = Object.entries(v.prs ?? {});
-        return [`${key.slice(7)} → ${v.to} (${v.project}) · last poll ${v.last_ok ? `${dur((Date.now() - Date.parse(v.last_ok)) / 60000)} ago` : 'never'} · since ${v.since}` +
+        return [`${key.slice(7)} → ${v.to} (${v.project}${v.card_projects?.length ? `; named cards also in ${v.card_projects.join(', ')}` : ''}) · last poll ${v.last_ok ? `${dur((Date.now() - Date.parse(v.last_ok)) / 60000)} ago` : 'never'} · since ${v.since}` +
           (v.last_error ? ` · last error: ${flat(v.last_error.message)} (since ${v.last_error.at})` : ''),
           ...(cards.length ? [`  open PR cards: ${cards.map(([n, id]) => `PR #${n} → card #${id}`).join(', ')}`] : [])].join('\n');
       });
@@ -584,8 +589,8 @@ async function run(): Promise<unknown> {
       const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
         exists (select 1 from cb.sessions where actor = ${args[0]}) as has_row, cb._board_active(${args[0]}) as mins`;
       const how = s.live ? 'relay live: delivered within seconds'
-        : s.mins !== null && !s.has_row && args[0]!.includes("@") ? `no session on the board under this name, but it last wrote to the board ${s.mins}m ago (a session with no relay, or its pane now runs another name): the message waits up to 24h for a relay under this name`
-        : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
+        : s.mins !== null && !s.has_row ? `no relay session on the board under this name, but it last wrote to the board ${s.mins}m ago: the message waits up to 24h for a relay under this name`
+        : s.mins !== null && s.has_row ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
         : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
       return { out: `message #${id} to ${args[0]} (${how})`, json: id };
     }
@@ -1062,7 +1067,9 @@ async function main() {
     if (e.code !== 'ECONNREFUSED') throw e;
     // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
     const pg = await import('../db/pg.ts');
-    if (!pg.ownsPg(databaseUrl())) throw e;
+    // say so in words: a refused 'localhost' (both ::1 and 127.0.0.1) is an AggregateError with an empty message
+    const port = new URL(databaseUrl()).port || '5432';
+    if (!pg.ownsPg(databaseUrl())) throw new Error(`board refused the connection at ${boardHost}:${port} (ECONNREFUSED): ${ran}. Is Postgres running there?`);
     pg.ensurePg();
     r = await run();
   }
