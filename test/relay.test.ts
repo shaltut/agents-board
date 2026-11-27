@@ -367,10 +367,13 @@ test('inbox: another session id in a pane starts its row again; the same id, non
   i = await inbox('S2');
   assert.deepEqual([i.actor, i.project, i.broadcasts], ['w9:p1@pc', null, []]);
   assert.deepEqual(await row(), { actor: 'w9:p1@pc', project: null, role: null, session_id: 'S2' });
-  // it binds (the first bind keeps the relay row's mark): the broadcast from before it still never reaches it
+  // it binds (the first bind keeps the relay row's mark): the broadcast from before the reset still never reaches it,
+  // one sent between the reset and the bind does
+  await sql`select cb.broadcast('after the reset, before the bind', 'iris', 'orch')`;
   await sql`select cb.iam('pc', 'w9:p1', 'W2@pc', 'iris')`;
   i = await inbox('S2');
-  assert.deepEqual([i.actor, i.project, i.broadcasts], ['W2@pc', 'iris', []]);
+  assert.deepEqual([i.actor, i.project, i.broadcasts.map((b: any) => b.summary)], ['W2@pc', 'iris', ['after the reset, before the bind']]);
+  await sql`select cb.broadcast_seen('pc', 'w9:p1', ${i.broadcasts.at(-1).id})`;
   // the next session binds before its relay has seen it: cb iam leaves no id, so that check keeps the new binding
   await sql`select cb.broadcast('for W2, unread: never for the name that takes the pane', 'iris', 'orch')`;
   await sql`select cb.iam('pc', 'w9:p1', 'W3@pc', 'iris')`;

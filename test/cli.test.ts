@@ -194,6 +194,12 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
+  // #4379: a new Claude took its pane (another session id): the name has no session row now, a re-bound pane, gone
+  await sql`update cb.sessions set session_id = 'S1' where actor = 'W2@macbook'`;
+  await sql`select cb.inbox('mac', 'w1:p3', 0, 'S2')`;
+  const g = cb(['tell', 'W2@macbook', 'anyone?']);
+  assert.equal(g.code, 0, g.err);
+  assert.match(g.out, /\(relay not live and nothing from the session on the board in 30 minutes: it may be gone;/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
