@@ -62,7 +62,7 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
-  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>() });
+  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>(), trustRefusedAt: new Map<string, number>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -423,6 +423,11 @@ test('a restart onto a setting whose folder is not trusted is refused once and t
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
   assert.ok(out.some((l) => l.startsWith('sv-B1@macbook runs an older setting than its seat, but sonnet cannot start here')), out.join('\n'));
   assert.equal((await events(sql, 'restart')).length, 1);
+  // review 94 L1: once the folder is trusted (cb squad trust), the restart is tried again after 10 minutes, not never
+  const soon = await tick(deps(sup, h.run, { memory, trust: null, now: Date.now() + 60_000 }));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), soon.join('\n'));
+  const later = await tick(deps(sup, h.run, { memory, trust: null, now: Date.now() + 11 * 60_000 }));
+  assert.ok(has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), later.join('\n'));
 });
 
 function runnerJson() {

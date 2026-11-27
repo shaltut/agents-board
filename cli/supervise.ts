@@ -27,6 +27,7 @@ const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC:
 // restartTried (#4332): per seat, the setting this run closed it to restart on, or refused: planTick's restartTried
 export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
   closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; restartTried: Map<string, string>;
+  trustRefusedAt: Map<string, number>; // #4602: restarts refused for an untrusted folder, by when
   runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
@@ -96,6 +97,9 @@ export async function tick(d: Deps): Promise<string[]> {
     }
   }
 
+  // a restart refused for an untrusted folder is not refused for good, as a setting this machine cannot start is: after
+  // 10 minutes it is planned again, so a folder trusted since (cb squad trust) gets its restart (review 94 L1)
+  for (const [n, at] of memory.trustRefusedAt) if (now - at >= 10 * 60_000) { memory.trustRefusedAt.delete(n); memory.restartTried.delete(n); }
   for (const state of states) {
     d.signal?.throwIfAborted();
     try {
@@ -107,7 +111,13 @@ export async function tick(d: Deps): Promise<string[]> {
       const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats,
         restartTried: memory.restartTried,
         // a restart is refused, the seat kept running, when the new setting's agent does not trust the folder (#4602)
-        startProblem: (l) => startProblem(l) ?? trust?.(l, state.project) ?? null });
+        startProblem: (l) => {
+          const p = startProblem(l);
+          if (p) return p;
+          const t = trust?.(l, state.project) ?? null;
+          if (t) memory.trustRefusedAt.set(l.name, now); // asked again in 10 minutes: cb squad trust fixes it (review 94 L1)
+          return t;
+        } });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length + plan.restart.length; // a restart's close frees its own Mac slot: macLive stays
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -387,7 +397,7 @@ if (import.meta.main) {
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
-    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map() };
+    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), trustRefusedAt: new Map() };
   let code = 0;
   for (;;) {
     try {
