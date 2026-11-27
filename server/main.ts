@@ -12,6 +12,7 @@ import { callFn, RpcError } from './rpc.ts';
 import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
+import { releaseApp, loadRelease } from './release.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const DIST = join(ROOT, 'web', 'dist');
@@ -332,6 +333,9 @@ app.get('/healthz', async (c) => {
   try { await sql`select 1`; return c.json({ ok: true }); } catch { return c.json({ ok: false }, 503); }
 });
 
+// #4352: the release workers check against (cb update --check); before the UI's fallback, which would answer 200
+app.route('/', releaseApp);
+
 // Live updates: one LISTEN connection fanned out to every open page.
 type Client = (table: string) => void;
 const clients = new Set<Client>();
@@ -411,6 +415,7 @@ export async function start() {
   if (ownsPg(databaseUrl())) ensurePg();
   const port = Number(process.env.PORT ?? 4747);
   const hostname = process.env.HOST ?? '127.0.0.1';
+  loadRelease(ROOT); // built once from this server's own files; a failure only means none is served
   serve({ fetch: app.fetch, port, hostname }, () => console.log(`Claude Board: http://localhost:${port}`));
   const token = process.env.TELEGRAM_BOT_TOKEN || dotenv('TELEGRAM_BOT_TOKEN');
   void lead(() => {

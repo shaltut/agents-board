@@ -6,3 +6,4 @@ dist/
 web/dist/
 .playwright-mcp/
 release.json
+release.tgz

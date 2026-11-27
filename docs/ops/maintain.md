@@ -34,6 +34,7 @@ A release is: the change merged to `main` (reviewed, the suite green on the PC o
 ```bash
 cd /opt/claude-board && git fetch && git merge --ff-only origin/main
 git log --oneline -1                    # must show the sha you pushed
+git archive --format=tar.gz -o release.tgz HEAD -- bin cli db prompts server hooks kit   # the release workers check (#4352)
 cd deploy && dc up -d --build board     # builds, applies the schema, swaps the container (seconds of downtime)
 dc logs --tail 20 board                 # "claude_board ready", then the listen line
 dc ps                                   # board shows a fresh "Up <seconds>"
@@ -64,6 +65,11 @@ Then the workers, right away, because their `cb` must match the schema:
   the archive, and run `cb doctor --manifest <file>` on the worker. It names every missing or changed file, checks the
   installed guard and its hook (as `node kit/guard/install.mjs --check`), writes nothing, never connects to the board,
   and exits 0 only when everything matches.
+  Or, once the board serves the release (the `git archive` line above; its log says `release: serving <sha>`):
+  `cb update --check --from <board https address>` (or PUBLIC_URL in the worker's .env). It fetches
+  `/release/current.json` and `/release/<sha>.tgz` (no sign-in: the public repo's tracked files only; the board refuses
+  an archive holding an env file or node_modules), verifies the archive, and compares the worker's files the same way.
+  It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac

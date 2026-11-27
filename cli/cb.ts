@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
-import { sql as direct, databaseUrl, machine } from '../server/db.ts';
+import { sql as direct, databaseUrl, machine, dotenv } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
 import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
@@ -22,6 +22,7 @@ import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
+import { updateCheck } from './update.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -37,7 +38,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
-  root: { type: 'string' }, manifest: { type: 'string' },
+  root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -80,7 +81,10 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
 const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
 let sql: any = direct;
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && cmd !== 'doctor' && !o.help)
+// doctor and update look at this machine (and the board's web address), never the board's database: they must work on
+// a stale worker and while the database is down
+const offline = cmd === 'doctor' || cmd === 'update';
+if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
@@ -427,8 +431,7 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 }
 
 async function run(): Promise<unknown> {
-  // cb doctor looks at this machine only, never the board: it must work on a stale worker and while the board is down
-  if (cmd !== 'doctor') await resolveActor();
+  if (!offline) await resolveActor();
   if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
@@ -838,6 +841,13 @@ ${body}`, json: pg };
     }
     case 'doctor':
       return doctorCmd({ root: o.root, manifest: o.manifest });
+    case 'update': {
+      if (!o.check) throw new Error('cb update does not install a release yet: run cb update --check (it compares this machine with the release the board serves and writes nothing)');
+      const from = o.from || process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL');
+      if (!from) throw new Error("no board web address: pass --from <url> (the board's https address), or set CB_PUBLIC_URL or PUBLIC_URL in this checkout's .env");
+      const r = await updateCheck({ root: o.root ?? join(import.meta.dirname, '..'), from });
+      return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 };
+    }
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');
       const text = await callFn('role_text', { role: args[0] }) as string;
