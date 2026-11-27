@@ -438,7 +438,7 @@ async function run(): Promise<unknown> {
       // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts).
       const sub = args[0];
       if (sub === 'add' || sub === 'remove') {
-        need(2, 'github add <owner/repo> [--to orch@shaltoot] [--project iris]   or   cb github remove <owner/repo>');
+        need(2, 'github add <owner/repo> [--project <project>] [--to <session>]   or   cb github remove <owner/repo>');
         const repo = args[1], key = `github:${repo}`;
         // no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
         if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add acme/widgets`);
@@ -453,9 +453,25 @@ async function run(): Promise<unknown> {
             if (!(await tx`delete from cb.settings where key = ${key} returning key`).length) throw new Error(`${repo} is not watched: cb github lists the repos`);
             return { out: `stopped watching ${repo}; its cards stay on the board` };
           }
-          const [{ p }] = await tx`select cb.read_project(${o.project ?? 'ihop'}) as p`;
-          const to = o.to ?? 'orch@shaltoot', patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}) };
-          // a new repo starts now (no backfill); adding it again changes only what was given and keeps its checkpoint
+          // adding it again changes only what was given and keeps its checkpoint: a watched repo needs no flag
+          const [had] = await tx`select 1 from cb.settings where key = ${key} for update`;
+          const proj = o.project ?? (had ? null : sessionProject);
+          if (!had && !proj) {
+            const [{ known }] = await tx`select string_agg(slug, ', ' order by slug) as known from cb.projects`;
+            throw new Error(`name the project its PR cards go in: cb github add ${repo} --project <project> (known: ${known ?? 'none yet'})`);
+          }
+          const p = proj ? (await tx`select cb.read_project(${proj}) as p`)[0].p : null;
+          let to = o.to;
+          if (!had && !to) {
+            // whom it tells defaults to the project's lead (cb._is_lead), when it has exactly one
+            const leads = (await tx`select distinct s.actor from cb.sessions s where s.project = ${p} and cb._is_lead(s.actor, ${p}) order by s.actor`).map((x: any) => x.actor);
+            if (leads.length !== 1) throw new Error(leads.length
+              ? `${p} has several leads (${leads.join(', ')}): say which one is told: cb github add ${repo} --project ${p} --to <session>`
+              : `${p} has no lead session to tell: cb github add ${repo} --project ${p} --to <session> (cb sessions lists them)`);
+            to = leads[0];
+          }
+          const patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}) };
+          // a new repo starts now (no backfill)
           const [r] = await tx`insert into cb.settings (key, value)
             values (${key}, ${tx.json({ since: new Date().toISOString(), to, project: p, last_ok: null, last_error: null, prs: {} })})
             on conflict (key) do update set value = cb.settings.value || ${tx.json(patch)} returning value`;

@@ -595,7 +595,7 @@ function cb(args: string[], env: Record<string, string> = {}) {
 
 test('cb github: anyone lists; only Ahmed adds and removes; a new repo starts at now', async () => {
   const sql = await freshDb(); clients.push(sql);
-  await sql`select cb.ensure_project('ihop')`;
+  await sql`select cb.ensure_project('demo')`;
   const AHMED = { PGAPPNAME: 'cb-web' }; // what his dashboard connection says; sessions can't (cb.dashboard_only)
   const no = cb(['github', 'add', R, '--to', 'orch@macbook']);
   assert.equal(no.code, 1);
@@ -603,22 +603,55 @@ test('cb github: anyone lists; only Ahmed adds and removes; a new repo starts at
   assert.doesNotMatch(no.err, /PGAPPNAME|cb-web/, 'the refusal never names the way past it');
   assert.equal((await sql`select count(*)::int as n from cb.settings`)[0].n, 0);
 
+  // a new repo has no default project or seat (#4383): it names the flag to pass
+  const bare = cb(['github', 'add', R], AHMED);
+  assert.equal(bare.code, 1);
+  assert.match(bare.err, /name the project its PR cards go in: cb github add acme\/widgets --project <project> \(known: demo\)/);
+  const noLead = cb(['github', 'add', R, '--project', 'demo'], AHMED);
+  assert.equal(noLead.code, 1);
+  assert.match(noLead.err, /demo has no lead session to tell: cb github add acme\/widgets --project demo --to <session>/);
+  assert.equal((await sql`select count(*)::int as n from cb.settings`)[0].n, 0);
+
+  // --to defaults to the project's one lead
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p1','orch@pc','demo','lead'), ('mac','p2','B1@mac','demo','builder')`;
   const before = Date.now();
-  const yes = cb(['github', 'add', R], AHMED);
+  const yes = cb(['github', 'add', R, '--project', 'demo'], AHMED);
   assert.equal(yes.code, 0, yes.err);
   const s = await state(sql);
-  assert.deepEqual({ ...s, since: undefined }, { to: 'orch@shaltoot', project: 'ihop', last_ok: null, last_error: null, prs: {}, since: undefined });
+  assert.deepEqual({ ...s, since: undefined }, { to: 'orch@pc', project: 'demo', last_ok: null, last_error: null, prs: {}, since: undefined });
   assert.ok(Date.parse(s.since) >= before - 1000 && Date.parse(s.since) <= Date.now(), 'no backfill: it starts now');
+
+  // a watched repo added again needs no flag and changes only what was given
+  assert.equal(cb(['github', 'add', R], AHMED).code, 0);
+  assert.deepEqual(await state(sql), s, 'a bare re-add changes nothing');
+  assert.equal(cb(['github', 'add', R, '--to', 'orch@pc2'], AHMED).code, 0);
+  assert.deepEqual(await state(sql), { ...s, to: 'orch@pc2' }, 'a --to re-add changes only whom it tells');
+
+  // several leads: name one
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p3','orch2@mac','demo','lead')`;
+  const two = cb(['github', 'add', 'acme/two', '--project', 'demo'], AHMED);
+  assert.equal(two.code, 1);
+  assert.match(two.err, /demo has several leads \((orch2@mac, orch@pc|orch@pc, orch2@mac)\): say which one is told: cb github add acme\/two --project demo --to <session>/);
+
+  // the project defaults to the one of the pane running it
+  await sql`select cb.ensure_project('other')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p4','lead@pc','other','lead')`;
+  const pane = cb(['github', 'add', 'acme/from-pane'], { ...AHMED, HERDR_PANE_ID: 'p4', CB_MACHINE: 'pc' });
+  assert.equal(pane.code, 0, pane.err);
+  const fp = (await sql`select value from cb.settings where key = 'github:acme/from-pane'`)[0].value;
+  assert.deepEqual([fp.project, fp.to], ['other', 'lead@pc']);
+  assert.equal(cb(['github', 'remove', 'acme/from-pane'], AHMED).code, 0);
+
   assert.equal(cb(['github', 'add', 'not a repo'], AHMED).code, 1);
   for (const bad of ['../..', '.github/x', 'acme/..']) assert.match(cb(['github', 'add', bad], AHMED).err, /is not owner\/repo/, bad);
   assert.match(cb(['github', 'add', 'acme/worker-service', '--project', 'nope'], AHMED).err, /unknown project/);
-  assert.equal(cb(['github', 'add', 'acme/worker-service', '--to', 'orch@macbook'], AHMED).code, 0);
+  assert.equal(cb(['github', 'add', 'acme/worker-service', '--project', 'demo', '--to', 'orch@macbook'], AHMED).code, 0);
 
   await sql`update cb.settings set value = value || ${sql.json({ prs: { 3452: 9 }, last_error: { at: T0, message: 'gh: HTTP 401' } })} where key = ${'github:' + R}`;
   const list = cb(['github']);
   assert.equal(list.code, 0, list.err);
-  assert.match(list.out, /^acme\/widgets → orch@shaltoot \((ihop)\) · last poll never · since \S+ · last error: gh: HTTP 401 \(since 2026-11-11T10:00:00\.000Z\)\n {2}open PR cards: PR #3452 → card #9$/m);
-  assert.match(list.out, /^acme\/worker-service → orch@macbook \((ihop)\) · last poll never · since \S+$/m);
+  assert.match(list.out, /^acme\/widgets → orch@pc2 \((demo)\) · last poll never · since \S+ · last error: gh: HTTP 401 \(since 2026-11-11T10:00:00\.000Z\)\n {2}open PR cards: PR #3452 → card #9$/m);
+  assert.match(list.out, /^acme\/worker-service → orch@macbook \((demo)\) · last poll never · since \S+$/m);
 
   assert.match(cb(['github', 'remove', R]).err, /only Ahmed adds or removes watched repos: ask him/);
   assert.equal(cb(['github', 'remove', R], AHMED).code, 0);
