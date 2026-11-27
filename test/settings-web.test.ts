@@ -63,7 +63,7 @@ function webCalls(): { direct: Set<string>; called: Set<string> } {
   for (const f of files) {
     const text = readFileSync(f, 'utf8').replace(/export const NO_ACTOR = new Set\(\[[^\]]*\]\)/, '');
     for (const m of text.matchAll(/\brpc(?:<[^(]*?>)?\(\s*['"]([a-z_]+)['"]/g)) { direct.add(m[1]!); called.add(m[1]!); }
-    if (/\brpc(?:<[^(]*?>)?\(\s*[A-Za-z_]/.test(text)) for (const m of text.matchAll(/['"]([a-z_]+)['"]/g)) if (allowed.has(m[1]!)) called.add(m[1]!);
+    if (/(?<!function )\brpc(?:<[^(]*?>)?\(\s*[A-Za-z_]/.test(text)) for (const m of text.matchAll(/['"]([a-z_]+)['"]/g)) if (allowed.has(m[1]!)) called.add(m[1]!);
   }
   return { direct, called: new Set([...called].filter((f) => allowed.has(f) || direct.has(f))) };
 }
