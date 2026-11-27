@@ -716,3 +716,42 @@ test('text brief: a Next card at merge or qa says its stage; build work stays a 
   assert.match(lineOf(qa), / · demo · Checking on dev against the design$/);
   assert.match(lineOf(build), / · demo$/);
 });
+
+test('text brief: in progress, blocked and review cards say their stage; a blocked card says why (#4454)', async () => {
+  const sql = await setup();
+  const atReview = await addCard(sql); await toStage(sql, atReview, 'review');
+  const atBuild = await addCard(sql); await toStage(sql, atBuild, 'build');
+  await sql`update cb.tasks set status = 'in_progress', assignee = null where id in (${atReview}, ${atBuild})`;
+  const approval = await addCard(sql); await toStage(sql, approval, 'approval');
+  await sql`update cb.tasks set status = 'review' where id = ${approval}`;
+  const said = await addCard(sql); await toStage(sql, said, 'build');
+  await sql`select cb.task_move(${String(said)}, 'blocked', 'waits for the test key', 'orch@pc')`;
+  const noted = await addCard(sql); await toStage(sql, noted, 'build');
+  await sql`select cb.task_move(${String(noted)}, 'blocked', null, 'orch@pc')`;
+  // line breaks and terminal controls (ESC, BEL, DEL, C1 CSI) never reach the screen
+  await sql`select cb.log('demo', ${'first line\nsecond line\u0085\x1b\x07\x7f\x9b' + 'x'.repeat(200)}, ${String(noted)}, '{}', 'B1@mac')`;
+  const bare = await addCard(sql); await toStage(sql, bare, 'build');
+  await sql`select cb.task_move(${String(bare)}, 'blocked', null, 'orch@pc')`;
+  // a reason restated on a card already blocked (a note event, no status change) replaces the old one, in brief and tick;
+  // tick's "blocked since" stays the move into Blocked
+  const restated = await addCard(sql); await toStage(sql, restated, 'build');
+  await sql`select cb.task_move(${String(restated)}, 'blocked', 'reason A', 'orch@pc')`;
+  await sql`update cb.events set at = now() - interval '2 hours' where task_id = ${restated}`;
+  await sql`select cb.task_move(${String(restated)}, 'blocked', 'reason B', 'orch@pc')`;
+  const ticked = (await sql`select cb.tick('demo') as t`)[0].t.blocked.find((x: any) => Number(x.id) === restated);
+  assert.equal(ticked?.note, 'reason B');
+  const r = cb(['brief', 'demo']);
+  assert.equal(r.code, 0, r.err);
+  const lineOf = (id: number) => r.out.split('\n').find((l) => l.trim().startsWith(`#${id} `)) ?? '';
+  assert.match(lineOf(atReview), /^ {2}#\d+ P2 feature: c · demo · In review$/);
+  assert.match(lineOf(atBuild), / · demo · Building$/);
+  assert.match(lineOf(approval), / · demo · Waiting for your approval$/);
+  assert.match(lineOf(said), / · demo · Building — why: waits for the test key$/);
+  // no reason given with the move: the last note, on one line and cut short, never the status codes
+  assert.match(lineOf(noted), / · demo · Building — no reason given; last note: first line second line x+…$/);
+  assert.ok(lineOf(noted).length < 300, lineOf(noted));
+  assert.match(lineOf(bare), / · demo · Building — no reason given$/);
+  assert.match(lineOf(restated), / · demo · Building — why: reason B$/);
+  assert.doesNotMatch(r.out, /→|\p{Cc}(?<!\n)/u);
+  assert.equal(r.out.split('\n').filter((l) => /^x+/.test(l.trim()) || l.trim() === 'second line').length, 0, 'a note cannot add a line');
+});

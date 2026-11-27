@@ -727,9 +727,13 @@ declare tid bigint := cb.norm_id(id); s text := cb.norm_status(status);
 begin
   perform cb.set_actor(actor);
   perform set_config('cb.note', coalesce(note, ''), true);
+  -- #4454: the status asked for rides on the event, so a move to the status a card already has (its history writes a
+  -- note, not a moved event) still reads as a move there: cb move <id> blocked "<new why>" restates a blocked card's reason
+  perform set_config('cb.data', jsonb_build_object('to', s)::text, true);
   update cb.tasks t set status = s where t.id = tid;
   if not found then raise exception 'task #% not found', tid; end if;
   perform set_config('cb.note', '', true);
+  perform set_config('cb.data', '', true);
 end $$;
 
 create function cb.task_update(id text, fields jsonb, actor text default null)
@@ -1505,6 +1509,14 @@ begin
            t.epic_id, cb._waits_on(t.id) as waits_on,
            case when cb._pipeline(t.project) then t.stage end as stage,
            case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end as stage_words,
+           -- #4454: why a Blocked card waits when no question or card holds it. block_note = the note given with
+           -- cb move <id> blocked "<why>" on its newest move there, a restatement on a card already blocked included
+           -- (a note event task_move marks with to; cb.tick's blocked list reads the same); null when that move had no
+           -- note (the summary is then "<from> → blocked"). last_note = its newest note, shown in its place as a note
+           case when t.status = 'blocked' then (select nullif(e.summary, (e.data ->> 'from') || ' → blocked') from cb.events e
+                 where e.task_id = t.id and e.kind in ('moved', 'note') and e.data ->> 'to' = 'blocked' order by e.id desc limit 1) end as block_note,
+           case when t.status = 'blocked' then (select e.summary from cb.events e
+                 where e.task_id = t.id and e.kind = 'note' order by e.id desc limit 1) end as last_note,
            row_number() over (order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last,
                                        t.priority, t.rank, t.id) as o
       from cb.tasks t where t.status = s and (p is null or t.project = p) and (tg is null or tg = any(t.labels))
@@ -2357,12 +2369,15 @@ begin
      where t.status = 'in_progress' and (p is null or t.project = p) and t.assignee is not null and t.assignee <> 'ahmed'
        and t.assignee not in (select u.name from cb.users u) and (l.at is null or l.at < now() - interval '30 minutes')), '[]'),
     'blocked', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'since', coalesce(b.at, t.updated_at),
-        'note', b.summary, 'question', q.id, 'question_body', q.body, 'question_status', q.status, 'question_for', coalesce(q.assigned_to, 'ahmed'))
+        'note', r.summary, 'question', q.id, 'question_body', q.body, 'question_status', q.status, 'question_for', coalesce(q.assigned_to, 'ahmed'))
         order by coalesce(b.at, t.updated_at))
       from cb.tasks t
       left join cb.questions q on q.id = t.blocked_on
       left join lateral (select e.at, e.summary from cb.events e where e.task_id = t.id and e.kind = 'moved' and e.data ->> 'to' = 'blocked'
                           order by e.id desc limit 1) b on true
+      -- the reason as cb brief picks it (#4454): a reason restated on a card already blocked is newest; since stays the move
+      left join lateral (select e.summary from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note') and e.data ->> 'to' = 'blocked'
+                          order by e.id desc limit 1) r on true
      where t.status = 'blocked' and (p is null or t.project = p) and coalesce(b.at, t.updated_at) < now() - interval '1 hour'
        -- waiting on an open task blocker is by design, not stuck (a question it also holds on still shows)
        and (t.blocked_on is not null or cardinality(cb._waits_on(t.id)) = 0)), '[]'),
