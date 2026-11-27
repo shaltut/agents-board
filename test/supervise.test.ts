@@ -394,6 +394,37 @@ test('a name that failed to start is not retried for 10 minutes', async () => {
   assert.ok(d.memory.failedAt.has('sv-B1@macbook'));
 });
 
+// #4602: the cb squad trust check, as squad up applies it (homeTrust reads this machine's configs; here a stand-in)
+const untrusted = (name: string) => (l: { name: string; cwd: string; agent: string }, project: string) =>
+  l.name === name ? `${l.cwd} is not trusted for ${l.agent} yet (cfg): run once in your own terminal: cb squad trust ${project}` : null;
+
+test('a seat whose folder is not trusted is not started (no pane), logged failed and not retried for 10 minutes', async () => {
+  const { sql, sup } = await setup();
+  await card(sql);
+  const h = fakeHerdr();
+  const d = deps(sup, h.run, { trust: untrusted('sv-B1@macbook') });
+  const out = await tick(d);
+  assert.ok(out.some((l) => /^failed sv-B1@macbook: \S+ is not trusted for claude yet \(cfg\): run once in your own terminal: cb squad trust sv$/.test(l)), out.join('\n'));
+  assert.ok(!has(h.calls, 'tab', 'create') && !has(h.calls, 'agent', 'start'), out.join('\n')); // one card: B1 only, and no pane for it
+  const f = (await events(sql, 'failed')).filter((e) => e.data.session === 'sv-B1@macbook');
+  assert.deepEqual(f.map((e) => e.data.note), ['folder not trusted: cb squad trust']);
+  assert.ok(d.memory.failedAt.has('sv-B1@macbook'));
+  await tick({ ...d, now: Date.now() + 60_000 });
+  assert.equal((await events(sql, 'failed')).filter((e) => e.data.session === 'sv-B1@macbook').length, 1);
+});
+
+test('a restart onto a setting whose folder is not trusted is refused once and the seat keeps running', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 6, model: 'opus' });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const memory = deps(sup, h.run).memory;
+  const out = await tick(deps(sup, h.run, { memory, trust: untrusted('sv-B1@macbook') }));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.ok(out.some((l) => l.startsWith('sv-B1@macbook runs an older setting than its seat, but sonnet cannot start here')), out.join('\n'));
+  assert.equal((await events(sql, 'restart')).length, 1);
+});
+
 function runnerJson() {
   const dir = mkdtempSync(join(tmpdir(), 'cb-sup-'));
   const cfg = { ...JSON.parse(readFileSync('docs/ops/runner.example.json', 'utf8')), name: 'pc-test' };
