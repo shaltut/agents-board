@@ -346,6 +346,14 @@ const secretReads = [
   'cat .e""nv', "cat .en''v", 'cat .env*', 'cat .env?', 'cat {.env,x}', 'cat a,.env', 'cat .env.',
   'git show :.env', 'xargs -a .env echo', 'openssl rsa -in server.key', 'ssh-add ~/.ssh/id_rsa', 'Import-Csv .env',
   'while read l; do echo $l; done < .env', 'echo $(<.env)', 'tee x < .env',
+  // #4589: a line continuation splits a reader from its file, splits the name (bash joins .e\<newline>nv into .env, which
+  // also hid it from the cheap name test), or splits the reader; CRLF and PowerShell's ` too
+  'cat \\\n .env', 'cat .e\\\nnv', 'cp \\\n deploy/.env /tmp/x', 'ca\\\nt .env', 'cat \\\r\n .env', 'cat ~/.ss\\\nh/id_ed25519',
+  'Get-Content `\n .env', 'grep TOKEN \\\n  apps/api/.env',
+  // PR 83 review I1, here too: the raw lines are judged as well as the joined text (a PowerShell path's trailing \, a
+  // bash comment's trailing \)
+  'Get-ChildItem C:\\work\\\ncat .env', 'echo a\\\ncat .env', 'ls # x\\\ncat .env',
+  'Set-Location C:\\tmp\\\nGet-Content .env', 'Get-ChildItem C:\\work\\\r\ncat .env',
 ];
 const secretUses = [
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
@@ -355,6 +363,8 @@ const secretUses = [
   'cp .env.example .env', 'cp .env.example .env.local', 'cp .npmrc.example .npmrc', 'Copy-Item .env.example .env',
   'tar czf x.tgz --exclude=.env .', 'grep -rn foo --exclude=.env .', 'sed -n 1,20p docs/ops/.env.md', 'cat src/.env.d.ts',
   'cat README.md; echo done > .env', 'cat a.txt && rm .env',
+  // #4589: continued uses stay uses: the template copy, --env-file, a look-alike
+  'cp .env.example \\\n  .env', 'node \\\n  --env-file=.env server.js', 'cat \\\n  .env.example',
 ];
 test('secret files (#4347): no seat reads one into its context; using one where it lives, and look-alikes, pass', () => {
   // the rule is the same for every role: the whole list for a builder, a sample for the rest (review M5: 7 x all is 18 s)
