@@ -4,7 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,12 +15,14 @@ import { LIVE_STEPS, cases, installedFeatures, runProbes, stepsFromFile } from '
 const BOARD = fileURLToPath(new URL('..', import.meta.url));
 const GUARD = join(BOARD, 'kit', 'guard');
 const root = mkdtempSync(join(tmpdir(), 'cb-live-check-'));
+// a deny root no test folder is under (setup refuses to run with none set, PR 108 r2 R2)
+const SAFE = { ...process.env, CB_SCRATCH_DENY: join(root, 'client-work'), CB_SCRATCH_ALLOW: '' };
 after(() => rmSync(root, { recursive: true, force: true }));
 const git = (dir: string, ...a: string[]) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
 
 test('setup: a synthetic scratch repo with one commit, the decoy .env ignored, the squad file beside it (#4612)', () => {
   const dir = join(root, 'scratch');
-  const r = setup({ dir, machine: 'box', board: BOARD });
+  const r = setup({ dir, machine: 'box', board: BOARD, env: SAFE });
   assert.equal(r.squadPath, `${dir}.squad.json`);
   assert.equal(git(dir, 'rev-list', '--count', 'HEAD').stdout.trim(), '1');
   assert.equal(git(dir, 'status', '--porcelain').stdout, '', 'clean: .env is ignored');
@@ -33,7 +35,7 @@ test('setup: a synthetic scratch repo with one commit, the decoy .env ignored, t
   // a folder that is not empty is refused, and nothing is written into it
   mkdirSync(join(root, 'busy'));
   writeFileSync(join(root, 'busy', 'x.txt'), 'x');
-  assert.throws(() => setup({ dir: join(root, 'busy'), machine: 'box', board: BOARD }), /not empty/);
+  assert.throws(() => setup({ dir: join(root, 'busy'), machine: 'box', board: BOARD, env: SAFE }), /not empty/);
   assert.ok(!existsSync(join(root, 'busy', '.git')));
 });
 
@@ -50,7 +52,7 @@ test('the squad file passes the board\'s own squad_set (agents and models includ
 
 test('part A against this checkout\'s guard: every probe passes or names the PR it needs (#4612)', () => {
   const seat = join(root, 'probe-seat');
-  setup({ dir: seat, machine: 'box', board: BOARD });
+  setup({ dir: seat, machine: 'box', board: BOARD, env: SAFE });
   const rows = runProbes({ guard: GUARD, seat, agents: ['codex', 'agy', 'opencode'] });
   assert.equal(rows.length, cases().length);
   // #4652: agy's edit tool is not fenced yet; the checklist reports it as a fail until that fix lands
@@ -80,7 +82,7 @@ test('K1: a scratch folder inside a git repo, or under a denied root and no allo
   const host = join(root, 'host-repo');
   mkdirSync(join(host, 'sub'), { recursive: true });
   git(host, 'init', '-q');
-  const env = { ...process.env, CB_SCRATCH_DENY: '', CB_SCRATCH_ALLOW: '' };
+  const env = { ...process.env, CB_SCRATCH_DENY: join(root, 'client-work'), CB_SCRATCH_ALLOW: '' };
   assert.match(placeProblem(join(host, 'scratch'), env) ?? '', /inside the git repo/);
   assert.match(placeProblem(join(host, 'sub', 'new', 'deeper'), env) ?? '', /inside the git repo/, 'a folder that does not exist yet: its nearest existing parent is asked');
   assert.throws(() => setup({ dir: join(host, 'scratch'), machine: 'box', board: BOARD, env }), /inside the git repo/);
@@ -95,9 +97,42 @@ test('K1: a scratch folder inside a git repo, or under a denied root and no allo
   assert.equal(placeProblem(join(root, 'workshop', 'scratch'), denied), null, 'a sibling whose name starts the same is not under it');
 });
 
+// PR 108 r2 R2: with no deny list set, setup cannot know where client work is, so it refuses (the card's paste block sets
+// it); R3/R4: a git answer other than "not a git repository" (dubious ownership, inside .git, git missing) refuses too;
+// R6: a deny root is compared through real paths, so a link to it (a junction on Windows) is under it
+test('K1 r2: an unset CB_SCRATCH_DENY refuses; a git error refuses; a link into a denied root is under it (#4612)', () => {
+  const plain = { ...process.env };
+  delete plain.CB_SCRATCH_DENY;
+  assert.match(placeProblem(join(root, 'free2', 'scratch'), plain) ?? '', /CB_SCRATCH_DENY is not set/);
+  assert.match(placeProblem(join(root, 'free2', 'scratch'), { ...plain, CB_SCRATCH_DENY: ' ' }) ?? '', /CB_SCRATCH_DENY is not set/);
+  assert.throws(() => setup({ dir: join(root, 'free2', 'scratch'), machine: 'box', board: BOARD, env: plain }), /CB_SCRATCH_DENY is not set/);
+  const env = { ...process.env, CB_SCRATCH_DENY: join(root, 'client-work'), CB_SCRATCH_ALLOW: '' };
+  const host = join(root, 'host-r3');
+  mkdirSync(host);
+  git(host, 'init', '-q');
+  assert.match(placeProblem(join(host, '.git', 'scratch'), env) ?? '', /git/, 'inside .git is inside the repo');
+  assert.match(placeProblem(join(root, 'free3'), env, process.platform, 'git-that-does-not-exist') ?? '', /could not ask git/);
+  const work = join(root, 'work-r6');
+  mkdirSync(work);
+  const link = join(root, 'link-r6');
+  symlinkSync(work, link, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.match(placeProblem(join(link, 'scratch'), { ...env, CB_SCRATCH_DENY: work }) ?? '', /CB_SCRATCH_DENY/);
+  assert.match(placeProblem(join(work, 'scratch'), { ...env, CB_SCRATCH_DENY: link }) ?? '', /CB_SCRATCH_DENY/);
+});
+
+// PR 108 r2 R7: the parents setup made for a new folder go too when it fails
+test('K5 r2: a failed setup removes the parent folders it made, and only those (#4612)', () => {
+  const env = { ...process.env, CB_SCRATCH_DENY: join(root, 'client-work'), CB_SCRATCH_ALLOW: '' };
+  const kept = join(root, 'r7');
+  mkdirSync(kept);
+  assert.throws(() => setup({ dir: join(kept, 'a', 'b', 'scratch'), machine: 'box', board: BOARD, env, gitBin: 'git-that-does-not-exist' }), /git/);
+  assert.ok(existsSync(kept), 'a folder that was there stays');
+  assert.deepEqual(readdirSync(kept), [], 'a and a/b, which setup made, are gone');
+});
+
 // K5: an existing squad file is never overwritten, and a setup that fails removes only what it made
 test('K5: an existing squad file is refused; a failed setup leaves no half-made folder (#4612)', () => {
-  const env = { ...process.env, CB_SCRATCH_DENY: '', CB_SCRATCH_ALLOW: '' };
+  const env = { ...process.env, CB_SCRATCH_DENY: join(root, 'client-work'), CB_SCRATCH_ALLOW: '' };
   const dir = join(root, 'k5');
   writeFileSync(`${dir}.squad.json`, '{"keep":true}\n');
   assert.throws(() => setup({ dir, machine: 'box', board: BOARD, env }), /squad\.json already exists/);
@@ -125,5 +160,17 @@ test('K3: installedFeatures probes the installed Codex shim: own tools outside a
   return i.tool_input.command === 'python' && seat ? deny('python opens a session that Codex write_stdin types into') : process.stdout.write('{}');
 });\n`);
   assert.deepEqual(installedFeatures(fake), { 'PR 96': true, 'PR 104': true });
-  assert.deepEqual(installedFeatures(GUARD), { 'PR 96': false, 'PR 104': false }, 'this checkout predates both');
+  // and one that answers as a guard from before both: every tool denied in or out of a seat, python allowed
+  const old = join(root, 'old-guard');
+  mkdirSync(old);
+  writeFileSync(join(old, 'shim-codex.mjs'), `let s = ''; process.stdin.on('data', (d) => (s += d)).on('end', () => {
+  const i = JSON.parse(s);
+  if (i.tool_name !== 'Bash') return process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'unrecognized tool' } }));
+  return process.stdout.write('{}');
+});\n`);
+  assert.deepEqual(installedFeatures(old), { 'PR 96': false, 'PR 104': false });
+  // PR 108 r2 R5: this checkout's own guard is asked too, but only for an answer: which PRs it has changes as they merge
+  const mine = installedFeatures(GUARD);
+  assert.deepEqual(Object.keys(mine), ['PR 96', 'PR 104']);
+  for (const v of Object.values(mine)) assert.equal(typeof v, 'boolean');
 });

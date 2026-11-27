@@ -7,9 +7,12 @@
 // Where it may go (PR 108 review K1): never inside a git repo (a client's files could reach a seat), and never under a
 // root in CB_SCRATCH_DENY unless under one in CB_SCRATCH_ALLOW (each a path list, ; on Windows, : elsewhere). The roots
 // are the owner's, set in his terminal, so no name or path of his is in this repo. An existing <dir>.squad.json is never
-// overwritten, and a setup that fails removes what it made (K5).
+// overwritten, and a setup that fails removes what it made, parent folders included (K5, r2 R7). Review r2: an unset
+// CB_SCRATCH_DENY refuses (R2), any git answer but "not a git repository" refuses (R3/R4: dubious ownership, inside
+// .git, no git), and both sides are compared through real paths too, so a junction, link or 8.3 name of a denied root is
+// under it (R6).
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -50,23 +53,37 @@ function git(dir, args, bin = 'git', env = process.env) {
 }
 
 const roots = (v) => String(v ?? '').split(delimiter).map((s) => s.trim()).filter(Boolean).map((s) => resolve(s));
-const under = (p, root, win) => {
+const under1 = (p, root, win) => {
   const rel = relative(win ? root.toLowerCase() : root, win ? p.toLowerCase() : p);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 };
+// a path as given and through the real path of its nearest existing folder (the rest appended as given)
+const forms = (p) => {
+  let near = p;
+  while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
+  try { return [...new Set([p, join(realpathSync.native(near), relative(near, p))])]; } catch { return [p]; }
+};
+const under = (p, root, win) => forms(p).some((a) => forms(root).some((b) => under1(a, b, win)));
 
 /** Why the scratch repo may not go at dir (K1), or null. A folder that does not exist yet is judged by its nearest
  *  existing parent. */
-export function placeProblem(dir, env = process.env, platform = process.platform) {
+export function placeProblem(dir, env = process.env, platform = process.platform, gitBin = 'git') {
   const p = resolve(dir), win = platform === 'win32';
   let near = p;
   while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
   // the repo's own variables would answer for another repo
   const gitEnv = { ...env };
   for (const k of Object.keys(gitEnv)) if (/^GIT_(?:DIR|WORK_TREE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)$/i.test(k)) delete gitEnv[k];
-  const top = spawnSync('git', ['-C', near, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', windowsHide: true, env: gitEnv });
+  // safe.directory=*: a repo another user owns still answers (r2 R3), instead of failing as if it were none
+  const top = spawnSync(gitBin, ['-c', 'safe.directory=*', '-C', near, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', windowsHide: true, env: gitEnv });
+  if (top.error) return `could not ask git whether ${p} is inside a repo (${top.error.code ?? top.error.message}): install git or put it on PATH`;
   if (top.status === 0 && top.stdout.trim()) return `${p} is inside the git repo ${top.stdout.trim()}: make the scratch repo outside any repo, so no other project's files sit where a seat works`;
-  const deny = roots(env.CB_SCRATCH_DENY).find((r) => under(p, r, win));
+  if (!/not a git repository/i.test(top.stderr ?? '')) {
+    return `git could not say whether ${p} is outside every repo (${String(top.stderr ?? '').trim().split('\n')[0].slice(0, 160) || `exit ${top.status}`}): make the scratch repo in a plain folder outside any repo`;
+  }
+  const denied = roots(env.CB_SCRATCH_DENY);
+  if (!denied.length) return 'CB_SCRATCH_DENY is not set: name the folders that hold client work in it (a path list, ; on Windows), so setup can keep the scratch repo out of them';
+  const deny = denied.find((r) => under(p, r, win));
   if (deny && !roots(env.CB_SCRATCH_ALLOW).some((r) => under(p, r, win))) {
     return `${p} is under ${deny}, which CB_SCRATCH_DENY names (client work), and under no root CB_SCRATCH_ALLOW names: make the scratch repo elsewhere`;
   }
@@ -84,6 +101,9 @@ export function setup(o) {
   if (existsSync(squadPath)) throw new Error(`${squadPath} already exists: remove it or give another folder (setup never overwrites one)`);
   const why = placeProblem(repo, env);
   if (why) throw new Error(why);
+  // the highest folder this run makes (r2 R7): a failure removes it, so no empty parents are left
+  let made = repo;
+  while (!existsSync(dirname(made)) && dirname(made) !== made) made = dirname(made);
   try {
     for (const [path, text] of Object.entries(FILES)) {
       mkdirSync(dirname(join(repo, path)), { recursive: true });
@@ -99,7 +119,7 @@ export function setup(o) {
   } catch (e) {
     // only what this run made: the folder if it made it, else what it wrote into the empty one
     if (existed) for (const f of readdirSync(repo)) rmSync(join(repo, f), { recursive: true, force: true });
-    else rmSync(repo, { recursive: true, force: true });
+    else rmSync(made, { recursive: true, force: true });
     throw e;
   }
   return { repo, squadPath };

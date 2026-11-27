@@ -22,7 +22,7 @@ git pull --ff-only
 
 # 1. scratch repo and squad file (synthetic; change the models to what your CLIs offer). setup refuses a folder inside
 #    any git repo, and one under a root in CB_SCRATCH_DENY unless it is under one in CB_SCRATCH_ALLOW (; between paths):
-#    name the folders that hold client work there, in this terminal
+#    name every folder that holds client work there, on every drive, in this terminal (it refuses to run without it)
 $env:CB_SCRATCH_DENY = '<folder with client repos>'; $env:CB_SCRATCH_ALLOW = '<a folder under it that is yours>'
 node kit/live-check/setup.mjs --dir <scratch> --machine <machine> --board (Get-Location).Path --workspace "Live Check" `
   --codex-model gpt-6.1-sol --agy-model gemini-3-pro --opencode-model anthropic/claude-opus-5-5
