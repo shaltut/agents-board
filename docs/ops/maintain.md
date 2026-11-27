@@ -547,6 +547,17 @@ The save gate's list is `cb._agents_main()` in `db/schema.sql`, the launch gate'
 
 An OpenCode seat's server port comes from its name (41000-48999, `CB_OPENCODE_PORT`).
 
+**No interactive sessions in a Codex seat (#4626).** Codex's `exec_command` can leave a process running, and
+`write_stdin` then types into it without any hook, so the guard never sees what a shell, REPL, database client, editor,
+pager or remote login opened that way runs next. In a Codex seat the guard therefore refuses a command that opens one
+(`bash`, `bash -s`, `sudo -s`, `python`, `node -i`, `psql`, `sqlite3 app.db`, `ssh host`, `ssh host bash`, `vim`,
+`less`, `tmux`, `docker exec -it c sh`, `kubectl exec -i pod -- sh`, `xargs`, `read`, `cat | sh`, `Read-Host`, ...),
+inside `bash -c "..."`, `$(...)` and the like too, whether or not Codex asked for a TTY. The one-shot forms stay
+allowed: `bash -c "..."`, `python x.py`, `python -c`, `psql -c`, `ssh -n host cmd`, `docker exec c ls`, or input from
+`< file`, a heredoc or a pipe. Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
+allowed and `view_image` is a read with the secret-file rule; `spawn_agent` stays blocked until the live check (#4612)
+shows a sub-agent's own tools reach the hook.
+
 ## Squad file: protected branches
 
 A squad may list the branches its sessions must never push to: `"protected": ["development", "staging",

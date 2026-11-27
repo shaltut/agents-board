@@ -1104,10 +1104,380 @@ Ask on Agents Board instead, then KEEP WORKING on something else:
 // allowAsk?; agent? (CB_AGENT); paths? (an edit's targets, editTargets) }. Returns { allow: true } or { allow: false, kind, reason }: kind 'dangerous' (a dangerous command or a
 // CB_PROTECTED_BRANCHES push), 'role' (a role rule), 'input' (unreadable input, unknown tool or role) or 'ask'. The
 // shim words the reason for its CLI. It fails closed: anything it cannot read or decide blocks.
+// #4626: an interactive session in a board seat. Codex's exec_command can leave a process running, and write_stdin then
+// types into it with no hook at all (rust-v0.160.0), so a shell, REPL, database client, editor, pager or remote login
+// opened through an allowed command would run, unjudged, whatever the seat types next: a full fence bypass. Claude's Bash
+// has no stdin, so a seat gets the same here: a command that reads the seat's input as commands is refused, and its
+// one-shot form (bash -c, python x.py, psql -c, ssh -n host cmd, input from < file or a heredoc) is allowed. Only for
+// a shim that says the tool has a stdin (stdin: true, Codex), and only in a role seat. What counts:
+// - in a pipeline's first stage, with no < redirect, heredoc or herestring, not in a loop whose input is redirected or
+//   piped: a shell with no -c or script (sh -, bash -s, sudo -s, su), an interpreter with no code or script (python,
+//   node -i, perl, php -a), a REPL, client or debugger (psql, mysql, sqlite3 app.db, redis-cli, gdb), an editor or pager
+//   (vim, less, man), a multiplexer (tmux, script), a remote login (ssh host, ssh host bash, telnet, nc), docker or
+//   kubectl exec/run/attach with -i (the command inside judged the same way), xargs and awk with no input file, and the
+//   shell's read, mapfile and select;
+// - cat, tee, head and other pass-throughs reading that input into a stage that runs it (cat | sh);
+// - anywhere: /dev/tty, and a PowerShell console read (Read-Host, [Console]::ReadLine, $input piped on);
+// - all of this inside bash -c "...", pwsh -Command "...", cmd /c "...", su -c, $(...) and backticks.
+// One pass over the words, and an inner command is a substring read at most SESSION_DEPTH times deeper: linear. Fail
+// closed: an unknown option to docker or kubectl -i, a docker run -i, or a nesting past the limit counts as a session.
+const SESSION_DEPTH = 4;
+const POSIX_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'yash', 'fish', 'csh', 'tcsh']);
+const PYTHON = /^(?:python[\d.]*|py|pypy[\d.]*|ipython[\d.]*)$/;
+// Interpreters: s = short options, l = long ones; code ends the options with code or an exit (a one-shot), inter makes it
+// interactive, arg takes a value. A first word that is not an option is a script (one-shot); '-' is the input (a session).
+const SESSION_INTERP = {
+  python: { s: { code: 'cmVh', inter: 'i', arg: 'WXQ' }, l: { code: ['--version', '--help'], arg: ['--check-hash-based-pycs'] } },
+  node: { s: { code: 'epcvh', inter: 'i', arg: 'rC' }, l: { code: ['--eval', '--print', '--test', '--run', '--check', '--version', '--help', '--v8-options'], inter: ['--interactive'], arg: ['--require', '--import', '--loader', '--experimental-loader', '--conditions', '--input-type', '--title', '--env-file'] } },
+  perl: { s: { code: 'eEvhV', inter: 'd', arg: '' }, l: { code: ['--version', '--help'] } },
+  ruby: { s: { code: 'evh', inter: '', arg: 'rIC' }, l: { code: ['--version', '--help'] } },
+  php: { s: { code: 'rfvhimlS', inter: 'a', arg: 'cdz' }, l: { code: ['--version', '--help', '--run', '--file'], inter: ['--interactive'] } },
+  lua: { s: { code: 'ev', inter: 'i', arg: 'l' }, l: {} },
+  julia: { s: { code: 'eEvh', inter: 'i', arg: 'pJt' }, l: { code: ['--eval', '--print', '--version', '--help'], inter: ['--interactive'], arg: ['--project', '--threads'] } },
+  r: { s: { code: 'efh', inter: '', arg: '' }, l: { code: ['--version', '--help', '--file'] } },
+  expect: { s: { code: 'cfv', inter: 'i', arg: '' }, l: {} },
+};
+const INTERP_OF = (n) => (PYTHON.test(n) ? 'python' : n === 'nodejs' ? 'node' : n === 'luajit' ? 'lua' : n === 'rscript' ? null : SESSION_INTERP[n] ? n : null);
+// always a session, unless --version or --help comes first
+const SESSION_ALWAYS = new Set(['tmux', 'screen', 'byobu', 'script', 'irb', 'pry', 'ghci', 'jshell', 'erl', 'scala', 'sbcl', 'guile', 'racket', 'clj',
+  'clojure', 'ocaml', 'utop', 'swipl', 'telnet', 'mosh', 'rlogin', 'ftp', 'lftp', 'vim', 'vi', 'nvim', 'view', 'vimdiff', 'nano', 'pico', 'micro',
+  'joe', 'ed', 'ex', 'less', 'more', 'most', 'pg', 'man', 'info', 'mc', 'lldb', 'pdb', 'mongo', 'bc', 'dc']);
+// clients: a session unless one of these options (a query, a file, an exit) is given; '-' as a value reads the input
+const SESSION_CLIENT = {
+  psql: /^(?:-[A-Za-z]*[cfl]|--command|--file|--list|-V|--version|--help|-\?)(?:=|$)/,
+  mysql: /^(?:-e.*|--execute|-V|--version|--help|-\?)(?:=|$)/,
+  mariadb: /^(?:-e.*|--execute|-V|--version|--help|-\?)(?:=|$)/,
+  mongosh: /^(?:--eval|-f|--file|--version|--help|.*\.js)(?:=|$)/,
+  sqlcmd: /^(?:-Q|-i|-\?|--version)(?:=|$)/,
+  cqlsh: /^(?:-e|--execute|-f|--file|--version|--help)(?:=|$)/,
+  'clickhouse-client': /^(?:-q|--query|--queries-file|--version|--help)(?:=|$)/,
+  emacs: /^(?:--batch|-batch|--script|-script|--version|--help)(?:=|$)/,
+  gdb: /^(?:-batch|--batch|--version|--help)(?:=|$)/,
+  sftp: /^-b$/,
+  nc: /^-[A-Za-z]*z/, ncat: /^-[A-Za-z]*z/, netcat: /^-[A-Za-z]*z/,
+};
+// one-shot once a word that is not an option follows (the SQL, the command); options here take a value
+const SESSION_POSITIONAL = {
+  sqlite3: { need: 2, arg: new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-init', '-mmap']), exit: /^-(?:version|help)$/ },
+  duckdb: { need: 2, arg: new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-init']), exit: /^-(?:version|help|c)$/ },
+  'redis-cli': { need: 1, arg: new Set(['-h', '-p', '-s', '-a', '-u', '-n', '-r', '-i', '-d', '--user', '--pass', '--eval']), exit: /^--(?:version|help|eval)$/ },
+};
+// a wrapper runs the next command: opts take a value; shell = options that open a shell when no command follows
+const SESSION_WRAP = {
+  sudo: { opts: new Set(['-u', '-g', '-C', '-D', '-p', '-r', '-t', '-U', '-T', '-R', '-h', '--user', '--group', '--chdir', '--prompt', '--role', '--type', '--other-user', '--command-timeout', '--chroot', '--close-from', '--host']), shell: /^-[A-Za-z]*[si]|^--(?:shell|login)$/ },
+  doas: { opts: new Set(['-u', '-C']), shell: /^-[A-Za-z]*s/ },
+  env: { opts: new Set(['-u', '-C', '--unset', '--chdir']) },
+  nohup: {}, command: { lookup: /^-[A-Za-z]*[vV]/ }, builtin: {}, exec: { opts: new Set(['-a']) }, time: { opts: new Set(['-f', '-o', '--format', '--output']) },
+  nice: { opts: new Set(['-n', '--adjustment']) }, ionice: { opts: new Set(['-c', '-n', '-t', '--class', '--classdata']) },
+  timeout: { opts: new Set(['-s', '-k', '--signal', '--kill-after']), positional: 1 }, gtimeout: { opts: new Set(['-s', '-k', '--signal', '--kill-after']), positional: 1 },
+  stdbuf: { opts: new Set(['-i', '-o', '-e']) }, setsid: {}, chronic: {}, unbuffer: {}, winpty: {}, busybox: {}, coproc: {},
+};
+const LOOP_START = new Set(['while', 'until', 'for', 'select']);
+const PASS_THROUGH = new Set(['cat', 'tac', 'tee', 'dd', 'head', 'tail', 'tr', 'cut', 'sed', 'grep', 'sort', 'uniq', 'base64', 'xxd', 'rev', 'nl', 'fold', 'paste']);
+const PASS_FILES = new Set(['cat', 'tac', 'base64', 'xxd', 'rev', 'nl', 'sort', 'uniq', 'fold', 'paste']); // every plain word is a file
+const RUNS_INPUT = new Set([...POSIX_SHELLS, 'pwsh', 'powershell', 'cmd', 'node', 'nodejs', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'luajit', 'julia', 'r',
+  'rscript', 'iex', 'invoke-expression', 'xargs', 'awk', 'gawk', 'mawk', 'nawk', 'source', '.', 'psql', 'mysql', 'mariadb', 'sqlite3', 'sqlcmd',
+  'mongosh', 'redis-cli', 'ssh', 'su', 'sudo', 'doas', 'expect']);
+const STDIN_DEV = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
+const PS_READ = /(?<![\w-])read-host(?![\w-])|\[(?:system\.)?console\]::(?:readline|readkey|read|in|openstandardinput)(?!\w)|\$host\.ui\.(?:readline|rawui\.readkey)|\$input\s*\||\bin\s+\$input(?!\w)/i;
+// a segment's words, quote-aware; ( ) and a backtick end a piece (a new command position: $(...), (...), `...`)
+const SESSION_TOKEN = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\[\s\S]|[()`]|\s+|[^\s()`"'\\]+/g;
+
+const SESSION = (what) => `${what} opens an interactive session, and what a seat types into it later (Codex write_stdin) is never checked by the guard (#4626). Run it one-shot instead: bash -c "...", python x.py or -c, psql -c, ssh -n host cmd, or give it its input with < file or a heredoc`;
+/** The interactive session a command opens, as a short name, or null (see above). */
+export function stdinSession(command) {
+  return sessionIn(String(command ?? ''), false, 0);
+}
+
+function sessionIn(cmd, fed, depth) {
+  if (depth > SESSION_DEPTH) return 'a command nested deeper than the guard reads';
+  const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ');
+  if (PS_READ.test(text.replace(/'[^']*'/g, "''").replace(/"(?:\\.|[^"\\$`])*"/g, '""'))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
+  const segs = [...text.matchAll(SEGMENT)].map((m) => ({ start: m.index, end: m.index + m[0].length, s: m[0] }));
+  const n = segs.length;
+  const piped = new Uint8Array(n), joined = new Uint8Array(n), redir = new Uint8Array(n), loopFed = new Uint8Array(n);
+  const pieces = segs.map((g) => piecesOf(g.s));
+  const lead = (k) => { const p = pieces[k][0]; if (!p) return ''; const i = p.w.findIndex((x) => !ASSIGNMENT.test(x)); return i < 0 ? '' : p.w[i]; };
+  const stack = [];
+  for (let k = 0; k < n; k++) {
+    const gap = k ? text.slice(segs[k - 1].end, segs[k].start) : '';
+    // | or |& carries the pipeline on (a blank stage before a newline too); & right after > or < is 2>&1, not a new command
+    joined[k] = k > 0 && (/^\|&?$/.test(gap) || (gap === '&' && /[<>]\s*$/.test(segs[k - 1].s)) || (/^\n+$/.test(gap) && !segs[k - 1].s.trim() && joined[k - 1]));
+    piped[k] = joined[k] && (gap !== '&' || piped[k - 1]);
+    redir[k] = /</.test(segs[k].s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '').replace(/<\(/g, ''));
+    const w0 = lead(k);
+    if (LOOP_START.has(w0)) stack.push(k);
+    else if (w0 === 'done' && stack.length) { const j = stack.pop(); loopFed[j] = redir[k] || piped[j]; }
+  }
+  const loops = [];
+  let feeding = 0, pass = null;
+  for (let k = 0; k < n; k++) {
+    const w0 = lead(k);
+    if (LOOP_START.has(w0)) { loops.push(loopFed[k]); feeding += loopFed[k]; }
+    const here = fed || piped[k] || redir[k] || feeding > 0;
+    if (w0 === 'done' && loops.length) feeding -= loops.pop();
+    if (!joined[k]) pass = null;
+    for (const p of pieces[k]) {
+      for (const q of p.inner) { const r = sessionIn(q, here, depth + 1); if (r) return r; }
+      if (p.w.some((x) => x === '/dev/tty')) return '/dev/tty';
+      if (!here && p.w.some((x) => STDIN_DEV.test(x))) return p.w.find((x) => STDIN_DEV.test(x));
+      const at = commandAt(p);
+      if (at.shell) { if (!here) return at.shell; continue; }
+      if (at.i < 0) continue;
+      const name = cmdName(p.raw[at.i]), args = p.w.slice(at.i + 1);
+      if (pass && (RUNS_INPUT.has(name) || PYTHON.test(name))) return `${pass} | ${name}`;
+      if (!here && !joined[k] && PASS_THROUGH.has(name) && passReads(name, args)) pass = name;
+      const r = judge(name, args, here, depth);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+// pieces of one segment: { raw, w, inner }; inner holds the text of a double-quoted "$(...)" or "`...`" (a command too)
+function piecesOf(seg) {
+  const out = [];
+  let cur = { raw: [], w: [], inner: [] }, word = null;
+  const endWord = () => { if (word !== null) { cur.raw.push(word); cur.w.push(unquote(word)); word = null; } };
+  const endPiece = () => { endWord(); if (cur.raw.length || cur.inner.length) out.push(cur); cur = { raw: [], w: [], inner: [] }; };
+  for (const [t] of seg.matchAll(SESSION_TOKEN)) {
+    if (/^\s/.test(t)) endWord();
+    else if (t === '(' || t === ')' || t === '`') endPiece();
+    else {
+      if (t[0] === '"' && /\$\(|`/.test(t)) cur.inner.push(t.slice(1, t.endsWith('"') && t.length > 1 ? -1 : undefined).replace(/^[^]*?(?:\$\(|`)/, '').replace(/[)`][^)`]*$/, ''));
+      word = (word ?? '') + t;
+    }
+  }
+  endPiece();
+  return out;
+}
+
+// the index of a piece's command word, past VAR=x, shell keywords and wrappers (sudo -u x, env -u X, timeout 5, nohup);
+// { shell } when a wrapper opens a shell with no command (sudo -s, sudo -i, doas -s); i = -1 when nothing runs
+function commandAt({ raw, w }) {
+  let i = 0, shell = null;
+  while (i < w.length) {
+    const lower = cmdName(raw[i]);
+    if (ASSIGNMENT.test(w[i]) || SHELL_KEYWORD.has(lower) || LOOP_START.has(lower) && lower !== 'select' || w[i] === '$' || w[i] === '{' || w[i] === '}') { i++; continue; }
+    const spec = SESSION_WRAP[lower];
+    if (!spec) return { i };
+    i++;
+    let positional = spec.positional ?? 0;
+    for (; i < w.length; i++) {
+      const a = w[i];
+      if (a === '--') { i++; break; }
+      if (lower === 'env' && ASSIGNMENT.test(a)) continue;
+      if (!a.startsWith('-') || a === '-') { if (positional > 0) { positional--; continue; } break; }
+      if (spec.lookup?.test(a)) return { i: -1 };
+      if (spec.shell?.test(a)) shell = `${lower} ${a}`;
+      if (spec.opts?.has(a)) i++;
+    }
+  }
+  return shell ? { shell, i: -1 } : { i: -1 };
+}
+
+// does a pass-through stage read its input (no file given)?
+function passReads(name, args) {
+  if (name === 'tee') return true;
+  if (name === 'dd') return !args.some((a) => /^if=/.test(a));
+  if (PASS_FILES.has(name)) return !args.some((a) => a !== '-' && !a.startsWith('-')) || args.includes('-');
+  return true; // grep, sed, head ...: their first word may be a pattern or a count, so read as input (fail closed)
+}
+
+// an interpreter's options: 'session', 'oneshot', or the index of its script word
+function interpMode(spec, args) {
+  let inter = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-') return 'session';
+    if (a === '--') return i + 1 < args.length && !inter ? 'oneshot' : 'session';
+    if (a.startsWith('--')) {
+      const name = a.split('=')[0];
+      if (spec.l.inter?.includes(name)) inter = true;
+      else if (spec.l.code?.includes(name)) return inter ? 'session' : 'oneshot';
+      else if (spec.l.arg?.includes(name) && !a.includes('=')) i++;
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      for (let c = 1; c < a.length; c++) {
+        const ch = a[c];
+        if (spec.s.inter.includes(ch)) inter = true;
+        else if (spec.s.code.includes(ch)) return inter ? 'session' : 'oneshot';
+        else if (spec.s.arg.includes(ch)) { if (c === a.length - 1) i++; break; }
+      }
+      continue;
+    }
+    return inter ? 'session' : 'oneshot'; // the script
+  }
+  return 'session';
+}
+
+const isI = (a) => /^-[A-Za-z]*i[A-Za-z]*$/.test(a) && !a.startsWith('--') || /^--interactive(?:=true)?$/.test(a) || /^--stdin(?:=true)?$/.test(a);
+// docker or podman exec/compose exec: past its options to the command inside; unknown option = null (fail closed)
+function innerAfter(args, from, valued, flags) {
+  let i = from;
+  for (; i < args.length && args[i].startsWith('-'); i++) {
+    const a = args[i];
+    if (a === '--') { i++; break; }
+    const name = a.split('=')[0];
+    if (valued.has(name)) { if (!a.includes('=')) i++; continue; }
+    if (flags.test(a)) continue;
+    return null;
+  }
+  return i < args.length ? args.slice(i + 1).join(' ') : null; // args[i] is the container or service
+}
+const DOCKER_EXEC_ARG = new Set(['-e', '--env', '--env-file', '-u', '--user', '-w', '--workdir', '--detach-keys']);
+const DOCKER_EXEC_FLAG = /^(?:-[ditT]+|--detach|--interactive(?:=true)?|--tty|--privileged)$/;
+const COMPOSE_EXEC_ARG = new Set(['-e', '--env', '-u', '--user', '-w', '--workdir', '--index']);
+const COMPOSE_EXEC_FLAG = /^(?:-[dT]+|--detach|--no-TTY|--no-tty|--privileged|--dry-run)$/;
+const COMPOSE_RUN_ARG = new Set([...COMPOSE_EXEC_ARG, '--name', '--entrypoint', '-p', '--publish', '-v', '--volume', '-l', '--label', '--pull', '--cap-add', '--cap-drop']);
+const COMPOSE_RUN_FLAG = /^(?:-[dTP]+|--detach|--rm|--no-TTY|--no-tty|--no-deps|--service-ports|--use-aliases|--build|--quiet-pull|--remove-orphans|--dry-run)$/;
+const DOCKER_GLOBAL_ARG = new Set(['-H', '--host', '--context', '-c', '--config', '-l', '--log-level', '--url', '--connection']);
+const COMPOSE_GLOBAL_ARG = new Set(['-f', '--file', '-p', '--project-name', '--project-directory', '--profile', '--env-file', '--ansi', '--parallel', '--progress']);
+const firstWord = (args, from, valued) => {
+  for (let i = from; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('-')) return i;
+    if (valued.has(a)) i++;
+  }
+  return -1;
+};
+
+// a session's name, or null; inner commands (bash -c, ssh host cmd, docker exec -i c cmd) are read the same way
+function judge(name, args, fed, depth) {
+  if (args[0] === '--version' || args[0] === '--help') return null;
+  const inner = (text) => (text === null || !text.trim() ? null : sessionIn(text, fed, depth + 1));
+  if (name === 'read' || name === 'mapfile' || name === 'readarray' || name === 'select') return fed ? null : name;
+  if (POSIX_SHELLS.has(name)) {
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-' || /^-[A-Za-z]*s/.test(a) && !a.startsWith('--')) return fed ? null : `${name} ${a}`;
+      if (/^-[A-Za-z]*c/.test(a) && !a.startsWith('--') || a === '--command') return inner(args[i + 1] ?? '');
+      if (/^[-+][oO]$/.test(a) || a === '--rcfile' || a === '--init-file') { i++; continue; }
+      if (a.startsWith('-') || a.startsWith('+')) continue;
+      return null; // a script file
+    }
+    return fed ? null : name;
+  }
+  if (name === 'pwsh' || name === 'powershell') {
+    if (args.some((a) => /^[-/]noe/i.test(a))) return `${name} -NoExit`;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i].toLowerCase();
+      if (a === '-') return fed ? null : `${name} -`;
+      if (/^[-/](?:c|co|com|comm|comma|comman|command|commandwithargs|cwa|f|fi|fil|file)$/.test(a)) {
+        if (args[i + 1] === '-') return fed ? null : `${name} ${args[i]} -`;
+        return /^[-/]f/.test(a) ? null : inner(args.slice(i + 1).join(' '));
+      }
+      if (/^[-/](?:e|ec|en|enc|enco|encod|encode|encoded|encodedc\w*)$/.test(a)) return null;
+      if (/^[-/](?:ex|ep|executionpolicy|wd|workingdirectory|o|outputformat|if|inputformat|w|windowstyle|settingsfile|configurationname|configurationfile|custompipename)$/.test(a)) { i++; continue; }
+      if (a.startsWith('-') || a.startsWith('/')) continue;
+      return null; // a script
+    }
+    return fed ? null : name;
+  }
+  if (name === 'cmd') {
+    for (let i = 0; i < args.length; i++) {
+      if (/^\/k/i.test(args[i])) return 'cmd /k';
+      if (/^\/c/i.test(args[i])) return inner([args[i].slice(2), ...args.slice(i + 1)].join(' '));
+    }
+    return fed ? null : 'cmd';
+  }
+  if (name === 'su') {
+    const c = args.findIndex((a) => a === '-c' || a === '--command');
+    if (c >= 0) return inner(args[c + 1] ?? '');
+    return fed ? null : 'su';
+  }
+  if (name === 'ssh') {
+    let host = -1;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a.startsWith('-')) {
+        if (/^-[A-Za-z]*[nfN]/.test(a)) return null; // no input (-n, -f) or no command (-N)
+        if (/^-[A-Za-z]*[BbcDEeFIiJLlmOopQRSWw]$/.test(a)) i++;
+        continue;
+      }
+      host = i;
+      break;
+    }
+    if (host < 0) return null;
+    const rest = args.slice(host + 1).join(' ');
+    return rest.trim() ? inner(rest) : fed ? null : 'ssh';
+  }
+  if (name === 'docker' || name === 'podman' || name === 'nerdctl' || name === 'docker-compose' || name === 'podman-compose') {
+    let s = name.endsWith('compose') ? -1 : firstWord(args, 0, DOCKER_GLOBAL_ARG);
+    let compose = name.endsWith('compose');
+    if (s >= 0 && args[s] === 'compose') { compose = true; }
+    if (compose) {
+      const c = firstWord(args, s + 1, COMPOSE_GLOBAL_ARG);
+      if (c < 0) return null;
+      const sub = args[c];
+      if (sub === 'attach') return `${name} compose attach`;
+      if (sub !== 'exec' && sub !== 'run') return null;
+      if (args.slice(c + 1).some((a) => /^(?:-i|--interactive)=false$/.test(a))) return null;
+      const r = innerAfter(args, c + 1, sub === 'exec' ? COMPOSE_EXEC_ARG : COMPOSE_RUN_ARG, sub === 'exec' ? COMPOSE_EXEC_FLAG : COMPOSE_RUN_FLAG);
+      return r === null ? `${name} compose ${sub}` : inner(r);
+    }
+    if (s < 0) return null;
+    const sub = args[s], opts = args.slice(s + 1);
+    if (sub === 'attach') return `${name} attach`;
+    if (sub === 'start') return opts.some((a) => isI(a)) && opts.some((a) => /^-[A-Za-z]*a|^--attach/.test(a)) ? `${name} start -ai` : null;
+    if (sub !== 'exec' && sub !== 'run' && sub !== 'create') return null;
+    if (!opts.some((a) => isI(a))) return null; // no -i: the command inside gets no input
+    if (sub !== 'exec') return `${name} ${sub} -i`;
+    const r = innerAfter(args, s + 1, DOCKER_EXEC_ARG, DOCKER_EXEC_FLAG);
+    return r === null ? `${name} exec -i` : inner(r);
+  }
+  if (name === 'kubectl' || name === 'oc') {
+    const s = firstWord(args, 0, new Set(['-n', '--namespace', '--context', '--kubeconfig', '--cluster', '--user', '-s', '--server']));
+    if (s < 0) return null;
+    const sub = args[s], dd = args.indexOf('--', s);
+    const opts = args.slice(s + 1, dd < 0 ? undefined : dd);
+    if (sub !== 'exec' && sub !== 'attach' && sub !== 'run' && sub !== 'debug') return null;
+    if (!opts.some((a) => isI(a))) return null;
+    if (sub !== 'exec' || dd < 0) return `${name} ${sub} -i`;
+    return inner(args.slice(dd + 1).join(' ')) ;
+  }
+  if (fed) return null;
+  if (SESSION_ALWAYS.has(name)) return name;
+  const interp = INTERP_OF(name);
+  if (interp) return interpMode(SESSION_INTERP[interp], args) === 'session' ? name : null;
+  if (name === 'deno' || name === 'bun') {
+    const sub = args.find((a) => !a.startsWith('-'));
+    return sub === 'repl' || (name === 'deno' && sub === undefined) ? `${name}${sub ? ` ${sub}` : ''}` : null;
+  }
+  if (SESSION_CLIENT[name]) return args.includes('-') || !args.some((a) => SESSION_CLIENT[name].test(a)) ? name : null;
+  const pos = SESSION_POSITIONAL[name];
+  if (pos) {
+    let count = 0;
+    for (let i = 0; i < args.length; i++) {
+      if (pos.exit.test(args[i])) return null;
+      if (pos.arg.has(args[i])) { i++; continue; }
+      if (!args[i].startsWith('-')) count++;
+    }
+    return count >= pos.need ? null : name;
+  }
+  if (name === 'xargs') return args.some((a) => /^(?:-a|--arg-file)(?:=|$)/.test(a) || /^-a./.test(a)) ? null : 'xargs';
+  if (name === 'awk' || name === 'gawk' || name === 'mawk' || name === 'nawk') {
+    let prog = false, files = 0;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-f' || a === '-e' || a === '--file' || a === '--source') { prog = true; i++; continue; }
+      if (a === '-F' || a === '-v' || a === '--assign' || a === '--field-separator') { i++; continue; }
+      if (a.startsWith('-') && a !== '-') continue;
+      if (!prog) { prog = true; continue; }
+      if (a === '-') return name;
+      files++;
+    }
+    return files ? null : name;
+  }
+  if (name === 'socat') return args.some((a) => a === '-' || /^(?:stdin|stdio|readline|-)(?:[,:]|$)/i.test(a)) ? 'socat' : null;
+  return null;
+}
+
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
-    const { tool, command, role = null, protectedBranches = [], allowAsk = false, agent = null, paths } = req ?? {};
+    const { tool, command, role = null, protectedBranches = [], allowAsk = false, agent = null, paths, stdin = false } = req ?? {};
     if (role !== null && role !== undefined && role !== '' && !ROLES.includes(role)) {
       return block('input', `unknown CB_ROLE ${JSON.stringify(role)}: a squad seat's role is one of ${ROLES.join(', ')}`);
     }
@@ -1123,8 +1493,13 @@ export function evaluate(req) {
       const branch = protectedPush(command, Array.isArray(protectedBranches) ? protectedBranches : []);
       if (branch) return block('dangerous', pushReason(branch));
       const byRole = checkRole(command, role);
-      return byRole ? block('role', byRole) : { allow: true };
+      if (byRole) return block('role', byRole);
+      // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
+      const session = stdin === true && role ? stdinSession(command) : null;
+      return session ? block('role', SESSION(session)) : { allow: true };
     }
+    // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool
+    if (tool === 'plan') return { allow: true };
     if (tool === 'edit') {
       if (READ_ONLY_ROLES.includes(role)) return block('role', `editing files: ${readsOnly(role)}`);
       // A shim that passes paths (an adapter's native edit tool, #4002) gets the fence and the secret rule on each, as a
