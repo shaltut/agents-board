@@ -297,6 +297,7 @@ test('role parity and evaluate(edit/ask)', () => {
   const ask = evaluate({ tool: 'ask', allowAsk: false });
   assert.equal(ask.allow, false);
   assert.match(ask.reason, /cb ask/);
+  assert.match(ask.reason, /Ask on Agents Board instead/, 'the product name (#4531) rides with the guard reinstall');
   assert.deepEqual(evaluate({ tool: 'ask', allowAsk: true }), { allow: true });
   assert.match(runClaudeShim('{"tool_name":"AskUserQuestion","tool_input":{"questions":[]}}', {}).reason, /^Blocked: .*cb ask/s);
   assert.deepEqual(runClaudeShim('{"tool_name":"AskUserQuestion","tool_input":{"questions":[]}}', { CB_ALLOW_ASK: '1' }), {});

@@ -642,7 +642,8 @@ const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\
 // but ~/.gemini and ~/.config/opencode only under a home folder: a repo's .gemini/ (a styleguide) is not agy's config.
 // Trailing dots (Windows drops them) and the 8.3 names (CODEX~1) count, as for .claude.
 const AGENT_FENCE = new RegExp(FENCE_LEAD + String.raw`(?:(?:\.codex\.*|codex~\d)(?:[\\/]+(?:hooks\.json|[\w.-]*\.toml)\.*|[\\/]*)|\.agents\.*[\\/]+hooks\.json\.*|opencode\.jsonc?\.*|(?:\.opencode\.*|openco~\d)(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
-const HOME = String.raw`(?:~|\$\{?HOME\}?|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|[\\/](?:Users|home)[\\/]+[^\\/\s"';&|)>]+|[\\/]root)[\\/]+`;
+// #4551 (review 68-m3): bash's $USERPROFILE (Git Bash has it) and PowerShell's ${env:USERPROFILE} too
+const HOME = String.raw`(?:~|\$\{?(?:HOME|USERPROFILE)\}?|\$\{?env:(?:USERPROFILE|HOME)\}?|%USERPROFILE%|[\\/](?:Users|home)[\\/]+[^\\/\s"';&|)>]+|[\\/]root)[\\/]+`;
 const HOME_AGENT_FENCE = new RegExp(HOME + String.raw`(?:(?:\.gemini\.*|gemini~\d)(?:[\\/]+[^\s"';&|)>]*)?|\.config\.*[\\/]+opencode\.*(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
 // the cd argument is in the fence: anything under .claude-board, or the .claude folder itself
 const IN_BOARD_DIR = /(?:^|[\\/~])\.claude-board\.*(?:[\\/]|$)/i;
@@ -672,15 +673,68 @@ const FENCE_WRITER = new RegExp(String.raw`(?<![\w.\\/-])(?:${FENCE_WORDS.join('
 // fence path were blocked), found after its global options (-C dir, -c k=v, --git-dir dir, quoted or not); anything else,
 // an unknown or unreadable form included, or a read with --output, is a writer (fail closed). A formatter writes only
 // with its write flag.
-const GIT_WORD = /(?<![\w.\\/-])git(?![\w.\\/-])/gi;
+// #4551 (review 68-m1): git is judged as a command, not as a word anywhere (rg -n git opencode.json is rg's search text).
+// - In command position every form above holds, a missing or shell-filled subcommand included. Command position: the
+//   segment's first word past VAR=x assignments and !, if, then, else, do, while, time, or the first word after ( { $( or
+//   a backtick; any spelling of git (/usr/bin/git, git.exe, a quoted path).
+// - Anywhere else (sudo git, xargs git, timeout 5 git, find -exec git, pnpm exec git: no launcher list to fall behind) it
+//   is a git call when the word past its options is a bare word (add, checkout) or one the shell fills in ($S), and then
+//   the same rules hold. A path or file name there (rg -n git opencode.json, cb help git -- .codex) is text: a read.
+// - A quoted word with a space or separator in it (bash -c "git add opencode.json") is judged as a command line too.
+// Review 68-m2: a git call that runs a program is a writer: -c or --config-env setting an alias, include, external diff,
+// textconv, filter, credential helper, pager (but cat, less, more), editor, fsmonitor, hooks path or ssh command;
+// --exec-path=<dir>; grep -O (--open-files-in-pager); GIT_EXTERNAL_DIFF, GIT_CONFIG*, GIT_SSH*, GIT_EXEC_PATH,
+// GIT_ASKPASS, GIT_EDITOR or a pager (but cat, less, more) assigned earlier in the segment.
 const GIT_READS = new Set(['diff', 'log', 'show', 'blame', 'annotate', 'grep', 'status', 'ls-files', 'ls-tree', 'cat-file', 'rev-parse',
   'rev-list', 'describe', 'shortlog', 'whatchanged', 'diff-tree', 'diff-files', 'diff-index', 'show-ref', 'name-rev', 'help', 'version']);
+// a segment's words, quote-aware (an unclosed quote runs to the end), with ( ) { } and a backtick as words of their own
+const GIT_TOKEN = /(?:"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s(){}`"'\\])+|[(){}`]/g;
+const GIT_OPENER = /^[(){}`]$/;
+const SHELL_KEYWORD = new Set(['!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time']);
+const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+const PAGER_OK = /^\s*(?:(?:cat|less|more)(?:\s+-\w+)*)?\s*$/i;
+const GIT_RUNS_ENV = /^(?:GIT_EXTERNAL_DIFF|GIT_CONFIG\w*|GIT_SSH\w*|GIT_EXEC_PATH|GIT_ASKPASS|GIT_EDITOR|(?:GIT_)?PAGER)=/i;
+const GIT_RUNS_KEY = /^(?:alias|include|includeif|pager)\.|^(?:core\.(?:fsmonitor|hookspath|sshcommand|askpass|gitproxy|editor)|sequence\.editor)$|\.(?:external|textconv|command|cmd|program|helper|clean|smudge|process|proxycommand)$/i;
+const BARE = /^[a-z][\w-]*$/i;
+// git's words (w[0] is git): true when the call writes or runs a program. atCommand: git is in command position;
+// runsEnv: the segment set a program-running git variable before it
+function gitCallWrites(w, atCommand, runsEnv) {
+  let i = 1;
+  for (; i < w.length && w[i].startsWith('-'); i++) {
+    const o = w[i];
+    if (/^--exec-path=/i.test(o)) return true;
+    const isEnv = /^--config-env(?:=|$)/.test(o);
+    const cfg = o === '-c' || o === '--config-env' ? (w[++i] ?? '') : isEnv ? o.slice(13) : null;
+    if (cfg === null) { if (GIT_OPT_ARG.has(o)) i++; continue; }
+    const eq = cfg.indexOf('='), key = eq < 0 ? cfg : cfg.slice(0, eq);
+    if (GIT_RUNS_KEY.test(key)) return true;
+    if (/^core\.pager$/i.test(key) && (isEnv || !PAGER_OK.test(eq < 0 ? '' : cfg.slice(eq + 1)))) return true;
+  }
+  const sub = w[i] ?? '';
+  if (!atCommand && !BARE.test(sub) && !/[$%`]/.test(sub)) return false; // text, not a git call
+  const s = sub.toLowerCase();
+  if (runsEnv || !GIT_READS.has(s) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
+  return s === 'grep' && w.slice(i + 1).some((x) => /^--op/.test(x) || /^-(?!-)[A-Za-z]*O/.test(x));
+}
 const gitWrites = (seg) => {
-  for (const m of seg.matchAll(GIT_WORD)) {
-    const w = seg.slice(m.index + 3).match(/"[^"]*"|'[^']*'|[^\s;&|]+/g) ?? [];
-    let i = 0;
-    while (i < w.length && w[i].startsWith('-')) i += GIT_OPT_ARG.has(w[i]) ? 2 : 1;
-    if (!GIT_READS.has((w[i] ?? '').toLowerCase()) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
+  const raw = seg.match(GIT_TOKEN) ?? [];
+  let start = true, runsEnv = false;
+  for (let k = 0; k < raw.length; k++) {
+    const t = raw[k];
+    if (GIT_OPENER.test(t)) { start = true; continue; }
+    const u = unquote(t);
+    // a quoted command line, judged on its own: one layer of quotes off (an unclosed quote dropped, so it always shrinks)
+    if (/["']/.test(t) && /[\s;&|]/.test(u)) {
+      const inner = u === t ? t.replace(/["']/g, '') : u;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(gitWrites)) return true;
+    }
+    if (ASSIGNMENT.test(u)) { // VAR=x git ..., env VAR=x git ...
+      const eq = u.indexOf('=');
+      if (GIT_RUNS_ENV.test(u) && !(/pager$/i.test(u.slice(0, eq)) && PAGER_OK.test(u.slice(eq + 1)))) runsEnv = true;
+      if (start) continue;
+    }
+    if (cmdName(t) === 'git' && gitCallWrites(raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote), start, runsEnv)) return true;
+    if (start && !SHELL_KEYWORD.has(u.toLowerCase())) start = false;
   }
   return false;
 };
@@ -700,8 +754,10 @@ const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), th
 const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi, '');
 // review 68-I2: /./ and seg/../ folded, so ~/.codex/./hooks.json and ~/.codex/x/../hooks.json name the file they reach
 // (bounded: a few passes, each linear)
+// #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
+// ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
 const fold = (t) => {
-  let s = t.replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
+  let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
   for (let i = 0; i < 8; i++) {
     const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
     if (n === s) break;
@@ -709,7 +765,11 @@ const fold = (t) => {
   }
   return s;
 };
-const forms = (t) => { const u = unhide(t); return [t, u, fold(t), fold(u)]; };
+// #4551 (review 68-m3): an NTFS stream suffix names the file or folder itself (hooks.json::$DATA is hooks.json's main
+// stream, .codex::$INDEX_ALLOCATION or .codex:$I30:$INDEX_ALLOCATION the folder), and a shell that expands $DATA to
+// nothing leaves hooks.json:: behind
+const noStream = (t) => t.replace(/:(?:\$I30)?:(?:\$(?:DATA|INDEX_ALLOCATION))?(?=[\\/\s"';&|)>]|$)/gi, '');
+const forms = (t) => { const u = unhide(t), n = noStream(t); return [t, u, fold(t), fold(u), n, fold(n), noStream(fold(u))]; };
 const fencePath = (t) => forms(t).some((f) => FENCE_PATH.test(f) || AGENT_FENCE.test(f) || HOME_AGENT_FENCE.test(f));
 function redirects(seg, anyTarget) {
   for (const m of seg.matchAll(REDIRECT_TARGET)) {

@@ -193,3 +193,65 @@ test('editTargets reads indented patch headers', () => {
   assert.deepEqual(editTargets({ command: p }), ['src/a.ts', '/Users/me/.codex/hooks.json']);
   assert.match(String(codex('apply_patch', { command: p }, CODEX)), /fence/);
 });
+
+// #4551 (review 68-m1): git is judged in command position, so a read whose search text is "git" passes (these blocked
+// after PR 68), while git as the command, under any launcher or spelling, keeps every write form fenced.
+const shell = (command: string, role: string) => evaluate({ tool: 'shell', command, role }).allow;
+test('the fence judges git as a command: a search for the word git is a read; git behind a launcher or spelled as a path still writes', () => {
+  const reads = ['rg -n git opencode.json', 'grep git .codex/config.toml', 'node cli/cb.ts help git -- .codex', 'cb help git -- .codex',
+    'rg "git" opencode.json', 'grep -rn git status opencode.json', 'sudo git log -- opencode.json', 'git "diff" opencode.json'];
+  const writes = ['/usr/bin/git add opencode.json', 'git.exe add opencode.json', '"C:/Program Files/Git/cmd/git.exe" add opencode.json',
+    'bash -c "git add opencode.json"', 'bash -c "cd x; git add opencode.json"', "sh -c 'git add .codex/config.toml'", 'xargs git add < l opencode.json',
+    String.raw`find . -name opencode.json -exec git add {} \;`, 'timeout 5 git add opencode.json', 'cmd /c git add opencode.json',
+    'pwsh -Command git add opencode.json', 'pnpm exec git checkout -- opencode.json', 'sudo -u root git add opencode.json',
+    'env -u X git add opencode.json', 'GIT_DIR=.git git add opencode.json', 'echo $(git add opencode.json)', '(git add opencode.json)',
+    '{ git add opencode.json; }', 'if true; then git add opencode.json; fi', 'time git add opencode.json', '! git add opencode.json',
+    'command git add opencode.json', 'nohup git add opencode.json', 'ssh h git add opencode.json', 'npx git add opencode.json',
+    'sudo git $SUB opencode.json', 'rg -n "git add" opencode.json',
+    // the review's fail-closed git forms
+    'git -c alias.x=checkout x opencode.json', 'git -C . apply opencode.json', 'git stash push opencode.json', 'git restore opencode.json',
+    'git config -f .codex/config.toml a.b c', 'git update-index opencode.json', 'git diff --output=/home/u/.codex/hooks.json',
+    'git log --output x opencode.json', 'git -c core.pager="tee ~/.codex/hooks.json" log', 'git show HEAD:x > ~/.codex/hooks.json',
+    'cd ~/.claude && git apply p.diff'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+  }
+  // and through a shim
+  assert.equal(codex('Bash', { command: 'rg -n git opencode.json' }, CODEX), true);
+  assert.match(String(codex('Bash', { command: 'xargs git add < l opencode.json' }, CODEX)), /fence/);
+});
+
+// Review 68-m2: git forms that run a program are writers, however they read.
+test('the fence reads git -c program keys, grep -O and program-running git variables as writes; harmless forms stay reads', () => {
+  const writes = ['git -c diff.external=./x.sh diff -- opencode.json', 'git -c DIFF.EXTERNAL=./x.sh diff -- opencode.json',
+    'git -c "diff.external=./x.sh" diff -- opencode.json', 'git --config-env=diff.external=X diff -- opencode.json',
+    'git --config-env core.pager=P log -- opencode.json', 'git -c core.pager=./x.sh log -- opencode.json',
+    'git -c core.fsmonitor=./x.sh status opencode.json', 'git -c core.hooksPath=./h status opencode.json',
+    'git -c core.sshCommand=./x status opencode.json', 'git -c diff.x.textconv=./x.sh log -p -- opencode.json',
+    'git -c include.path=/tmp/c log -- opencode.json', 'git --exec-path=./bin diff -- opencode.json',
+    'git grep -O./x.sh foo -- .codex/hooks.json', 'git grep --open-files-in-pager=./x.sh foo -- .codex/hooks.json',
+    'git grep -nO foo -- .codex/hooks.json', 'GIT_EXTERNAL_DIFF=./x.sh git diff -- opencode.json', 'GIT_PAGER=./x.sh git log -- opencode.json',
+    'env GIT_EXTERNAL_DIFF=./x.sh git diff -- opencode.json', 'GIT_CONFIG_PARAMETERS=x git log -- opencode.json'];
+  const reads = ['git -c core.quotepath=off status opencode.json', 'git diff -O.order -- opencode.json', 'GIT_PAGER=cat git log -- opencode.json',
+    'git -c core.pager=cat log -- opencode.json', 'git -c core.pager="less -R" log -- opencode.json', 'git grep -n foo -- .codex/hooks.json'];
+  for (const c of writes) assert.equal(shell(c, 'builder'), false, c);
+  for (const c of reads) assert.equal(shell(c, 'builder'), true, c);
+});
+
+// Review 68-m3: a ... segment, bash's $USERPROFILE and an NTFS stream suffix name the fenced file too.
+test('the fence folds a ... segment, reads bash $USERPROFILE as home, and drops an NTFS stream suffix', () => {
+  const paths = ['~/.codex/.../hooks.json', String.raw`C:\Users\me\.codex\...\hooks.json`, 'C:/Users/me/.codex/hooks.json::$DATA',
+    String.raw`C:\Users\me\.codex\hooks.json::$data`, '/home/u/.codex::$INDEX_ALLOCATION/hooks.json', '/home/u/.codex:$I30:$INDEX_ALLOCATION/config.toml'];
+  for (const p of paths) {
+    assert.ok(editFence(p), `editFence ${p}`);
+    assert.match(String(codex('Write', { file_path: p, content: 'x' }, CODEX)), /fence/, `codex ${p}`);
+  }
+  for (const c of ['echo x > ~/.codex/.../hooks.json', 'echo x > $USERPROFILE/.gemini/settings.json', 'echo x > ${USERPROFILE}/.gemini/settings.json',
+    'echo x > ${env:USERPROFILE}/.gemini/settings.json', "echo x > '~/.codex/hooks.json::$DATA'", 'echo x > ~/.codex/hooks.json::',
+    'echo x > ~/.codex::$INDEX_ALLOCATION/hooks.json', 'cd ~/.codex::$INDEX_ALLOCATION && echo x > hooks.json']) {
+    assert.equal(shell(c, 'builder'), false, c);
+  }
+  for (const p of ['notes/.../x.md', 'src/a::b.ts']) assert.equal(editFence(p), null, p);
+  assert.equal(shell('echo ... > notes.txt', 'builder'), true);
+});
