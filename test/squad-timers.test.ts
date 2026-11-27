@@ -287,6 +287,35 @@ test('an unheld review card whose only live reviewer built it is named; a down h
   assert.ok(lines.some((l) => /^W7@mac is down and holds #3:/.test(l)), lines.join('\n'));
 });
 
+test('a holder whose relay is down but who still writes to the board is not called down (#4341)', async () => {
+  const { sql } = await setup();
+  await sql`update cb.sessions set last_seen = now() - interval '20 minutes' where actor = 'B1@mac'`;
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, at) values ('B1@mac', 'demo', 1, 'note', 'working', now() - interval '5 minutes')`;
+  let lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.includes(`B1@mac's relay is down, but the session last wrote to the board 5m ago; it holds #1: have it run cb relay --restart (a cb tell to it waits for its relay)`), lines.join('\n'));
+  assert.ok(!lines.some((l) => /B1@mac is down/.test(l)), lines.join('\n'));
+  // nothing from it for 30 minutes: down, as before
+  await sql`update cb.events set at = now() - interval '31 minutes' where actor = 'B1@mac'`;
+  lines = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.some((l) => /^B1@mac is down and holds #1: restore it, or cb edit 1 --assignee <session>$/.test(l)), lines.join('\n'));
+  // a follow-up opening when someone else answers its parent is written as the asker: not its own write
+  await sql`select cb.ask(project => 'demo', body => 'Which one?', actor => 'B1@mac', options => '["a","b"]'::jsonb)`;
+  await sql`select cb.ask(project => 'demo', body => 'And then?', actor => 'B1@mac', options => '["c","d"]'::jsonb, parent => 'Q1')`;
+  await sql`update cb.events set at = now() - interval '31 minutes' where actor = 'B1@mac'`;
+  await sql`select cb.answer('1', 'a')`;
+  assert.equal((await sql`select status from cb.questions where id = 2`)[0].status, 'open', 'the follow-up opened');
+  lines = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.some((l) => /^B1@mac is down and holds #1: restore it, or cb edit 1 --assignee <session>$/.test(l)), lines.join('\n'));
+});
+
+test('a re-bound name stays down, whatever it wrote before the pane was taken over (#4341)', async () => {
+  const { sql } = await setup();
+  await sql`update cb.sessions set actor = 'B3@mac' where actor = 'B1@mac'`; // the pane is someone else now
+  await sql`insert into cb.events (actor, project, task_id, kind, summary, at) values ('B1@mac', 'demo', 1, 'note', 'working', now() - interval '3 minutes')`;
+  const lines: string[] = (await sql`select cb.digest('demo') as d`)[0].d;
+  assert.ok(lines.some((l) => /^B1@mac is down and holds #1: restore it, or cb edit 1 --assignee <session>$/.test(l)), lines.join('\n'));
+});
+
 test('cb digest --all shows what the digest caps', async () => {
   const { sql } = await setup();
   for (let i = 0; i < 8; i++) await sql`select cb.task_add(project => 'demo', title => ${'plain ' + i}, status => 'next', actor => 'github')`;

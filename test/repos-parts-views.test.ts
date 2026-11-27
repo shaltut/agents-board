@@ -254,6 +254,7 @@ test('the digest shows parts', async () => {
   const held = await approved(sql);
   assert.deepEqual(await claim(sql, D), [held]);
   await sql`update cb.sessions set last_seen = now() - interval '11 minutes' where actor = ${D}`;
+  await sql`update cb.events set at = now() - interval '31 minutes' where actor = ${D}`; // and quiet on the board: down (#4341)
   d = await digest(sql);
   assert.ok(d.includes(`#${bare} has no repo: cb edit ${bare} --repo <repo,repo>`), d.join('\n'));
   assert.ok(d.includes(`${D} is down and holds #${held} (part dashboard): restore it`), d.join('\n'));

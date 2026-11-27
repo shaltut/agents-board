@@ -144,9 +144,14 @@ test('cb tell sends to one session and says whether it is live', async () => {
   await sql`update cb.sessions set last_seen = now() - interval '5 minutes'`;
   const r = cb(['tell', 'W2@macbook', 'take', '#19', 'next']);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /message #\d+ to W2@macbook \(relay not live: it arrives when its relay starts, within 24h\)/);
+  assert.match(r.out, /message #\d+ to W2@macbook \(relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start\)/);
   const [e] = await sql`select actor, summary from cb.events where kind = 'message'`;
   assert.deepEqual([e.actor, e.summary], ['W1@test', 'take #19 next']);
+  // still writing to the board: only its relay is down, and the sender is told so (#4341)
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('W2@macbook', 'demo', 'note', 'working', now() - interval '4 minutes')`;
+  const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
+  assert.equal(w.code, 0, w.err);
+  assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
