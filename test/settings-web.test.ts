@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import {
   ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstUnknown, askFirstValue, handEdited, seedChanges,
   CLAUDE_MODELS, OWNER_ONLY_MESSAGE, ROLES, ROLE_TEXT_CAP, RX, STALE_PREFIX, agentLabel, checkSquad, diffSquads, historyLines,
-  modelLabel, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
+  joinedModels, modelLabel, modelProblem, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
   actorLabel, charCount, restoredHerdr, seatName, setSupervise,
   type Seat, type Squad, type SquadPage,
 } from '../web/src/lib/squad.ts';
@@ -231,6 +231,29 @@ test('the JS patterns match squad_set\'s POSIX ones on paths, slugs and model na
   assert.ok(RX.opencode.test('anthropic/claude-opus-5-5') && !RX.opencode.test('claude-opus'));
   assert.ok(RX.codex.test('gpt-6.1-sol') && !RX.codex.test('GPT'));
   assert.ok(RX.repo.test('acme/widgets') && !RX.repo.test('acme'));
+});
+
+test('a model field that appended a second pick is caught and refused, never saved as two names (#4717)', () => {
+  const known = ['gemini-4-neon-high', 'gemini-4-neon-xhigh'];
+  const joined = 'gemini-4-neon-highgemini-4-neon-xhigh';
+  // the picker slip: the second choice was appended to the first, with no separator
+  assert.deepEqual(joinedModels(joined, known), ['gemini-4-neon-high', 'gemini-4-neon-xhigh']);
+  // not a join: a known name itself, a new name, or nothing
+  assert.equal(joinedModels('gemini-4-neon-xhigh', known), null);
+  assert.equal(joinedModels('gemini-4-neon-low', known), null);
+  assert.equal(joinedModels('', known), null);
+  // the agy shape (letters, digits, . _ -) lets a doubled name through; the known names catch it and name both halves
+  assert.equal(modelProblem('agy', joined), null, 'the shape alone passes a doubled name');
+  assert.match(modelProblem('agy', joined, known) ?? '', /two model names joined/);
+  assert.equal(modelProblem('agy', 'gemini-4-neon-xhigh', known), null, 'a real name is still fine');
+  // the form blocks the save (the Save button is disabled while checkSquad reports a problem)
+  const bad = squad(); bad.roles.qa = { ...bad.roles.qa!, agent: 'agy', model: joined };
+  const withUsed = { ...opts, models_used: { agy: known } };
+  assert.match(checkSquad(bad, 'demo', withUsed).map((p) => p.text).join(' | '), /two model names joined/);
+  // the field no longer offers a native datalist, which is where the second pick was appended
+  const card = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleCard.tsx'), 'utf8');
+  assert.doesNotMatch(card, /<datalist/, 'the model field must not use a native datalist (#4717)');
+  assert.doesNotMatch(card, /list=\{`models-/, 'nothing links a model input to a datalist (#4717)');
 });
 
 // the PR 71 review's minors
