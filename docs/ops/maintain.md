@@ -59,6 +59,11 @@ Then the workers, right away, because their `cb` must match the schema:
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
   broke every `cb` on the Mac for 15 minutes.
+- **Check each worker** after its update (#4352): build the manifest in the updated checkout on the PC
+  (`node cli/release.ts --out /tmp/release.json`; it refuses a tree with uncommitted release files), copy it next to
+  the archive, and run `cb doctor --manifest <file>` on the worker. It names every missing or changed file, checks the
+  installed guard and its hook (as `node kit/guard/install.mjs --check`), writes nothing, never connects to the board,
+  and exits 0 only when everything matches.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac

@@ -226,6 +226,11 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'The PC only: starts the job runner in this terminal (a herdr pane), reading ~/.claude-board/runner.json. Stays up; Ctrl+C stops it. Setup: docs/ops/maintain.md, "PC job runner".',
       eg: 'cb runner' },
   }],
+  ['CHECK THIS MACHINE', {
+    doctor: { use: 'cb doctor [--root <dir>] [--manifest <file>] [--json]',
+      does: "Is this machine's cb what the release says? Compares the release files (bin cli db prompts server hooks kit) under <dir> (default: this cb's checkout) with a release manifest: --manifest, else release.json in <dir>; build one in an up-to-date clone with node cli/release.ts. Then checks that the installed guard (~/.claude-board/guard) matches <dir>'s kit/guard and that the PreToolUse hook in ~/.claude/settings.json runs it (6 probes), as node kit/guard/install.mjs --check does. Prints each missing or changed file, the release and this checkout's commit, and exits 1 when any check fails or could not run (no manifest included). Writes nothing and never connects to the board, so it works while the board is down. Fixing the guard or the hook is Ahmed's: ask him.",
+      eg: 'cb doctor --manifest ~/release.json' },
+  }],
 ];
 
 export const COMMANDS: Record<string, Cmd> = Object.fromEntries(GROUPS.flatMap(([, c]) => Object.entries(c)));

@@ -12,7 +12,8 @@
     "dev": "pnpm -C web dev",
     "build": "pnpm -C web build",
     "seed": "node db/seed.ts",
-    "test": "node --test --test-concurrency=1 test/*.test.ts"
+    "test": "node --test --test-concurrency=1 test/*.test.ts",
+    "release-manifest": "node cli/release.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.6",
