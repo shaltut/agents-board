@@ -45,7 +45,7 @@ function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean;
   if (o.plugin !== false) writeFileSync(join(home, '.config', 'opencode', 'plugins', 'cb-guard.js'), PLUGIN_GOOD);
   t.after(() => rmSync(root, { recursive: true, force: true }));
   // a pane cb squad up started holds CB_ROLE (and CB_AGENT, set per agent where a check runs: seatEnv)
-  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CB_ROLE: 'builder' };
+  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CB_ROLE: 'builder', CB_SEAT_RELAY: 'off' }; // #4610: a ready seat starts no relay here
   for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_SERVER_PASSWORD']) delete env[k];
   return { root, home, ws, env };
 }

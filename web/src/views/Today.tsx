@@ -240,7 +240,9 @@ function MemoryCard({ project }: { project?: string }) {
  *  The code is one-time and lasts 10 minutes; pairing writes cb.settings, whose NOTIFY flips this card live. */
 function TelegramCard() {
   const qc = useQueryClient()
-  const { data: t } = useQuery({ queryKey: ['telegram'], queryFn: () => get<{ configured: boolean; bot: string | null; paired: boolean; paired_at: string | null }>('/api/telegram') })
+  // refetched each minute: what did not reach Telegram changes with no board change to say so (#4629)
+  const { data: t } = useQuery({ queryKey: ['telegram'], refetchInterval: 60_000,
+    queryFn: () => get<{ configured: boolean; bot: string | null; paired: boolean; paired_at: string | null; refused?: number; unrecorded?: number }>('/api/telegram') })
   const [link, setLink] = useState<string | null>(null)
   const post = async (path: string) => {
     const r = await fetch(path, { method: 'POST' })
@@ -259,6 +261,8 @@ function TelegramCard() {
       {t.paired ? (
         <>
           <span className="text-muted-foreground">Questions go to your chat{t.paired_at ? `, since ${day(t.paired_at)}` : ''}.</span>
+          {!!t.refused && <span>{t.refused === 1 ? '1 question' : `${t.refused} questions`} could not be sent to Telegram: answer {t.refused === 1 ? 'it' : 'them'} here.</span>}
+          {!!t.unrecorded && <span>{t.unrecorded === 1 ? '1 question' : `${t.unrecorded} questions`} reached your chat, but answering there does not work yet: answer {t.unrecorded === 1 ? 'it' : 'them'} here.</span>}
           <Button variant="ghost" size="sm" className="ml-auto h-7" onClick={unpair}>Unpair</Button>
         </>
       ) : link ? (
