@@ -336,6 +336,15 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 - closes a squad session idle 20 minutes that holds nothing (no card, question, job or open dashboard ask), that herdr
   shows ready for input (`idle`, or `done` for a pane nobody looked at), when its role has no waiting work: it marks
   it closing, finds its pane, checks again (board and herdr), sends `/exit`, then closes the pane (not gone in 60 s: the pane stays and the mark lapses in 5 minutes);
+- treats a seat an earlier saved version of the squad file generated but this one does not (the role moved machine,
+  its count went down, the role or repo left; read from the last 20 `squad updated` events) as leaving (#3770): it
+  counts toward no role's slots and cancels no waiting work, so the new seats start; once idle as above it is closed
+  even while its role has waiting work, at most 2 a tick. A hand-started name no saved version generated (`foo@m`, an
+  extra `<project>-B5@m` past any count) is never leaving. Busy (holding a card, question, job or ask, or mid-turn), down
+  holding cards, or on a machine that is not one of the squad's, it is kept and said in its log once per reason
+  (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
+  the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
+  under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
@@ -344,7 +353,8 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
 
 It never:
 
-- starts, closes or restores the lead (`orch@*`) or any name the squad file does not generate;
+- starts, closes or restores the lead (`orch@*`) or a name no version of the squad file generated (a hand-started
+  session); it starts and restores only names the squad file generates now, and closes a leaving one only as above;
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
   live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
