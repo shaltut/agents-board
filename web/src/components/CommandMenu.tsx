@@ -1,12 +1,12 @@
 import { Plus, Layers, Milestone } from 'lucide-react'
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from '@/components/ui/command'
-import { useEpics, useProjects, useTasks } from '@/lib/api'
+import { useEpics, useLiveProjects, useTasks } from '@/lib/api'
 import { go, GROUPS, openPage, type Page } from '@/lib/route'
 import { ProjectDot, StatusDot, TaskId } from './Chips'
 import { PageKeys } from './NavMenus'
 
 export function CommandMenu({ open, onOpenChange, onNewTask, pages }: { open: boolean; onOpenChange: (o: boolean) => void; onNewTask: () => void; pages: readonly Page[] }) {
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const { data: tasks = [] } = useTasks()
   const { data: epics = [] } = useEpics()
   const run = (fn: () => void) => { onOpenChange(false); fn() }

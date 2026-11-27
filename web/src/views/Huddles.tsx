@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { CornerDownLeft, ListPlus, Plus } from 'lucide-react'
-import { get, qs, rpc, useProjects } from '@/lib/api'
+import { get, qs, rpc, useLiveProjects } from '@/lib/api'
 import { ago, clock, lineAuthor, splitActor } from '@/lib/format'
 import { defaultRecipient } from '@/lib/asks'
 import { go, type Route } from '@/lib/route'
@@ -119,7 +119,7 @@ function Faces({ members }: { members: string[] }) {
 
 /** Ahmed opens a huddle: topic, the project's sessions (its lead preselected, live first), optional task. */
 function NewHuddle({ open, onOpenChange, project }: { open: boolean; onOpenChange: (o: boolean) => void; project?: string }) {
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const [proj, setProj] = useState(project ?? '')
   const [topic, setTopic] = useState('')
   const [task, setTask] = useState('')

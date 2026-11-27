@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { BookMarked, Plus, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
-import { MEM_KINDS, rpc, useMemories, useMemStats, useProjects, type Memory as Mem } from '@/lib/api'
+import { MEM_KINDS, rpc, useMemories, useMemStats, useLiveProjects, type Memory as Mem } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
@@ -237,7 +237,7 @@ function EditEntry({ m, confirm, onClose }: { m: Mem; confirm: boolean; onClose:
 
 function NewEntry({ open, onOpenChange, project }: { open: boolean; onOpenChange: (o: boolean) => void; project?: string }) {
   const qc = useQueryClient()
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const [proj, setProj] = useState(project ?? '')
   const [kind, setKind] = useState<Mem['kind']>('rule')
   const [title, setTitle] = useState('')

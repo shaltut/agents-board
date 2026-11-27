@@ -2,12 +2,18 @@
 import { sql } from './db.ts';
 
 const proj = (p?: string) => (p ? sql`and project = ${p}` : sql``);
+/** One project, or every one that gets work: the "All projects" views (Board, Backlog, Today, Sessions) leave a disabled
+ *  or archived project out; chosen, it shows (with its banner) (#4559). A row with no project stays. */
+const projLive = (p?: string) => (p ? proj(p) : sql`and cb._live(project)`);
 
 /** Every project, archived ones included (#4559): state, who set it and when, so the Projects page can fold them and a
  *  link to a disabled project still finds its name. Pickers keep only the enabled ones. */
 export const projects = () => sql`
   select p.slug, p.name, p.color, p.repo_path, p.pipeline, p.state, p.state_by, p.state_at,
     (select count(*)::int from cb.tasks t where t.project = p.slug and t.status not in ('done','cancelled','backlog')) as open_count,
+    -- the Projects page's row counts (#4559 slice 2): cards being worked on, and seats seen in the last 90 seconds
+    (select count(*)::int from cb.tasks t where t.project = p.slug and t.status = 'in_progress') as in_progress_count,
+    (select count(distinct s.actor)::int from cb.sessions s where s.project = p.slug and s.last_seen > now() - interval '90 seconds') as seats_live,
     -- #4559 (Q3019): a disabled project's questions are out of the lamp until it is enabled
     case when p.state = 'enabled' then (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') else 0 end as question_count
   from cb.projects p order by p.name`;
@@ -26,7 +32,7 @@ function taskRows(project?: string, status?: string) {
       exists (select 1 from cb.task_pings p where p.task_id = t.id) as ping,
       (select gt.goal_id from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = t.id and gt.state = 'in' and g.status = 'active' order by g.rank, g.id limit 1) as goal_id
-    from cb.tasks t where ${filter} ${proj(project)}
+    from cb.tasks t where ${filter} ${projLive(project)}
     order by status, priority <> 'P0', case when priority <> 'P0' then cb._goal_rank(id) end nulls last, priority, rank, id`;
 }
 
@@ -97,9 +103,9 @@ export function questions(project?: string, status?: string) {
     order by (status = 'open') desc, blocking desc, created_at`;
 }
 
-export function events(f: { project?: string; actor?: string; kind?: string; notKind?: string; since?: string; before?: string; q?: string; limit?: number }) {
+export function events(f: { project?: string; actor?: string; kind?: string; notKind?: string; since?: string; before?: string; q?: string; limit?: number; live?: boolean }) {
   const kinds = f.kind ? f.kind.split(',') : null;
-  return sql`select * from cb.events where true ${proj(f.project)}
+  return sql`select * from cb.events where true ${f.live ? projLive(f.project) : proj(f.project)}
     ${f.actor ? sql`and actor = ${f.actor}` : sql``}
     ${kinds ? sql`and kind in ${sql(kinds)}` : sql``}
     ${f.notKind ? sql`and kind <> ${f.notKind}` : sql``}
@@ -113,10 +119,10 @@ export function events(f: { project?: string; actor?: string; kind?: string; not
 export async function today(project: string | undefined, since: string, board: string | null = null) {
   const [[counts], evs, code] = await Promise.all([
     sql`select
-        (select count(*)::int from cb.tasks where status = 'done' and done_at > ${since} ${proj(project)}) as done,
-        (select count(*)::int from cb.tasks where status = 'in_progress' ${proj(project)}) as active,
-        (select count(*)::int from cb.tasks where status = 'blocked' ${proj(project)}) as blocked`,
-    events({ project, since, limit: 500, notKind: 'huddle' }), // huddle chatter lives on its task and the Huddles page
+        (select count(*)::int from cb.tasks where status = 'done' and done_at > ${since} ${projLive(project)}) as done,
+        (select count(*)::int from cb.tasks where status = 'in_progress' ${projLive(project)}) as active,
+        (select count(*)::int from cb.tasks where status = 'blocked' ${projLive(project)}) as blocked`,
+    events({ project, since, limit: 500, notKind: 'huddle', live: true }), // huddle chatter lives on its task and the Huddles page
     board ? sql`select cb.seats_code(${board}, ${project ?? null}) as c`.then(([r]: any) => r.c) : null,
   ]);
   return { since, counts, events: evs, code };
@@ -128,7 +134,10 @@ export async function lastSeen() {
 }
 
 export async function sessions(project?: string) {
-  const [{ o }] = await sql`select cb.sessions_overview(${project ?? null}) as o`;
+  if (project) return (await sql`select cb.sessions_overview(${project}) as o`)[0].o;
+  // all projects: a seat whose project is disabled or archived is left out (#4559); one with no session row stays
+  const [{ o }] = await sql`select coalesce(jsonb_agg(x.r order by x.n), '[]') as o
+    from jsonb_array_elements(cb.sessions_overview(null)) with ordinality x(r, n) where cb._live(x.r ->> 'project')`;
   return o;
 }
 

@@ -5,7 +5,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { ArrowLeft, GripVertical, Plus, Sparkles, Target } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useGoal, useGoals, useProjects, type Goal, type GoalCard, type GoalRules, type Task } from '@/lib/api'
+import { rpc, useGoal, useGoals, useLiveProjects, type Goal, type GoalCard, type GoalRules, type Task } from '@/lib/api'
 import { ago, STATUS } from '@/lib/format'
 import { dropIndex, rankAt } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
@@ -200,7 +200,7 @@ function PreviewList({ cards, skip, onToggle, loading }: { cards: Task[]; skip?:
 /** Ahmed sets a goal: say it, take or edit the proposed rules, check the cards they catch, save. */
 function NewGoal({ open, onOpenChange, project }: { open: boolean; onOpenChange: (o: boolean) => void; project?: string }) {
   const qc = useQueryClient()
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const [proj, setProj] = useState(project ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
