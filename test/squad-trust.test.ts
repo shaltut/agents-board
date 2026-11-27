@@ -225,7 +225,9 @@ test('guard: no role runs cb squad trust; a message that mentions it is text; a 
       'cb squa`d trust x', 'CB_ROLE= CB_AGENT= cb squad --machine pc trust x', 'cb SQUAD Trust x']) {
       const r = evaluate({ tool: 'shell', command: cmd, role });
       assert.equal(r.allow, false, `${role}: ${cmd}`);
-      assert.match(r.reason, /cb squad trust/);
+      // #4696: clearing CB_ROLE/CB_AGENT is its own block (PR 96) and checkRole answers it first; either reason is a deny,
+      // and the same command without the prefix (cb squad --machine pc trust iris) still pins the trust reason
+      assert.match(r.reason, cmd.startsWith('CB_ROLE=') ? /cb squad trust|changing CB_ROLE or CB_AGENT/ : /cb squad trust/, `${role}: ${cmd}`);
     }
   }
   assert.deepEqual(evaluate({ tool: 'shell', command: 'cb log 1 "run cb squad trust demo once"', role: 'builder' }), { allow: true });

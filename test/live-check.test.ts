@@ -174,3 +174,33 @@ test('K3: installedFeatures probes the installed Codex shim: own tools outside a
   assert.deepEqual(Object.keys(mine), ['PR 96', 'PR 104']);
   for (const v of Object.values(mine)) assert.equal(typeof v, 'boolean');
 });
+
+// #4683 (PR 108 r3 R8): git variables exported in the operator's terminal point git at another repo; setup's own git
+// calls run without them, so that repo is never touched and the scratch repo is made where asked
+test('setup: an exported GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE never reaches setup\'s git calls (#4683)', () => {
+  const other = join(root, 'other-repo');
+  mkdirSync(other);
+  assert.equal(git(other, 'init', '-q', '-b', 'main').status, 0);
+  const before = readFileSync(join(other, '.git', 'config'), 'utf8');
+  const env = { ...SAFE, GIT_DIR: join(other, '.git'), GIT_WORK_TREE: other, GIT_INDEX_FILE: join(other, '.git', 'index'),
+    GIT_OBJECT_DIRECTORY: join(other, '.git', 'objects'), GIT_COMMON_DIR: join(other, '.git'), GIT_NAMESPACE: 'x' };
+  const dir = join(root, 'scratch-env');
+  setup({ dir, machine: 'box', board: BOARD, env });
+  assert.equal(readFileSync(join(other, '.git', 'config'), 'utf8'), before, 'the other repo\'s config is untouched');
+  assert.notEqual(git(other, 'rev-parse', '--verify', '-q', 'HEAD').status, 0, 'no commit landed in the other repo');
+  assert.equal(git(dir, 'rev-list', '--count', 'HEAD').stdout.trim(), '1', 'the scratch repo got its commit');
+});
+
+// #4694 (PR 115 review I1): an exported GIT_CONFIG is git config's default --file, so setup's user.* writes went to that
+// file and the scratch commit was authored with the machine's own identity
+test('setup: an exported GIT_CONFIG never takes setup\'s scratch identity (#4694)', () => {
+  const other = join(root, 'other-config');
+  mkdirSync(other);
+  assert.equal(git(other, 'init', '-q', '-b', 'main').status, 0);
+  const before = readFileSync(join(other, '.git', 'config'), 'utf8');
+  const dir = join(root, 'scratch-config');
+  setup({ dir, machine: 'box', board: BOARD, env: { ...SAFE, GIT_CONFIG: join(other, '.git', 'config') } });
+  assert.equal(readFileSync(join(other, '.git', 'config'), 'utf8'), before, 'the other config file is untouched');
+  assert.equal(git(dir, 'config', '--local', 'user.email').stdout.trim(), 'live-check@example.invalid');
+  assert.equal(git(dir, 'log', '-1', '--format=%an <%ae>').stdout.trim(), 'Live Check <live-check@example.invalid>');
+});
