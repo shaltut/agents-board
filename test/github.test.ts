@@ -336,14 +336,42 @@ test('a card per PR: created once, reused, closed on merge or close with a note 
   assert.deepEqual(closing.slice(1, 3), ['  PR #7 "Date parse" → card #2 (closed): merged', '  PR #8 "Old idea" → card #3 (closed): closed']);
 });
 
-test('cardRefs: the cards a PR names, from its branch, then its title, then "card N" in its body; a bare #N in the body is no card', () => {
+test('cardRefs: "(card N)" in the title, then the branch, then a trailing "(#N)", then a body line "card N"; ordinary numbers are no card', () => {
   assert.deepEqual(gh.cardRefs({ head: { ref: 'fix/101-102-date-parse' }, title: 'fix: x (cards 101, 102)', body: 'card 9' }),
     [[101, 102], [101, 102], [9]]);
   assert.deepEqual(gh.cardRefs({ head: { ref: 'fix/214-export' }, title: 'fix(export): page the rows (214)' }), [[214], [214]]);
-  assert.deepEqual(gh.cardRefs({ head: { ref: 'hotfix-prod' }, title: 'fix: totals (hotfix)', body: 'For card #263; fixes #5800' }), [[263]]);
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'fix/5-step-wizard' }, title: 'fix: page (card 32)' }), [[32], [5]], 'an explicit (card N) comes first');
+  assert.deepEqual(gh.cardRefs({ head: { ref: 'hotfix-prod' }, title: 'fix: totals (hotfix)', body: 'Notes\nCard: #263\nfixes #5800' }), [[263]]);
   assert.deepEqual(gh.cardRefs({ title: 'feat: y (#3555)', body: 'see #5800, discard 3 rows' }), [[3555]]);
-  assert.deepEqual(gh.cardRefs({ head: { ref: 'release/2026-11-27' }, title: 'Release' }), [], 'only a conventional branch prefix names a card');
-  assert.deepEqual(gh.cardRefs(pr(1)), []);
+  for (const p of [{ head: { ref: 'release/2026-11-27' }, title: 'Release' }, { head: { ref: 'chore/2026-11-27-cleanup' } },
+    { title: 'fix(ui): spacing (1 and 2)' }, { title: 'Revert "feat: x (#5882)"' }, { title: 'Release 1.4 (#5800, #5801, #5802)' },
+    { body: 'checks the member card 4111 and an ID card 2' }, pr(1)])
+    assert.deepEqual(gh.cardRefs(p), [], JSON.stringify(p));
+});
+
+test('who and how many: a fork PR by an outsider, or a PR naming more than 3 cards, or only a card closed before it opened, gets a card of its own (#4334)', async () => {
+  const { sql, watch } = await board();
+  const add = async (title: string) => Number((await sql`select cb.task_add(project => 'iris', title => ${title}, status => 'next', actor => 'W1@pc') as id`)[0].id);
+  const a = await add('A'), b = await add('B'), c = await add('C'), d = await add('D');
+  const old = await add('Old'); // closed before the PR below opened (at(1))
+  await sql`update cb.tasks set status = 'done' where id = ${old}`;
+  await sql`update cb.tasks set done_at = ${OLD} where id = ${old}`; // after: closing stamps done_at itself
+  const fork = { author_association: 'NONE', head: { ref: `fix/${a}-x`, repo: { full_name: 'rando/widgets' } } };
+  const f = fakeGh({
+    [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [
+      pr(96, { ...fork, title: `fix: x (card ${a})`, body: `card ${b}` }),                                 // outsider's fork: no card named
+      pr(97, { title: 'fix: many', body: `cards ${a}, ${b}, ${c}, ${d}` }),                               // over the cap
+      pr(98, { title: `fix: retry the upload (${old})`, created_at: at(1) }),                            // only an old closed card
+      pr(99, { author_association: 'CONTRIBUTOR', head: { ref: `fix/${c}-y`, repo: { full_name: R } } }), // same-repo branch: trusted
+    ] : [],
+    [`repos/${R}/issues/comments`]: () => [96, 97, 98, 99].map((n) => comment(n, at(5), `on ${n}`)),
+  });
+  await poll(f, watch);
+  assert.deepEqual((await sql`select title from cb.tasks where created_by = 'github' order by id`).map((x: any) => x.title.split(':')[0]),
+    ['GitHub PR #96', 'GitHub PR #97', 'GitHub PR #98']);
+  for (const id of [a, b, d, old]) assert.deepEqual(await notes(sql, id), [], `card #${id} untouched`);
+  assert.match((await notes(sql, c)).join('\n'), /PR #99: comment by AlexMorgan16 \(MEMBER\): "on 99"/);
+  assert.equal((await notes(sql, c)).length, 1, 'only the same-repo PR reached card C');
 });
 
 test('a PR naming a card in a watched project logs on that card: no card of its own, the merge noted there, the card never moved (#4334)', async () => {
@@ -382,6 +410,9 @@ test('a PR naming a card in a watched project logs on that card: no card of its 
   issueComments = [];
   await poll(f, watch, new Date(+NOW + 60_000));
   assert.match((await notes(sql, work)).at(-1)!, /^\[GitHub\] widgets PR #90 merged at abc1234def$/);
+  assert.equal((await notes(sql, work)).length, 3, 'two events and the merge, each once');
+  await poll(f, watch, new Date(+NOW + 120_000));
+  assert.equal((await notes(sql, work)).length, 3, 'a later poll writes nothing again');
   assert.equal((await sql`select status from cb.tasks where id = ${work}`)[0].status, 'next', 'never moved or closed by the watch');
   assert.match((await tells(sql))[1], new RegExp(`^  PR #90 .* → card #${work}: merged$`, 'm'));
   assert.equal((await sql`select count(*)::int as n from cb.tasks where project = 'iris'`)[0].n, 1, 'still no card of its own');
@@ -401,7 +432,7 @@ test('a PR with a card of its own from before #4334 that names a card: both log,
   assert.deepEqual((await state(sql)).prs, {});
   assert.match((await notes(sql, work)).join('\n'), /comment by AlexMorgan16 \(MEMBER\): "ship it"[^]*\[GitHub\] widgets PR #95 merged at beef$/);
   assert.match((await notes(sql, mirror)).join('\n'), /"ship it"/);
-  assert.match((await tells(sql))[0], new RegExp(`^  PR #95 .* → card #${work}: merged, 1 comment by AlexMorgan16$`, 'm'));
+  assert.match((await tells(sql))[0], new RegExp(`^  PR #95 .* → card #${work} \\(mirror #${mirror} closed\\): merged, 1 comment by AlexMorgan16$`, 'm'));
 });
 
 test("forged metadata: a title or a git author name can't pose as who did what", async () => {

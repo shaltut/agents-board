@@ -134,31 +134,44 @@ async function fetchEvents(repo: string, since: number, until: number, run: Run,
   return { evs, pulls, unread };
 }
 
-/** The board cards a PR names (#4334), as candidate lists in order: its branch (fix/4263-..., fix/4201-4205-...), its
- *  title ("(#4263)", "(card 4263)", "(cards 4201, 4205)", "(4214)"), its body ("card 4263", "cards 4201, 4205"). The
- *  first list naming a card that exists wins. A bare #N in the body is left out: on GitHub that is a PR or an issue,
- *  and their numbers overlap the cards'. */
+/** The board cards a PR names (#4334), as candidate lists in order: an explicit "(card 4263)" / "(cards 4201, 4205)" in
+ *  its title; its branch (fix/4263-..., fix/4201-4205-...: two numbers at most, never a date); a bare "(#4263)" or
+ *  "(4214)" ending its title; a body line starting "card 4263" or "Card: 4263". The first list naming a card that
+ *  exists wins. A bare #N elsewhere is left out: on GitHub that is a PR or an issue, and their numbers overlap the cards'. */
 export function cardRefs(p: any): number[][] {
-  const list = String.raw`(#?\d{1,9}(?:\s*(?:,|and|&)\s*#?\d{1,9})*)`;
-  const branch = /^(?:fix|feat|chore|docs|test|refactor|perf|hotfix|ci|build|style|revert)\/((?:\d{1,9}-)*\d{1,9})(?:-|$)/i
+  const list = String.raw`(#?\d{1,9}(?:\s*(?:,|and|&)\s*#?\d{1,9})*)`, title = String(p?.title ?? '');
+  const named = [...title.matchAll(new RegExp(String.raw`\(cards?\s+${list}\)`, 'gi'))].map((m) => m[1]).join(' ');
+  // one or two numbers then a word: fix/2026-11-27-tidy (three) never matches
+  const branch = /^(?:fix|feat|chore|docs|test|refactor|perf|hotfix|ci|build|style|revert)\/((?:\d{1,9}-)?\d{1,9})(?:-(?!\d)|$)/i
     .exec(String(p?.head?.ref ?? ''))?.[1] ?? '';
-  const title = [...String(p?.title ?? '').matchAll(new RegExp(String.raw`\((?:cards?\s+)?${list}\)`, 'gi'))].map((m) => m[1]).join(' ');
-  const body = [...String(p?.body ?? '').matchAll(new RegExp(String.raw`\bcards?\s+${list}`, 'gi'))].map((m) => m[1]).join(' ');
-  return [branch, title, body].map((x) => [...new Set([...x.matchAll(/\d+/g)].map((m) => Number(m[0])))]).filter((x) => x.length);
+  const tail = /\((#?\d{1,9})\)\s*$/.exec(title)?.[1] ?? ''; // 'Revert "x (#5882)"' ends in )": no card
+  const body = [...String(p?.body ?? '').matchAll(new RegExp(String.raw`^\s*(?:[-*]\s+)?cards?\s*:?\s*${list}`, 'gim'))].map((m) => m[1]).join(' ');
+  return [named, branch, tail, body].map((x) => [...new Set([...x.matchAll(/\d+/g)].map((m) => Number(m[0])))]).filter((x) => x.length);
 }
 
+// Who may point a PR at board cards: a branch of the watched repo itself (pushing one needs write access), or an author
+// GitHub calls a member. A stranger's fork PR names no card: it gets a card of its own, as before (#4334 review C1).
+const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+const trusted = (p: any, repo: string) =>
+  String(p?.head?.repo?.full_name ?? '').toLowerCase() === repo.toLowerCase() || TRUSTED.includes(String(p?.author_association ?? ''));
+const MAX_NAMED = 3; // a PR naming more cards than this names none: a card of its own, not notes on every card listed
+
 type Card = { id: number; project: string };
-/** Per PR, the cards it names that exist in one of the given projects (from the first candidate list with any). */
-async function namedCards(tx: any, pulls: Map<number, any>, projects: string[]): Promise<Map<number, Card[]>> {
-  const refs = new Map([...pulls].map(([n, p]) => [n, cardRefs(p)] as const));
+/** Per trusted PR, the cards it names that exist in one of the given projects (from the first candidate list with
+ *  any). A card closed before the PR was opened is not its work card. Over MAX_NAMED: none. */
+async function namedCards(tx: any, pulls: Map<number, any>, projects: string[], repo: string): Promise<Map<number, Card[]>> {
+  const refs = new Map([...pulls].filter(([, p]) => trusted(p, repo)).map(([n, p]) => [n, cardRefs(p)] as const));
   const ids = [...new Set([...refs.values()].flat(2))];
-  const found = new Map<number, Card>();
-  if (ids.length) for (const r of await tx`select id, project from cb.tasks where id = any(${ids}::bigint[]) and project = any(${projects}::text[])`)
-    found.set(Number(r.id), { id: Number(r.id), project: r.project });
+  const found = new Map<number, Card & { closed: number | null }>();
+  if (ids.length) for (const r of await tx`select id, project, case when status in ('done', 'cancelled') then done_at end as closed
+                                             from cb.tasks where id = any(${ids}::bigint[]) and project = any(${projects}::text[])`)
+    found.set(Number(r.id), { id: Number(r.id), project: r.project, closed: r.closed ? +new Date(r.closed) : null });
   const out = new Map<number, Card[]>();
   for (const [n, lists] of refs) {
-    const cards = lists.map((l) => l.flatMap((id) => found.get(id) ?? [])).find((l) => l.length);
-    if (cards) out.set(n, cards);
+    const opened = Date.parse(pulls.get(n)?.created_at);
+    const ok = (id: number) => { const c = found.get(id); return c && !(c.closed !== null && c.closed < opened) ? [{ id: c.id, project: c.project }] : []; };
+    const l = lists.find((x) => x.some((id) => ok(id).length));
+    if (l && l.length <= MAX_NAMED) out.set(n, l.flatMap(ok));
   }
   return out;
 }
@@ -222,7 +235,8 @@ async function write(tx: any, f: Fetched, until: number, now: Date, task: number
   const [cur] = await tx`select value from cb.settings where key = ${key} for update`;
   if (!cur || cur.value.since !== f.since) return;
   const { to, project } = cur.value, prs: Record<string, number> = { ...cur.value.prs }, { evs, pulls } = f;
-  const named = await namedCards(tx, pulls, [project, ...(cur.value.card_projects ?? [])]);
+  const also = Array.isArray(cur.value.card_projects) ? cur.value.card_projects.filter((x: unknown) => typeof x === 'string') : [];
+  const named = await namedCards(tx, pulls, [project, ...also], f.repo);
   // closed only if it closed inside this slice or before: a merge GitHub already shows but after the slice's end is
   // the next slice's event, and closing now would make that slice open a second card for it
   const shut = (p: any) => p?.state === 'closed' && Date.parse(p.closed_at) < until;
@@ -257,7 +271,7 @@ async function write(tx: any, f: Fetched, until: number, now: Date, task: number
         } else prs[g.pr] = card;
       }
     }
-    const tail = cards.length ? ` → card #${cards.map((c) => c.id).join(', #')}`
+    const tail = cards.length ? ` → card #${cards.map((c) => c.id).join(', #')}${card ? ` (mirror #${card}${closed ? ' closed' : ''})` : ''}`
       : card ? ` → card #${card}${closed ? ' (closed)' : ''}` : '';
     lines.push(short(g, pulls, tail));
   }
