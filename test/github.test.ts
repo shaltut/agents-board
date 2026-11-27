@@ -347,6 +347,12 @@ test('cardRefs: "(card N)" in the title, then the branch, then a trailing "(#N)"
     { title: 'fix(ui): spacing (1 and 2)' }, { title: 'Revert "feat: x (#5882)"' }, { title: 'Release 1.4 (#5800, #5801, #5802)' },
     { body: 'checks the member card 4111 and an ID card 2' }, pr(1)])
     assert.deepEqual(gh.cardRefs(p), [], JSON.stringify(p));
+  // a body of 65,536 lines (GitHub's limit) parses in linear time: the poll runs on the board server's event loop
+  const t0 = performance.now();
+  assert.deepEqual(gh.cardRefs({ body: '\n'.repeat(65_536) + 'x' }), []);
+  assert.deepEqual(gh.cardRefs({ body: 'x\n'.repeat(30_000) + 'card 7' }), [[7]]);
+  assert.deepEqual(gh.cardRefs({ body: ' \n'.repeat(32_768) + '\t'.repeat(30_000) }), []);
+  assert.ok(performance.now() - t0 < 300, `took ${Math.round(performance.now() - t0)} ms`);
 });
 
 test('who and how many: a fork PR by an outsider, or a PR naming more than 3 cards, or only a card closed before it opened, gets a card of its own (#4334)', async () => {
@@ -356,6 +362,9 @@ test('who and how many: a fork PR by an outsider, or a PR naming more than 3 car
   const old = await add('Old'); // closed before the PR below opened (at(1))
   await sql`update cb.tasks set status = 'done' where id = ${old}`;
   await sql`update cb.tasks set done_at = ${OLD} where id = ${old}`; // after: closing stamps done_at itself
+  const gone = await add('Gone'); // cancelled before the PR opened: a cancel sets no done_at, its last update counts
+  await sql`update cb.tasks set status = 'cancelled' where id = ${gone}`;
+  await sql`update cb.tasks set done_at = null, updated_at = ${OLD} where id = ${gone}`;
   const fork = { author_association: 'NONE', head: { ref: `fix/${a}-x`, repo: { full_name: 'rando/widgets' } } };
   const f = fakeGh({
     [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [
@@ -363,13 +372,14 @@ test('who and how many: a fork PR by an outsider, or a PR naming more than 3 car
       pr(97, { title: 'fix: many', body: `cards ${a}, ${b}, ${c}, ${d}` }),                               // over the cap
       pr(98, { title: `fix: retry the upload (${old})`, created_at: at(1) }),                            // only an old closed card
       pr(99, { author_association: 'CONTRIBUTOR', head: { ref: `fix/${c}-y`, repo: { full_name: R } } }), // same-repo branch: trusted
+      pr(100, { head: { ref: `fix/${gone}-z` }, created_at: at(1) }),                                     // only a card cancelled earlier
     ] : [],
-    [`repos/${R}/issues/comments`]: () => [96, 97, 98, 99].map((n) => comment(n, at(5), `on ${n}`)),
+    [`repos/${R}/issues/comments`]: () => [96, 97, 98, 99, 100].map((n) => comment(n, at(5), `on ${n}`)),
   });
   await poll(f, watch);
   assert.deepEqual((await sql`select title from cb.tasks where created_by = 'github' order by id`).map((x: any) => x.title.split(':')[0]),
-    ['GitHub PR #96', 'GitHub PR #97', 'GitHub PR #98']);
-  for (const id of [a, b, d, old]) assert.deepEqual(await notes(sql, id), [], `card #${id} untouched`);
+    ['GitHub PR #96', 'GitHub PR #97', 'GitHub PR #98', 'GitHub PR #100']);
+  for (const id of [a, b, d, old, gone]) assert.deepEqual(await notes(sql, id), [], `card #${id} untouched`);
   assert.match((await notes(sql, c)).join('\n'), /PR #99: comment by AlexMorgan16 \(MEMBER\): "on 99"/);
   assert.equal((await notes(sql, c)).length, 1, 'only the same-repo PR reached card C');
 });
@@ -694,7 +704,7 @@ function cb(args: string[], env: Record<string, string> = {}) {
 
 test('cb github: anyone lists; only Ahmed adds and removes; a new repo starts at now', async () => {
   const sql = await freshDb(); clients.push(sql);
-  await sql`select cb.ensure_project('ihop')`;
+  await sql`select cb.ensure_project('demo')`;
   const AHMED = { PGAPPNAME: 'cb-web' }; // what his dashboard connection says; sessions can't (cb.dashboard_only)
   const no = cb(['github', 'add', R, '--to', 'orch@macbook']);
   assert.equal(no.code, 1);
@@ -702,30 +712,63 @@ test('cb github: anyone lists; only Ahmed adds and removes; a new repo starts at
   assert.doesNotMatch(no.err, /PGAPPNAME|cb-web/, 'the refusal never names the way past it');
   assert.equal((await sql`select count(*)::int as n from cb.settings`)[0].n, 0);
 
+  // a new repo has no default project or seat (#4383): it names the flag to pass
+  const bare = cb(['github', 'add', R], AHMED);
+  assert.equal(bare.code, 1);
+  assert.match(bare.err, /name the project its PR cards go in: cb github add acme\/widgets --project <project> \(known: demo\)/);
+  const noLead = cb(['github', 'add', R, '--project', 'demo'], AHMED);
+  assert.equal(noLead.code, 1);
+  assert.match(noLead.err, /demo has no lead session to tell: cb github add acme\/widgets --project demo --to <session>/);
+  assert.equal((await sql`select count(*)::int as n from cb.settings`)[0].n, 0);
+
+  // --to defaults to the project's one lead
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p1','orch@pc','demo','lead'), ('mac','p2','B1@mac','demo','builder')`;
   const before = Date.now();
-  const yes = cb(['github', 'add', R], AHMED);
+  const yes = cb(['github', 'add', R, '--project', 'demo'], AHMED);
   assert.equal(yes.code, 0, yes.err);
   const s = await state(sql);
-  assert.deepEqual({ ...s, since: undefined }, { to: 'orch@shaltoot', project: 'ihop', last_ok: null, last_error: null, prs: {}, since: undefined });
+  assert.deepEqual({ ...s, since: undefined }, { to: 'orch@pc', project: 'demo', last_ok: null, last_error: null, prs: {}, since: undefined });
   assert.ok(Date.parse(s.since) >= before - 1000 && Date.parse(s.since) <= Date.now(), 'no backfill: it starts now');
+
+  // a watched repo added again needs no flag and changes only what was given
+  assert.equal(cb(['github', 'add', R], AHMED).code, 0);
+  assert.deepEqual(await state(sql), s, 'a bare re-add changes nothing');
+  assert.equal(cb(['github', 'add', R, '--to', 'orch@pc2'], AHMED).code, 0);
+  assert.deepEqual(await state(sql), { ...s, to: 'orch@pc2' }, 'a --to re-add changes only whom it tells');
+
+  // several leads: name one
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p3','orch2@mac','demo','lead')`;
+  const two = cb(['github', 'add', 'acme/two', '--project', 'demo'], AHMED);
+  assert.equal(two.code, 1);
+  assert.match(two.err, /demo has several leads \((orch2@mac, orch@pc|orch@pc, orch2@mac)\): say which one is told: cb github add acme\/two --project demo --to <session>/);
+
+  // the project defaults to the one of the pane running it
+  await sql`select cb.ensure_project('other')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p4','lead@pc','other','lead')`;
+  const pane = cb(['github', 'add', 'acme/from-pane'], { ...AHMED, HERDR_PANE_ID: 'p4', CB_MACHINE: 'pc' });
+  assert.equal(pane.code, 0, pane.err);
+  const fp = (await sql`select value from cb.settings where key = 'github:acme/from-pane'`)[0].value;
+  assert.deepEqual([fp.project, fp.to], ['other', 'lead@pc']);
+  assert.equal(cb(['github', 'remove', 'acme/from-pane'], AHMED).code, 0);
+
   assert.equal(cb(['github', 'add', 'not a repo'], AHMED).code, 1);
   for (const bad of ['../..', '.github/x', 'acme/..']) assert.match(cb(['github', 'add', bad], AHMED).err, /is not owner\/repo/, bad);
   assert.match(cb(['github', 'add', 'acme/worker-service', '--project', 'nope'], AHMED).err, /unknown project/);
-  assert.equal(cb(['github', 'add', 'acme/worker-service', '--to', 'orch@macbook'], AHMED).code, 0);
+  assert.equal(cb(['github', 'add', 'acme/worker-service', '--project', 'demo', '--to', 'orch@macbook'], AHMED).code, 0);
   // --cards-in (#4334): more projects whose cards a PR may name; re-adding keeps the checkpoint and the rest
   assert.match(cb(['github', 'add', 'acme/worker-service', '--cards-in', 'nope'], AHMED).err, /unknown project/);
   await sql`select cb.ensure_project('iris-squad')`;
   const also = cb(['github', 'add', 'acme/worker-service', '--cards-in', 'iris-squad'], AHMED);
   assert.equal(also.code, 0, also.err);
-  assert.match(also.out, /PR cards go in ihop \(a PR naming a card in ihop, iris-squad logs on that card\)/);
+  assert.match(also.out, /PR cards go in demo \(a PR naming a card in demo, iris-squad logs on that card\)/);
 
   await sql`update cb.settings set value = value || ${sql.json({ prs: { 3452: 9 }, last_error: { at: T0, message: 'gh: HTTP 401' } })} where key = ${'github:' + R}`;
   const list = cb(['github']);
   assert.equal(list.code, 0, list.err);
-  assert.match(list.out, /^acme\/widgets → orch@shaltoot \((ihop)\) · last poll never · since \S+ · last error: gh: HTTP 401 \(since 2026-11-11T10:00:00\.000Z\)\n {2}open PR cards: PR #3452 → card #9$/m);
-  assert.match(list.out, /^acme\/worker-service → orch@macbook \(ihop; named cards also in iris-squad\) · last poll never · since \S+$/m);
+  assert.match(list.out, /^acme\/widgets → orch@pc2 \((demo)\) · last poll never · since \S+ · last error: gh: HTTP 401 \(since 2026-11-11T10:00:00\.000Z\)\n {2}open PR cards: PR #3452 → card #9$/m);
+  assert.match(list.out, /^acme\/worker-service → orch@macbook \(demo; named cards also in iris-squad\) · last poll never · since \S+$/m);
   assert.equal(cb(['github', 'add', 'acme/worker-service', '--cards-in', ''], AHMED).code, 0, '"" clears them');
-  assert.match(cb(['github']).out, /^acme\/worker-service → orch@macbook \(ihop\) · /m);
+  assert.match(cb(['github']).out, /^acme\/worker-service → orch@macbook \(demo\) · /m);
 
   assert.match(cb(['github', 'remove', R]).err, /only Ahmed adds or removes watched repos: ask him/);
   assert.equal(cb(['github', 'remove', R], AHMED).code, 0);

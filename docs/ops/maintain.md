@@ -254,9 +254,16 @@ Set up, once, on the PC:
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
-     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "5544{lane}"`,
-     `"TEST_STACK_REDIS_PORT": "5638{lane}"`, `"TEST_STACK_S3_PORT": "5901{lane}"`. Keep lane ports off the old
+     lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "2544{lane}"`,
+     `"TEST_STACK_REDIS_PORT": "2638{lane}"`, `"TEST_STACK_S3_PORT": "2901{lane}"`. Keep lane ports off the old
      single-stack ports (55432, 56379, 59000) and any stack you start by hand.
+   - Keep lane ports below 32768 (#4417). Docker Desktop binds a published port inside its Linux VM, where 32768-60999
+     is the range the kernel hands to outgoing connections, so a fixed port in it is sometimes held by a connection at
+     the moment a lane's `up` binds it: `failed to bind host port 0.0.0.0:<port>/tcp: address already in use`, and the
+     job fails in seconds. A Windows port reservation (`netsh ... add excludedportrange`) reaches that VM only when
+     Docker Desktop starts (it copies them to the VM's reserved ports then), so one added later protects nothing there
+     until Docker Desktop restarts. Check the VM's view with
+     `docker run --rm --network host redis:7 cat /proc/sys/net/ipv4/ip_local_port_range /proc/sys/net/ipv4/ip_local_reserved_ports`.
    - With `dbLanes` above 1, `laneEnv` names those env values. Every DB recipe must set each of them with `{lane}`,
      and all DB recipes must write each one the same way, so lane n is one stack whichever recipe runs in it. The
      runner refuses to start otherwise.
@@ -295,10 +302,12 @@ What each result means:
 | `error: runner restarted` | the runner stopped mid-job | queue again |
 | `error: could not start <cmd>` | the program is missing or is a `.cmd` file | fix `runner.json` or the PC's PATH |
 | `error: bad parameter <name>: <value>` | the runner's own check refused a value | fix the value; if it looks right, the recipe's pattern is too tight |
+| `error: not in the repo at <sha>: <paths>` | a path parameter (`files`, or one with `"paths": true`) is no file or folder tracked at that commit, read from the recipe's folder or from a package folder under it (one with a tracked `package.json`, where `pnpm --filter … exec` runs the tool), never as the tail of a deeper path (#4338) | fix the name; a path from the repo root that starts with the recipe's folder is taken too. It proves the names are real. A `node --test` recipe is fully covered when its names are paths from its folder: one whose folder holds packages could pass a package-relative name that `node --test` then drops, so give it its own `cwd`. vitest filters by substring, so it may run more. `"paths": false` on a parameter turns the check off |
 | `error: could not fetch from origin` | no network, or no access to the repo | check git credentials on the PC |
 | `error: bad job row` | the job row is malformed | `cb job show <id>`; report it |
 | `error: runner fault: see cb job log <id>` | the runner itself failed | read the log, then the runner's pane |
 | `no tests ran: <summary>` | the command exited 0 but ran nothing | the file list or app is wrong |
+| `step <n> of <m> (<program>) exited <code>, but no test failed. Its last lines: ...` | the step's test counts show no failure, yet it exited non-zero (a crash after the run, a hook runner's own failure); the lines are that step's last output (stdout and stderr share the log) | read them, then `cb job log <id>`; queue again if it looks like a flake |
 | `summary withheld: see cb job log <id>` | the output looked sensitive, so none of it went to the board | read the log from the PC or the MacBook |
 
 ## Supervisor
@@ -406,5 +415,8 @@ squad file (`cb squad set <project> -f <file>`):
 ## Tests
 
 Never on the VPS. The suite truncates whatever database it is given and expects the PC's layout (127.0.0.1:5434);
-run it on the PC or the Mac against their own test databases (`CB_TEST_DB=claude_board_test`). Changing the code is
+run it on the PC or the Mac against their own test databases (`CB_TEST_DB=claude_board_test`). On the PC each worktree
+tests on its own cluster and port (#4413); stop it (`node db/setup.ts --test --stop` in the worktree) before removing
+the worktree, or its Postgres keeps running and holds the folder (a forced delete under it crashes that cluster). Put
+that step in any worktree clean-up a squad or brief runs. Changing the code is
 in [CLAUDE.md](../../CLAUDE.md).

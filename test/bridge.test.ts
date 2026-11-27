@@ -259,3 +259,41 @@ test('a sql`` fragment passed as a value is refused with a clear error, not "#<P
     assert.equal((await db`select ${2}::int as n`)[0].n, 2, 'plain values still work');
   } finally { await stop(); }
 });
+
+test('cb ask: a stored question exits 0 even when the board drops right after, and a resend posts no second copy (#3331)', { timeout: 60_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  const pane = `p-ask-${process.pid}`;
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  // a relay whose board connection drops once the question is in: the insert runs in cb's own transaction, the
+  // reads after it come through here and time out, as seen live ("board unreachable (CONNECT_TIMEOUT)", then a duplicate)
+  const flaky: any = (strings: any, ...values: any[]) => Array.isArray(strings?.raw) && /from cb\.sessions where actor|select parent_id, if_answer/.test(strings.join('$'))
+    ? Promise.reject(Object.assign(new Error('write CONNECT_TIMEOUT'), { code: 'CONNECT_TIMEOUT' })) : relaySql(strings, ...values);
+  flaky.unsafe = (...a: any[]) => relaySql.unsafe(...a);
+  const stop = await serveBridge(flaky, seatKey('testbox', pane), TEST_URL, undefined,
+    { binding: (who: any) => who.pane === pane ? { actor: 'W5@test', project: null } : undefined });
+  const ask = async (...a: string[]) => {
+    const child = spawn('node', ['cli/cb.ts', 'ask', 'demo', 'Ship it tonight?', ...a], { env: seatEnv(pane), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = ''; child.stdout!.on('data', (d) => { out += d; }); child.stderr!.on('data', (d) => { err += d; });
+    const code = await Promise.race([new Promise((r) => child.on('exit', r)), wait(20_000).then(() => { child.kill(); return 'timeout'; })]);
+    return { code, out: out.trim(), err: err.trim() };
+  };
+  try {
+    const first = await ask('-o', 'Yes', '-o', 'No');
+    assert.equal(first.code, 0, first.err);
+    assert.match(first.out, /^Q1 posted/);
+    const again = await ask('-o', 'Yes', '-o', 'No');
+    assert.equal(again.code, 0, again.err);
+    assert.match(again.out, /^Q1 is already on the board/);
+    assert.deepEqual((await sql`select id, asked_by from cb.questions`).map((q: any) => [q.id, q.asked_by]), [['1', 'W5@test']], 'one question, not two');
+    // other options are another question; so is the same one once the first is withdrawn
+    const other = await ask('-o', 'Yes', '-o', 'Tomorrow');
+    assert.match(other.out, /^Q2 posted/, other.err);
+    await sql`select cb.withdraw('1', 'W5@test')`;
+    const third = await ask('-o', 'Yes', '-o', 'No');
+    assert.match(third.out, /^Q3 posted/, third.err);
+    // a follow-up: its parent read fails too, and the message falls back to what was asked
+    const follow = await ask('-o', 'Yes', '-o', 'No', '--after', 'Q2', '--if', 'Yes');
+    assert.equal(follow.code, 0, follow.err);
+    assert.match(follow.out, /^Q4 posted as a follow-up to Q2: it opens only if Q2 is answered "Yes"/);
+  } finally { await stop(); }
+});

@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
@@ -48,6 +48,47 @@ test('ask captures pane', async () => {
   assert.equal(q.multi, true);
 });
 
+test('cb ask again while the same question is open returns it; any field that differs is a new question (#3331)', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'a')`;
+  await sql`select cb.task_add(project => 'demo', title => 'b')`;
+  const ask = (args: string[], input?: string, env: Record<string, string> = {}) => {
+    const r = spawnSync('node', ['cli/cb.ts', 'ask', 'demo', ...args], { encoding: 'utf8', input,
+      env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', ...env } });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const md = '## Which export?\n\n| Format | Size |\n|---|---|\n| CSV | 1 MB |\n';
+  assert.match(ask(['-', '-o', 'CSV', '-o', 'XLSX'], md), /^Q1 posted/);
+  assert.match(ask(['-', '-o', 'CSV', '-o', 'XLSX'], md), /^Q1 is already on the board/, 'a stdin body, resent');
+  assert.match(ask(['What is the sandbox URL?', '--free']), /^Q2 posted/);
+  assert.match(ask(['What is the sandbox URL?', '--free']), /^Q2 is already/, 'no options, resent');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '1', '--blocking']), /^Q3 posted/);
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '#1', '--blocking']), /^Q3 is already/);
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--blocking']), /^Q4 posted/, 'another card');
+  const [t] = await sql`select status, blocked_on from cb.tasks where id = 2`;
+  assert.deepEqual([t.status, t.blocked_on], ['blocked', '4'], 'and that card is blocked on it');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2']), /^Q5 posted/, 'not blocking');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '-c', 'see PR 9']), /^Q6 posted/, 'other context');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2', '--reply-to', 'pc:w1:p2']), /^Q7 posted/, 'another reply pane');
+  assert.match(ask(['Approve?', '-o', 'Yes', '-o', 'No', '-t', '2'], undefined, { CB_ACTOR: 'W2@test' }), /^Q8 posted/, 'another asker');
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'Yes']), /^Q9 posted as a follow-up to Q3/);
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'yes']), /^Q9 is already/, 'a follow-up, resent');
+  assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'No']), /^Q10 posted/, 'another --if');
+  assert.equal((await sql`select count(*)::int as n from cb.questions`)[0].n, 10);
+  // pictures: always posted, so new ones are never dropped behind an old question's
+  const dir = mkdtempSync(join(tmpdir(), 'cb-3331-'));
+  const png = (name: string, tail: string) => { const p = join(dir, name); writeFileSync(p, Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from(tail)])); return p; };
+  try {
+    assert.match(ask(['Which layout?', '-o', 'A', '-o', 'B', '-i', `Now=${png('a.png', 'a')}`]), /^Q11 posted with 1 picture/);
+    assert.match(ask(['Which layout?', '-o', 'A', '-o', 'B', '-i', `Now=${png('b.png', 'b')}`]), /^Q12 posted with 1 picture/, 'new pictures, new question');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  // a bad id is refused as cb.ask refuses it, never read as "no parent" and matched to a top-level question
+  const bad = cb(['ask', 'demo', 'What is the sandbox URL?', '--free', '--after', 'Qx2']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /bad id/);
+});
+
 test('bad status exits 1 with message', async () => {
   await db();
   cb(['add', 'demo', 'T']);
@@ -65,14 +106,15 @@ test('done records links', async () => {
   assert.deepEqual(e.data.links, { pr: '#412', commit: 'abc123' });
 });
 
-test('unreachable remote board fails fast with a clear message', () => {
+test('unreachable remote board fails within its retry budget with a clear message', () => {
   const t0 = Date.now();
-  // 10.255.255.1 is a non-routable address: connections hang rather than refuse.
+  // 10.255.255.1 is a non-routable address: connections usually hang rather than refuse. A hung try waits 5 s, so two fit
+  // the ~10 s budget (#4337); the rest is node starting up on a busy machine.
   const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@10.255.255.1:5434/claude_board' });
   assert.equal(r.code, 1);
-  assert.match(r.err, /board unreachable at 10\.255\.255\.1/);
+  assert.match(r.err, /board unreachable at 10\.255\.255\.1 \([A-Z_]+, tried \d+ times over \d+ s\): the call that failed never reached it/);
   assert.match(r.err, /keep working/);
-  assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0}ms`);
+  assert.ok(Date.now() - t0 < 25_000, `took ${Date.now() - t0}ms`);
 });
 
 test('unknown flag fails with a readable message, no stack', async () => {
@@ -152,6 +194,17 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
+  // #4421: no session row at all (a session that never started a relay), yet it wrote lately: not "it may be gone"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
+  const v = cb(['tell', 'V1@vps', 'ping']);
+  assert.equal(v.code, 0, v.err);
+  assert.match(v.out, /\(no relay session on the board under this name, but it last wrote to the board 3m ago: the message waits up to 24h for a relay under this name\)/);
+  // a session name with no '@' and no row (a session that runs cb with --as, no relay) gets the same, never "its relay is down"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('ops-bot', 'demo', 'note', 'working', now() - interval '2 minutes')`;
+  const o = cb(['tell', 'ops-bot', 'ping']);
+  assert.equal(o.code, 0, o.err);
+  assert.match(o.out, /\(no relay session on the board under this name, but it last wrote to the board 2m ago/);
+  assert.doesNotMatch(o.out, /its relay is down/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {

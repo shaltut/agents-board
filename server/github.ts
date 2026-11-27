@@ -145,7 +145,8 @@ export function cardRefs(p: any): number[][] {
   const branch = /^(?:fix|feat|chore|docs|test|refactor|perf|hotfix|ci|build|style|revert)\/((?:\d{1,9}-)?\d{1,9})(?:-(?!\d)|$)/i
     .exec(String(p?.head?.ref ?? ''))?.[1] ?? '';
   const tail = /\((#?\d{1,9})\)\s*$/.exec(title)?.[1] ?? ''; // 'Revert "x (#5882)"' ends in )": no card
-  const body = [...String(p?.body ?? '').matchAll(new RegExp(String.raw`^\s*(?:[-*]\s+)?cards?\s*:?\s*${list}`, 'gim'))].map((m) => m[1]).join(' ');
+  // [ \t], not \s: with the m flag a \s* at every line start rescans the newlines after it (65k lines: seconds)
+  const body = [...String(p?.body ?? '').matchAll(new RegExp(String.raw`^[ \t]*(?:[-*][ \t]+)?cards?[ \t]*:?[ \t]*${list}`, 'gim'))].map((m) => m[1]).join(' ');
   return [named, branch, tail, body].map((x) => [...new Set([...x.matchAll(/\d+/g)].map((m) => Number(m[0])))]).filter((x) => x.length);
 }
 
@@ -163,7 +164,7 @@ async function namedCards(tx: any, pulls: Map<number, any>, projects: string[], 
   const refs = new Map([...pulls].filter(([, p]) => trusted(p, repo)).map(([n, p]) => [n, cardRefs(p)] as const));
   const ids = [...new Set([...refs.values()].flat(2))];
   const found = new Map<number, Card & { closed: number | null }>();
-  if (ids.length) for (const r of await tx`select id, project, case when status in ('done', 'cancelled') then done_at end as closed
+  if (ids.length) for (const r of await tx`select id, project, case status when 'done' then done_at when 'cancelled' then coalesce(done_at, updated_at) end as closed
                                              from cb.tasks where id = any(${ids}::bigint[]) and project = any(${projects}::text[])`)
     found.set(Number(r.id), { id: Number(r.id), project: r.project, closed: r.closed ? +new Date(r.closed) : null });
   const out = new Map<number, Card[]>();

@@ -9,6 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
+import { withConnectRetry, neverSent, ranWords } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -78,6 +79,13 @@ if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
   }
+const boardHost = new URL(databaseUrl()).hostname;
+const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost);
+// #4337: a remote board that is briefly unreachable is retried for ~10 s, one statement at a time and only when it never
+// left this machine (connect-retry.ts). A local board that refuses is started instead (main()), with no wait first.
+// Local is by name only: this machine's own Tailscale name or address counts as remote. cb start answers at once: it is
+// advice that always exits 0.
+if (!localBoard && cmd !== 'start') sql = withConnectRetry(sql);
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -391,6 +399,7 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 
 async function run(): Promise<unknown> {
   await resolveActor();
+  if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
       return { out: await start() };
@@ -438,7 +447,7 @@ async function run(): Promise<unknown> {
       // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts).
       const sub = args[0];
       if (sub === 'add' || sub === 'remove') {
-        need(2, 'github add <owner/repo> [--to orch@shaltoot] [--project iris] [--cards-in <project,...>]   or   cb github remove <owner/repo>');
+        need(2, 'github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]   or   cb github remove <owner/repo>');
         const repo = args[1], key = `github:${repo}`;
         // no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
         if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add acme/widgets`);
@@ -453,12 +462,28 @@ async function run(): Promise<unknown> {
             if (!(await tx`delete from cb.settings where key = ${key} returning key`).length) throw new Error(`${repo} is not watched: cb github lists the repos`);
             return { out: `stopped watching ${repo}; its cards stay on the board` };
           }
-          const [{ p }] = await tx`select cb.read_project(${o.project ?? 'ihop'}) as p`;
+          // adding it again changes only what was given and keeps its checkpoint: a watched repo needs no flag
+          const [had] = await tx`select 1 from cb.settings where key = ${key} for update`;
+          const proj = o.project ?? (had ? null : sessionProject);
+          if (!had && !proj) {
+            const [{ known }] = await tx`select string_agg(slug, ', ' order by slug) as known from cb.projects`;
+            throw new Error(`name the project its PR cards go in: cb github add ${repo} --project <project> (known: ${known ?? 'none yet'})`);
+          }
+          const p = proj ? (await tx`select cb.read_project(${proj}) as p`)[0].p : null;
+          let to = o.to;
+          if (!had && !to) {
+            // whom it tells defaults to the project's lead (cb._is_lead), when it has exactly one
+            const leads = (await tx`select distinct s.actor from cb.sessions s where s.project = ${p} and cb._is_lead(s.actor, ${p}) order by s.actor`).map((x: any) => x.actor);
+            if (leads.length !== 1) throw new Error(leads.length
+              ? `${p} has several leads (${leads.join(', ')}): say which one is told: cb github add ${repo} --project ${p} --to <session>`
+              : `${p} has no lead session to tell: cb github add ${repo} --project ${p} --to <session> (cb sessions lists them)`);
+            to = leads[0];
+          }
           // --cards-in (#4334): more projects whose cards a PR may name (fix/<card>-..., "(card <n>)"); "" clears them
           const also = o['cards-in'] === undefined ? undefined : await Promise.all(String(o['cards-in']).split(',').map((x) => x.trim())
             .filter(Boolean).map(async (x) => (await tx`select cb.read_project(${x}) as p`)[0].p as string));
-          const to = o.to ?? 'orch@shaltoot', patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}), ...(also ? { card_projects: also } : {}) };
-          // a new repo starts now (no backfill); adding it again changes only what was given and keeps its checkpoint
+          const patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}), ...(also ? { card_projects: also } : {}) };
+          // a new repo starts now (no backfill)
           const [r] = await tx`insert into cb.settings (key, value)
             values (${key}, ${tx.json({ since: new Date().toISOString(), to, project: p, ...(also ? { card_projects: also } : {}), last_ok: null, last_error: null, prs: {} })})
             on conflict (key) do update set value = cb.settings.value || ${tx.json(patch)} returning value`;
@@ -558,11 +583,13 @@ async function run(): Promise<unknown> {
       }
       const id = await callFn('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
       // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits.
-      // A name with no session row (its pane re-bound) is never "still writing", as in the digest
+      // A name with no session row (a pane re-bound to another name, or a session that never started a relay) is not
+      // "relay down", as in the digest; but if it wrote lately, say so rather than "it may be gone" (#4421)
       const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
-        case when exists (select 1 from cb.sessions where actor = ${args[0]}) then cb._board_active(${args[0]}) end as mins`;
+        exists (select 1 from cb.sessions where actor = ${args[0]}) as has_row, cb._board_active(${args[0]}) as mins`;
       const how = s.live ? 'relay live: delivered within seconds'
-        : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
+        : s.mins !== null && !s.has_row ? `no relay session on the board under this name, but it last wrote to the board ${s.mins}m ago: the message waits up to 24h for a relay under this name`
+        : s.mins !== null && s.has_row ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
         : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
       return { out: `message #${id} to ${args[0]} (${how})`, json: id };
     }
@@ -824,24 +851,52 @@ ${body}`, json: pg };
       if (o.if && !o.after) throw new Error('--if needs --after: name the question whose answer it waits for, e.g. cb ask <project> "<q>" -o ... --after Q12 --if "Yes"');
       const reply_to = replyTo(), pics = images();
       const body = await fromStdin(args.slice(1).join(' '), 'question'), context = await fromStdin(o.context, 'context');
+      const opts = o.option ? options() : null;
       // one transaction: the question never shows on the board without the pictures it was asked with
+      let again = false;
       const id = await sql.begin(async (tx) => {
-        const qid = await callFn('ask', { project: args[0], body, options: o.option ? options() : null,
+        // #3331: a resend of a question that is still open (the first run stored it, then failed or seemed to) returns
+        // that question instead of a second copy. Every field the asker gives must match, with a follow-up's task, reply
+        // pane and recipient taken from its parent and the ids read as cb.ask reads them: a wrong match would drop a
+        // question, a miss only repeats one. With pictures it always posts: new pictures must never be dropped silently.
+        // The lock: a resend while the first run's commit is still in flight waits for it, then sees it.
+        if (!pics.length) await tx`select pg_advisory_xact_lock(hashtext(${actor.trim()} || '|' || trim(${body}::text)))`;
+        const [dup] = pics.length ? [] : await tx`with a as (
+            select case when nullif(trim(${o.after ?? null}::text), '') is null then null
+                        else cb.norm_id(regexp_replace(trim(${o.after ?? null}::text), '^[qQ]', '')) end as par,
+                   case when nullif(trim(${o.task ?? null}::text), '') is null then null else cb.norm_id(${o.task ?? null}::text) end as tid)
+          select q.id from a left join cb.questions p on p.id = a.par cross join cb.questions q
+           where q.asked_by = ${actor.trim()} and q.project = cb.resolve(${args[0]}) and q.body = trim(${body}::text)
+             and q.options is not distinct from cb._options(${opts && JSON.stringify(opts)}::text::jsonb)
+             and q.parent_id is not distinct from a.par
+             and (${o.if ?? null}::text is null and q.if_answer is null or lower(q.if_answer) = lower(trim(${o.if ?? null}::text)))
+             and q.context is not distinct from ${context ?? null}::text and q.multi = ${!!o.multi} and q.blocking = ${!!o.blocking}
+             and q.task_id is not distinct from coalesce(a.tid, p.task_id)
+             and q.reply_to is not distinct from coalesce(${reply_to && JSON.stringify(reply_to)}::text::jsonb, p.reply_to)
+             and q.assigned_to is not distinct from coalesce(${o.to ?? null}::text, p.assigned_to)
+             and q.status in ('open', 'dormant') order by q.id limit 1`;
+        if (dup) { again = true; return dup.id; }
+        const qid = await callFn('ask', { project: args[0], body, options: opts,
           multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: context ?? null, reply_to, actor, to_user: o.to ?? null,
           parent: o.after ?? null, if_answer: o.if ?? null }, tx);
         await addImages(tx, qid, pics, false);
         return qid;
       });
-      const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}` : [];
+      // #3331: the question is stored. Nothing after this may turn that into an error (a retry would ask it twice): the
+      // reads below only shape the message, so a board that drops now costs their detail, never the exit code.
+      const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}`
+        .catch(() => [{ parent_id: String(o.after).trim().replace(/^[qQ#]+/, ''), if_answer: o.if ?? null }]) : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
-      if (!o['reply-to']) {
+      if (!o['reply-to']) try {
         // same 90s as cb.sessions_overview. Written out twice, not as a shared sql`` fragment: a fragment is a Promise
         // and the relay bridge cannot carry one ("#<Promise> could not be cloned", broke every ask with a live relay).
         const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and last_seen > now() - interval '90 seconds') as live,
           (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and last_seen > now() - interval '90 seconds') as mine`;
         if (!r.live) console.error(`warning: no relay listens on ${actor}, so the answer will wait in cb pending --as ${actor}` +
           (r.mine && r.mine !== actor ? `. This pane's relay is ${r.mine}: ask without --as, or add --reply-to` : ''));
-      }
+      } catch { /* only a warning: the question is posted either way */ }
+      if (again) return { out: `Q${id} is already on the board: you asked the same question and it is still open, so it was not posted again` +
+        ' — keep working; its answer arrives like any other', json: id };
       return { out: (f ? `Q${id} posted as a follow-up to Q${f.parent_id}: ` +
           (f.if_answer ? `it opens only if Q${f.parent_id} is answered "${f.if_answer}", else it is skipped` : `it opens once Q${f.parent_id} is answered`) +
           ' — keep working; its answer arrives like any other'
@@ -976,14 +1031,19 @@ async function main() {
   } catch (e: any) {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
-    const host = new URL(databaseUrl()).hostname;
-    const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host);
-    const network = ['ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND'].includes(e?.code);
-    if (!network) throw e;
+    // Whether the command ran is said plainly (#4337): a resend of one that may have run does it twice (#3331).
+    const ran = ranWords(e, sql.answered ?? 0);
+    if (!ran) throw e;
+    const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
+    // the connection dropped after a statement was sent (reset, closed, the relay lost): the board may have run it
+    if (!neverSent(e)) throw new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`);
     // A remote board (another machine) can't be started from here: say so and let the session carry on.
-    if (!local) throw new Error(`board unreachable at ${host} (${e.code}). The board machine may be asleep: keep working and register this later.`);
+    if (!localBoard) throw new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`);
     if (e.code !== 'ECONNREFUSED') throw e;
-    (await import('../db/pg.ts')).ensurePg();
+    // only the board's own cluster (5434): a worktree test cluster's port must not start .pgdata on 5434 (#4413)
+    const pg = await import('../db/pg.ts');
+    if (!pg.ownsPg(databaseUrl())) throw e;
+    pg.ensurePg();
     r = await run();
   }
   if (o.json && 'json' in r) console.log(JSON.stringify(r.json, null, 2));
