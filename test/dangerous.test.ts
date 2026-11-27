@@ -266,6 +266,66 @@ const killBlocked = [
   "ps aux | grep node | awk '{print $2}' | xargs kill",
   // M1: stripped once, so a kill between two quoted heredocs is still seen
   "cat > a.txt <<'EOF'\naaa\nEOF\npkill node\ncat > b.txt <<'EOF'\nbbb\nEOF",
+  // #3883 n4: a kill loop fed by a here-string of a lookup (<<< is one word, glued to its operand or not)
+  'while read p; do kill $p; done <<< "$(pgrep node)"',
+  'while read p; do kill $p; done <<< $(pgrep node)',
+  'while read p; do kill $p; done <<<"$(pgrep node)"',
+  'while read p; do kill $p; done <<<$(pgrep node)',
+  'while read p; do taskkill //F //PID $p; done <<< "$(tasklist | grep node | awk \'{print $2}\')"',
+  // #3883 n1: a block that stops, given the lookup after its closing brace (arguments, -ArgumentList, -InputObject)
+  'Invoke-Command -ScriptBlock { Stop-Process -Id $args } -ArgumentList (Get-Process node).Id',
+  'Invoke-Command { param($ids) Stop-Process -Id $ids } -ArgumentList (,(Get-Process node).Id)',
+  '& { param($ids) Stop-Process -Id $ids } (Get-Process node).Id',
+  '& { Stop-Process -Id $args } (Get-Process node).Id',
+  'ForEach-Object { Stop-Process -Id $_.Id } -Inp (Get-Process node)',
+  'ForEach-Object { Stop-Process -Id $_.Id } -InputObject:(Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id }; ForEach-Object $sb -InputObject (Get-Process node)',
+  // ... and any cmdlet that may run a block on its -InputObject (fail closed: only read-only cmdlets are exempt)
+  '$sb = { $input | Stop-Process }; Start-Job -ScriptBlock $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; $true }; Where-Object -FilterScript $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id }; Measure-Command $sb -Inp (Get-Process node)',
+  // ... a read-only cmdlet given a script block to run (-Property, -GroupBy, @{e=...}), or a user function named like one
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Select-Object -InputObject (Get-Process node) -Property $sb',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Select-Object -Property @{n="k";e=$sb} -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Select-Object -InputObject (Get-Process node) @{e=$sb}',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Sort-Object -Property $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; sort $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Group-Object $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Format-Table -Property $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; ft $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Format-List -InputObject (Get-Process node) -Property @{n="k";e=$sb}',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Format-Table -GroupBy $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; Measure-Object -Property $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; 1 }; ConvertTo-Html -Property @{l="k";e=$sb} -InputObject (Get-Process node)',
+  '$sb = { $input | Stop-Process }; $r = Select-Object -InputObject (Get-Process node) -Property $sb',
+  'kill $x; $h = @{e={Stop-Process -Id $_.Id}}; Select-Object -InputObject (Get-Process node) -Property $h',
+  'function Out-Kill { param($InputObject) Stop-Process -Id $InputObject.Id }; Out-Kill -InputObject (Get-Process node)',
+  'function Export-X { param($InputObject) $InputObject | Stop-Process }; Export-X -InputObject (Get-Process node)',
+  'function Format-Y { process { Stop-Process -Id $_.Id } }; Format-Y -InputObject (Get-Process node)',
+  // ... or a function, filter or alias that takes a read-only built-in's own name
+  'function Format-Table { Stop-Process -Id $args[1].Id }; Format-Table -InputObject (Get-Process node)',
+  'filter Out-String { Stop-Process -Id $_.Id }; Out-String -InputObject (Get-Process node)',
+  'Set-Alias ft Stop-Process; ft -InputObject (Get-Process node)',
+  // ... and a ${...} inside the block or between it and its arguments ends nothing
+  '& { param($ids) Stop-Process -Id $ids; ${x}} (Get-Process node).Id',
+  'Invoke-Command { param($ids) Stop-Process -Id $ids; ${null}} -ArgumentList (,(Get-Process node).Id)',
+  '& { param($a, $ids) Stop-Process -Id $ids } ${x} (Get-Process node).Id',
+  // ... a PowerShell braced name ends at its first } (a { or ${ inside it is literal), so the next } closes the block
+  '& { param($ids) Stop-Process -Id $ids; ${a:-${b}} (Get-Process node).Id',
+  '& { param($ids) Stop-Process -Id $ids; ${a{b} } (Get-Process node).Id',
+  '& { param($ids) Stop-Process -Id $ids; ${{} } (Get-Process node).Id',
+  'Invoke-Command { param($ids) Stop-Process -Id $ids; ${a{} } -ArgumentList (,(Get-Process node).Id)',
+  // harmless, but blocked (fails closed): bash nests ${a:-${b}}, PowerShell ends the name at the first }, and the guard
+  // cannot tell the shells apart, so the second } reads as a block's close
+  'kill $pid; echo ${a:-${b}} $(pgrep -c node)',
+  // #3883 n2: options between the shell and -Command / -c / /c, values included
+  'powershell -NoProfile -Command "Stop-Process" -Name node',
+  'pwsh -NoProfile -c "Stop-Process" -Name node',
+  'cmd /d /c "taskkill" /F /IM node.exe',
+  'powershell -ExecutionPolicy Bypass -Command "Stop-Process" -Name node',
+  // #3883 n3: a Terminate splat that names MethodName before its query
+  `$m = @{ MethodName = 'Terminate'; Query = "select * from Win32_Process where name like 'node%'" }; Invoke-CimMethod @m`,
+  `$m = @{\n  MethodName = 'Terminate'\n  Query = 'select * from Win32_Process where name like "node%"'\n}\nInvoke-CimMethod @m`,
 ];
 // The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
 const recommended = [
@@ -356,6 +416,28 @@ const killPassed = [
   'git commit -m "$(cat <<\'EOF\'\nfix: Get-Process node | Stop-Process killed the runner\nEOF\n)"',
   'herdr agent prompt orch-shaltoot "never run Get-Process node | Stop-Process"',
   'herdr --machine macbook agent prompt w1 "do not pkill node"',
+  // #3883: a here-string of PIDs that are not a by-name lookup; a lookup after another branch of an if
+  'while read p; do kill $p; done <<< "$(cat /tmp/mock.pids)"',
+  'while read p; do kill $p; done <<< "$(pgrep -P $$)"',
+  'while read p; do echo $p; done <<< "$(pgrep node)"',
+  'if ($id) { Stop-Process -Id $id } elseif (Get-Process node) { Write-Host "still up" }',
+  'Stop-Process -Id $id; do { Start-Sleep 1 } while (Get-Process node -ErrorAction SilentlyContinue)',
+  'Stop-Process -Id $id; do { Start-Sleep 1 } until (-not (Get-Process node -ErrorAction SilentlyContinue))',
+  // #3883 n5: -InputObject of a lookup belongs to its own cmdlet, not to an earlier stop
+  'Stop-Process -Id $mockPid; Format-Table -InputObject (Get-Process node)',
+  'kill $PID; Measure-Object -InputObject (Get-Process node)',
+  'Stop-Process -Id $id; $n = Select-Object -InputObject (Get-Process node) -Property Id',
+  // #3883: the } of a parameter expansion ends no block: a lookup after it is a check
+  'kill $pid; echo "stopped ${pid}, remaining $(pgrep -c node)"',
+  'kill $pid; echo "${name} left: $(pgrep -fl node)"',
+  'kill "$SERVER_PID"; printf "%s\\n" ${PORT} $(pgrep -f vite)',
+  // #3883 n3: = 'Terminate' under another key is not a MethodName
+  `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
+  // #3883 n3: a splat or a Terminate that names one process, then a by-name listing
+  `$m = @{ MethodName = 'Terminate'; Query = "select * from Win32_Process where ProcessId = 1234" }; Invoke-CimMethod @m`,
+  `Invoke-CimMethod -MethodName Terminate -Query "select * from Win32_Process where ProcessId = 1234"; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
+  // #3883 n2: a -c that is not a shell's
+  'Get-Process node; grep -c "kill" app.log',
 ];
 const KILL = check('killall node');
 test('kill by name: the reason names the harm, the PID and port routes, and quotes each recommended command', () => {
