@@ -283,7 +283,6 @@ drop function if exists cb._broadcasts cascade;
 drop function if exists cb.tick cascade;
 drop function if exists cb._is_review cascade;
 drop function if exists cb._pr_no cascade;
-drop function if exists cb._pr_open cascade;
 drop function if exists cb._has_reviewer cascade;
 drop function if exists cb.lock_take cascade;
 drop function if exists cb.lock_release cascade;
@@ -2268,12 +2267,6 @@ $$;
 create function cb._pr_no(links jsonb) returns text language sql immutable as $$
   select substring($1 ->> 'pr' from '([0-9]+)/?$')
 $$;
--- #4335: a PR the GitHub poller has open: its repo is watched (cb.settings 'github:<owner/repo>') and the PR is in that
--- state's open list (prs: number -> card; the poller drops a PR when it merges or closes). Unwatched or unknown: false.
-create function cb._pr_open(url text) returns boolean language sql stable as $$
-  with m as (select regexp_match(coalesce(url, ''), 'github\.com/([^/]+/[^/]+)/pull/([0-9]+)/?$') as g)
-  select coalesce((select bool_or(s.value -> 'prs' ? m.g[2]) from m join cb.settings s on lower(s.key) = lower('github:' || m.g[1])), false)
-$$;
 
 -- Some reviewer task (not cancelled) covers this task: same PR, or "#<task id>"/"#<pr>" in its title.
 create function cb._has_reviewer(t cb.tasks) returns boolean language sql stable as $$
@@ -4036,18 +4029,19 @@ $$;
 -- and loses the card after 90 if the nudge went unanswered; a hold (status next) whose live holder has gone 90 minutes
 -- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
 -- event (the board's own nudges excluded) and no event by the holder anywhere. Returns messages sent plus cards freed.
--- #4335: a builder holding a card (or part) at build whose PR is open (cb._pr_open: by the GitHub poller) is working
--- on that PR, and keeps it through a quiet spell of up to 24 h: nudged once, without "it goes back to the queue". Any
--- other holder, a PR merged, closed or not watched, or a longer spell: the usual rules (the review of #17: a links.pr
--- alone is on every card past build and never cleared).
+-- #4335: a builder holding a card (or part) at build with a PR linked is working on that PR (a send-back to build owes
+-- a new one), and keeps it through a quiet spell of up to 24 h: nudged once, without "it goes back to the queue". At
+-- 24 h it gets the usual nudge, and is freed an hour after that if it is still quiet. Any other holder, or stage: the
+-- usual rules. (Not the PR's state: the poller lists only PRs that have its card, which a squad's own PRs mostly lack;
+-- #17's second review. A merged or closed PR is held at most the 24 h.)
 create function cb.stage_stalls_due() returns int language plpgsql as $$
-declare r record; n int := 0; mins int; idle text; why text; moved int;
+declare r record; n int := 0; mins int; idle text; why text; moved int; grace interval;
 begin
   -- the close path leaves a card's nudge row behind: drop rows of cards that have no stage any more
   delete from cb.stage_nudges d where not exists (select 1 from cb.tasks t where t.id = d.task_id and t.stage is not null);
   for r in
     select t.id, t.project, left(t.title, 80) as title, t.assignee, t.status, t.stage, q.quiet_since, nd.nudged_at,
-           (t.stage = 'build' and cb._role(t.assignee) = 'builder' and cb._pr_open(t.links ->> 'pr')) as has_pr,
+           (t.stage = 'build' and cb._role(t.assignee) = 'builder' and cb._pr_no(t.links) is not null) as has_pr,
            cb._pr_no(t.links) as pr_no
       from cb.tasks t
       cross join lateral (select greatest(t.updated_at,
@@ -4064,7 +4058,9 @@ begin
   loop
     mins := floor(extract(epoch from now() - r.quiet_since) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
-    if not (r.has_pr and mins < 24 * 60) and mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since and r.nudged_at <= now() - interval '60 minutes')) then
+    -- a PR hold's own nudge is no warning (review M1): past 24 h only a nudge sent after the exemption ended counts
+    grace := case when r.has_pr then interval '24 hours' else interval '0' end;
+    if not (r.has_pr and mins < 24 * 60) and mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since + grace and r.nudged_at <= now() - interval '60 minutes')) then
       why := case when r.status = 'next' then format('held for %s with no activity', idle)
                   else format('no update for %s and the nudge went unanswered', idle) end;
       perform set_config('cb.actor', 'board', true);
@@ -4082,11 +4078,11 @@ begin
       values ('board', r.project, r.id, 'message', format('#%s went back to the queue: %s', r.id, why),
               jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
       n := n + 2;
-    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since) then
+    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
               case when r.has_pr and mins < 24 * 60
-                then format('#%s "%s" has PR #%s open, with no update for %s at %s. Say where it stands (cb log %s "...").',
+                then format('#%s "%s" has PR #%s linked, with no update for %s at %s. Say where it stands (cb log %s "...").',
                             r.id, r.title, r.pr_no, idle, cb._stage_words(r.stage), r.id)
                 else format('#%s "%s" has had no update for %s at %s. Say where it stands (cb log %s "...") or it goes back to the queue in an hour.',
                             r.id, r.title, idle, cb._stage_words(r.stage), r.id) end,
@@ -4100,7 +4096,7 @@ begin
   -- excluded), no event by the holder anywhere, no fresh bind of its session.
   for r in
     select h.task_id as id, h.repo, h.assignee, h.status, h.stage, h.nudged_at, t.project, left(t.title, 80) as title, q.quiet_since,
-           (h.stage = 'build' and cb._role(h.assignee) = 'builder' and cb._pr_open(h.pr)) as has_pr,
+           (h.stage = 'build' and cb._role(h.assignee) = 'builder' and substring(h.pr from '([0-9]+)/?$') is not null) as has_pr,
            substring(h.pr from '([0-9]+)/?$') as pr_no
       from cb._held_parts() h join cb.tasks t on t.id = h.task_id
       cross join lateral (select greatest(h.since,
@@ -4115,7 +4111,9 @@ begin
     mins := floor(extract(epoch from now() - r.quiet_since) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
     perform 1 from cb.tasks t where t.id = r.id for update;  -- part rows change only under the card's row lock
-    if not (r.has_pr and mins < 24 * 60) and mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since and r.nudged_at <= now() - interval '60 minutes')) then
+    -- a PR hold's own nudge is no warning (review M1): past 24 h only a nudge sent after the exemption ended counts
+    grace := case when r.has_pr then interval '24 hours' else interval '0' end;
+    if not (r.has_pr and mins < 24 * 60) and mins >= 90 and (r.status = 'next' or (r.nudged_at > r.quiet_since + grace and r.nudged_at <= now() - interval '60 minutes')) then
       why := case when r.status = 'next' then format('held for %s with no activity', idle)
                   else format('no update for %s and the nudge went unanswered', idle) end;
       update cb.task_parts p set assignee = null, status = 'next', nudged_at = null
@@ -4129,11 +4127,11 @@ begin
       values ('board', r.project, r.id, 'message', format('#%s part %s went back to the queue: %s', r.id, r.repo, why),
               jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo));
       n := n + 2;
-    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since) then
+    elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
               case when r.has_pr and mins < 24 * 60
-                then format('#%s "%s" (part %s) has PR #%s open, with no update for %s at %s. Say where it stands (cb log %s "...").',
+                then format('#%s "%s" (part %s) has PR #%s linked, with no update for %s at %s. Say where it stands (cb log %s "...").',
                             r.id, r.title, r.repo, r.pr_no, idle, cb._stage_words(r.stage), r.id)
                 else format('#%s "%s" (part %s) has had no update for %s at %s. Say where it stands (cb log %s "...") or it goes back to the queue in an hour.',
                             r.id, r.title, r.repo, idle, cb._stage_words(r.stage), r.id) end,
