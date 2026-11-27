@@ -12,19 +12,19 @@
 // hook trust is not checked here: its launch passes --dangerously-bypass-hook-trust, so the installed hook always runs.
 // Names only ever appear in a reason, never a value.
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isClaudeOnly } from './env.ts';
 import { readOpencodeEndpoint, writeOpencodeEndpoint } from './opencode.ts';
 
 const read = (f: string) => { try { return readFileSync(f, 'utf8'); } catch { return null; } };
-/** cwd equals or is under root (case-insensitive on Windows, where agy stores native paths). */
-export function within(cwd: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
-  const norm = (p: string) => { const r = resolve(p); return platform === 'win32' ? r.toLowerCase() : r; };
-  const rel = relative(norm(root), norm(cwd));
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+/** The same folder (case-insensitive on Windows, where agy stores native paths). Exact, never a parent: whether agy's trust
+ *  of a folder covers the folders under it is not verified, and assuming it would fail open. */
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  const norm = (p: string) => { const r = resolve(p).replace(/[\\/]+$/, ''); return platform === 'win32' ? r.toLowerCase() : r; };
+  return norm(a) === norm(b);
 }
 
 /** Null when the seat may start, else why not. env, cwd and home are the shell's (tests pass their own). */
@@ -41,8 +41,8 @@ export function seatRefusal(agent: string, machine: string, pane: string, env: N
     if (!hooks || !hooks.includes('shim-agy.mjs')) return 'no .agents/hooks.json entry for kit/guard/shim-agy.mjs in the seat folder: install the guard first';
     let trusted: unknown;
     try { trusted = JSON.parse(read(join(home, '.gemini', 'antigravity-cli', 'settings.json')) ?? 'null')?.trustedWorkspaces; } catch { trusted = null; }
-    if (!Array.isArray(trusted) || !trusted.some((t) => typeof t === 'string' && t && within(cwd, t))) {
-      return 'agy has not trusted this folder, and agy loads workspace hooks only after trust: the guard would not run. A person trusts it in agy first';
+    if (!Array.isArray(trusted) || !trusted.some((t) => typeof t === 'string' && t && samePath(cwd, t))) {
+      return 'agy has not trusted this folder (its exact path in trustedWorkspaces), and agy loads workspace hooks only after trust: the guard would not run. A person trusts it in agy first';
     }
     return null;
   }
@@ -76,4 +76,6 @@ export function main(argv: string[], out: (s: string) => void = (s) => process.s
   return 2;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) process.exitCode = main(process.argv.slice(2));
+// realpath: a linked or junction checkout must still run as the helper (import.meta.url is the real path)
+const isMain = () => { const a = process.argv[1]; if (!a) return false; try { return import.meta.url === pathToFileURL(realpathSync(a)).href; } catch { return import.meta.url === pathToFileURL(resolve(a)).href; } };
+if (isMain()) process.exitCode = main(process.argv.slice(2));

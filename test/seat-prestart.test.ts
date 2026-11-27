@@ -15,13 +15,16 @@ import { CLAUDE_ONLY_ENV, isClaudeOnly } from '../cli/agents/env.ts';
 import { codexPromptText, createCodexAdapter } from '../cli/agents/codex.ts';
 import { opencodeEndpointPath } from '../cli/agents/opencode.ts';
 
+// The owner's Codex switch (#4002): startOne reaches the registry's adapter, which reads it from this process
+process.env.CB_CODEX_BYPASS_HOOK_TRUST = '1';
 const BOARD = fileURLToPath(new URL('..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '');
 // Plainly fake values: the names are what count, and no value is ever printed by a child.
 const CANARY = { GITHUB_PERSONAL_ACCESS_TOKEN: 'not-a-token', CLAUDE_CODE_FAKE_SOCKET: 'fake', ANTHROPIC_FAKE_KEY: 'fake', anthropic_fake_lower: 'fake', CLAUDECODE: '1', CB_KEEP_ME: 'kept' };
 const ALL: ReadonlySet<AgentKind> = new Set(['claude', 'codex', 'opencode', 'agy']);
 const GATE = { installed: ALL, env: { CB_MCP_GATE_OK: 'codex,opencode,agy' } };
 const noPause = () => {};
-const bashOk = (() => { const r = spawnSync('bash', ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; })();
+const shellOk = (sh: string) => { const r = spawnSync(sh, ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; };
+const bashOk = shellOk('bash'), zshOk = shellOk('zsh');
 const pwshOk = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
 
 /** A home folder with the guard installed for every agent, and a seat folder agy trusts (unless told otherwise). */
@@ -30,7 +33,7 @@ function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean;
   for (const d of [home, ws, tmp, join(home, '.codex'), join(home, '.gemini', 'antigravity-cli'), join(home, '.config', 'opencode', 'plugins'), join(ws, '.agents')]) mkdirSync(d, { recursive: true });
   if (o.codexHook !== false) writeFileSync(join(home, '.codex', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: `node ${BOARD}/kit/guard/shim-codex.mjs` }] }] } }));
   writeFileSync(join(ws, '.agents', 'hooks.json'), JSON.stringify({ 'cb-guard': { PreToolUse: [{ command: `node ${BOARD}/kit/guard/shim-agy.mjs` }] } }));
-  writeFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ trustedWorkspaces: o.agyTrusted === false ? [join(root, 'elsewhere')] : [root] }));
+  writeFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ trustedWorkspaces: o.agyTrusted === false ? [root] : [join(root, 'elsewhere'), ws] }));
   if (o.plugin !== false) writeFileSync(join(home, '.config', 'opencode', 'plugins', 'cb-guard.js'), '// test plugin\n');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp };
@@ -86,14 +89,16 @@ test('one Claude-only list: every adapter strips it from its launch env, and bot
   for (const f of ['kit/seat/prestart.sh', 'kit/seat/prestart.ps1']) assert.ok(readFileSync(join(BOARD, f), 'utf8').includes(`'${pattern}'`), f);
 });
 
-test('prestart.sh in a real bash: the Claude-only names leave the shell itself, a child sees none, the rest stays', { skip: !bashOk && 'no bash' }, (t) => {
-  const w = world(t);
-  const r = spawnSync('bash', ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
-  assert.match(r.stdout, /^cb-seat-ready:n0nce1$/m, r.stdout + r.stderr);
-  const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
-  assert.deepEqual(names.filter(isClaudeOnly), []);
-  assert.ok(names.includes('CB_KEEP_ME'));
-});
+for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
+  test(`prestart.sh in a real ${sh}: the Claude-only names leave the shell itself, a child sees none, the rest stays`, { skip: !has && `no ${sh}` }, (t) => {
+    const w = world(t);
+    const r = spawnSync(sh, ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+    assert.match(r.stdout, /^cb-seat-ready:n0nce1$/m, r.stdout + r.stderr);
+    const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
+    assert.deepEqual(names.filter(isClaudeOnly), []);
+    assert.ok(names.includes('CB_KEEP_ME'));
+  });
+}
 
 test('prestart.ps1 in a real pwsh: the same', { skip: !pwshOk && 'no pwsh' }, (t) => {
   const w = world(t);

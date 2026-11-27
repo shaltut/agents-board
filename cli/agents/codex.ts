@@ -44,8 +44,15 @@ function retryAfterSec(text: string): number | undefined {
   return total > 0 ? total : undefined;
 }
 
+/** #4002 install gate, the owner's switch: Codex runs hooks only once a person trusts them, and Esc on "Hooks need review"
+ *  goes on without them, so the guard fails open. A Codex seat starts only with --dangerously-bypass-hook-trust (the
+ *  installed hooks always run; DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too), and
+ *  only where CB_CODEX_BYPASS_HOOK_TRUST=1 is set (where cb squad up and the supervisor run). Unset: refused by name. */
+export const codexHookTrustBypassed = (env: NodeJS.ProcessEnv = process.env) => /^(?:1|true|yes)$/i.test(String(env.CB_CODEX_BYPASS_HOOK_TRUST ?? '').trim());
+
 // realRun is read when a call is made, never at import: squad-up.ts imports the registry that imports this file.
-export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)): AgentAdapter {
+// switchEnv: where the owner's switch is read (tests pass their own)
+export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), switchEnv: NodeJS.ProcessEnv = process.env): AgentAdapter {
   const adapter: AgentAdapter = {
     kind: 'codex',
     // No SessionStart hook hands the relay anything: the seat's relay is started by the pane before the agent runs.
@@ -55,6 +62,7 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
+      if (!codexHookTrustBypassed(switchEnv)) throw new Error(`codex seat ${l.name}: Codex runs the guard hook only after a person trusts it (Esc on "Hooks need review" goes on without it), so a Codex seat starts only with --dangerously-bypass-hook-trust, the owner's call: set CB_CODEX_BYPASS_HOOK_TRUST=1 where cb squad up and the supervisor run`);
       const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
       const env = stripClaudeOnly(l.env);
       return {
@@ -63,10 +71,8 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
           ...(l.model ? ['-m', l.model] : []),
           '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
-          // #4002 install gate: hooks run only once a person trusts them, and Esc on "Hooks need review" goes on without
-          // them (fail open). With this flag the installed hooks always run; the prestart refuses a seat with no guard
-          // entry in hooks.json, and the fence keeps every seat out of hooks.json and config.toml. Owner's call (DANGEROUS
-          // in Codex's help: it also runs a trusted project's own .codex hooks unreviewed).
+          // #4002 install gate (codexHookTrustBypassed): the installed hooks always run; the prestart refuses a seat with
+          // no guard entry in hooks.json, and the fence keeps every seat out of hooks.json and config.toml
           '--dangerously-bypass-hook-trust',
           '-s', readOnly ? 'read-only' : 'workspace-write',
           // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)

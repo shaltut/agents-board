@@ -714,6 +714,7 @@ test('launchFor (#4429): a non-claude seat carries the launching machine\'s CB_M
   // squad up (planSquad) and the supervisor (supervise-plan) pass no env: this process's is read, so the PC's or the Mac's
   // value rides on the herdr --env of a local or a --machine launch alike
   process.env.CB_MCP_GATE_OK = 'codex';
+  process.env.CB_CODEX_BYPASS_HOOK_TRUST = '1'; // the owner's Codex switch (#4002), or the Codex launch is refused
   try {
     const plan = planSquad('demo', MIXED, [], {});
     assert.equal(plan.start.find((l) => l.name === 'demo-B3@macbook')!.env.CB_MCP_GATE_OK, 'codex');
@@ -728,7 +729,7 @@ test('launchFor (#4429): a non-claude seat carries the launching machine\'s CB_M
     const out = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? lead
       : [{ actor: 'QO@shaltoot', project: 'demo', live: false, machine: 'shaltoot', role: 'lead', last_seen: ago(10) }]), fake(() => GONE).run);
     assert.match(out, /herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=codex' --env 'CB_MCP_GATE_OK=codex', or cb iam/);
-  } finally { delete process.env.CB_MCP_GATE_OK; }
+  } finally { delete process.env.CB_MCP_GATE_OK; delete process.env.CB_CODEX_BYPASS_HOOK_TRUST; }
 });
 
 test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as before', async () => {
