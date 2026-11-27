@@ -387,15 +387,15 @@ function AddPerson({ open, onOpenChange, base, people }: { open: boolean; onOpen
             </fieldset>
             <label className="grid gap-1.5 text-sm">
               <span className="font-medium">Display name</span>
-              <Input autoFocus required value={display} onChange={(e) => setDisplay(e.target.value)} placeholder="Omar Khaled…" />
+              <Input autoFocus required value={display} onChange={(e) => setDisplay(e.target.value)} placeholder="Cai Lee…" />
             </label>
             <div className="grid gap-1.5 text-sm">
               <label htmlFor="person-name" className="font-medium">Name</label>
               <Input id="person-name" required value={handle} onChange={(e) => setName(e.target.value)} pattern="[a-z][a-z0-9_\-]*" spellCheck={false} autoCapitalize="off"
-                placeholder="omar…" className="font-mono" aria-describedby="person-name-hint" />
+                placeholder="cai…" className="font-mono" aria-describedby="person-name-hint" />
               <span id="person-name-hint" className="text-xs text-muted-foreground">
                 {existing ? <>{existing.display} already has this name: adding keeps their link and changes the display name.</>
-                  : <>Lowercase. Sessions use it: <code className="font-mono">cb ask … --to {handle || 'omar'}</code></>}
+                  : <>Lowercase. Sessions use it: <code className="font-mono">cb ask … --to {handle || 'cai'}</code></>}
               </span>
             </div>
             {role === 'admin' && (

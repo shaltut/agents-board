@@ -170,7 +170,7 @@ test('a restore that did not start is tried again after 10 minutes and is never 
 });
 
 // several repos (#3703): builders and reviewers start, count and close per repo, each in its repo's folder
-const QHS: any = {
+const ZED: any = {
   machines: { shaltoot: { herdr: null, board: '/b' }, macbook: { herdr: 'macbook', board: '/b' } },
   repos: { api: { home: true, paths: { shaltoot: '/q/api', macbook: '/m/api' } }, dashboard: { home: false, paths: { shaltoot: '/q/dash', macbook: '/m/dash' } } },
   areas: [{ name: 'api', repo: 'api' }, { name: 'dashboard', repo: 'dashboard' }],
@@ -179,35 +179,35 @@ const QHS: any = {
            reviewer: { count: { api: 1, dashboard: 1 }, model: 'opus', machine: 'macbook' } },
   supervise: true,
 };
-const qhs = (builder: Record<string, number>, sessions: Session[] = []): State => ({ project: 'qhs', squad: QHS, supervised: true, sessions,
+const zed = (builder: Record<string, number>, sessions: Session[] = []): State => ({ project: 'zed', squad: ZED, supervised: true, sessions,
   waiting: { builder, reviewer: { api: 0, dashboard: 0 }, qa: 0, investigator: 0, architect: 0, owner: { api: 0, dashboard: 0 } } });
 
 test('starts per repo', () => {
-  const p = tick(qhs({ api: 0, dashboard: 2 }));
-  assert.deepEqual(names(p.start), ['qhs-dashboard-B1@macbook']); // the dashboard count is 1; never an api builder
+  const p = tick(zed({ api: 0, dashboard: 2 }));
+  assert.deepEqual(names(p.start), ['zed-dashboard-B1@macbook']); // the dashboard count is 1; never an api builder
   assert.equal(p.start[0].cwd, '/m/dash');
   assert.ok(p.start[0].prompt.includes('--repo dashboard'));
   // an idle api builder does not cancel dashboard work; an idle dashboard builder does
-  const apiIdle = sess('qhs-B1@macbook', 'builder', { repo: 'api' });
-  assert.deepEqual(names(tick(qhs({ api: 0, dashboard: 1 }, [apiIdle])).start), ['qhs-dashboard-B1@macbook']);
-  assert.deepEqual(names(tick(qhs({ api: 1, dashboard: 0 }, [apiIdle])).start), []);
-  assert.deepEqual(names(tick(qhs({ api: 2, dashboard: 0 }, [apiIdle])).start), ['qhs-B2@macbook']);
+  const apiIdle = sess('zed-B1@macbook', 'builder', { repo: 'api' });
+  assert.deepEqual(names(tick(zed({ api: 0, dashboard: 1 }, [apiIdle])).start), ['zed-dashboard-B1@macbook']);
+  assert.deepEqual(names(tick(zed({ api: 1, dashboard: 0 }, [apiIdle])).start), []);
+  assert.deepEqual(names(tick(zed({ api: 2, dashboard: 0 }, [apiIdle])).start), ['zed-B2@macbook']);
   // close rules apply per repo group: the api builder closes while dashboard work waits, never the dashboard one
   const quiet = (n: string, repo: string) => sess(n, 'builder', { repo, last_event: ago(21) });
-  const ready = { herdrStatus: { 'qhs-b1-macbook': 'idle', 'qhs-dashboard-b1-macbook': 'idle' } };
-  const both = [quiet('qhs-B1@macbook', 'api'), quiet('qhs-dashboard-B1@macbook', 'dashboard')];
-  assert.deepEqual(tick(qhs({ api: 0, dashboard: 1 }, both), ready).close, ['qhs-B1@macbook']);
-  assert.deepEqual(tick(qhs({ api: 1, dashboard: 0 }, both), ready).close, ['qhs-dashboard-B1@macbook']);
+  const ready = { herdrStatus: { 'zed-b1-macbook': 'idle', 'zed-dashboard-b1-macbook': 'idle' } };
+  const both = [quiet('zed-B1@macbook', 'api'), quiet('zed-dashboard-B1@macbook', 'dashboard')];
+  assert.deepEqual(tick(zed({ api: 0, dashboard: 1 }, both), ready).close, ['zed-B1@macbook']);
+  assert.deepEqual(tick(zed({ api: 1, dashboard: 0 }, both), ready).close, ['zed-dashboard-B1@macbook']);
 });
 
 test('3 starts per tick and the Mac cap hold across repo groups', () => {
-  const both = (o: Partial<TickInput>) => tick(qhs({ api: 2, dashboard: 1 }), o).start;
-  assert.deepEqual(names(both({ startsLeft: 3 })), ['qhs-B1@macbook', 'qhs-B2@macbook', 'qhs-dashboard-B1@macbook']);
-  assert.deepEqual(names(both({ startsLeft: 2 })), ['qhs-B1@macbook', 'qhs-B2@macbook']);
-  assert.deepEqual(names(both({ startsLeft: 3, macLive: 6 })), ['qhs-B1@macbook', 'qhs-B2@macbook']);
-  assert.deepEqual(names(both({ startsLeft: 3, macLive: 7 })), ['qhs-B1@macbook']);
+  const both = (o: Partial<TickInput>) => tick(zed({ api: 2, dashboard: 1 }), o).start;
+  assert.deepEqual(names(both({ startsLeft: 3 })), ['zed-B1@macbook', 'zed-B2@macbook', 'zed-dashboard-B1@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 2 })), ['zed-B1@macbook', 'zed-B2@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 3, macLive: 6 })), ['zed-B1@macbook', 'zed-B2@macbook']);
+  assert.deepEqual(names(both({ startsLeft: 3, macLive: 7 })), ['zed-B1@macbook']);
   // reviewers of both repos share the same budget
-  const st = qhs({ api: 2, dashboard: 1 }); st.waiting.reviewer = { api: 1, dashboard: 1 };
+  const st = zed({ api: 2, dashboard: 1 }); st.waiting.reviewer = { api: 1, dashboard: 1 };
   assert.equal(tick(st, { startsLeft: 3 }).start.length, 3);
   assert.equal(tick(st, { startsLeft: 5 }).start.length, 5);
 });

@@ -86,7 +86,7 @@
 
 **Files:**
 - Create: `cli/recipes.ts`
-- Create: `docs/ops/runner.example.json` (the iHop recipes below; `log.host` and `log.peers` hold placeholder Tailscale addresses `100.64.0.1`, `100.64.0.2`)
+- Create: `docs/ops/runner.example.json` (the Iris recipes below; `log.host` and `log.peers` hold placeholder Tailscale addresses `100.64.0.1`, `100.64.0.2`)
 - Test: `test/recipes.test.ts`
 
 **Interfaces:**
@@ -96,14 +96,14 @@
   - `type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env: Record<string,string>; timeout: number /* seconds */; db: boolean; params: Record<string, Param> }`
   - `type Project = { git: string; base: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> }`
   - `type RunnerConfig = { name?: string; slots: number; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> }`
-  - `loadConfig(text: string): RunnerConfig` — parses and validates; throws `Error` naming the field (`projects.ihop.recipes.test.steps[0]: ...`). Rules: `slots` 1-4; every slot `{x}` in a step, `finally` or `cwd` names a declared param; an argv element holds at most one slot; `cwd` may use only params with `max` 1; every `pattern` compiles; recipe names and param names match `^[a-z][a-z0-9-]*$`; `timeout` 1-7200.
+  - `loadConfig(text: string): RunnerConfig` — parses and validates; throws `Error` naming the field (`projects.iris.recipes.test.steps[0]: ...`). Rules: `slots` 1-4; every slot `{x}` in a step, `finally` or `cwd` names a declared param; an argv element holds at most one slot; `cwd` may use only params with `max` 1; every `pattern` compiles; recipe names and param names match `^[a-z][a-z0-9-]*$`; `timeout` 1-7200.
   - `checkParams(recipe: Recipe, params: Record<string, string[]>): string | null` — null when fine, else `error: bad parameter <name>: <value>` (or `<name>: unknown` / `<name>: needs at least <min>` / `<name>: at most <max>`). Applies the Global Constraints value rule, then the recipe pattern.
   - `expand(argv: string[], params: Record<string, string[]>): string[]` — an element containing `{name}` becomes one element per value, the slot replaced (`"--filter={ws}"` with `ws=[a,b]` → `"--filter=a","--filter=b"`); a param with no values drops the element.
   - `jobCwd(slotDir: string, recipe: Recipe, params): string` — resolves `cwd` inside `slotDir`; throws if the result leaves `slotDir`.
   - `jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Recipe): Record<string,string>` — Global Constraints env rule.
   - `published(cfg: RunnerConfig): { project: string; recipe: string; params: Record<string,{min:number;max:number}>; db: boolean }[]` — what `runner_hello` gets (no argv, no patterns, no env).
 
-- iHop recipes for `runner.example.json` (project `ihop`, `git` `https://github.com/TachyHealth/iHop-Platform.git`, `base` `C:/r`, `lockfile` `pnpm-lock.yaml`, `install` `["pnpm","install","--frozen-lockfile"]`, `installTimeout` 1200). `ws` pattern `^@ihop/[a-z0-9-]+$`. Integration env for `itest`/`kbtest`: `INTEGRATION_TESTS=1`, `DB_SSL_DISABLE=true`, `SSO_CONFIG_ENCRYPTION_KEY=` a 43-char base64 placeholder, `TEST_STACK_PROJECT=cb-runner-it`, `TEST_STACK_PG_PORT=55432`, `TEST_STACK_REDIS_PORT=56379`, `TEST_STACK_S3_PORT=59000`. `NODE_OPTIONS=--max-old-space-size=4096` on `check`, `test`, `itest`, `build`.
+- Iris recipes for `runner.example.json` (project `iris`, `git` `https://github.com/acme/widgets.git`, `base` `C:/runs`, `lockfile` `pnpm-lock.yaml`, `install` `["pnpm","install","--frozen-lockfile"]`, `installTimeout` 1200). `ws` pattern `^@iris/[a-z0-9-]+$`. Integration env for `itest`/`kbtest`: `INTEGRATION_TESTS=1`, `DB_SSL_DISABLE=true`, `SSO_CONFIG_ENCRYPTION_KEY=` a 43-char base64 placeholder, `TEST_STACK_PROJECT=cb-runner-it`, `TEST_STACK_PG_PORT=55432`, `TEST_STACK_REDIS_PORT=56379`, `TEST_STACK_S3_PORT=59000`. `NODE_OPTIONS=--max-old-space-size=4096` on `check`, `test`, `itest`, `build`.
 
   | Recipe | params | cwd | steps | finally | timeout | db |
   |---|---|---|---|---|---|---|
@@ -117,13 +117,13 @@
   | build | ws 1-6 | `.` | `pnpm exec turbo build --filter={ws}` | — | 1800 | no |
   | guards | — | `.` | one step each: `node scripts/<x>.mjs` for `image-digest-guard`, `log-discipline-guard`, `telemetry-names-guard`, `metric-registry-guard`, `secrets-scan`, `input-validation-audit`, `suppression-audit`, `llm-client-boundary`, `check-auth-error-envelope` | — | 900 | no |
 
-  `tsx` and `vitest` resolve only from inside the app folder in an iHop checkout (checked 2026-11-23), so `itest` and `kbtest` run from the app folder and reach the stack script by `../../`. The `..` is in the trusted recipe, never in a parameter. The stack script writes `--env-out` relative to its cwd.
+  `tsx` and `vitest` resolve only from inside the app folder in an Iris checkout (checked 2026-11-23), so `itest` and `kbtest` run from the app folder and reach the stack script by `../../`. The `..` is in the trusted recipe, never in a parameter. The stack script writes `--env-out` relative to its cwd.
 
 - [ ] **Step 1: Write the failing tests** in `test/recipes.test.ts` (no DB):
-  - `the iHop example loads and publishes names only`: `loadConfig(readFileSync('docs/ops/runner.example.json'))` succeeds; `published()` has the nine iHop recipes; `JSON.stringify(published(cfg))` contains no `pnpm`, no `node`, no `pattern`, no `TEST_STACK`.
+  - `the Iris example loads and publishes names only`: `loadConfig(readFileSync('docs/ops/runner.example.json'))` succeeds; `published()` has the nine Iris recipes; `JSON.stringify(published(cfg))` contains no `pnpm`, no `node`, no `pattern`, no `TEST_STACK`.
   - `loadConfig names the bad field`: unknown slot `{nope}` → `/steps\[0\].*nope/`; two slots in one element → refused; bad regex → refused; `slots: 9` → refused; a `cwd` using a list param → refused.
   - `checkParams refuses flag- and path-shaped values and the pattern`: with the example `test` recipe, `files: ['-r']`, `['../x']`, `['tests/../x.test.ts']`, `['C:/x']`, `['/etc']`, `['a b']`, `['tests/a.ts']` (pattern), `['tests/a.integration.test.ts']` (integration files go to `itest`) → each returns a string starting `error: bad parameter files:`; 21 values → `files: at most 20`; `app: ['claims-api'], files: ['tests/a.test.ts']` → null; `extra: ['x']` → `extra: unknown`.
-  - `expand repeats an element per value and drops empty params`: `expand(['pnpm','--filter={ws}','check'], {ws:['@ihop/a','@ihop/b']})` → `['pnpm','--filter=@ihop/a','--filter=@ihop/b','check']`; `expand(['node','{files}'], {files:[]})` → `['node']`.
+  - `expand repeats an element per value and drops empty params`: `expand(['pnpm','--filter={ws}','check'], {ws:['@iris/a','@iris/b']})` → `['pnpm','--filter=@iris/a','--filter=@iris/b','check']`; `expand(['node','{files}'], {files:[]})` → `['node']`.
   - `jobCwd stays inside the slot`: `apps/{app}` with `app=['claims-api']` → `<slot>/apps/claims-api`; a cwd that resolves outside → throws.
   - `jobEnv starts empty`: given `{ PATH: 'p', CB_DATABASE_URL: 'x', DATABASE_URL: 'y', SECRET: 's', TEMP: 't' }` and a recipe env `{ A: '1' }` → exactly `{ PATH, TEMP, NO_COLOR:'1', FORCE_COLOR:'0', CI:'1', A:'1' }` plus any `passEnv` names present.
 
@@ -244,4 +244,4 @@ Behaviour (spec "The runner daemon on the PC"):
 - [ ] Full suite under `cb lock take db`; final whole-branch review on the most capable model.
 - [ ] Write the PC `~/.claude-board/runner.json` from the example with the real Tailscale addresses of the PC and the MacBook; tell Ahmed on the board it is his file to edit.
 - [ ] Ask Ahmed on the board (`cb ask`) for the merge-and-deploy go; then push main, deploy vps2 (schema applies on start), pull the PC, copy to the Mac.
-- [ ] Start `cb runner` in a new herdr pane on the PC. From a Mac session bound to `ihop`: `cb run check --ws @ihop/claims-api --sha <pushed main sha>`, `cb run test --app claims-api --files <one test> --sha …`, `cb run itest --files <one integration test> --sha …`, and each of the other six recipes once (`kbtest` with `server/routes/async-ingest.db.test.ts`); expect a Windows Firewall prompt on the runner's first bind to the Tailscale address (Ahmed answers it); `cb run test --files ../x` and `--files -r` refused; each result arrives by itself; `cb job log <id> --tail 20` works from the Mac and is refused from vps2.
+- [ ] Start `cb runner` in a new herdr pane on the PC. From a Mac session bound to `iris`: `cb run check --ws @iris/claims-api --sha <pushed main sha>`, `cb run test --app claims-api --files <one test> --sha …`, `cb run itest --files <one integration test> --sha …`, and each of the other six recipes once (`kbtest` with `server/routes/async-ingest.db.test.ts`); expect a Windows Firewall prompt on the runner's first bind to the Tailscale address (Ahmed answers it); `cb run test --files ../x` and `--files -r` refused; each result arrives by itself; `cb job log <id> --tail 20` works from the Mac and is refused from vps2.

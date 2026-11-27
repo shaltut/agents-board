@@ -14,7 +14,7 @@ never free it, because it often waits on Ahmed.
   after a compaction or restart (`cb resume`) and before the next step.
 - `cb page show --area <area>`: what the area page claims. Check it against the code; it may be stale.
 - Read code, logs and read-only queries. Show the file and line behind every claim.
-- Production and UAT are air-gapped: you cannot reach them. Ask Ahmed to run the steps and paste back the output:
+- Production and staging are air-gapped: you cannot reach them. Ask Ahmed to run the steps and paste back the output:
   `cb ask <project> "<q>" -t <id> -c "<exact steps to run>" -o ...` (or `--free` for pasted output). Keep working
   on what you can check meanwhile.
 - `cb bug <project> "<title>" -b "..." --link investigation=<id>`: a defect you find, linked to this card.

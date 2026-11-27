@@ -87,14 +87,14 @@ test('a pending correction: its session cannot withdraw it (it takes it instead)
 test("a guest changes only a delivered answer they gave: not Ahmed's on their question", async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'seed')`;
-  await sql`select cb.user_add('omar', 'Omar')`;
-  await onProject(sql, 'omar', 'demo');
-  const mine = await ask(sql, { body: 'E1?', to: 'omar' });
-  const his = await ask(sql, { body: 'E2?', to: 'omar' });
-  await sql`select cb.answer(${String(mine)}, 'A', 'omar'), cb.answer(${String(his)}, 'A', 'ahmed')`;
+  await sql`select cb.user_add('cai', 'Cai')`;
+  await onProject(sql, 'cai', 'demo');
+  const mine = await ask(sql, { body: 'E1?', to: 'cai' });
+  const his = await ask(sql, { body: 'E2?', to: 'cai' });
+  await sql`select cb.answer(${String(mine)}, 'A', 'cai'), cb.answer(${String(his)}, 'A', 'ahmed')`;
   await deliver(sql, mine); await deliver(sql, his);
-  await assert.rejects(sql`select cb.answer(${String(his)}, 'B', 'omar')`, /Q\d+ was answered by ahmed: only they or Ahmed can change it/);
-  await sql`select cb.answer(${String(mine)}, 'B', 'omar')`;
+  await assert.rejects(sql`select cb.answer(${String(his)}, 'B', 'cai')`, /Q\d+ was answered by ahmed: only they or Ahmed can change it/);
+  await sql`select cb.answer(${String(mine)}, 'B', 'cai')`;
   assert.deepEqual([(await q(sql, mine)).answer, (await q(sql, his)).answer], ['B', 'A']);
   await sql`select cb.answer(${String(mine)}, 'C', 'ahmed')`;  // Ahmed may change anyone's
   assert.equal((await q(sql, mine)).answer, 'C');
@@ -103,15 +103,15 @@ test("a guest changes only a delivered answer they gave: not Ahmed's on their qu
 test("Ahmed's answer, not yet delivered, is his: a guest's answer to it is refused; their own stays theirs to edit", async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'seed')`;
-  await sql`select cb.user_add('omar', 'Omar')`;
-  await onProject(sql, 'omar', 'demo');
-  const his = await ask(sql, { body: 'E3?', to: 'omar' });
-  const mine = await ask(sql, { body: 'E4?', to: 'omar' });
+  await sql`select cb.user_add('cai', 'Cai')`;
+  await onProject(sql, 'cai', 'demo');
+  const his = await ask(sql, { body: 'E3?', to: 'cai' });
+  const mine = await ask(sql, { body: 'E4?', to: 'cai' });
   await sql`select cb.answer(${String(his)}, 'A', 'ahmed')`;
-  await assert.rejects(sql`select cb.answer(${String(his)}, 'B', 'omar')`, /Q\d+ was answered by Ahmed: only he can change it/);
+  await assert.rejects(sql`select cb.answer(${String(his)}, 'B', 'cai')`, /Q\d+ was answered by Ahmed: only he can change it/);
   assert.deepEqual([(await q(sql, his)).answer, (await q(sql, his)).answered_by], ['A', 'ahmed']);
-  await sql`select cb.answer(${String(mine)}, 'A', 'omar')`;
-  await sql`select cb.answer(${String(mine)}, 'B', 'omar')`;
+  await sql`select cb.answer(${String(mine)}, 'A', 'cai')`;
+  await sql`select cb.answer(${String(mine)}, 'B', 'cai')`;
   assert.equal((await q(sql, mine)).answer, 'B');
 });
 
@@ -162,7 +162,7 @@ test('follow-ups: the new answer opens its branch (skipped at delivery); the old
   await answer(sql, p, 'Yes');
   await deliver(sql, p);
   assert.deepEqual([(await q(sql, fy)).status, (await q(sql, fn)).status, (await q(sql, deep)).status], ['open', 'withdrawn', 'withdrawn']);
-  await answer(sql, fy, 'SIT');  // the old branch is answered already: the change still goes through
+  await answer(sql, fy, 'STG');  // the old branch is answered already: the change still goes through
   await answer(sql, p, 'No');
   assert.deepEqual([(await q(sql, fy)).status, (await q(sql, fn)).status, (await q(sql, fn2)).status, (await q(sql, deep)).status],
     ['answered', 'open', 'withdrawn', 'dormant'], 'No opens; Yes stays; the hand-withdrawn stays; the deeper one waits again');

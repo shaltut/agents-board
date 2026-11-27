@@ -54,27 +54,27 @@ test('brief --type filters; CLI lines mark non-default types only', async () => 
 
 test('cb bug files an unassigned P2 bug in Next and says who is told', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'seed')`;
+  await sql`select cb.task_add(project => 'iris', title => 'seed')`;
   await sql`select cb.task_add(project => 'claude-board', title => 'seed2')`;
-  await sql`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'ihop')`;
-  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'ihop')`;
+  await sql`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'iris')`;
+  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'iris')`;
   await sql`select cb.iam('pc', 'w3:pA', 'board-dev@shaltoot', 'claude-board')`;
   await sql`select cb.iam('pc', 'w9:pZ', 'old-dev@shaltoot', 'claude-board')`;
   await sql`update cb.sessions set last_seen = now() - interval '2 days' where actor = 'old-dev@shaltoot'`; // dead session row
   const env = { CB_ACTOR: '', HERDR_PANE_ID: 'w1:p7', CB_MACHINE: 'mac' };
-  assert.equal(cb(['iam', 'W7@macbook', 'ihop'], env).code, 0);
+  assert.equal(cb(['iam', 'W7@macbook', 'iris'], env).code, 0);
 
-  const noBody = cb(['bug', 'ihop', 'claims page blank'], env);
+  const noBody = cb(['bug', 'iris', 'claims page blank'], env);
   assert.equal(noBody.code, 1);
   assert.match(noBody.err, /-b "what happened/);
 
-  const r = cb(['bug', 'ihop', 'claims page blank', '-b', 'Open /claims as payer.\nExpected list, got blank.'], env);
+  const r = cb(['bug', 'iris', 'claims page blank', '-b', 'Open /claims as payer.\nExpected list, got blank.'], env);
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out, '#3 bug filed in ihop; told orch@shaltoot');
+  assert.equal(r.out, '#3 bug filed in iris; told orch@shaltoot');
   const [t] = await sql`select project, type, status, priority, assignee, created_by from cb.tasks where id = 3`;
-  assert.deepEqual({ ...t }, { project: 'ihop', type: 'bug', status: 'next', priority: 'P2', assignee: null, created_by: 'W7@macbook' });
+  assert.deepEqual({ ...t }, { project: 'iris', type: 'bug', status: 'next', priority: 'P2', assignee: null, created_by: 'W7@macbook' });
 
-  // a bug against Claude Board itself, from an ihop session: no orchestrator there, so its bound sessions hear it
+  // a bug against Claude Board itself, from an iris session: no orchestrator there, so its bound sessions hear it
   const b = cb(['bug', 'claude-board', 'cb brief hangs', '-b', 'cb brief took 30s', '-p', 'P1'], env);
   assert.equal(b.code, 0, b.err);
   assert.equal(b.out, '#4 bug filed in claude-board; told board-dev@shaltoot (no orchestrator there)');
@@ -95,22 +95,22 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   // a typo is refused, not filed into a brand-new project nobody watches
   const typo = cb(['bug', 'tawuniy', 'x', '-b', 'y'], env);
   assert.equal(typo.code, 1);
-  assert.match(typo.err, /unknown project "tawuniy"; known: claude-board, ihop/);
+  assert.match(typo.err, /unknown project "tawuniy"; known: claude-board, iris/);
   assert.equal((await sql`select count(*)::int as n from cb.projects where slug = 'tawuniy'`)[0].n, 0);
 
   await sql`select cb.task_add(project => 'newproj', title => 'seed3')`;
   const nobody = cb(['bug', 'newproj', 'x', '-b', 'y'], env);
   assert.equal(nobody.out, '#7 bug filed in newproj; no session works in newproj yet: it waits in Next');
-  const own = cb(['bug', 'ihop', 'orch found one', '-b', 'z'], { CB_ACTOR: 'orch@shaltoot' });
-  assert.equal(own.out, '#8 bug filed in ihop; you triage it: cb edit 8 --assignee <worker>');
+  const own = cb(['bug', 'iris', 'orch found one', '-b', 'z'], { CB_ACTOR: 'orch@shaltoot' });
+  assert.equal(own.out, '#8 bug filed in iris; you triage it: cb edit 8 --assignee <worker>');
 });
 
 test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {
   const sql = await db();
-  await sql`select cb.ensure_project('qhs')`;
-  await sql`select cb.iam('pc', 'w2:p2', 'QO@shaltoot', 'qhs', 'lead')`;
-  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'qhs')`;
-  const r = cb(['bug', 'qhs', 'login blank', '-b', 'Open /login.\nExpected a form, got blank.'], { CB_ACTOR: 'W7@macbook' });
+  await sql`select cb.ensure_project('zed')`;
+  await sql`select cb.iam('pc', 'w2:p2', 'QO@shaltoot', 'zed', 'lead')`;
+  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'zed')`;
+  const r = cb(['bug', 'zed', 'login blank', '-b', 'Open /login.\nExpected a form, got blank.'], { CB_ACTOR: 'W7@macbook' });
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out, '#1 bug filed in qhs; told QO@shaltoot');
+  assert.equal(r.out, '#1 bug filed in zed; told QO@shaltoot');
 });

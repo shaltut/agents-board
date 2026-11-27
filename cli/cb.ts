@@ -9,6 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
+import { withConnectRetry, neverSent, ranWords } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -78,6 +79,13 @@ if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
   }
+const boardHost = new URL(databaseUrl()).hostname;
+const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost);
+// #4337: a remote board that is briefly unreachable is retried for ~10 s, one statement at a time and only when it never
+// left this machine (connect-retry.ts). A local board that refuses is started instead (main()), with no wait first.
+// Local is by name only: this machine's own Tailscale name or address counts as remote. cb start answers at once: it is
+// advice that always exits 0.
+if (!localBoard && cmd !== 'start') sql = withConnectRetry(sql);
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -271,7 +279,7 @@ async function start() {
   }
   if (pane && !sessionProject) {
     out.push('NEXT: bind this pane to a project (once; later commands act as that name, in that project)',
-      `  cb iam <name> <project>        e.g. cb iam W1@${machine()} ihop`,
+      `  cb iam <name> <project>        e.g. cb iam W1@${machine()} iris`,
       `  <name>: orch@${machine()} if you orchestrate the project; W<n>@${machine()} if you take tasks; R<n>@${machine()} if you review.`,
       '         Your prompt or your orchestrator names you; else pick the next free W<n> in cb sessions <project>.',
       '  <project>, one of:', await projects(),
@@ -391,11 +399,12 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 
 async function run(): Promise<unknown> {
   await resolveActor();
+  if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
       return { out: await start() };
     case 'tag': {
-      need(2, 'tag <id> <tag>... [-<tag>]...   e.g. cb tag 42 ocr tawuniya -old');
+      need(2, 'tag <id> <tag>... [-<tag>]...   e.g. cb tag 42 ocr tamarind -old');
       await guard(args[0]);
       const tags = args.slice(1);
       const now: any = await callFn('task_tag', { id: args[0], actor,
@@ -403,7 +412,7 @@ async function run(): Promise<unknown> {
       return { out: `#${args[0].replace(/^#/, '')} tags: ${now.length ? now.join(', ') : '(none)'}`, json: now };
     }
     case 'user': {
-      need(2, 'user add <name> ["Display Name"] [--admin]   e.g. cb user add omar "Omar"');
+      need(2, 'user add <name> ["Display Name"] [--admin]   e.g. cb user add cai "Cai"');
       if (args[0] === 'rotate' || args[0] === 'remove')
         throw new Error(`Ahmed does this on the Users page (key 7 on the board): a new link, or removing someone, is his call`);
       // Admin and password: the Users page's, or the VPS shell's (PGAPPNAME=cb-web) for the first admin, before anyone can sign in.
@@ -432,16 +441,16 @@ async function run(): Promise<unknown> {
         (select count(*)::int from cb.questions q where q.assigned_to = u.name and q.status = 'open') as open_questions,
         (select count(*)::int from cb.tasks t where t.assignee = u.name and t.status not in ('done','cancelled')) as open_tasks
         from cb.users u order by u.name`;
-      return { out: rows.map((r: any) => `${r.name.padEnd(12)} ${r.display}${r.role === 'admin' ? ' (admin)' : ''}: ${r.open_questions} questions, ${r.open_tasks} tasks open`).join('\n') || 'no users (cb user add omar "Omar")', json: rows };
+      return { out: rows.map((r: any) => `${r.name.padEnd(12)} ${r.display}${r.role === 'admin' ? ' (admin)' : ''}: ${r.open_questions} questions, ${r.open_tasks} tasks open`).join('\n') || 'no users (cb user add cai "Cai")', json: rows };
     }
     case 'github': {
       // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts).
       const sub = args[0];
       if (sub === 'add' || sub === 'remove') {
-        need(2, 'github add <owner/repo> [--to orch@shaltoot] [--project ihop]   or   cb github remove <owner/repo>');
+        need(2, 'github add <owner/repo> [--to orch@shaltoot] [--project iris]   or   cb github remove <owner/repo>');
         const repo = args[1], key = `github:${repo}`;
         // no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
-        if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add TachyHealth/iHop-Platform`);
+        if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add acme/widgets`);
         return await sql.begin(async (tx: any) => {
           // What the board watches, and whom it tells, is Ahmed's call: the same guard as his People and Epics pages
           // (a session pointing it at another repo Ahmed's gh reads would pour that text onto a board guests see)
@@ -514,7 +523,7 @@ async function run(): Promise<unknown> {
     case 'huddle': {
       const sub = args[0];
       if (sub === 'open') {
-        need(2, 'huddle open "<topic>" <session>... [-t task]   e.g. cb huddle open "Hijri dates" W3@macbook -t 59');
+        need(2, 'huddle open "<topic>" <session>... [-t task]   e.g. cb huddle open "Date parsing" W3@macbook -t 59');
         if (o.task) await guard(o.task);
         const id = await callFn('huddle_open', { topic: args[1], members: args.slice(2), task: o.task ?? null, actor });
         return { out: `huddle #${id} open with ${args.slice(2).join(', ') || 'nobody yet'}; talk with: cb huddle say ${id} "..."`, json: id };
@@ -553,8 +562,14 @@ async function run(): Promise<unknown> {
           throw new Error(`${args[0]} works in ${t.project}; this session works in ${sessionProject}. Sessions only talk inside their project: tell one of yours (cb sessions), or ask your orchestrator to pass it on.`);
       }
       const id = await callFn('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
-      const [s] = await sql`select last_seen > now() - interval '90 seconds' as live from cb.sessions where actor = ${args[0]} order by last_seen desc limit 1`;
-      return { out: `message #${id} to ${args[0]}${s?.live ? ' (relay live: delivered within seconds)' : ' (relay not live: it arrives when its relay starts, within 24h)'}`, json: id };
+      // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits.
+      // A name with no session row (its pane re-bound) is never "still writing", as in the digest
+      const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
+        case when exists (select 1 from cb.sessions where actor = ${args[0]}) then cb._board_active(${args[0]}) end as mins`;
+      const how = s.live ? 'relay live: delivered within seconds'
+        : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
+        : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
+      return { out: `message #${id} to ${args[0]} (${how})`, json: id };
     }
     case 'sessions': {
       const rows: any = await callFn('sessions_overview', { project: args[0] ?? sessionProject ?? null });
@@ -596,7 +611,7 @@ async function run(): Promise<unknown> {
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {
-      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook ihop --role builder');
+      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook iris --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
       // a Claude cb iam sends no agent: the 8 arguments a rolled-back cb.iam still takes (cli/iam-args.ts)
       const p = await callFn('iam', iamArgs({ machine: machine(), pane, actor: args[0]!, project: args[1], role: o.role, area: o.area,
@@ -609,7 +624,7 @@ async function run(): Promise<unknown> {
     case 'mem':
       return await mem();
     case 'add': {
-      need(2, 'add <project> "<title>" [-s next] [-p P1]   e.g. cb add ihop "Fix Hijri month parse" -s next');
+      need(2, 'add <project> "<title>" [-s next] [-p P1]   e.g. cb add iris "Fix month parse" -s next');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb add <project> "<title>" --stage build --why "<why>"');
       const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
@@ -660,7 +675,7 @@ async function run(): Promise<unknown> {
       await callFn('task_move', { id: args[0], status: args[1], note: args.slice(2).join(' ') || null, actor });
       return { out: `#${args[0].replace('#', '')} → ${args[1]}${await released(args[0])}` };
     case 'done':
-      need(2, 'done <id> "<summary>" [--commit <sha>] [--pr <url>]   e.g. cb done 42 "Hijri parse fixed" --commit ab12cd3');
+      need(2, 'done <id> "<summary>" [--commit <sha>] [--pr <url>]   e.g. cb done 42 "Date parse fixed" --commit ab12cd3');
       await guard(args[0]);
       await callFn('task_done', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
       return { out: `#${args[0].replace('#', '')} done${await released(args[0])}` };
@@ -719,7 +734,7 @@ async function run(): Promise<unknown> {
 ${body}`, json: pg };
     }
     case 'log':
-      need(2, 'log <task id> "<what happened>"   e.g. cb log 130 "SC64 graded 27/32"');
+      need(2, 'log <task id> "<what happened>"   e.g. cb log 130 "B64 graded 27/32"');
       // `cb log 130 "..."` means task #130 (sessions kept typing it), not a project named "130"
       if (/^#?\d+$/.test(args[0]) && !o.task) {
         const [t] = await sql`select project from cb.tasks where id = ${Number(args[0].replace('#', ''))}`;
@@ -732,7 +747,7 @@ ${body}`, json: pg };
       return { out: 'logged' };
     case 'next': {
       const project = args[0] ?? sessionProject;
-      if (!project) throw new Error('no project: say which (cb next ihop) or bind this session once (cb iam <name> <project>)');
+      if (!project) throw new Error('no project: say which (cb next iris) or bind this session once (cb iam <name> <project>)');
       if (sessionProject) {
         const [{ p }] = await sql`select cb.resolve(${project}) as p`;
         if (p !== sessionProject) throw new Error(`this session works in ${sessionProject}; ${p}'s work is for ${p}'s sessions. Run: cb next (takes from ${sessionProject})`);
@@ -902,14 +917,14 @@ ${body}`, json: pg };
       await callFn('withdraw', { id: args[0].replace(/^q/i, ''), actor });
       return { out: `Q${args[0].replace(/^q/i, '')} withdrawn` };
     case 'reply': {
-      need(2, 'reply A<id> "<text>" [--done]   e.g. cb reply A12 "SC64 graded 27/32" --done');
+      need(2, 'reply A<id> "<text>" [--done]   e.g. cb reply A12 "B64 graded 27/32" --done');
       const id = args[0].replace(/^a/i, '');
       await callFn('ask_reply', { id: args[0], message: args.slice(1).join(' '), done: !!o.done, actor });
       return { out: `replied to A${id}${o.done ? `; A${id} closed` : ': Ahmed reads it on Today (more: cb reply again; the last one with --done)'}` };
     }
     case 'asks': {
       if (args[0] === 'add') { // #951: what Ahmed asked in this terminal, onto the board so the reply lands on Today
-        need(2, 'asks add "<what Ahmed asked you>" [-t <task>]   e.g. cb asks add "Why is SC64 at 27/32?"');
+        need(2, 'asks add "<what Ahmed asked you>" [-t <task>]   e.g. cb asks add "Why is B64 at 27/32?"');
         const id = await callFn('ask_record', { body: args.slice(1).join(' '), task: o.task ?? null, project: sessionProject ?? null, actor });
         return { out: `A${id} recorded (asked in your terminal): reply on the board with cb reply A${id} "<reply>" (--done with the final one)`, json: id };
       }
@@ -922,7 +937,7 @@ ${body}`, json: pg };
     }
     case 'tick': {
       const project = args[0] ?? sessionProject;
-      if (!project) throw new Error('no project: say which (cb tick ihop) or bind this session once (cb iam <name> <project>)');
+      if (!project) throw new Error('no project: say which (cb tick iris) or bind this session once (cb iam <name> <project>)');
       return await tick(project, actor);
     }
     case 'lock': {
@@ -950,7 +965,7 @@ ${body}`, json: pg };
     }
     case 'digest': {
       const project = args[0] ?? sessionProject;
-      if (!project) throw new Error('no project: say which (cb digest ihop) or bind this session once (cb iam <name> <project>)');
+      if (!project) throw new Error('no project: say which (cb digest iris) or bind this session once (cb iam <name> <project>)');
       const lines: any = await callFn('digest', { project, cap: !o.all });
       return { out: lines.join('\n'), json: lines };
     }
@@ -994,12 +1009,14 @@ async function main() {
   } catch (e: any) {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
-    const host = new URL(databaseUrl()).hostname;
-    const local = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host);
-    const network = ['ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND'].includes(e?.code);
-    if (!network) throw e;
+    // Whether the command ran is said plainly (#4337): a resend of one that may have run does it twice (#3331).
+    const ran = ranWords(e, sql.answered ?? 0);
+    if (!ran) throw e;
+    const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
+    // the connection dropped after a statement was sent (reset, closed, the relay lost): the board may have run it
+    if (!neverSent(e)) throw new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`);
     // A remote board (another machine) can't be started from here: say so and let the session carry on.
-    if (!local) throw new Error(`board unreachable at ${host} (${e.code}). The board machine may be asleep: keep working and register this later.`);
+    if (!localBoard) throw new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`);
     if (e.code !== 'ECONNREFUSED') throw e;
     (await import('../db/pg.ts')).ensurePg();
     r = await run();

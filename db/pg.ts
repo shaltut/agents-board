@@ -20,7 +20,12 @@ export function ensurePg(dir = PGDATA, port = 5434): void {
   if (spawnSync(join(BIN, 'pg_isready.exe'), ['-h', '127.0.0.1', '-p', String(port)], { stdio: 'ignore' }).status === 0) return;
   if (!existsSync(join(dir, 'PG_VERSION'))) {
     const i = spawnSync(join(BIN, 'initdb.exe'), ['-D', dir, '-U', 'cb', '--auth=trust', '-E', 'UTF8'], { stdio: 'pipe', encoding: 'utf8' });
-    if (i.status !== 0) throw new Error(`could not create Postgres cluster in ${dir}: ${i.stderr || i.stdout}`);
+    // #4401: an initdb that never started has no output: say why, and where it was looked for
+    if (i.status !== 0) {
+      const hint = (i.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? ` (no initdb.exe in ${BIN}: set CB_PG_BIN to PostgreSQL's bin folder)` : '';
+      const why = i.error ? `${i.error.message}${hint}` : (i.stderr || i.stdout);
+      throw new Error(`could not create Postgres cluster in ${dir}: ${why}`);
+    }
   }
   if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status === 0) return;
   // stdio 'ignore': the postmaster inherits pg_ctl's handles, so a pipe here never closes and spawnSync hangs.

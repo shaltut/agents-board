@@ -54,7 +54,8 @@ function framed(sock: net.Socket, onMessage: (m: any) => void) {
   return (m: any) => { const b = v8.serialize(m); const h = Buffer.alloc(4); h.writeUInt32BE(b.length); sock.write(Buffer.concat([h, b])); };
 }
 
-const errorOut = (e: any) => ({ message: String(e?.message ?? e), code: e?.code, detail: e?.detail, hint: e?.hint, severity: e?.severity });
+// syscall: cb retries a timed-out or unreachable board only when it came from connect() (connect-retry.ts, #4337)
+const errorOut = (e: any) => ({ message: String(e?.message ?? e), code: e?.code, syscall: e?.syscall, detail: e?.detail, hint: e?.hint, severity: e?.severity });
 
 /** What the relay adds (#3256): binding(who) is the pane's cb iam binding when the relay holds it, handed over with
  *  the hello so cb skips its own lookup; served(text) is told each query it ran, once it returned. */
