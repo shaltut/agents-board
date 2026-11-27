@@ -37,7 +37,7 @@ test('role block: a reviewer may not commit or edit; a builder may edit', () => 
   assert.match(c.out.reason!, /^Blocked by role \(reviewer\): /);
   for (const tool of ['edit', 'write', 'patch', 'apply_patch', 'multiedit']) {
     assert.equal(run(JSON.stringify({ tool, args: {} }), { CB_ROLE: 'qa' }).out.decision, 'block', tool);
-    assert.equal(run(JSON.stringify({ tool, args: {} }), { CB_ROLE: 'builder' }).raw, '{}', tool);
+    assert.equal(run(JSON.stringify({ tool, args: { filePath: 'src/a.ts' } }), { CB_ROLE: 'builder' }).raw, '{}', tool);
   }
 });
 
@@ -60,8 +60,8 @@ test('malformed input fails closed', () => {
   }
 });
 
-test('unknown tools, including read-only ones and MCP names, are blocked', () => {
-  for (const tool of ['read', 'grep', 'glob', 'webfetch', 'task', 'server_tool', '']) {
+test('unknown tools, including web fetch, subagents and MCP names, are blocked', () => {
+  for (const tool of ['webfetch', 'task', 'server_tool', '']) {
     const r = run(JSON.stringify({ tool, args: { command: 'ls' } }));
     assert.equal(r.out.decision, 'block', tool);
     assert.match(r.out.reason!, /unrecognized tool/, tool);
@@ -78,7 +78,7 @@ test('unknown CB_ROLE fails closed', () => {
 
 test('parseOpencodeInput: tool names are case-insensitive; shapes', () => {
   assert.deepEqual(parseOpencodeInput('{"tool":"Bash","args":{"command":"ls"}}'), { ok: true, tool: 'shell', command: 'ls' });
-  assert.deepEqual(parseOpencodeInput('{"tool":"edit","args":{}}'), { ok: true, tool: 'edit' });
+  assert.deepEqual(parseOpencodeInput('{"tool":"edit","args":{}}'), { ok: true, tool: 'edit', args: {} });
   assert.deepEqual(parseOpencodeInput('{"tool":"question","args":{}}'), { ok: true, tool: 'ask' });
   assert.equal(parseOpencodeInput(undefined as any).ok, false);
 });

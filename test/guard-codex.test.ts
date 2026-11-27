@@ -30,7 +30,7 @@ const denial = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreT
 test('allow prints exactly {} (Codex rejects an explicit permissionDecision:allow)', () => {
   assert.equal(run(bash('ls -la')).stdout, '{}');
   assert.equal(run(bash('git push origin feat/x'), { CB_ROLE: 'builder' }).stdout, '{}');
-  assert.equal(run(call('apply_patch', { command: '*** Begin Patch\n*** End Patch' }), { CB_ROLE: 'builder' }).stdout, '{}');
+  assert.equal(run(call('apply_patch', { command: '*** Begin Patch\n*** Update File: src/a.ts\n*** End Patch' }), { CB_ROLE: 'builder' }).stdout, '{}');
   assert.equal(run(call('apply_patch', {})).stdout, '{}'); // no role: only the base rules
 });
 
@@ -113,7 +113,7 @@ test('a shim copied without core.mjs still blocks (never fails open)', () => {
 
 test('the parser: shell, edit and ask map to core tools; the in-process run matches the process', () => {
   assert.deepEqual(parseCodexInput(bash('ls')), { ok: true, tool: 'shell', command: 'ls' });
-  for (const t of ['apply_patch', 'Edit', 'Write']) assert.deepEqual(parseCodexInput(call(t, {})), { ok: true, tool: 'edit' });
+  for (const t of ['apply_patch', 'Edit', 'Write']) assert.deepEqual(parseCodexInput(call(t, {})), { ok: true, tool: 'edit', input: {}, cwd: null });
   assert.deepEqual(parseCodexInput(call('request_user_input', {})), { ok: true, tool: 'ask' });
   assert.deepEqual(runCodexShim(bash('ls'), {}), {});
   assert.deepEqual(runCodexShim(bash('git reset --hard'), {}), denial('Blocked dangerous command: git reset --hard'));
