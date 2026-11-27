@@ -27,7 +27,8 @@ const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['min
   ['epics', 'demo'], ['pending', 'demo'], ['role', 'builder'], ['users'], ['huddles', 'demo'], ['jobs', 'demo'], ['show', '2'],
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
-  ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github']];
+  ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],
+  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json']];
 // no job exists to read: these stop at "no job #1", after the select that would have written
 const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1']);
 
@@ -42,6 +43,7 @@ test('every form marked read-only runs on a read-only connection without writing
   await sql`select cb.mem_add(project => 'demo', title => 'a gotcha', kind => 'gotcha', body => '', actor => 'W1@test')`;
   await sql`select cb.huddle_open(topic => 'dates', members => '["orch"]'::jsonb, actor => 'W1@test')`;
   await sql`select cb.lock_take(name => 'db', actor => 'W1@test')`;
+  await sql`select cb.usage_report('testbox', 'p-ro', 'sid-ro', 'claude-test-1', 10, 20, 30, 40, 0.5)`;
   await sql`select cb.page_set(body => '# p', task => '2', actor => 'W1@test')`;
   await sql`select cb.epic_create(project => 'demo', title => 'E', actor => 'orch')`;
   await sql`select cb.squad_set('demo', ${sql.json({ machines: { box: { herdr: null, repo: '/r', board: '/b' } }, roles: { lead: { count: 1, model: 'opus', machine: 'box' } } })}, 'ahmed')`;

@@ -1,10 +1,11 @@
 // The supervisor's pure planner: from the board's facts and herdr's, decide this tick's restores, starts, closes and notes.
-import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad-up.ts';
+import { herdrName, launchFor, runsOn, seatSpec, wantList, type Launch, type Squad } from './squad-up.ts';
 
 export type Session = { actor: string; role: string; area: string | null; repo: string; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
   last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean;
-  agent?: string | null }; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
+  agent?: string | null; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
+  model?: string | null }; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
 export type State = { project: string; squad: Squad; supervised: boolean;
   // builder and reviewer: per repo (#3703); owner: per area
   waiting: { builder: Record<string, number>; reviewer: Record<string, number>; qa: number; investigator: number; architect: number; owner: Record<string, number> };
@@ -14,18 +15,41 @@ export type State = { project: string; squad: Squad; supervised: boolean;
 // safeToClose (#4002): per session (actor), its agent adapter's answer, which then decides instead of herdrStatus; a
 // session it does not name is not closed. Omitted: herdrStatus and READY, as before
 // pastSeats (#3770): non-lead names an earlier saved version of this squad generated (pastSeatNames); omitted: none
+// restartTried (#4332): per seat, the setting (runsOn words) this run already restarted it for or refused: never again
+// for the same setting, so a seat that comes back still reading as old, or a setting that cannot start, makes no loop
+// startProblem (#4332): why this machine cannot start a launch (its agent not installed, a model its adapter refuses),
+// null when it can; omitted: none
 export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number;
-  safeToClose?: Record<string, boolean>; pastSeats?: Set<string> };
+  safeToClose?: Record<string, boolean>; pastSeats?: Set<string>; restartTried?: Map<string, string>; startProblem?: (l: Launch) => string | null };
 // leaving (#3770): seats the squad file no longer generates that stay open for now: busy (live with work), down holding
 // work, on a machine that is not one of the squad's, or every seat while the squad names none besides the lead (empty).
 // The supervisor never closes or frees these: a person hands over.
 export type Leaving = { session: string; why: 'busy' | 'down' | 'machine' | 'empty' };
-export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[]; leaving: Leaving[] };
+// restart (#4332, Q2970): an idle seat on an old agent or model, closed then started on its seat's setting (launch).
+// from/to: what it runs and what the squad names, in runsOn words. refused: a seat on an old setting whose new one this
+// machine cannot start (why): kept as it is, said once. settled: seats restartTried names that now run their seat's
+// setting (bound again on it, by the restart or by hand): forgotten, so a later change back to that setting is acted on
+export type Restart = { launch: Launch; from: string; to: string };
+export type Refused = { session: string; to: string; why: string };
+export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[]; leaving: Leaving[];
+  restart: Restart[]; refused: Refused[]; settled: string[] };
 
 /** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
 export const READY = new Set(['idle', 'done']);
 const MIN = 60_000, CLOSE_AFTER = 20 * MIN, RETRY_AFTER = 10 * MIN, RESTORE_EVERY = 30 * MIN, MAC = 'macbook', MAC_CAP = 8;
 const LEAVING_CLOSES = 2; // a bad squad save cannot drain a squad in one tick
+// #4332: a seat restarts on a changed setting only once it has been quiet 5 minutes: past the moment a seat that just
+// passed a card runs cb next and claims the next one, or a fresh one binds (last_event counts from its bind), yet well
+// under the 20-minute idle close, so the change lands soon. At most 2 a tick, as leaving closes: one squad save cannot
+// recycle a whole squad at once, and each restart takes a start from the tick's shared budget
+const RESTART_AFTER = 5 * MIN, RESTARTS = 2;
+
+/** Whether a session runs another setting than its seat's (#4332): another agent, or a model it named that does not
+ *  contain the seat's (case-insensitive, as the digest's wrong-model line reads it: claude-opus-4-5 runs opus). */
+export function onOldSetting(s: Pick<Session, 'agent' | 'model'>, want: { agent: string; model: string }): boolean {
+  if ((s.agent ?? 'claude') !== want.agent) return true;
+  return !!s.model && !s.model.toLowerCase().includes(want.model.toLowerCase());
+}
 
 /** The non-lead names any of these saved squad versions generated (#3770); a version wantList cannot read is skipped. */
 export function pastSeatNames(project: string, squads: unknown[]): Set<string> {
@@ -43,7 +67,7 @@ export function mayBeLeaving(state: State, herdrLive: Set<string>): boolean {
 
 export function planTick(i: TickInput): TickPlan {
   const { state, herdrLive, herdrDown, now } = i;
-  const plan: TickPlan = { restore: [], start: [], close: [], notes: [], leaving: [] };
+  const plan: TickPlan = { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [], settled: [] };
   if (!state.supervised) return plan;
   const { squad, project } = state;
   const by = new Map(state.sessions.map((s) => [s.actor, s]));
@@ -124,6 +148,28 @@ export function planTick(i: TickInput): TickPlan {
     else if (!isLive(n)) plan.leaving.push({ session: n, why: 'down' });
     else if (!idle(s)) { if (!s.closing) plan.leaving.push({ session: n, why: 'busy' }); } // closing: a close is under way
     else if (closesLeft > 0 && !herdrDown.has(machineOf(n)) && safe(n) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) { plan.close.push(n); closesLeft--; }
+  }
+  // #4332 (Q2970): a squad seat running another agent or model than its seat names now is closed and started on the new
+  // one, once idle (holding nothing, ready in herdr) and quiet 5 minutes; busy, it waits. Squad seats only: never the
+  // lead (the supervisor never starts one), a hand-started name or a leaving seat. After restores and starts, so waiting
+  // work comes first; a seat this tick closes anyway gets the new setting at its next start. A setting this machine
+  // cannot start is refused (said at once, busy or not), and a seat already restarted or refused for this setting is
+  // left alone (restartTried) until it is seen on its seat's setting (settled)
+  let restartsLeft = RESTARTS;
+  const closing = new Set(plan.close);
+  for (const w of wanted) {
+    const s = by.get(w.name);
+    if (!s?.live) continue;
+    const spec = seatSpec(squad, w), to = runsOn(spec);
+    if (!onOldSetting(s, spec)) { if (i.restartTried?.has(w.name)) plan.settled.push(w.name); continue; }
+    if (closing.has(w.name) || i.restartTried?.get(w.name) === to) continue;
+    const l = launchFor(project, squad, w), why = i.startProblem?.(l) ?? null;
+    if (why) { plan.refused.push({ session: w.name, to, why }); continue; }
+    if (restartsLeft <= 0 || startsLeft <= 0 || !idle(s) || !safe(w.name) || !ok(w.name) || i.launched.has(w.name)
+      || !s.last_event || now - Date.parse(s.last_event) < RESTART_AFTER) continue;
+    const agent = s.agent ?? 'claude';
+    plan.restart.push({ launch: l, from: s.model ? runsOn({ agent, model: s.model }) : agent, to });
+    restartsLeft--; startsLeft--; // its close frees its own machine slot: no Mac room taken
   }
   return plan;
 }

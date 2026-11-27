@@ -5,7 +5,9 @@ and Ahmed's view of what you do. Keep it true at all times. Use the `cb` command
 ## Start, once per session (`cb help start`)
 1. `cb start`. It says what is missing and prints the exact command to run next.
 2. Bind: `cb iam <role>@<machine> <project>` (e.g. `cb iam W1@macbook iris`). From then on, every `cb`
-   command acts as you, in your project. When you have a role, run `cb role <role>`, and run it again after a compaction.
+   command acts as you, in your project. When you have a role, run `cb role <role>`. After a compaction or restart,
+   a Claude seat gets `cb resume` and `cb role` printed by the start hook; if you did not get them (or you run on
+   another agent), run `cb resume` and `cb role <your role>`.
 3. Relay: `cb relay`. Ahmed's answers and his changes to your tasks then arrive in this session as
    [Claude Board] messages by themselves. New sessions start the relay automatically, and running it twice is harmless.
 4. `cb brief`: read what is in progress, next, blocked and waiting on Ahmed.

@@ -23,7 +23,7 @@ If this session also takes work *from* a board, run `cb start` first and follow 
 | `cli/agents/` | `AgentAdapter` interface, registry, the Claude Code adapter (the only one) |
 | `cli/squad-up.ts`, `cli/supervise*.ts`, `cli/runner*.ts`, `cli/recipes.ts` | Squads, the supervisor, the job runner |
 | `kit/guard/` | Command guard: `core.mjs`, `shim-claude.mjs`, `install.mjs`. `kit/permissions/<role>.json`: per-role Claude settings |
-| `hooks/` | Claude Code hooks (SessionStart, AskUserQuestion block, relay endpoint) |
+| `hooks/` | Claude Code hooks (SessionStart, AskUserQuestion block, relay endpoint, Stop usage ledger) |
 | `web/` | React UI (Vite). `pnpm build` builds it into `web/dist` |
 | `prompts/` | What sessions, orchestrators and roles are given |
 | `Dockerfile`, `deploy/` | Compose deployment, env template, backup |
