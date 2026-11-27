@@ -241,6 +241,11 @@ const fenceWrites = [
   'cd \\\n ~/.claude && echo x > settings.json', 'Copy-Item evil.json `\n  $HOME\\.claude\\settings.json',
   // an escaped backslash before a newline is a real line end: the next line is its own command
   'echo a\\\\\ncp x ~/.claude/settings.json',
+  // PR 83 review I1: the joined text is judged as well as the raw lines, never instead of them. In PowerShell a trailing
+  // \ is a real line end (a path), and in a bash comment the newline still ends the line
+  'Set-Location C:\\tmp\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'Set-Location C:\\tmp\\\r\nCopy-Item evil.json $HOME\\.claude\\settings.json',
+  'Get-ChildItem C:\\work\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'cd C:\\tmp\\\nSet-Content $HOME\\.claude\\settings.json x',
+  'echo a\\\ncp x ~/.claude/settings.json', 'ls # x\\\ncp evil.json ~/.claude/settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
