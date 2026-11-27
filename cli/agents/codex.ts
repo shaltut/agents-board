@@ -4,7 +4,6 @@
 // Message text is never logged or put in an error message.
 import { classifyAgentGet, realRun } from '../squad-up.ts';
 import type { Runner } from '../squad-up.ts';
-import { READ_ONLY_ROLES } from '../../kit/guard/core.mjs';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
 import { stripClaudeOnly } from './env.ts';
@@ -57,7 +56,6 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
-      const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
       const env = stripClaudeOnly(l.env);
       return {
         kind: 'codex',
@@ -70,10 +68,11 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           // prestart refuses a seat whose hooks.json has no cb guard entry, and the fence keeps every seat out of hooks.json
           // and config.toml. DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too.
           '--dangerously-bypass-hook-trust',
-          // Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat, no CLI sandbox, the board guard is the fence. Read-only
-          // roles keep Codex's read-only sandbox (as their Claude permission files deny edits); every other role runs
-          // unsandboxed, so node, git commit and the board connection work (#4573, #4574) and no network opening is needed
-          '-s', readOnly ? 'read-only' : 'danger-full-access',
+          // Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat, no CLI sandbox, the board guard is the fence. Every role,
+          // read-only ones too (#4611): Codex's read-only sandbox has no node and no network on the PC (#4573), so cb iam
+          // failed and the seat never bound. A reviewer, qa or investigator seat is fenced as a Claude one is: the guard's
+          // read-only role rules block its apply_patch, Edit and Write, commits and pushes
+          '-s', 'danger-full-access',
           '-c', EXCLUDE,
           ...adapter.mcpOff(l.board).args,
           ...adapter.trustSpec([l.cwd], process.platform).extraArgs,
