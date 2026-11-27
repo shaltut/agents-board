@@ -210,6 +210,12 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
   const [t] = await sql`select role from cb.users where name = ${target}`;
   return t?.role === 'admin' ? "another admin's sign-in, role and removal are Ahmed's to change" : null;
 }
+// The project settings page (#4332): the squad, the role texts and the GitHub watches are the owner's to change. Another
+// admin sees the page read-only; the local dashboard (no admin) is Ahmed. The SQL guards stay as they are (squad_set
+// also lets the lead's cb squad set through; the rest are dashboard_only): this narrows only which signed-in admin may
+// call them. The pipeline switch and the reminders keep their guard (any admin, as on Board and Backlog).
+const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
+const ownerRule = (admin: Who, fn: string) => OWNER_ONLY.has(fn) && admin.name !== 'ahmed' ? 'Only Ahmed changes project settings.' : null;
 
 app.post('/api/rpc/:fn', async (c) => {
   try {
@@ -219,6 +225,8 @@ app.post('/api/rpc/:fn', async (c) => {
     // The CLI shares this pool and callFn, so the name is set per transaction here, not on the pool.
     // A signed-in admin is the dashboard, and acts as who signed in: the page's own actor is never trusted.
     const admin = c.get('admin'), fn = c.req.param('fn');
+    const notOwner = admin && ownerRule(admin, fn);
+    if (notOwner) return c.json({ ok: false, error: notOwner }, 403);
     if (admin && args && typeof args === 'object') {
       // every function with an actor argument gets the admin's name, given or not: several default it to 'ahmed'
       if (await takesActor(fn)) args.actor = admin.name;
