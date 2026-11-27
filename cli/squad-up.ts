@@ -194,6 +194,13 @@ export function herdrJson(run: Runner, m: string | null, args: string[], timeout
 const BUSY_TRIES = 6, BUSY_WAIT_MS = 2000;
 const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
+/** A launch's adapter and native command, as startOne makes them before any pane. Throws an agent not installed, one
+ *  whose MCP check is not confirmed here, or a model its adapter refuses (#4332: the supervisor asks before a restart). */
+export function launchSpec(l: Launch): { adapter: AgentAdapter; spec: LaunchSpec } {
+  const adapter = getAdapter(l.agent);
+  return { adapter, spec: adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, board: l.board, cwd: l.cwd, env: l.env }) };
+}
+
 /** Start one session: a pane (a new tab, or a split of a tab in `tabs`, two panes per tab), the agent its adapter
  *  launches, its first prompt. ok: the agent is up (blocked: up but waiting on a startup dialog; the pane is kept). A
  *  launch that did not come up has its own pane closed, never any other. "started, prompt not sent" is ok: false with
@@ -203,10 +210,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
   // the seat's agent adapter, before any pane (#4002): an agent without one fails here, never started as Claude instead
   let adapter: AgentAdapter, spec: LaunchSpec;
-  try {
-    adapter = getAdapter(l.agent);
-    spec = adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, board: l.board, cwd: l.cwd, env: l.env });
-  } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
+  try { ({ adapter, spec } = launchSpec(l)); } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
   let pane: string | undefined, started = false;
   // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
   const env = Object.entries(spec.env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);

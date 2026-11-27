@@ -32,10 +32,10 @@ async function card(sql: any, o: { stage?: string; assignee?: string | null; sta
   await sql`update cb.tasks set stage = ${o.stage ?? 'build'}, stage_since = now(), assignee = ${o.assignee ?? null}, status = ${o.status ?? 'next'} where id = ${id}`;
   return Number(id);
 }
-const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number; agent?: string } = {}) =>
-  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent)
+const session = (sql: any, actor: string, role: string, o: { live?: boolean; startedMin?: number; agent?: string; model?: string } = {}) =>
+  sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent, model)
       values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}),
-              ${o.agent ?? 'claude'})`;
+              ${o.agent ?? 'claude'}, ${o.model ?? null})`;
 const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what}`) as any[];
 
 // ---- a fake herdr: nothing real is started; `live` holds the herdr names it reports ----
@@ -62,7 +62,7 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
-  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>() });
+  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -208,6 +208,50 @@ test('closeOne delegates through Claude adapter and safely skips unregistered ag
     assert.equal(await closingAt(sql), null, 'the mark is cleared');
     assert.equal((await events(sql, 'close')).length, 0);
   }
+});
+
+// #4332 (Q2970): builders run sonnet now; B1, idle 6 minutes, still runs opus
+test('an idle seat on an old model is closed and started on the new one, said on the board, once per setting', async () => {
+  const { sql, sup } = await setup();
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 6, model: 'opus' });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const dry = await tick(deps(sup, h.run, { dryRun: true }));
+  assert.ok(dry.includes('would restart sv-B1@macbook (opus to sonnet)'), dry.join('\n'));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), dry.join('\n'));
+  const memory = deps(sup, h.run).memory;
+  const out = await tick(deps(sup, h.run, { memory }));
+  assert.ok(has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.ok(has(h.calls, 'pane', 'close', 'w1:p9'), out.join('\n'));
+  const start = h.calls.find((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'sv-b1-macbook');
+  assert.ok(start && start.args.slice(start.args.indexOf('--') + 1).join(' ').startsWith('--model sonnet'), out.join('\n'));
+  assert.ok(h.calls.some((c) => c.args[1] === 'prompt' && c.args[2] === 'sv-b1-macbook' && c.args[3]!.includes('--model sonnet')), out.join('\n'));
+  assert.deepEqual((await events(sql, 'restart')).map((e) => e.summary), ['restart sv-B1@macbook (opus to sonnet)']);
+  assert.equal((await events(sql, 'close')).length, 1);
+  assert.equal((await events(sql, 'start')).length, 1);
+  // the old row still reads live on opus for up to 90 s: the next tick does not close the new seat
+  const exits = h.calls.filter((c) => c.args[3] === '/exit').length;
+  const again = await tick(deps(sup, h.run, { memory }));
+  assert.equal(h.calls.filter((c) => c.args[3] === '/exit').length, exits, again.join('\n'));
+  assert.equal((await events(sql, 'restart')).length, 1);
+});
+
+test('a seat whose new agent cannot start here is kept running, refused once on the board, never closed', async () => {
+  const { sql, sup } = await setup();
+  // squad_set refuses another agent than claude in phase 1: the stored squad is edited as a later phase would save it
+  await sql`update cb.projects set squad = jsonb_set(squad, '{roles,builder,seats}', ${sql.json({ 1: { agent: 'codex', model: 'gpt-6.1-sol' } })}) where slug = 'sv'`;
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 6, model: 'sonnet' });
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const memory = deps(sup, h.run).memory;
+  const out = await tick(deps(sup, h.run, { memory }));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.ok(out.some((l) => l.startsWith('sv-B1@macbook runs an older setting than its seat, but codex/gpt-6.1-sol cannot start here')), out.join('\n'));
+  assert.deepEqual((await events(sql, 'restart')).map((e) => e.summary), ['restart sv-B1@macbook (refused, codex/gpt-6.1-sol cannot start: agent "codex" is not installed yet)']);
+  const again = await tick(deps(sup, h.run, { memory }));
+  assert.ok(!again.some((l) => l.includes('cannot start here')), again.join('\n'));
+  assert.equal((await events(sql, 'restart')).length, 1);
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'));
 });
 
 test('a working seat is never marked closing: the tick reads its herdr status', async () => {

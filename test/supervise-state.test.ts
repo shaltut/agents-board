@@ -90,6 +90,16 @@ test('supervise_state sessions include agent (defaulting to claude)', async () =
   assert.deepEqual(by, { 'sv-B1@macbook': 'claude', 'sv-B2@macbook': 'codex', 'sv-B9@macbook': null });
 });
 
+// #4332: the supervisor compares each seat's model with the squad's, and logs a restart in plain words
+test('supervise_state sessions include the model each bound with; supervise_log takes a restart', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.iam('macbook', 'p2', 'sv-B2@macbook', model => 'opus')`;
+  const by = Object.fromEntries((await state(sup)).sessions.map((x: any) => [x.actor, x.model]));
+  assert.deepEqual([by['sv-B1@macbook'], by['sv-B2@macbook']], [null, 'opus']);
+  await sup`select cb.supervise_log('sv', 'restart', 'sv-B2@macbook', 'opus to sonnet')`;
+  assert.equal((await sql`select summary from cb.events where data ->> 'what' = 'restart'`)[0].summary, 'restart sv-B2@macbook (opus to sonnet)');
+});
+
 test('a closing session cannot claim', async () => {
   const { sql, sup } = await setup();
   await card(sql, { stage: 'build' });

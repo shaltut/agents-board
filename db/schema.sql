@@ -5364,8 +5364,8 @@ begin
       'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes')) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
-        -- the session's agent (#4002); null for a holder with no session row
-        'agent', s.agent,
+        -- the session's agent (#4002) and the model it bound with (#4332); null for a holder with no session row
+        'agent', s.agent, 'model', s.model,
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))
                  + (select count(*) from cb._held_parts() h where h.assignee = a.actor),
@@ -5423,8 +5423,8 @@ begin
   note := nullif(left(trim(note), 200), '');
   hit := cb._sensitive(note);
   if hit is not null then raise exception 'the note looks like %; the board keeps no such text', hit; end if;
-  if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again') then
-    raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again';
+  if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again', 'restart') then
+    raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again, restart';
   end if;
   insert into cb.events (actor, project, kind, summary, data)
   values ('supervisor', case when project is null then null else cb.read_project(project) end, 'supervisor',
