@@ -7,6 +7,7 @@ import {
 import { uptime } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, missingPaths, recipeFolder, relPaths, type RunnerConfig } from './recipes.ts';
+import { dropLinks } from './slot-links.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
 
 const WIN = process.platform === 'win32';
@@ -305,6 +306,15 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   const br = await git(['branch', '-r', '--contains', full], true);
   if (stop.aborted) return null;
   if (br.code !== 0 || !br.out.trim()) return err('error: not on a branch of origin');
+  // #3776: a link a job left in the worktree (a junction over a tracked folder survives checkout --force on Windows) would
+  // let the clean delete what it points at, outside the slot. Every link goes first; the checkout puts tracked ones back.
+  const links = dropLinks(dir);
+  // the log stays on the PC (the summary is read from after the steps start)
+  if (links.length) {
+    writeSync(io.fd, `runner: removed ${links.length} link(s) a job left in the slot: ${links.slice(0, 5).join(', ')}${links.length > 5 ? ', ...' : ''}\n`);
+    // a dropped link may have been the install (node_modules swapped for one): the record must not outlive it (review I1)
+    rmSync(lockState, { force: true });
+  }
   for (const args of [['checkout', '--force', '--detach', full], ['clean', '-ffdx', '-e', 'node_modules']]) {
     const r = await git(args);
     if (stop.aborted) return null;

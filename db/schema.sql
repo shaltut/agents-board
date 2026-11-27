@@ -260,6 +260,7 @@ drop function if exists cb.task_move cascade;
 drop function if exists cb.task_update cascade;
 drop function if exists cb.task_done cascade;
 drop function if exists cb.log cascade;
+drop function if exists cb.guest_text cascade;
 drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb.iam cascade;
@@ -324,6 +325,20 @@ drop function if exists cb.goals_list cascade;
 -- ponytail: a deterrent, not auth. Known bypasses: PGAPPNAME=cb-web (or set application_name) on any
 -- psql/postgres connection, and a local POST to /api/rpc with a forged same-host Origin header. It stops
 -- accidents and prompt-injected sessions, not a determined local process. Real auth = a Postgres role per client.
+-- #4356: what a guest (a member) writes reaches sessions, so the invisible format characters (Unicode Cf: zero-width,
+-- bidi overrides, tag characters) come out where it is written: answers, send-back notes, log lines. The class is every
+-- Cf code point of Unicode 17, written as \u escapes so it can be read and diffed (Postgres regexes have no \p{};
+-- test/guest-text.test.ts pins it and checks it against Node's). Cf only, by design: other invisible or confusable
+-- letters and marks (Hangul fillers, U+034F, variation selectors, braille blank) are ordinary text and stay.
+-- Control characters go too (review I2: a terminal acts on an ESC sequence, \r, a backspace): a line break of any
+-- kind (\r\n, \r, U+0085) becomes \n, which the relay indents; the other C0 and C1 controls but \n and \t are removed.
+-- The owner's and admins' text stays as typed (a right-to-left mark, an emoji joiner).
+create function cb.guest_text(actor text, t text) returns text language sql stable as $$
+  select case when t is not null and exists (select 1 from cb.users u where lower(u.name) = lower(trim(coalesce(actor, ''))) and u.role = 'member')
+    then regexp_replace(regexp_replace(regexp_replace(t, '\r\n?|\u0085', E'\n', 'g'),
+           '[\u0001-\u0008\u000b-\u001f\u007f-\u009f]', '', 'g'),
+           '[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890-\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]', '', 'g')
+    else t end $$;
 create function cb.ahmed_like(a text) returns boolean language sql immutable as $$ select coalesce(a, '') ~* '\mahmed\M' $$;
 create function cb.not_ahmed(a text) returns void language plpgsql as $$
 begin
@@ -822,6 +837,7 @@ returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.ensure_project(project); new_id bigint;
 begin
+  summary := cb.guest_text(a, summary);
   if coalesce(trim(summary), '') = '' then raise exception 'summary is required'; end if;
   insert into cb.events (actor, project, task_id, kind, summary, data)
   values (a, p, case when task_id is null then null else cb.norm_id(task_id) end, 'note', trim(summary), coalesce(data, '{}'))
@@ -946,7 +962,9 @@ begin
     if new.status = 'open' then
       insert into cb.events (actor, project, task_id, question_id, kind, summary, data)
       values (case when tg_op = 'INSERT' then a else new.asked_by end, new.project, new.task_id, new.id, 'asked', left(new.body, 120),
-              jsonb_build_object('blocking', new.blocking, 'options', new.options));
+              jsonb_build_object('blocking', new.blocking, 'options', new.options)
+              -- who opened it: not the asker, so cb._board_active does not read it as the asker's own write (#4341)
+              || case when tg_op = 'INSERT' then '{}'::jsonb else jsonb_build_object('opened_by', a) end);
     end if;
   elsif new.status = 'answered' and (old.status <> 'answered' or new.answer is distinct from old.answer) then
     insert into cb.events (actor, project, task_id, question_id, kind, summary, data)
@@ -1107,6 +1125,7 @@ begin
     if stale then raise exception 'M% is past its review date: renew it on the Memory page first', rid; end if;
     if rp is not null and rp <> qp then raise exception 'M% is in %, not %: only a global entry or one in Q%''s project', rid, rp, qp, qid; end if;
   end if;
+  answer := cb.guest_text(a, answer);
   if coalesce(trim(answer), '') = '' then raise exception 'answer is required'; end if;
   if cur = 'withdrawn' then raise exception 'question Q% is already withdrawn', qid; end if;
   if cur = 'delivered' then
@@ -1307,7 +1326,7 @@ returns void language plpgsql as $$
 #variable_conflict use_variable
 declare qid bigint := cb.norm_id(regexp_replace(trim(coalesce(id, '')), '^[qQ]', '')); a text := cb.set_actor(actor);
         r text := lower(trim(coalesce(reason, '')));
-        n text := nullif(trim(regexp_replace(coalesce(note, ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
+        n text := nullif(trim(regexp_replace(coalesce(cb.guest_text(a, note), ''), '[\s\u0085\u2028\u2029]+', ' ', 'g')), ''); cur text; hit text;
 begin
   perform cb.dashboard_only('Today');
   perform cb._approval_guard(qid);
@@ -1559,6 +1578,8 @@ begin
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
+                               -- 24 h, as messages and huddles: a reused pane id keeps the old row's broadcast_seen (#4343)
+                               and e.at > now() - interval '24 hours'
                                and e.actor is distinct from me), '[]'),
     -- raw: Ahmed typing from the dashboard (cb.type_to); the relay hands it over as a plain prompt, no board wrapper
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
@@ -1614,19 +1635,15 @@ begin
     'next_work', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority)
                                             order by t.priority <> 'P0', case when t.priority <> 'P0' then cb._goal_rank(t.id) end nulls last, t.priority, t.rank, t.id)
                              from cb.tasks t
-                            where me is not null and proj is not null and t.project = proj and t.status = 'next'
-                              and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
-                              and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+                            where me is not null and proj is not null and t.project = proj and cb._offerable(t, me)
+                              and not (select cb._busy(me))  -- once per call, not per card
                               and exists (select 1 from cb.events e where e.task_id = t.id and e.id > after_event and e.actor <> me
                                             and ((e.kind = 'task_created' and e.data ->> 'status' = 'next')
                                                  or (e.kind = 'moved' and e.data ->> 'to' = 'next')
                                                  -- a parts card (#3703) stays in Next while its parts move: its stage
                                                  -- changes, and changes to a part of my repo (sent back, freed), count
                                                  or (e.kind in ('updated', 'note') and exists (select 1 from cb.task_parts p where p.task_id = t.id)
-                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))
-                              and not exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
-                              -- a part in work (#3703) is work in progress too
-                              and not exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')), '[]'),
+                                                     and (e.data ? 'stage' or e.data ->> 'repo' = myrepo))))), '[]'),
     -- Shared memory changes (#553), same audience as broadcasts: bound sessions on the entry's project, every bound
     -- session for a global one, only that machine's for a machine-scoped one. Live on add, Ahmed's confirm, a
     -- supersede (one line naming the replacement: its add is skipped), a retire with its why. Never a proposal, a
@@ -3471,12 +3488,16 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb.work_still_open cascade;
+drop function if exists cb._offerable cascade;
+drop function if exists cb._busy cascade;
 drop function if exists cb._repo_fits cascade;
 drop function if exists cb._closing cascade;
 drop function if exists cb.stage_stalls_due cascade;
 drop function if exists cb._role_model cascade;
 drop function if exists cb._expected_model cascade;
 drop function if exists cb.digest cascade;
+drop function if exists cb._board_active cascade;
 drop function if exists cb.digests_due cascade;
 drop function if exists cb._stage_words cascade;
 drop function if exists cb._held_parts cascade;
@@ -4025,6 +4046,7 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
     end
 $$;
 
+
 -- Quiet staged cards (never approval, never unstaged ones such as investigations): a live holder is nudged after 30 minutes
 -- and loses the card after 90 if the nudge went unanswered; a hold (status next) whose live holder has gone 90 minutes
 -- quiet is freed. A holder whose session is down keeps everything (Q2324: Ahmed restores the session). Quiet = no card
@@ -4156,6 +4178,16 @@ begin
   return coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, agent));
 end $$;
 
+-- Minutes since a session last wrote to the board itself, when that was in the last 30 minutes (the "silent" window of
+-- cb tick), else null. Its relay not live plus a number here = the relay is down but the session still acts (#4341):
+-- the digest and cb tell say so instead of "down". A lead acting with --as writes as the session too, so callers say
+-- "last wrote to the board", never that the session is alive. A follow-up question opening is written as its asker by
+-- whoever answered the parent (questions_history, data.opened_by): not the session's write.
+create function cb._board_active(who text) returns int language sql stable as $$
+  select floor(extract(epoch from now() - max(e.at)) / 60)::int from cb.events e
+   where e.actor = who and e.at > now() - interval '30 minutes' and not (e.kind = 'asked' and e.data ? 'opened_by')
+$$;
+
 -- What needs the lead in a pipeline project: plain lines, the stage count first, P0 cards next, at most 20. Reads only:
 -- it frees nothing and writes nothing on any card.
 create function cb.digest(project text, since timestamptz default now() - interval '15 minutes', cap boolean default true) returns jsonb language plpgsql stable as $$
@@ -4199,7 +4231,7 @@ begin
     union all
     -- 5: answers nobody collected: the lead asked, or the asker's relay has been gone for 10 minutes
     select 5, false, q.id, format('Q%s answered for %s (%s): cb pending', q.id, q.asked_by,
-                                  case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its session has been gone 10 minutes' end)
+                                  case when cb._role(q.asked_by) = 'lead' then 'asked by the lead' else 'its relay has been down 10 minutes' end)
       from cb.questions q
      where q.project = p and q.status = 'answered' and q.approval_for is null and q.asked_by not in ('ahmed', 'board')
        and q.answered_at > now() - interval '24 hours'  -- as the old copies: older answers are history
@@ -4224,20 +4256,26 @@ begin
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
     union all
-    -- 9: a holder that is down keeps its cards and parts (Q2324); a name with no session row is a re-bound pane. cb edit
-    -- hands over a card, not a part: a holder of parts only is restored
+    -- 9: a holder whose relay has been gone 10 minutes keeps its cards and parts (Q2324); a name with no session row is a
+    -- re-bound pane. With a session row and still writing to the board (cb._board_active): only its relay is down, so
+    -- restart that (#4341); a re-bound name's recent writes do not count, nothing runs as it now. Else it is down: cb edit
+    -- hands over a card, not a part, so a holder of parts only is restored
     select 9, bool_or(x.p0), min(x.id),
-           format('%s is down and holds %s: restore it', x.holder, string_agg(x.what, ', ' order by x.id, x.what))
-           || coalesce(', or cb edit ' || min(x.id) filter (where x.repo is null) || ' --assignee <session>', '')
+           case when a.mins is not null
+                then format('%s''s relay is down, but the session last wrote to the board %sm ago; it holds %s: have it run cb relay --restart (a cb tell to it waits for its relay)',
+                            x.holder, a.mins, string_agg(x.what, ', ' order by x.id, x.what))
+                else format('%s is down and holds %s: restore it', x.holder, string_agg(x.what, ', ' order by x.id, x.what))
+                     || coalesce(', or cb edit ' || min(x.id) filter (where x.repo is null) || ' --assignee <session>', '') end
       from (select t.id, t.priority = 'P0' as p0, t.assignee as holder, null::text as repo, '#' || t.id as what
               from cb.tasks t
              where t.project = p and t.status in ('in_progress', 'next', 'blocked') and nullif(trim(t.assignee), '') is not null
             union all
             select t.id, t.priority = 'P0', h.assignee, h.repo, format('#%s (part %s)', t.id, h.repo)
               from cb._held_parts() h join cb.tasks t on t.id = h.task_id where t.project = p) x
+     cross join lateral (select case when exists (select 1 from cb.sessions s where s.actor = x.holder) then cb._board_active(x.holder) end as mins) a
      where not exists (select 1 from cb.sessions s where s.actor = x.holder and s.last_seen > now() - interval '10 minutes')
        and (x.holder like '%@%' or exists (select 1 from cb.sessions s where s.actor = x.holder))
-     group by x.holder
+     group by x.holder, a.mins
     union all
     -- 10: a live session on the wrong model for its seat (#4002: the squad's seat or role model, else the role's
     -- default); a session with no model to expect (an agent without a default) is not judged
@@ -4362,6 +4400,28 @@ $$;
 create function cb._held_parts() returns setof cb.task_parts language sql stable as $$
   select p.* from cb.task_parts p join cb.tasks t on t.id = p.task_id
    where nullif(trim(p.assignee), '') is not null and p.stage <> 'merged' and t.status not in ('done', 'cancelled') and t.stage is not null
+$$;
+
+-- #4336: may this card be offered to me as new Next work? Shared by the inbox's next_work and the relay's re-check
+-- (cb.work_still_open) so the two cannot drift (review I1): in Next, unassigned or mine, mine to claim, and not an
+-- unassigned bug outside a pipeline stage (triage gets those). Whether I am busy is cb._busy, kept apart on purpose:
+-- it does not depend on the card, and callers evaluate it once (an uncorrelated subquery), not once per card.
+create function cb._offerable(t cb.tasks, me text) returns boolean language sql stable as $$
+  select t.status = 'next' and (t.assignee is null or t.assignee = me) and cb._claimable(t, me)
+     and not (t.type = 'bug' and t.assignee is null and not (cb._pipeline(t.project) and t.stage is not null))
+$$;
+
+-- I have something in progress: a card, or a part (#3703). New Next work is offered only while I have neither.
+create function cb._busy(me text) returns boolean language sql stable as $$
+  select exists (select 1 from cb.tasks w where w.assignee = me and w.status = 'in_progress')
+      or exists (select 1 from cb._held_parts() h where h.assignee = me and h.status = 'in_progress')
+$$;
+
+-- #4336: the relay holds a "new work in Next" offer a few seconds (the lead creates a card in Next, then assigns it),
+-- then pushes only the cards this returns: those still offerable to me.
+create function cb.work_still_open(ids bigint[], actor text) returns bigint[] language sql stable as $$
+  select coalesce(array_agg(t.id order by t.id), '{}') from cb.tasks t
+   where t.id = any(ids) and cb._offerable(t, actor) and not (select cb._busy(actor))
 $$;
 
 -- A parts card in plain words (#3703): its stage, then each part in the design's repo order, e.g.
@@ -5004,6 +5064,7 @@ drop function if exists cb.job_get cascade;
 drop function if exists cb.jobs_list cascade;
 drop function if exists cb.job_cancel cascade;
 drop function if exists cb.runner_hello cascade;
+drop function if exists cb.runner_reconcile cascade;
 drop function if exists cb.runner_beat cascade;
 drop function if exists cb.job_claim cascade;
 drop function if exists cb.job_finish cascade;
@@ -5125,6 +5186,22 @@ begin
   end loop;
   for j in update cb.jobs x set state = 'error', summary = 'error: runner restarted', finished_at = now()
            where x.runner = runner_hello.runner and x.state = 'running' returning x.* loop
+    n := n + 1;
+    perform cb._job_tell(j);
+  end loop;
+  return n;
+end $$;
+
+-- #3902 review I1: a claim whose reply was lost (the connection died after job_claim committed) leaves a job running
+-- that no slot of this runner holds. A restart used to end it (runner_hello); a runner that survives the drop calls this
+-- with the jobs its slots hold, from inside its one claim loop (so no claim is in flight), and the rest end.
+create function cb.runner_reconcile(runner text, running bigint[]) returns int language plpgsql as $$
+#variable_conflict use_variable
+declare j cb.jobs; n int := 0;
+begin
+  perform cb._runner_only();
+  for j in update cb.jobs x set state = 'error', summary = 'error: the runner lost the board connection while claiming it', finished_at = now()
+           where x.runner = runner_reconcile.runner and x.state = 'running' and not (x.id = any(coalesce(running, '{}'))) returning x.* loop
     n := n + 1;
     perform cb._job_tell(j);
   end loop;

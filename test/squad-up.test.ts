@@ -410,7 +410,8 @@ test('startOne: a Claude seat starts with exactly today\'s herdr argv', () => {
   const start = f.calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'start');
   assert.deepEqual(start.map((c) => [c.m, ...c.args]), [['macbook', 'agent', 'start', 'ihop-b1-macbook', '--kind', 'claude', '--pane', 'w2:p5',
     '--timeout', '120000', '--', '--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings',
-    '/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json']]);
+    `${IHOP.machines.macbook.board}/kit/permissions/builder.json`,
+    '--strict-mcp-config', '--mcp-config', `${IHOP.machines.macbook.board}/kit/mcp/none.json`]]);
 });
 
 test('the ihop squad with orch@shaltoot live in ihop: the lead is skipped, nothing renamed (#3746)', () => {
@@ -698,7 +699,8 @@ test('squad up starts the Claude seats and refuses the codex one without touchin
   assert.ok(f.calls.filter((c) => c.args.includes('demo-b3-macbook')).every((c) => c.args[1] === 'get'), 'only herdr agent get for the codex seat');
   assert.ok(!f.calls.some((c) => c.args.includes('demo-B3@macbook')), 'no tab labelled for it');
   const b2 = f.calls.find((c) => c.args[1] === 'start' && c.args[2] === 'demo-b2-macbook')!;
-  assert.deepEqual(b2.args.slice(b2.args.indexOf('--')), ['--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json']);
+  assert.deepEqual(b2.args.slice(b2.args.indexOf('--')), ['--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json',
+    '--strict-mcp-config', '--mcp-config', '/Users/me/board/kit/mcp/none.json']);
 });
 
 test('squadShow: Claude roles exactly as before; another agent in brackets, a fallback and seat overrides when there', () => {

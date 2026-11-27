@@ -28,6 +28,9 @@ COPY db ./db
 COPY server ./server
 COPY prompts ./prompts
 COPY hooks ./hooks
+# the agent adapters import kit/guard at load, so cb in the container needs it (#4415); test/image-files.test.ts checks
+# that every relative import of bin, cli, db, server and hooks lands in a folder copied here
+COPY kit ./kit
 COPY --from=web /app/web/dist ./web/dist
 # `cb` inside the container: docker compose exec board cb ... (a wrapper, not a symlink: bin/cb finds the repo from $0)
 RUN printf '#!/bin/sh\nexec node /app/cli/cb.ts "$@"\n' > /usr/local/bin/cb && chmod +x /usr/local/bin/cb

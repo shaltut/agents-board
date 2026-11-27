@@ -104,7 +104,16 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 **never copy it into `~/.claude/hooks/`**. Alone it blocks EVERY shell command on that machine.
 
 1. From the checkout, install: `node kit/guard/install.mjs`. It defaults to `~/.claude-board/guard` (`--target <dir>`
-   changes that). Then verify: `node kit/guard/install.mjs --check` exits 0 when the installed files match the checkout.
+   changes that). Then verify (after step 2): `node kit/guard/install.mjs --check` exits 0 when the installed files
+   match the checkout AND `~/.claude/settings.json` has a PreToolUse hook that runs the installed shim with an absolute
+   node that exists and a matcher covering Bash (and PowerShell on Windows), and the 6 probes pass through that exact
+   hook command (#4348). Each problem prints one `hook:` line saying what to change. A herdr seat whose wiring is off
+   hears one `Guard:` line at session start. Also checked: `disableAllHooks` is not set in that file, the hook is a
+   `command` hook, and any `timeout` is 15 s or more (a hook that times out counts as allow). Git Bash forms
+   (`/c/...`, `$HOME/...`, `~/...`) count as the same paths. On Windows the probes run through Git Bash, as Claude
+   Code runs hooks (`CLAUDE_CODE_GIT_BASH_PATH`, else `%ProgramFiles%\Git\bin\bash.exe`; cmd.exe only with neither).
+   Only this one settings file is read: `settings.local.json`, project settings and managed policy are not.
+   `--check --no-wiring` checks the files only (CI, a machine with no `~/.claude`), where plain `--check` exits 1.
 2. In `~/.claude/settings.json`, point the PreToolUse hook command at
    `node <abs-home>/.claude-board/guard/shim-claude.mjs` (the absolute home path, not `~`: the full home path, e.g. `C:/Users/<you>` on Windows, `/Users/<you>` on the Mac). On Windows, set that
    entry's matcher to `Bash|PowerShell`: Claude Code's PowerShell tool runs commands a `Bash`-only hook never sees.
@@ -127,8 +136,9 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
    must block, with a reason starting `Blocked by role (builder): git push to protected branch main`. The installed hook blocks these command lines when a Claude session runs them, so a session runs the
    checks from a small script that builds the command strings.
 5. If `node` is not on the PATH of the shell that runs hooks (possible on the Mac), the hook exits 127, and Claude Code
-   treats that as **allow**: the fence silently disappears. On such a machine use an absolute node path in the hook
-   command (`command -v node` prints it), and from a fresh session confirm that a blocked command is refused.
+   treats that as **allow**: the fence silently disappears. So the hook command uses an absolute node path
+   (`command -v node` prints it; `--check` refuses a bare `node`), and from a fresh session confirm that a blocked
+   command is refused.
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 
@@ -252,6 +262,9 @@ Set up, once, on the PC:
      runner refuses to start otherwise.
    - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
      then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
+   - A `guards` recipe can also run the repo's script tests on every job with the pre-push hook's own command
+     (`pnpm exec lefthook run pre-push --commands <command> --no-tty`): the commit's own `lefthook.yml` decides which
+     files run, so no file list is copied into runner.json.
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
