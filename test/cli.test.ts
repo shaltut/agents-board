@@ -39,7 +39,13 @@ test('cb add: a second quoted argument is the body; bare words stay one title; a
   assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb add <project> "<title>" -b "<body>"/);
   const three = cb(['add', 'demo', 'Fix minute parse', 'part one', 'part two']);
   assert.equal(three.code, 1);
-  assert.match(three.err, /got 3 arguments after the project\. Give the body with -b: cb add <project> "<title>" -b "<body>"/);
+  assert.match(three.err, /^cb: add got 3 arguments after the project .*Give the body with -b \(cb add <project> "<title>" -b "<body>"\), or quote the whole title as one argument$/);
+  // a quoted phrase and a bare word, either order: refused, never split into a one-word title or body
+  for (const words of [['Fix month', 'parse'], ['Fix', 'month parse']]) {
+    const mixed = cb(['add', 'demo', ...words]);
+    assert.equal(mixed.code, 1, JSON.stringify(words));
+    assert.match(mixed.err, /got 2 arguments after the project .*or quote the whole title as one argument/);
+  }
   assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused add creates no card');
 });
 

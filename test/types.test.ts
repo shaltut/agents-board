@@ -111,6 +111,11 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   const twice = cb(['bug', 'iris', 'claims page blank', 'a body', '-b', 'another'], env);
   assert.equal(twice.code, 1);
   assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb bug <project> "<title>" -b "<body>"/);
+  const n = (await sql`select count(*)::int as n from cb.tasks`)[0].n;
+  const mixed = cb(['bug', 'iris', 'claims page', 'broken'], env);
+  assert.equal(mixed.code, 1, 'a one-word body is not split off a quoted title');
+  assert.match(mixed.err, /bug got 2 arguments after the project .*Give the body with -b \(cb bug <project> "<title>" -b "<body>"\)/);
+  assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused bug creates no card');
 });
 
 test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {
