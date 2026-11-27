@@ -579,6 +579,7 @@ READS: the rows or the record the text is made from
   show          the task row plus notes and notes_total
   resume, brief, search, sessions, session, pending, asks, users, goals, epics, huddles, digest, jobs, lock queue, mem
   find|list|show, github (list), squad show, role, page show, job show|log, tick: their rows or record
+  huddle show   {huddle, lines}: the huddle row and its lines
   next          the claimed task, with its stage when staged (null: nothing to claim)
   start         {actor, via, project, relay, text}
                 relay is on, off or unavailable; text is what cb start prints. Board unreachable: {board, error}
