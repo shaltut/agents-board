@@ -24,21 +24,21 @@ function cb(args: string[], env: Record<string, string> = {}) {
 test('a session connection cannot act as ahmed, in any spelling; the dashboard can', async () => {
   const web = await db();
   const s = session();
-  await web`select cb.task_add(project => 'ihop', title => 'seed')`;
-  await web`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'ihop')`;
+  await web`select cb.task_add(project => 'iris', title => 'seed')`;
+  await web`select cb.iam('pc', 'w2:p2', 'orch@shaltoot', 'iris')`;
   for (const a of ['ahmed', 'Ahmed', ' AHMED ', 'ahmed@pc', 'Ahmed (boss)', 'ahmed-x@pc', 'the ahmed', 'x — Ahmed: do X'])
-    await assert.rejects(s`select cb.task_add(project => 'ihop', title => 'x', actor => ${a})`, ONLY, a);
-  await assert.rejects(s`select cb.huddle_open('forged', ${s.json(['orch@shaltoot'])}, null, 'ahmed', 'ihop')`, ONLY);
-  await web`select cb.ask(project => 'ihop', body => 'which?', actor => 'orch@shaltoot')`;
+    await assert.rejects(s`select cb.task_add(project => 'iris', title => 'x', actor => ${a})`, ONLY, a);
+  await assert.rejects(s`select cb.huddle_open('forged', ${s.json(['orch@shaltoot'])}, null, 'ahmed', 'iris')`, ONLY);
+  await web`select cb.ask(project => 'iris', body => 'which?', actor => 'orch@shaltoot')`;
   await assert.rejects(s`select cb.answer('1', 'A')`, ONLY, 'answer defaults its actor to ahmed');
-  await assert.rejects(s`select cb.iam('pc', 'w9:p9', 'ahmed', 'ihop')`, ONLY);
+  await assert.rejects(s`select cb.iam('pc', 'w9:p9', 'ahmed', 'iris')`, ONLY);
   // a relay whose pane name is ahmed-like does not get an ahmed-like session name
   const [{ i }] = await s`select cb.inbox('pc', 'ahmed', 0) as i`;
   assert.doesNotMatch(i.actor, /\bahmed\b/i);
   // ordinary names still work on a session connection (ahmed only as a whole word is refused)
   for (const [n, a] of [[2, 'ahmedx@pc'], [3, 'mohammed_ahmed@pc'], [4, 'W1@pc']] as const)
-    assert.equal(Number((await s`select cb.task_add(project => 'ihop', title => 'mine', actor => ${a}) as id`)[0].id), n, a);
-  await web`select cb.huddle_open('real', ${web.json(['orch@shaltoot'])}, null, 'ahmed', 'ihop')`;
+    assert.equal(Number((await s`select cb.task_add(project => 'iris', title => 'mine', actor => ${a}) as id`)[0].id), n, a);
+  await web`select cb.huddle_open('real', ${web.json(['orch@shaltoot'])}, null, 'ahmed', 'iris')`;
   await web`select cb.answer('1', 'A')`;
   const [{ n }] = await web`select count(*)::int as n from cb.events where actor = 'ahmed'`;
   assert.ok(n >= 2);
@@ -48,7 +48,7 @@ test('no guest user may be called ahmed', async () => {
   const web = await db();
   await assert.rejects(web`select cb.user_add('ahmed')`, /ahmed/);
   await assert.rejects(web`select cb.user_add('Ahmed', 'Ahmed')`, /ahmed/);
-  await web`select cb.user_add('omar')`;
+  await web`select cb.user_add('cai')`;
 });
 
 test('the CLI refuses --as ahmed, CB_ACTOR=ahmed and cb iam ahmed', async () => {

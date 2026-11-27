@@ -1,6 +1,6 @@
 # Claude Board: design
 
-Date: 2026-11-08 · Owner: Ahmed · Location: `F:\Work\claude-board`
+Date: 2026-11-08 · Owner: Ahmed · Location: `C:\work\claude-board`
 
 ## Intent
 
@@ -79,7 +79,7 @@ those answers. Claude finds the board easier to update than to skip.
 
 ### Data model (schema `cb`)
 
-- `projects` — `slug` (pk, e.g. `ihop`), `name`, `repo_path` (nullable), `color`,
+- `projects` — `slug` (pk, e.g. `iris`), `name`, `repo_path` (nullable), `color`,
   `archived`, `created_at`. Auto-created on first use by slug.
 - `tasks` — `id` bigint identity (shown as `#12`), `project`, `title`, `body`
   (markdown), `status`, `priority` (`P0`–`P3`, default `P2`), `rank` (float, ordering
@@ -134,11 +134,11 @@ forgiving — e.g. accept status aliases like `todo`, `wip`, `doing`, `done`):
 | `cb.brief(project?)` | compact text/JSON snapshot: in progress, next, blocked, open questions — what a session reads at start |
 
 Doors:
-1. **psql**: `psql -d claude_board -c "select cb.task_add('ihop','Fix RI grading')"`.
+1. **psql**: `psql -d claude_board -c "select cb.task_add('iris','Fix RI grading')"`.
 2. **`cb` CLI**: tiny Node script on PATH (Windows `.cmd` shim), talks **directly to
-   Postgres** (works when the web server is down). Examples: `cb add ihop "Fix RI
-   grading" -p P1`, `cb move 12 done "merged #412"`, `cb ask ihop "Rotate creds now?"
-   -o "now,friday" --blocking --task 12`, `cb brief ihop`, `cb pending`.
+   Postgres** (works when the web server is down). Examples: `cb add iris "Fix RI
+   grading" -p P1`, `cb move 12 done "merged #412"`, `cb ask iris "Rotate creds now?"
+   -o "now,friday" --blocking --task 12`, `cb brief iris`, `cb pending`.
    Actor from `CB_ACTOR` env or `--as`.
 3. **HTTP**: `POST /api/rpc/<function>` with JSON args, plus `GET` read endpoints the
    UI uses. Thin passthrough to the same functions.

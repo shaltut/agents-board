@@ -184,24 +184,24 @@ test('claim skips Next tasks assigned to someone else', async () => {
 
 test('project aliases resolve to the product and tag new work', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'base')`;
+  await sql`select cb.task_add(project => 'iris', title => 'base')`;
   await sql`select cb.task_add(project => 'ocr-arena', title => 'old', labels => ${sql.json(['ocr'])})`;
   await sql`select cb.ask(project => 'ocr-arena', body => 'q?')`;
   const before = (await sql`select count(*)::int n from cb.events`)[0].n;
-  await sql`select cb.project_alias('OCR Arena', 'ihop', ${sql.json(['ocr'])})`;
+  await sql`select cb.project_alias('OCR Arena', 'iris', ${sql.json(['ocr'])})`;
   // existing work moved, tagged once, one summary event instead of one per task
   const [old] = await sql`select project, labels from cb.tasks where title = 'old'`;
-  assert.deepEqual({ ...old }, { project: 'ihop', labels: ['ocr'] });
-  assert.equal((await sql`select project from cb.questions`)[0].project, 'ihop');
+  assert.deepEqual({ ...old }, { project: 'iris', labels: ['ocr'] });
+  assert.equal((await sql`select project from cb.questions`)[0].project, 'iris');
   assert.equal((await sql`select count(*)::int n from cb.events`)[0].n, before + 1);
   assert.equal((await sql`select count(*)::int n from cb.events where project = 'ocr-arena'`)[0].n, 0);
   const [{ id }] = await sql`select cb.task_add(project => 'ocr-arena', title => 'via alias', status => 'next', labels => ${sql.json(['urgent'])}) as id`;
   const [t] = await sql`select project, labels from cb.tasks where id = ${id}`;
-  assert.deepEqual({ ...t }, { project: 'ihop', labels: ['urgent', 'ocr'] });
+  assert.deepEqual({ ...t }, { project: 'iris', labels: ['urgent', 'ocr'] });
   const [{ b }] = await sql`select cb.brief('ocr-arena') as b`;
   assert.equal(b.next.length, 1);
   assert.equal((await sql`select * from cb.task_claim('OCR Arena', 'W1')`)[0].title, 'via alias');
-  assert.deepEqual((await sql`select slug from cb.projects`).map((r: any) => r.slug), ['ihop']);
+  assert.deepEqual((await sql`select slug from cb.projects`).map((r: any) => r.slug), ['iris']);
 });
 
 test('queues run by priority, then drag order', async () => {
@@ -218,9 +218,9 @@ test('queues run by priority, then drag order', async () => {
 
 test('tags: add and remove in one call, normalized, filterable in brief', async () => {
   const sql = await db();
-  await sql`select cb.task_add(project => 'demo', title => 'reader', status => 'next', labels => ${sql.json(['tawuniya'])})`;
+  await sql`select cb.task_add(project => 'demo', title => 'reader', status => 'next', labels => ${sql.json(['tamarind'])})`;
   await sql`select cb.task_add(project => 'demo', title => 'other', status => 'next')`;
-  const [{ t }] = await sql`select cb.task_tag('1', ${sql.json(['OCR', ' Arabic RTL ', 'ocr'])}, ${sql.json(['tawuniya'])}, 'orch') as t`;
+  const [{ t }] = await sql`select cb.task_tag('1', ${sql.json(['OCR', ' Arabic RTL ', 'ocr'])}, ${sql.json(['tamarind'])}, 'orch') as t`;
   assert.deepEqual(t, ['ocr', 'arabic-rtl']);
   const [e] = await sql`select data from cb.events where kind = 'updated'`;
   assert.deepEqual(e.data.fields, ['labels']);

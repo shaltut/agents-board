@@ -13,7 +13,7 @@ export type Run = (args: string[]) => Promise<string>;
 type Opts = { run?: Run; now?: Date; logTask?: number };
 
 const KEY = 'github:', ACTOR = 'github', LABEL = '[GitHub · untrusted]';
-// [logins] Ahmed muted (cb github mute): his own iHop workers post as one; what they open, say or commit is dropped
+// [logins] Ahmed muted (cb github mute): his own Iris workers post as one; what they open, say or commit is dropped
 const MUTED = 'github-muted';
 const OUTBOX = 'github:outbox:'; // + target session: [message parts] written by the repos, not yet told (no '/': never a repo)
 // ponytail: a fixed margin for GitHub's indexing lag and clock skew; an event GitHub shows later than this is missed.

@@ -596,50 +596,50 @@ const repoOf = (gitUrl: string, rs: object = { ok: recipes.ok }) => { const { ba
 test('loadConfig: a project\'s repos', async () => {
   const { published } = await import('../cli/recipes.ts');
   const cfg = loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: {
-    qhs: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN, { ok: recipes.ok, fail: recipes.fail }) } },
+    zed: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN, { ok: recipes.ok, fail: recipes.fail }) } },
     demo: project(ORIGIN, { ok: recipes.ok }),
   } }));
-  assert.deepEqual(Object.keys(cfg.projects.qhs!.repos), ['api', 'dashboard']);
-  assert.equal(cfg.projects.qhs!.base, join(TMP, 'direct'));
-  assert.equal(cfg.projects.qhs!.repos.dashboard!.git, ORIGIN);
-  assert.deepEqual(Object.keys(cfg.projects.qhs!.repos.dashboard!.recipes), ['ok', 'fail']);
+  assert.deepEqual(Object.keys(cfg.projects.zed!.repos), ['api', 'dashboard']);
+  assert.equal(cfg.projects.zed!.base, join(TMP, 'direct'));
+  assert.equal(cfg.projects.zed!.repos.dashboard!.git, ORIGIN);
+  assert.deepEqual(Object.keys(cfg.projects.zed!.repos.dashboard!.recipes), ['ok', 'fail']);
   // a flat project is one repo, main, with the same fields
   assert.deepEqual(Object.keys(cfg.projects.demo!.repos), ['main']);
   assert.equal(cfg.projects.demo!.repos.main!.lockfile, 'lock.txt');
   assert.equal(cfg.projects.demo!.repos.main!.installTimeout, 60);
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, git: ORIGIN, repos: { api: repoOf(ORIGIN) } } } })),
-    /projects\.qhs: unknown key "git"/);
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: { ...repoOf(ORIGIN), base: TMP } } } } })),
-    /projects\.qhs\.repos\.api: unknown key "base"/);
-  // a flat qhs-api and qhs's repo api would share slot clones and install records: refused
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: repoOf(ORIGIN) } }, 'qhs-api': project(ORIGIN, { ok: recipes.ok }) } })),
-    /projects: qhs-api and qhs repo api would share the slot clones qhs-api-<slot>/);
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, git: ORIGIN, repos: { api: repoOf(ORIGIN) } } } })),
+    /projects\.zed: unknown key "git"/);
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, repos: { api: { ...repoOf(ORIGIN), base: TMP } } } } })),
+    /projects\.zed\.repos\.api: unknown key "base"/);
+  // a flat zed-api and zed's repo api would share slot clones and install records: refused
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, repos: { api: repoOf(ORIGIN) } }, 'zed-api': project(ORIGIN, { ok: recipes.ok }) } })),
+    /projects: zed-api and zed repo api would share the slot clones zed-api-<slot>/);
   const pub = published(cfg);
   assert.ok(pub.every((r) => typeof r.repo === 'string'));
-  assert.deepEqual(pub.map((r) => `${r.project}/${r.repo}/${r.recipe}`), ['qhs/api/ok', 'qhs/dashboard/ok', 'qhs/dashboard/fail', 'demo/main/ok']);
+  assert.deepEqual(pub.map((r) => `${r.project}/${r.repo}/${r.recipe}`), ['zed/api/ok', 'zed/dashboard/ok', 'zed/dashboard/fail', 'demo/main/ok']);
 });
 
 test('slot clones per repo', async () => {
   const cfg = loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: {
-    qhs: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN) } },
+    zed: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN) } },
     flat: { ...project(ORIGIN, { ok: recipes.ok }), base: join(TMP, 'direct') },
   } }));
   const one = (id: number, project: string, repo?: string) =>
     runJob({ id, project, ...(repo ? { repo } : {}), recipe: 'ok', sha: MAIN, params: {} }, { cfg, home: DHOME, slot: 1, stop: new AbortController().signal });
-  const d = await one(900010, 'qhs', 'dashboard');
+  const d = await one(900010, 'zed', 'dashboard');
   assert.equal(d?.state, 'passed', d?.summary);
-  assert.ok(existsSync(join(TMP, 'direct', 'qhs-dashboard-1', '.git')));
-  assert.ok(existsSync(join(DHOME, 'state', 'qhs-dashboard-1.lock')));
-  assert.ok(existsSync(join(DHOME, 'state', 'qhs-dashboard-1.gitconfig')));
-  assert.ok(!existsSync(join(TMP, 'direct', 'qhs-1')));
+  assert.ok(existsSync(join(TMP, 'direct', 'zed-dashboard-1', '.git')));
+  assert.ok(existsSync(join(DHOME, 'state', 'zed-dashboard-1.lock')));
+  assert.ok(existsSync(join(DHOME, 'state', 'zed-dashboard-1.gitconfig')));
+  assert.ok(!existsSync(join(TMP, 'direct', 'zed-1')));
   const f = await one(900011, 'flat', 'main');
   assert.equal(f?.state, 'passed', f?.summary);
   assert.ok(existsSync(join(TMP, 'direct', 'flat-1', '.git')));
   assert.ok(existsSync(join(DHOME, 'state', 'flat-1.lock')));
   // a row without a repo (an older board) is main; a repo this PC does not have is refused, naming it
   assert.equal((await one(900012, 'flat'))?.state, 'passed');
-  assert.equal((await one(900013, 'qhs', 'bot'))?.summary, 'error: bad job row: no repo bot for qhs on this PC');
-  assert.equal((await one(900014, 'qhs'))?.summary, 'error: bad job row: no repo main for qhs on this PC');
+  assert.equal((await one(900013, 'zed', 'bot'))?.summary, 'error: bad job row: no repo bot for zed on this PC');
+  assert.equal((await one(900014, 'zed'))?.summary, 'error: bad job row: no repo main for zed on this PC');
 });
 
 // #3763: git clean keeps node_modules (the install) and so every build cache inside it. tsc's tsbuildinfo there

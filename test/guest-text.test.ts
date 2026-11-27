@@ -34,20 +34,20 @@ const ask = async (sql: any, to: string | null) =>
 
 test('a guest answer, send-back note and log line lose every format character', async () => {
   const sql = await db();
-  await sql`select cb.user_add('omar', 'Omar')`; await onProject(sql, 'omar', 'demo');
-  const a = await ask(sql, 'omar');
-  await sql`select cb.answer(${String(a)}, ${HIDDEN}, 'omar')`;
+  await sql`select cb.user_add('cai', 'Cai')`; await onProject(sql, 'cai', 'demo');
+  const a = await ask(sql, 'cai');
+  await sql`select cb.answer(${String(a)}, ${HIDDEN}, 'cai')`;
   const [{ answer }] = await sql`select answer from cb.questions where id = ${a}`;
   assert.equal(answer, 'Ship ittoday');
 
-  const b = await ask(sql, 'omar');
-  await sql`select cb.send_back(${String(b)}, 'details', ${HIDDEN}, 'omar')`;
+  const b = await ask(sql, 'cai');
+  await sql`select cb.send_back(${String(b)}, 'details', ${HIDDEN}, 'cai')`;
   const [{ note }] = await sql`select sent_back->>'note' as note from cb.questions where id = ${b}`;
   assert.equal(note, 'Ship ittoday');
 
-  const [{ t }] = await sql`insert into cb.tasks (project, title, assignee) values ('demo', 'a task', 'omar') returning id as t`;
-  await sql`select cb.log('demo', ${HIDDEN}, ${String(t)}, '{}', 'omar')`;
-  const [{ summary }] = await sql`select summary from cb.events where actor = 'omar' and kind = 'note' order by id desc limit 1`;
+  const [{ t }] = await sql`insert into cb.tasks (project, title, assignee) values ('demo', 'a task', 'cai') returning id as t`;
+  await sql`select cb.log('demo', ${HIDDEN}, ${String(t)}, '{}', 'cai')`;
+  const [{ summary }] = await sql`select summary from cb.events where actor = 'cai' and kind = 'note' order by id desc limit 1`;
   assert.equal(summary, 'Ship ittoday');
 });
 
@@ -56,33 +56,33 @@ test('a guest answer, send-back note and log line lose every format character', 
 // the relay indents every continuation line. A tab stays.
 test('a guest answer and log line lose control characters; a line break stays \\n', async () => {
   const sql = await db();
-  await sql`select cb.user_add('omar', 'Omar')`; await onProject(sql, 'omar', 'demo');
+  await sql`select cb.user_add('cai', 'Cai')`; await onProject(sql, 'cai', 'demo');
   const typed = 'Yes\x1b[2K\x1b[1A\rred\x07\x08 and\r\nnext\rline\u0085end\tok\x7f\x9b';
-  const q = await ask(sql, 'omar');
-  await sql`select cb.answer(${String(q)}, ${typed}, 'omar')`;
+  const q = await ask(sql, 'cai');
+  await sql`select cb.answer(${String(q)}, ${typed}, 'cai')`;
   const [{ answer }] = await sql`select answer from cb.questions where id = ${q}`;
   assert.equal(answer, 'Yes[2K[1A\nred and\nnext\nline\nend\tok');
-  const [{ t }] = await sql`insert into cb.tasks (project, title, assignee) values ('demo', 'a task', 'omar') returning id as t`;
-  await sql`select cb.log('demo', ${typed}, ${String(t)}, '{}', 'omar')`;
-  const [{ summary }] = await sql`select summary from cb.events where actor = 'omar' and kind = 'note' order by id desc limit 1`;
+  const [{ t }] = await sql`insert into cb.tasks (project, title, assignee) values ('demo', 'a task', 'cai') returning id as t`;
+  await sql`select cb.log('demo', ${typed}, ${String(t)}, '{}', 'cai')`;
+  const [{ summary }] = await sql`select summary from cb.events where actor = 'cai' and kind = 'note' order by id desc limit 1`;
   assert.equal(summary, 'Yes[2K[1A\nred and\nnext\nline\nend\tok');
   // the name as any caller spells it (review M1)
-  const [{ g }] = await sql`select cb.guest_text(' Omar ', ${'a\u200bb'}) as g`;
+  const [{ g }] = await sql`select cb.guest_text(' Cai ', ${'a\u200bb'}) as g`;
   assert.equal(g, 'ab');
 });
 
 test('a guest whose whole text is format characters has written nothing', async () => {
   const sql = await db();
-  await sql`select cb.user_add('omar', 'Omar')`; await onProject(sql, 'omar', 'demo');
-  const b = await ask(sql, 'omar');
-  await assert.rejects(sql`select cb.send_back(${String(b)}, 'clarify', ${'\u200b\u202e'}, 'omar')`, /clarify needs/);
+  await sql`select cb.user_add('cai', 'Cai')`; await onProject(sql, 'cai', 'demo');
+  const b = await ask(sql, 'cai');
+  await assert.rejects(sql`select cb.send_back(${String(b)}, 'clarify', ${'\u200b\u202e'}, 'cai')`, /clarify needs/);
 });
 
 test('the owner and admins keep what they typed (an emoji joiner, a right-to-left mark)', async () => {
   const sql = await db();
-  await sql`select cb.user_add('iman', 'Iman', null, 'admin')`;
+  await sql`select cb.user_add('ana', 'Ana', null, 'admin')`;
   const typed = 'نعم\u200f, ship 👩\u200d💻';
-  for (const who of ['ahmed', 'iman']) {
+  for (const who of ['ahmed', 'ana']) {
     const q = await ask(sql, null);
     await sql`select cb.answer(${String(q)}, ${typed}, ${who})`;
     const [{ answer }] = await sql`select answer from cb.questions where id = ${q}`;

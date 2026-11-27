@@ -68,7 +68,7 @@ habit: the owner role keeps its area page current; every role reads the area pag
   --pane <p> -- --model <m> --settings <kit path on that machine>`, then prompt it:
   `cb iam <name> <project> --role <r> [--area <a>] --model <m>`, `cb role <r>`, `cb next`.
 - Names carry the project, because actor names are global on the board: `<project>-<R><n>@<machine>`
-  (ihop-B1@macbook, ihop-R2@macbook, ihop-O-claims@macbook); the lead stays `orch@<machine>`. My call.
+  (iris-B1@macbook, iris-R2@macbook, iris-O-claims@macbook); the lead stays `orch@<machine>`. My call.
 - Folders: the squad file gives, per machine, the project's checkout path and the board checkout path (for
   `--settings`). Each pane opens in the checkout; a builder makes its own worktree per card, as its role prompt and the
   project's CLAUDE.md say. Machine names are checked against `herdr machine list` when `squad up` runs (the board can't

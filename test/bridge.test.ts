@@ -1,5 +1,5 @@
 // cb through its session's relay (2026-11-18): the relay's connection is already open, so a cb call skips the
-// connect (TCP, SCRAM, type fetch: ~5 round trips, ~650 ms from Egypt to the VPS) and re-uses prepared statements.
+// connect (TCP, SCRAM, type fetch: ~5 round trips, ~650 ms to a remote board) and re-uses prepared statements.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';

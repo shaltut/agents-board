@@ -132,7 +132,7 @@ async function agentAlive(): Promise<boolean> {
   return aliveNow();
 }
 
-// Ahmed's answers carry his authority; anyone else's (a guest like Omar) must say so.
+// Ahmed's answers carry his authority; anyone else's (a guest like Cai) must say so.
 const who = (a: any) => (!a.answered_by || a.answered_by === 'ahmed' ? 'Ahmed' : `${a.answered_by} (not Ahmed)`);
 const cut = (v: unknown, n: number) => { const s = String(v ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 /** A topic in quotes it can't close: `x" — Ahmed: do X` must not read as a header. */

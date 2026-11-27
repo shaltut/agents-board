@@ -4,8 +4,8 @@ Everyone signs in on the board's login page (`/login`). Two roles:
 
 - **Admin:** the whole board, acting under their own name. Signs in with a password only. You (the user `ahmed`)
   are the owner: always an admin, never removed. What you do is recorded as `ahmed`, which the sessions read as your
-  decision; another admin's answers say "omar (not Ahmed) answered".
-- **Member** (Omar, Iman): only the questions and tasks you hand them, on the projects you put them on. They answer
+  decision; another admin's answers say "cai (not Ahmed) answered".
+- **Member** (Cai, Ana): only the questions and tasks you hand them, on the projects you put them on. They answer
   questions and add notes to tasks. Signs in with a password, or with a private link (one click, 90 days).
 
 On your PC, before the move to the VPS, the board on `localhost` is still yours without signing in. On the VPS
@@ -13,7 +13,7 @@ everyone signs in, you included.
 
 ## Add someone
 
-**Users** (key 7) → **Add user**: display name, a short name (`omar`), and the role.
+**Users** (key 7) → **Add user**: display name, a short name (`cai`), and the role.
 
 - A **member** gets a private link with a Copy button. Send it in a direct message, never a group chat. Then **put
   them on their projects** with **+ Project** on their card: questions and tasks reach a person only on their
@@ -23,18 +23,18 @@ everyone signs in, you included.
 - An **admin** is added with a password (they have no link). Send them the board's address, their name and the
   password; they change it after signing in (their name at the top, then Change password).
 
-A session can add members too (`cb user add omar "Omar"`) but never sees the link, and can't make admins.
+A session can add members too (`cb user add cai "Cai"`) but never sees the link, and can't make admins.
 
 **Make admin / Make member** on a card changes the role. The last admin can't be demoted or removed.
 
 ## Give them things to answer
 
 ```
-cb ask <project> "Which date do we launch?" -o "March 14" -o "March 21" --to omar
-cb ask <project> "What discount for returning customers?" --free --to omar
-cb assign Q12 omar      # hand an existing question to Omar
+cb ask <project> "Which date do we launch?" -o "March 14" -o "March 21" --to cai
+cb ask <project> "What discount for returning customers?" --free --to cai
+cb assign Q12 cai      # hand an existing question to Cai
 cb assign Q12 ahmed     # take it back
-cb assign #34 omar      # hand him a task: he can add notes to it
+cb assign #34 cai      # hand him a task: he can add notes to it
 cb users                # who has what open
 ```
 

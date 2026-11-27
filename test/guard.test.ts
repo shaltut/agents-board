@@ -137,7 +137,7 @@ const psPassed = [
   // a target is a whole word: a trailing slash or a deeper path is not a root
   'rm -rf build/',
   'Remove-Item -Recurse -Force dist/',
-  'Remove-Item -Recurse -Force C:\\w\\x\\dist',
+  'Remove-Item -Recurse -Force C:\\work\\x\\dist',
   'rd /s /q build',
   'Get-ChildItem C:\\ -Recurse',
   // bash's own backslashes are not a root: find's escaped ; and a line continuation
