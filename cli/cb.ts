@@ -811,7 +811,10 @@ ${body}`, json: pg };
         // #4559: a disabled project hands out nothing: say so, and what to do meanwhile. Read only when nothing came, and a
         // board without the words (a rolled-back schema) still answers
         const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
-        return { out: w?.words ?? 'nothing to claim', json: null };
+        if (w?.words) return { out: w.words, json: null };
+        // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
+        const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
+        return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: null };
       }
       const t = rows[0];
       const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done

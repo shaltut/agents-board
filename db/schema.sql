@@ -573,6 +573,15 @@ create function cb.tasks_before() returns trigger language plpgsql as $$
 declare ep text;
 declare ac text; r text;
 begin
+  -- #4593: a for:<agent> label names an agent a seat can run (a typo would keep the card from everyone). Only labels
+  -- added now: one saved before this rule does not block other changes to its card
+  if tg_op = 'INSERT' or new.labels is distinct from old.labels then
+    select l into r from unnest(new.labels) l
+     where lower(l) like 'for:%' and substr(lower(l), 5) <> all(cb._agents_main()) and (tg_op = 'INSERT' or l <> all(old.labels)) limit 1;
+    if r is not null then
+      raise exception 'label % names no agent: for: takes one of %', lower(r), array_to_string(cb._agents_main(), ', ');
+    end if;
+  end if;
   -- squad pipeline guard (#3598): a staged card leaves its flow only through Ahmed's dashboard, or the lead with a note
   if tg_op = 'UPDATE' and old.stage is not null and cb._pipeline(old.project) and current_setting('cb.stage_ok', true) is distinct from 'on' then
     if new.status in ('done', 'cancelled') and new.status is distinct from old.status then
@@ -3639,6 +3648,9 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb._agent cascade;
+drop function if exists cb._for_agents cascade;
+drop function if exists cb._for_skipped cascade;
 drop function if exists cb.work_still_open cascade;
 drop function if exists cb._offerable cascade;
 drop function if exists cb._busy cascade;
@@ -4175,11 +4187,32 @@ begin
   return not cb._multi_repo(t.project) or coalesce(t.repos[1] = cb._repo(a), false);
 end $$;
 
+-- #4593: the agent an actor runs, read as cb._role reads its role (its latest session); claude when it has none.
+create function cb._agent(a text) returns text language sql stable as $$
+  select coalesce((select s.agent from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'claude')
+$$;
+
+-- #4593: the agents a card is kept for, from its for:<agent> labels, in name order (empty: any agent).
+create function cb._for_agents(labels text[]) returns text[] language sql immutable as $$
+  select coalesce(array(select distinct substr(lower(l), 5) from unnest(labels) l where lower(l) like 'for:%' order by 1), '{}')
+$$;
+
+-- #4593: why cb next found nothing for a: the Next cards of the project it skipped only for their for: labels, as
+-- "#660: for codex or agy" (at most 5), or null.
+create function cb._for_skipped(project text, a text) returns text language sql stable as $$
+  select string_agg(format('#%s: for %s', t.id, array_to_string(cb._for_agents(t.labels), ' or ')), ', ' order by t.id)
+    from (select t.* from cb.tasks t where t.status = 'next' and t.project = $1 and t.assignee is null
+            and cardinality(cb._for_agents(t.labels)) > 0 and cb._agent($2) <> all(cb._for_agents(t.labels))
+          order by t.id limit 5) t
+$$;
+
 create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
   select case
     when cb._closing(a) then false
     -- #4559: the one place "no new work" lives: cb next, the cb start preview, the relay's offers and cb tick's "can take"
     when not cb._live(t.project) then false
+    -- #4593: a card kept for:<agent> goes only to a seat of that agent, or to its assignee
+    when t.assignee is distinct from a and cardinality(cb._for_agents(t.labels)) > 0 and cb._agent(a) <> all(cb._for_agents(t.labels)) then false
     when not cb._pipeline(t.project) then true
     when t.stage is null then
       case when t.type = 'research' then cb._role(a) = 'investigator' or t.assignee = a
