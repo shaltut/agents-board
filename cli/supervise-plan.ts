@@ -9,7 +9,11 @@ export type Session = { actor: string; role: string; area: string | null; repo: 
 export type State = { project: string; squad: Squad; supervised: boolean;
   // builder and reviewer: per repo (#3703); owner: per area
   waiting: { builder: Record<string, number>; reviewer: Record<string, number>; qa: number; investigator: number; architect: number; owner: Record<string, number> };
+  // #4593 review 100 F1: of the waiting cards, those kept for an agent (for: labels), by the agents named ("codex",
+  // "agy,codex"); shaped as waiting. Absent (an older board): none kept
+  kept?: { builder?: Record<string, Kept>; reviewer?: Record<string, Kept>; qa?: Kept; investigator?: Kept; architect?: Kept; owner?: Record<string, Kept> };
   sessions: Session[] };
+export type Kept = Record<string, number>;
 // launched: names this supervisor run started or restored that the board has not yet seen live
 // herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only READY may be closed
 // safeToClose (#4002): per session (actor), its agent adapter's answer, which then decides instead of herdrStatus; a
@@ -109,14 +113,19 @@ export function planTick(i: TickInput): TickPlan {
 
   // one want group per role (owners: one per area; builders and reviewers: one per repo)
   const perRepo = (role: string): role is 'builder' | 'reviewer' => role === 'builder' || role === 'reviewer';
-  const groups = new Map<string, { role: string; area?: string; repo: string; waiting: number; names: typeof wanted }>();
+  const groups = new Map<string, { role: string; area?: string; repo: string; waiting: number; kept: Kept; names: typeof wanted }>();
   for (const w of wanted) {
     const key = `${w.role}/${w.area ?? ''}/${w.repo}`;
     const waiting = w.role === 'owner' ? state.waiting.owner[w.area!] ?? 0
       : perRepo(w.role) ? state.waiting[w.role][w.repo] ?? 0
       : state.waiting[w.role as 'qa' | 'investigator' | 'architect'] ?? 0;
-    (groups.get(key) ?? groups.set(key, { role: w.role, area: w.area, repo: w.repo, waiting, names: [] }).get(key)!).names.push(w);
+    const k = state.kept, kept = (w.role === 'owner' ? k?.owner?.[w.area!] : perRepo(w.role) ? k?.[w.role]?.[w.repo]
+      : k?.[w.role as 'qa' | 'investigator' | 'architect']) ?? {};
+    (groups.get(key) ?? groups.set(key, { role: w.role, area: w.area, repo: w.repo, waiting, kept, names: [] }).get(key)!).names.push(w);
   }
+  // #4593 review 100 F1: kept work counts only for seats of an agent it names ("agy,codex": either)
+  const fits = (agent: string, k: string) => k.split(',').includes(agent);
+  const wantAgent = (w: (typeof wanted)[number]) => seatSpec(squad, w).agent;
   for (const g of groups.values()) {
     const mine = state.sessions.filter((s) => !leaving.has(s.actor) && s.role === g.role && (g.area === undefined || s.area === g.area) && (!perRepo(g.role) || s.repo === g.repo));
     // a name this run launched that herdr runs but the board does not see yet (still starting, or on a startup
@@ -125,18 +134,34 @@ export function planTick(i: TickInput): TickPlan {
     const pending = g.names.filter((w) => i.launched.has(w.name) && herdrLive.has(herdrName(w.name)) && !by.get(w.name)?.live && !by.get(w.name)?.holds);
     const liveCount = mine.filter((s) => (s.live || herdrLive.has(herdrName(s.actor))) && !s.closing).length
       + pending.filter((w) => !mine.some((s) => s.actor === w.name)).length + g.names.filter((w) => restored.has(w.name)).length;
-    let n = Math.min(g.waiting - mine.filter(idle).length - pending.length, g.names.length - liveCount);
-    for (const w of g.names) {
-      if (n <= 0) break;
-      if (isLive(w.name) || restored.has(w.name) || by.get(w.name)?.holds || !ok(w.name) || !room(w.name)) continue;
-      plan.start.push(launchFor(project, squad, w));
-      take(w.name);
-      n--;
+    // what waits: kept work by the agents it names, the rest for anyone. Each idle or pending seat takes a kept card it
+    // fits first, else one for anyone; what is left is started for, kept work by a seat of its agent first
+    const left: Kept = Object.fromEntries(Object.entries(g.kept).filter(([, n]) => n > 0));
+    let anyLeft = Math.max(0, g.waiting - Object.values(left).reduce((a, b) => a + b, 0));
+    const anyWait = anyLeft > 0, keptWait = { ...left };
+    const cover = (agent: string) => {
+      const k = Object.keys(left).find((x) => fits(agent, x) && left[x]! > 0);
+      if (k) left[k]!--; else if (anyLeft > 0) anyLeft--;
+    };
+    for (const s of mine.filter(idle)) cover(s.agent ?? 'claude');
+    for (const w of pending) cover(wantAgent(w));
+    let n = g.names.length - liveCount;
+    const startable = (w: (typeof wanted)[number]) => !isLive(w.name) && !restored.has(w.name) && !by.get(w.name)?.holds && ok(w.name) && room(w.name)
+      && !plan.start.some((l) => l.name === w.name);
+    const start = (w: (typeof wanted)[number]) => { plan.start.push(launchFor(project, squad, w)); take(w.name); n--; };
+    for (const k of Object.keys(left)) for (const w of g.names) {
+      if (n <= 0 || left[k]! <= 0) break;
+      if (fits(wantAgent(w), k) && startable(w)) { start(w); left[k]!--; }
     }
-    if (g.waiting > 0) continue;
+    for (const w of g.names) {
+      if (n <= 0 || anyLeft <= 0) break;
+      if (startable(w)) { start(w); anyLeft--; }
+    }
+    // a seat stays open while work it could take waits; kept work for another agent does not keep it
+    const wanted4 = (agent: string) => anyWait || Object.keys(keptWait).some((k) => fits(agent, k));
     for (const w of g.names) {
       const s = by.get(w.name);
-      if (s && !herdrDown.has(machineOf(w.name)) && idle(s) && safe(w.name)
+      if (s && !wanted4(s.agent ?? 'claude') && !herdrDown.has(machineOf(w.name)) && idle(s) && safe(w.name)
         && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }

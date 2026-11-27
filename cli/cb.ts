@@ -199,8 +199,17 @@ async function mineLines(rows: any[], who: string, indent: string) {
   return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [], words };
 }
 
+// #4593 review 100 F3: a card's tags, a for:<agent> label in plain words ("for a Codex seat"), never the raw tag
+const AGENT_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', agy: 'agy' };
+function tagWords(labels: string[] | undefined): string {
+  if (!labels?.length) return '';
+  const agents = labels.map((l) => /^for:(.+)$/i.exec(l.trim())?.[1]?.toLowerCase()).filter((a): a is string => !!a && a in AGENT_NAMES).sort();
+  const tags = labels.filter((l) => !/^for:/i.test(l.trim()));
+  const seat = agents.length ? agents.map((a) => AGENT_NAMES[a]).join(' or ') : '';
+  return (tags.length ? ` {${tags.join(', ')}}` : '') + (seat ? ` [for ${/^[aeiou]/i.test(seat) ? 'an' : 'a'} ${seat} seat]` : '');
+}
 const line = (t: any) =>
-  `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
+  `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${tagWords(t.labels)}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
 // #4454: a staged card says its stage in words, so an unheld in-progress card at review reads as waiting for review, not
 // as abandoned work. cb brief, cb show and cb mine (#4512) print it the same way.
 const withStage = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
@@ -815,7 +824,7 @@ ${body}`, json: pg };
         if (w?.words) return { out: w.words, json: null };
         // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
         const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
-        return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: null };
+        return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
       }
       const t = rows[0];
       const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
