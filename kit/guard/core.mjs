@@ -620,7 +620,7 @@ function secretRead(command) {
 // (Claude seats); the other agents' shims pass their edit targets to evaluate, which applies editFence (#4002).
 // A tripwire, not a sandbox: it reads command text, so a script the seat wrote and then runs (node fix.mjs) or a path
 // built in a variable passes. It stops the accident and the injected command; the boundary is OS permissions.
-// Per segment (review I3): a segment that names a fence path blocks when it also has a writer (git only through a write
+// Per segment (review I3): a segment that names a fence path blocks when it also has a writer (git unless a known read
 // subcommand, a formatter only with its write flag: #4002 review 68-I1), an in-place edit, an interpreter with a write
 // call, or a redirect INTO a fence path; after a cd into ~/.claude or ~/.claude-board any later writer or redirect blocks.
 // Fence paths: .claude/settings*.json anywhere, the .claude folder itself (moving or deleting it, a git write in it), and
@@ -668,12 +668,24 @@ const FENCE_WORDS = ['tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'install', 'rsync',
   'vi', 'vim', 'nvim', 'nano', 'emacs', 'code', 'notepad'];
 // a whole word (not part of a path or a longer word): touch in ~/.claude/touch is not the command
 const FENCE_WRITER = new RegExp(String.raw`(?<![\w.\\/-])(?:${FENCE_WORDS.join('|')})(?![\w.\\/-])`, 'i');
-// git writes files only through some subcommands (review 68-I1: git diff, log, show, blame, grep and status naming a fence
-// path are reads, and were blocked); commit and push write no working file. Global options (-C dir, -c k=v, --x[=y]) may
-// come first. A formatter writes only with its write flag.
-const GIT_WRITE = /(?<![\w.\\/-])git(?![\w.\\/-])(?:[ \t]+(?:-[Cc][ \t]+\S+|--?[\w-]+(?:=\S*)?))*[ \t]+(?:add|rm|mv|checkout|restore|reset|apply|am|stash|clean|worktree|switch|pull|merge|rebase|cherry-pick|revert|config|submodule|sparse-checkout|update-index|checkout-index|read-tree|init|clone|archive|format-patch)(?![\w-])|(?<![\w.\\/-])git(?![\w.\\/-])[^;&|]*[ \t]--output(?:=|[ \t])/i;
+// git is a reader only through a known read subcommand (review 68-I1: git diff, log, show, blame, grep and status naming a
+// fence path were blocked), found after its global options (-C dir, -c k=v, --git-dir dir, quoted or not); anything else,
+// an unknown or unreadable form included, or a read with --output, is a writer (fail closed). A formatter writes only
+// with its write flag.
+const GIT_WORD = /(?<![\w.\\/-])git(?![\w.\\/-])/gi;
+const GIT_READS = new Set(['diff', 'log', 'show', 'blame', 'annotate', 'grep', 'status', 'ls-files', 'ls-tree', 'cat-file', 'rev-parse',
+  'rev-list', 'describe', 'shortlog', 'whatchanged', 'diff-tree', 'diff-files', 'diff-index', 'show-ref', 'name-rev', 'help', 'version']);
+const gitWrites = (seg) => {
+  for (const m of seg.matchAll(GIT_WORD)) {
+    const w = seg.slice(m.index + 3).match(/"[^"]*"|'[^']*'|[^\s;&|]+/g) ?? [];
+    let i = 0;
+    while (i < w.length && w[i].startsWith('-')) i += GIT_OPT_ARG.has(w[i]) ? 2 : 1;
+    if (!GIT_READS.has((w[i] ?? '').toLowerCase()) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
+  }
+  return false;
+};
 const FORMAT_WRITE = /(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
-const writes = (seg) => FENCE_WRITER.test(seg) || GIT_WRITE.test(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
+const writes = (seg) => FENCE_WRITER.test(seg) || gitWrites(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
 const WRITE_CALL = /write|append|unlink|rename|copy|move|remove|delete|rmdir|rmsync|truncate|chmod|replace|dump|mkdir|\bopen\s*\([^),]{0,300},\s*["'][wax+]|-i\b|--in-place/i;
@@ -711,7 +723,8 @@ function redirects(seg, anyTarget) {
 // skip the second stripMessages (the costly step on big heredocs) for nearly every command.
 const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini|opencode/i;
 // a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
-const URL_WORD = /\b[a-z][a-z\d+.-]*:\/\/[^\s"';&|)>]*/gi;
+// (a scheme of two or more letters: C://Users/... is a drive, not a URL)
+const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
 function fenceWrite(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ');
