@@ -266,6 +266,28 @@ const killBlocked = [
   "ps aux | grep node | awk '{print $2}' | xargs kill",
   // M1: stripped once, so a kill between two quoted heredocs is still seen
   "cat > a.txt <<'EOF'\naaa\nEOF\npkill node\ncat > b.txt <<'EOF'\nbbb\nEOF",
+  // #3883 n4: a kill loop fed by a here-string of a lookup (<<< is one word, glued to its operand or not)
+  'while read p; do kill $p; done <<< "$(pgrep node)"',
+  'while read p; do kill $p; done <<< $(pgrep node)',
+  'while read p; do kill $p; done <<<"$(pgrep node)"',
+  'while read p; do kill $p; done <<<$(pgrep node)',
+  'while read p; do taskkill //F //PID $p; done <<< "$(tasklist | grep node | awk \'{print $2}\')"',
+  // #3883 n1: a block that stops, given the lookup after its closing brace (arguments, -ArgumentList, -InputObject)
+  'Invoke-Command -ScriptBlock { Stop-Process -Id $args } -ArgumentList (Get-Process node).Id',
+  'Invoke-Command { param($ids) Stop-Process -Id $ids } -ArgumentList (,(Get-Process node).Id)',
+  '& { param($ids) Stop-Process -Id $ids } (Get-Process node).Id',
+  '& { Stop-Process -Id $args } (Get-Process node).Id',
+  'ForEach-Object { Stop-Process -Id $_.Id } -Inp (Get-Process node)',
+  'ForEach-Object { Stop-Process -Id $_.Id } -InputObject:(Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id }; ForEach-Object $sb -InputObject (Get-Process node)',
+  // #3883 n2: options between the shell and -Command / -c / /c, values included
+  'powershell -NoProfile -Command "Stop-Process" -Name node',
+  'pwsh -NoProfile -c "Stop-Process" -Name node',
+  'cmd /d /c "taskkill" /F /IM node.exe',
+  'powershell -ExecutionPolicy Bypass -Command "Stop-Process" -Name node',
+  // #3883 n3: a Terminate splat that names MethodName before its query
+  `$m = @{ MethodName = 'Terminate'; Query = "select * from Win32_Process where name like 'node%'" }; Invoke-CimMethod @m`,
+  `$m = @{\n  MethodName = 'Terminate'\n  Query = 'select * from Win32_Process where name like "node%"'\n}\nInvoke-CimMethod @m`,
 ];
 // The block reason's own commands, as written there; each passes with its placeholders filled in (<pid> 1234, <port> 3000)
 const recommended = [
@@ -356,6 +378,19 @@ const killPassed = [
   'git commit -m "$(cat <<\'EOF\'\nfix: Get-Process node | Stop-Process killed the runner\nEOF\n)"',
   'herdr agent prompt orch-shaltoot "never run Get-Process node | Stop-Process"',
   'herdr --machine macbook agent prompt w1 "do not pkill node"',
+  // #3883: a here-string of PIDs that are not a by-name lookup; a lookup after another branch of an if
+  'while read p; do kill $p; done <<< "$(cat /tmp/mock.pids)"',
+  'while read p; do kill $p; done <<< "$(pgrep -P $$)"',
+  'while read p; do echo $p; done <<< "$(pgrep node)"',
+  'if ($id) { Stop-Process -Id $id } elseif (Get-Process node) { Write-Host "still up" }',
+  // #3883 n5: -InputObject of a lookup belongs to its own cmdlet, not to an earlier stop
+  'Stop-Process -Id $mockPid; Format-Table -InputObject (Get-Process node)',
+  'kill $PID; Measure-Object -InputObject (Get-Process node)',
+  // #3883 n3: a splat or a Terminate that names one process, then a by-name listing
+  `$m = @{ MethodName = 'Terminate'; Query = "select * from Win32_Process where ProcessId = 1234" }; Invoke-CimMethod @m`,
+  `Invoke-CimMethod -MethodName Terminate -Query "select * from Win32_Process where ProcessId = 1234"; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
+  // #3883 n2: a -c that is not a shell's
+  'Get-Process node; grep -c "kill" app.log',
 ];
 const KILL = check('killall node');
 test('kill by name: the reason names the harm, the PID and port routes, and quotes each recommended command', () => {

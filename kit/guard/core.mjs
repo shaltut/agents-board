@@ -247,34 +247,52 @@ const KILL_SEGMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[^;&|\n{}"'\\])+`, '
 const RUNS_NEXT = new Set(['c', 'k', '-c', '-command']);
 const SHELLS = new Set(['cmd', 'bash', 'sh', 'zsh', 'pwsh', 'powershell']);
 const TERMINATE_AFTER = new Set(['-methodname', '-name', 'call', '=', 'methodname']); // Invoke-CimMethod -Name Terminate, splats
+// -InputObject and its abbreviations down to -Inp (-In is ambiguous), colon-bound too: -Inp (...), -InputObject:(...)
+const INPUT_OBJECT = /^-inp(?:u(?:t(?:o(?:b(?:j(?:e(?:c(?:t)?)?)?)?)?)?)?)?:?$/;
+// the cmdlets whose -InputObject runs a block on it (ForEach-Object -Process $sb -InputObject (Get-Process node))
+const RUNS_BLOCK = new Set(['foreach-object', '%', 'foreach', 'invoke-command', 'icm']);
+// a segment after a block's closing brace that starts another branch: its words are not that block's arguments
+const BRANCH = new Set(['else', 'elseif', 'catch', 'finally']);
 
-// seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; inArgs: this text is inside a
+// seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; seen.splat: a Terminate named in a
+// hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
 // stop's arguments
 function scanKills(text, seen, inArgs) {
-  for (const seg of text.match(KILL_SEGMENT) ?? []) {
-    const raw = seg.match(WORD) ?? [];
+  for (const m of text.matchAll(KILL_SEGMENT)) {
+    const raw = m[0].match(WORD) ?? [];
     const w = raw.map(unquote);
     const name = raw.map(cmdName);
     let argsEnd = -1; // the last word of a stop's arguments in this segment
     // once per segment, not once per word (#4002: per word, both re-read the whole segment: 200 KB took 7 to 16 s)
     let one; // oneProcess(w): the segment's ProcessId filter names one process
     const isOne = () => (one ??= oneProcess(w));
-    let fed = false; // an earlier word is a < that feeds stdin: < <(...) or done < ...
+    let block; // the segment names a cmdlet that runs a block on its -InputObject
+    const runsBlock = () => (block ??= name.some((x) => RUNS_BLOCK.has(x)));
+    // right after a block's closing brace, not another branch: & { Stop-Process -Id $args } (Get-Process node).Id,
+    // Invoke-Command { ... } -ArgumentList (...), ForEach-Object { ... } -InputObject (...)
+    const afterBlock = text[m.index - 1] === '}' && !BRANCH.has(name[0]);
+    let fed = false; // an earlier word feeds stdin: < <(...), done < ..., done <<< ... (a here-string, glued or not)
+    let shell = false; // an earlier word of the segment is a shell: powershell -NoProfile -ExecutionPolicy Bypass -Command
     for (let i = 0; i < w.length; i++) {
-      if (i > 0 && w[i - 1] === '<' && (w[i - 2] === '<' || name[i - 2] === 'done')) fed = true;
+      if (i > 0 && (((w[i - 1] === '<' || w[i - 1] === '<<<') && (w[i - 2] === '<' || name[i - 2] === 'done'))
+        || (name[i - 1] === 'done' && w[i].startsWith('<<<')))) fed = true;
       const args = inArgs || i <= argsEnd;
-      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args)) return true;
+      // a quoted here-string of a lookup is fed to the loop's earlier stop: done <<< "$(pgrep node)"
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args || (fed && seen.stop))) return true;
       const n = name[i], prev = name[i - 1];
       // CIM/WMI Terminate, quoted or not: Invoke-CimMethod -MethodName "Terminate", -Name Terminate, @{ MethodName = 'Terminate' }
       // (-MethodName:Terminate too); its arguments, like any stop's, hold its source: -MethodName Terminate -Query "..."
       if ((n === 'terminate' && TERMINATE_AFTER.has(prev)) || /^(?:-(?:method)?name:|methodname=)terminate$/.test(n)) {
         if (seen.lookup) return true;
         seen.stop = true;
+        if (prev === '=' || n === 'methodname=terminate') seen.splat = true;
         argsEnd = Math.max(argsEnd, Math.min(w.length - 1, i + ARGS));
         continue;
       }
-      // a quoted word is an argument (Select-String "kill"), unless it is the command: & 'taskkill' /IM node.exe
-      if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !(RUNS_NEXT.has(prev) && SHELLS.has(name[i - 2]))) continue;
+      // a quoted word is an argument (Select-String "kill"), unless it is the command: & 'taskkill' /IM node.exe, or
+      // the word after a shell's -c / -Command / /c, with the shell's options between (cmd /d /c "taskkill" /IM node.exe)
+      if (/^["']/.test(raw[i]) && i > 0 && !PS_BEFORE.has(prev) && !(RUNS_NEXT.has(prev) && shell)) { shell ||= SHELLS.has(n); continue; }
+      shell ||= SHELLS.has(n);
       if (!KILL_WORDS.has(n) && !/\.(?:kill|terminate|foreach)$/.test(n) && !n.includes('getprocessesbyname')) continue;
       if (NOT_RUN.has(prev) || (prev === '-v' && name[i - 2] === 'command')) continue; // which pkill, command -v pkill
       let rest = w.slice(i + 1, i + 1 + ARGS);
@@ -295,10 +313,12 @@ function scanKills(text, seen, inArgs) {
         || (n === 'win32_process' && !isOne()) || (n === 'wmic' && /^process$/i.test(rest[0] ?? '') && !isOne())
         || (n === 'lsof' && rest.some((x) => /^-c/.test(x))) // lsof -c node
         || n.includes('getprocessesbyname');
-      // inside a stop's arguments, or fed to an earlier stop's input: xargs kill < <(pgrep node), done < <(pgrep node)
-      // ... or -InputObject (Get-Process node) after a ForEach-Object { Stop-Process ... } block
+      // inside a stop's arguments, or fed to an earlier stop's input: xargs kill < <(pgrep node), done < <(pgrep node);
+      // after the closing brace of a block that stops; the -InputObject of a ForEach-Object whose block is a variable
+      // ($sb = { Stop-Process ... }; ForEach-Object $sb -InputObject (Get-Process node)), not of any cmdlet (Format-Table)
       if (lookup) {
-        if (args || (seen.stop && (prev === '-inputobject' || fed))) return true;
+        if (args || (seen.stop && (fed || afterBlock || (INPUT_OBJECT.test(prev ?? '') && runsBlock())))) return true;
+        if (seen.splat && n === 'win32_process') return true; // @{ MethodName = 'Terminate'; Query = "... Win32_Process ..." }
         seen.lookup = true;
       }
       const stop = ((n === 'stop-process' || n === 'spps' || n === 'taskkill' || n === 'remove-ciminstance'
