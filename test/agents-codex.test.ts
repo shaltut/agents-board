@@ -40,8 +40,8 @@ test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a bu
 test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; config.toml servers are an install gate', () => {
   const m = codexAdapter.mcpOff('C:/w/board');
   assert.deepEqual([m.args, m.env], [['--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install'], {}]);
-  assert.match(m.gate ?? '', /\[mcp_servers\]/);
-  assert.match(m.gate ?? '', /merges/);
+  assert.match(codexAdapter.mcpGate ?? '', /\[mcp_servers\]/);
+  assert.match(codexAdapter.mcpGate ?? '', /merges/);
   for (const role of ['builder', 'reviewer']) {
     const a = codexAdapter.buildLaunch(input({ role })).args.join('\u0000');
     assert.ok(a.includes(m.args.join('\u0000')), role);

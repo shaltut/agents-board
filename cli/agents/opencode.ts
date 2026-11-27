@@ -265,13 +265,13 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
     // the launch, built on the orchestrating machine, cannot know). --pure also drops the cb-guard plugin, a per-seat
     // XDG_CONFIG_HOME drops the plugin, AGENTS.md and providers, and OPENCODE_DISABLE_PROJECT_CONFIG drops the repo's
     // AGENTS.md. Checked with opencode debug config on 1.19.4 against throwaway XDG folders (not a live session).
+    mcpGate: 'no enabled "mcp" entry in the OpenCode config the seat loads on its machine (~/.config/opencode/opencode.json[c], ' +
+      "the repo's opencode.json[c], OPENCODE_CONFIG; check: opencode mcp list from the seat's folder lists none): " +
+      'OPENCODE_CONFIG_CONTENT merges, and --pure would drop the cb-guard plugin',
     mcpOff() {
       return {
         args: [],
         env: {},
-        gate: 'no enabled "mcp" entry in the OpenCode config the seat loads on its machine (~/.config/opencode/opencode.json[c], ' +
-          "the repo's opencode.json[c], OPENCODE_CONFIG; check: opencode mcp list from the seat's folder lists none): " +
-          'OPENCODE_CONFIG_CONTENT merges, and --pure would drop the cb-guard plugin',
         note: 'nothing is added to the launch; MCP tools are also outside the cb-guard plugin, which forwards only its listed tools',
       };
     },

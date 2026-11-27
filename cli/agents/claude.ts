@@ -205,11 +205,11 @@ export const claudeAdapter: AgentAdapter = {
 
   // #4346: --strict-mcp-config with an empty --mcp-config loads no MCP server at all (no process spawned with the
   // seat's env), on top of the mcp__* deny in the role file. Checked live: 83 MCP tools without, 0 with either.
+  mcpGate: null,
   mcpOff(board) {
     return {
       args: ['--strict-mcp-config', '--mcp-config', `${board.replace(/[\/]+$/, '')}/kit/mcp/none.json`],
       env: {},
-      gate: null,
       note: 'every MCP source is off for the run; kit/permissions/<role>.json also denies mcp__* and turns claude.ai connectors off',
     };
   },

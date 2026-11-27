@@ -39,8 +39,8 @@ test('buildLaunch: --mode auto, this session only settings, the model; never --d
 test('mcpOff (#4392): agy has no per-run MCP off, so nothing is added and the gate names mcp_config.json and plugins', () => {
   const m = agyAdapter.mcpOff('C:/w/board');
   assert.deepEqual([m.args, m.env], [[], {}]);
-  assert.match(m.gate ?? '', /mcp_config\.json/);
-  assert.match(m.gate ?? '', /plugin/);
+  assert.match(agyAdapter.mcpGate ?? '', /mcp_config\.json/);
+  assert.match(agyAdapter.mcpGate ?? '', /plugin/);
 });
 
 test('buildLaunch: env keeps the squad env, adds the auto-update pin, strips Claude-only secrets and markers (any case)', () => {

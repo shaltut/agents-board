@@ -48,9 +48,9 @@ test('buildLaunch: argv, env, no secret in argv', () => {
 test('mcpOff (#4392): OpenCode has no per-run MCP off, so nothing is added and the gate names the config to check', () => {
   const m = A.mcpOff('C:/w/board');
   assert.deepEqual([m.args, m.env], [[], {}]);
-  assert.match(m.gate ?? '', /"mcp"/);
-  assert.match(m.gate ?? '', /OPENCODE_CONFIG_CONTENT merges/);
-  assert.match(m.gate ?? '', /--pure/);
+  assert.match(A.mcpGate ?? '', /"mcp"/);
+  assert.match(A.mcpGate ?? '', /OPENCODE_CONFIG_CONTENT merges/);
+  assert.match(A.mcpGate ?? '', /--pure/);
 });
 
 test('buildLaunch: never passes Claude-only secrets through', () => {

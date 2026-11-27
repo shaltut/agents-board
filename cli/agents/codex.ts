@@ -156,13 +156,13 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     // know the seat machine's names. --ignore-user-config exists on `codex exec` only, and a per-seat CODEX_HOME would
     // lose the login and the guard's hooks.json. Checked with codex mcp list on 0.160 against a throwaway CODEX_HOME
     // (not a live session).
+    mcpGate: "no enabled [mcp_servers] entry in ~/.codex/config.toml or the repo's .codex/config.toml on the seat's machine " +
+      "(check: codex mcp list --disable plugins --disable apps, from the seat's folder, lists none): Codex has no per-run " +
+      'way to drop them, -c merges into that table',
     mcpOff() {
       return {
         args: ['--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install'],
         env: {},
-        gate: "no enabled [mcp_servers] entry in ~/.codex/config.toml or the repo's .codex/config.toml on the seat's machine " +
-          "(check: codex mcp list --disable plugins --disable apps, from the seat's folder, lists none): Codex has no per-run " +
-          'way to drop them, -c merges into that table',
         note: 'plugin, connector (apps) and skill-install MCP are off for the run; servers in config.toml are the install gate',
       };
     },

@@ -13,10 +13,9 @@ export type GuardInstallSpec = { targetPath: string; shimFile: string; matchers:
 export type InstructionMapping = { nativeFiles: string[]; extraArgs: string[]; env: Record<string, string>; note: string };
 export type TrustSpec = { dialogHint: string; preseedPath?: string; extraArgs: string[] };
 export type DisableAskSpec = { toolName: string; mechanism: 'hook' | 'permission'; target: string };
-/** How a seat starts with no MCP server (#4392). `args` and `env` are for this run only (buildLaunch adds them; never the
- *  user's own config). `gate` is null when they turn every MCP source off; otherwise it names what the CLI cannot turn
- *  off per run, which must be true on the seat's machine before the adapter is installed (getAdapter refuses it until then). */
-export type McpOffSpec = { args: string[]; env: Record<string, string>; gate: string | null; note: string };
+/** How a seat starts with no MCP server (#4392): `args` and `env` for this run only (buildLaunch adds them; never the
+ *  user's own config). What they cannot turn off is the adapter's `mcpGate`. */
+export type McpOffSpec = { args: string[]; env: Record<string, string>; note: string };
 export type LaunchInput = { name: string; role: string; area?: string; repo: string; agent: AgentKind; model: string; board: string; cwd: string; env?: Record<string, string> };
 
 export interface AgentAdapter {
@@ -33,4 +32,7 @@ export interface AgentAdapter {
   trustSpec(repoPaths: string[], platform: NodeJS.Platform): TrustSpec;
   disableAskSpec(): DisableAskSpec;
   mcpOff(board: string): McpOffSpec;
+  /** Null when mcpOff turns every MCP source off. Otherwise what the CLI cannot turn off per run, which must hold on every
+   *  machine that runs this agent's seats: getAdapter refuses the agent until CB_MCP_GATE_OK names it (#4392). */
+  readonly mcpGate: string | null;
 }

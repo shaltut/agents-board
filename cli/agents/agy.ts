@@ -133,13 +133,13 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     // mcp_servers.md), and has no flag (agy --help, 1.5.18), documented env var or documented --settings key that skips
     // them for one run; `agy mcp disable` and `agy plugin disable` write the user's config. The catch-all guard hook
     // denies every tool it does not list, MCP tools included, but the servers still start with the seat's env.
+    mcpGate: "no MCP server on the seat's machine: ~/.gemini/config/mcp_config.json defines none and no enabled plugin bundles " +
+      'one (check: agy mcp list lists none and agy plugin list shows no enabled plugin with MCP servers): agy has no per-run ' +
+      'way to skip them',
     mcpOff() {
       return {
         args: [],
         env: {},
-        gate: "no MCP server on the seat's machine: ~/.gemini/config/mcp_config.json defines none and no enabled plugin bundles " +
-          'one (check: agy mcp list lists none and agy plugin list shows no enabled plugin with MCP servers): agy has no per-run ' +
-          'way to skip them',
         note: 'nothing is added to the launch; the guard hook denies MCP tool calls, but servers would still start',
       };
     },
