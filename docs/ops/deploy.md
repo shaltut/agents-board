@@ -44,7 +44,7 @@ cd /opt/claude-board/deploy
 docker compose up -d --build        # first build: 3 to 6 minutes
 docker compose ps                   # db and board: running (healthy)
 curl -s localhost:4747/healthz      # {"ok":true}
-docker compose logs board | tail    # "claude_board ready", then "Claude Board: http://localhost:4747"
+docker compose logs board | tail    # "claude_board ready", then "Agents Board: http://localhost:4747"
 ```
 
 The board container applies `db/schema.sql` every time it starts (idempotent), then serves. Both containers restart

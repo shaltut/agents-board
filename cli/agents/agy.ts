@@ -4,6 +4,7 @@
 // Design note: docs/superpowers/specs/2026-11-26-agy-adapter-design.md (what is verified on agy 1.5.17 and what is not).
 import { classifyAgentGet, realRun, type Runner } from '../squad-up.ts';
 import type { AgentAdapter, AgentState, DisableAskSpec, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
+import { stripClaudeOnly } from './env.ts';
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 const CLAUDE_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable']);
@@ -16,9 +17,6 @@ export function checkAgyModel(model: string): void {
   if (CLAUDE_ALIASES.has(model.toLowerCase())) throw new Error(`agy model "${model}" is a Claude alias: name an agy model id (agy models)`);
   if (!AGY_MODEL.test(model)) throw new Error(`agy model "${model}" is not an id: letters, digits, . _ - only (agy models lists them)`);
 }
-
-// Claude-only secrets and markers a non-Claude seat must not inherit (the owner's standing rule): CLAUDE_CODE_*, ANTHROPIC_*, CLAUDECODE.
-const isClaudeOnly = (k: string) => /^(?:CLAUDE_CODE_|ANTHROPIC_)/i.test(k) || ['CLAUDECODE', 'GITHUB_PERSONAL_ACCESS_TOKEN'].includes(k.toUpperCase());
 
 // Stops, from agy's own strings (agy.exe 1.5.17) and the changelog: a spent quota stops the turn at once; a per-minute
 // 429 is retried by agy for up to 4 minutes, so it is a rate limit, not a stop.
@@ -43,13 +41,15 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     // leaves it (never --dangerously-skip-permissions: the owner's classifier denied it). --settings is this session only.
     buildLaunch(l: LaunchInput) {
       checkAgyModel(l.model);
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(l.env ?? {})) if (!isClaudeOnly(k)) env[k] = v;
+      const env = stripClaudeOnly(l.env);
       env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true'; // a pinned version: herdr's screen rules are tuned per version
       return {
         kind: 'agy',
         args: ['--mode', 'auto', '--settings', `${trimSlash(l.board)}/kit/agy/settings.json`, ...(l.model ? ['--model', l.model] : [])],
         env,
+        // #4002: drops the Claude-only env from the pane's shell (agy has no exclude list: its shell saw them in the live
+        // check) and refuses the seat unless the workspace hook is in place and agy trusts the folder (no trust, no hooks)
+        prestart: { args: [] },
       };
     },
 

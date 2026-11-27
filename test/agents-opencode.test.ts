@@ -22,7 +22,7 @@ const pane = () => `oc-${process.pid}-${++n}`;
 const seat = (p: string, extra: Partial<SeatHandle> = {}): SeatHandle => ({ machine: M, pane: p, agent: 'opencode', ...extra });
 const input = (extra: Partial<LaunchInput> = {}): LaunchInput => ({
   name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'opencode', model: 'freellmapi/auto', board: 'C:/w/board', cwd: 'C:/w/x',
-  env: { CB_ROLE: 'builder', CB_OPENCODE_PORT: '41234', OPENCODE_SERVER_PASSWORD: 'pw-1' }, ...extra,
+  env: { CB_ROLE: 'builder', CB_OPENCODE_PORT: '41234' }, ...extra,
 });
 
 test('registry: opencode is registered; defaultModelFor stays null like cb._role_model', () => {
@@ -34,15 +34,19 @@ test('registry: opencode is registered; defaultModelFor stays null like cb._role
   assert.equal(defaultModelFor('opencode', 'builder'), null);
 });
 
-test('buildLaunch: argv, env, no secret in argv', () => {
+// #4002 install gate: squad up passes the launch env as herdr --env arguments, so the password is never in it: the pane
+// prestart makes it on the seat's machine (prestart args: the port)
+test('buildLaunch: argv, env, no secret in argv or env; the prestart carries the port', () => {
   const s = A.buildLaunch(input());
   assert.equal(s.kind, 'opencode');
   assert.deepEqual(s.args, ['C:/w/x', '--hostname', '127.0.0.1', '--port', '41234', '-m', 'freellmapi/auto', '--auto']);
   assert.equal(s.env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT, '1');
   assert.equal(s.env.OPENCODE_DISABLE_AUTOUPDATE, '1');
-  assert.equal(s.env.OPENCODE_SERVER_PASSWORD, 'pw-1');
+  assert.ok(!Object.keys(s.env).some((k) => /password/i.test(k)));
   assert.equal(s.env.CB_ROLE, 'builder');
-  assert.ok(!s.args.join(' ').includes('pw-1'));
+  assert.deepEqual(s.prestart, { args: ['41234'] });
+  for (const k of ['OPENCODE_SERVER_PASSWORD', 'opencode_server_password'])
+    assert.throws(() => A.buildLaunch(input({ env: { ...input().env, [k]: 'pw-1' } })), /refuses OPENCODE_SERVER_PASSWORD/, k);
 });
 
 test('mcpOff (#4392): OpenCode has no per-run MCP off, so nothing is added and the gate names the config to check', () => {
@@ -56,8 +60,9 @@ test('mcpOff (#4392): OpenCode has no per-run MCP off, so nothing is added and t
 test('buildLaunch: never passes Claude-only secrets through', () => {
   const s = A.buildLaunch(input({ env: {
     ...input().env, GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'y', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't', CLAUDE_CODE_ENTRYPOINT: 'e',
+    ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
   } }));
-  assert.deepEqual(Object.keys(s.env).filter((k) => /^(GITHUB_PERSONAL|CLAUDE_CODE_)/i.test(k)), []);
+  assert.deepEqual(Object.keys(s.env).filter((k) => /^(GITHUB_PERSONAL|CLAUDE_CODE_|ANTHROPIC_|CLAUDECODE$)/i.test(k)), []);
 });
 
 test('buildLaunch: model must be provider/model', () => {
@@ -66,10 +71,11 @@ test('buildLaunch: model must be provider/model', () => {
   assert.ok(OPENCODE_MODEL.test('freellmapi/auto'));
 });
 
-test('buildLaunch: needs port and password; refuses client folders for the free router only', () => {
+test('buildLaunch: needs a port, refuses a password; refuses client folders for the free router only', () => {
   assert.throws(() => A.buildLaunch(input({ env: { OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
   assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '80', OPENCODE_SERVER_PASSWORD: 'p' } })), /CB_OPENCODE_PORT/);
-  assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234' } })), /OPENCODE_SERVER_PASSWORD/);
+  assert.throws(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234', OPENCODE_SERVER_PASSWORD: 'p' } })), /refuses OPENCODE_SERVER_PASSWORD/);
+  assert.doesNotThrow(() => A.buildLaunch(input({ env: { CB_OPENCODE_PORT: '41234' } })));
   assert.throws(() => A.buildLaunch(input({ cwd: 'X:\\Work\\acme\\app' })), /freellmapi refused/);
   assert.throws(() => A.buildLaunch(input({ cwd: 'x:/work/zed/x' })), /freellmapi refused/);
   assert.doesNotThrow(() => A.buildLaunch(input({ cwd: 'X:\\Work\\alpha\\app' })));

@@ -6,7 +6,7 @@
 // (including a missing tool_name: Codex always sends one), a missing or broken core.mjs, or any error blocks. No static local
 // imports: core.mjs loads dynamically, so a shim copied without it still blocks. Deploy with the installer (see the design note).
 import { readFileSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 let core = null;
@@ -45,12 +45,20 @@ export function parseCodexInput(raw) {
     if (typeof input.command !== 'string') return unreadable(`tool_input.command is ${input.command === undefined ? 'missing' : 'not a string'}`);
     return { ok: true, tool: 'shell', command: input.command };
   }
-  if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit' };
+  if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', input, cwd: typeof p.cwd === 'string' ? p.cwd : null };
   if (ASK_TOOLS.has(name)) return { ok: true, tool: 'ask' };
   return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard reads Bash, apply_patch and request_user_input` };
 }
 
-// One hook run: raw stdin and an env (CB_ROLE, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
+// An edit's targets as given, resolved against the hook's cwd (a relative hooks.json run from ~/.codex is the fence too),
+// and through the real path of their nearest existing folder (review 68-I2: ./, ../ and links are judged where they land).
+const FS = { resolve, dirname, basename, join, realpathSync };
+export function editPaths(input, cwd) {
+  return [...new Set(core.editTargets(input).flatMap((t) => core.editPathForms(t, cwd, FS)))];
+}
+
+// One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
+// CB_AGENT without CB_ROLE blocks (a broken seat launch, #4002); neither set: a hand-started Codex, base rules only.
 export function runCodexShim(raw, env = process.env) {
   try {
     if (!core) return deny(`Blocked: guard failed to load core (${detail(loadErr)})`);
@@ -58,7 +66,9 @@ export function runCodexShim(raw, env = process.env) {
     if (!p.ok) return deny(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
+    const agent = String(env.CB_AGENT ?? '').trim() || null;
+    const paths = p.tool === 'edit' ? editPaths(p.input, p.cwd) : undefined;
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return deny(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

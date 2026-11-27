@@ -7,6 +7,7 @@ import type { Runner } from '../squad-up.ts';
 import { READ_ONLY_ROLES } from '../../kit/guard/core.mjs';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
+import { stripClaudeOnly } from './env.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
 export const CLAUDE_MODEL_NAMES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -18,11 +19,9 @@ export function codexModelProblem(model: string): string | null {
   return MODEL.test(model) ? null : `"${model}" is not a Codex model name (letters, digits, dot, dash, underscore; at most 64)`;
 }
 
-/** Claude-only secrets: the owner's standing rule is that a non-Claude seat never carries them. */
-const FORBIDDEN_ENV = /^(?:GITHUB_PERSONAL_ACCESS_TOKEN|CLAUDE_CODE_.*|ANTHROPIC_.*|CLAUDECODE)$/i;
-/** The same names as a glob list for Codex's own `shell_environment_policy.exclude`: commands the model runs never see
- *  them, even though the pane's env (set by herdr from the PC's) still holds them. TOML literal strings, so there are no
- *  double quotes for a shell to lose. */
+/** The Claude-only names (cli/agents/env.ts) as a glob list for Codex's own `shell_environment_policy.exclude`: a second
+ *  line behind the pane prestart, which drops them from the pane's shell before Codex starts. TOML literal strings, so
+ *  there are no double quotes for a shell to lose. */
 const EXCLUDE = "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']";
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
@@ -32,6 +31,11 @@ const QUOTA = /You[’']ve hit your usage limit[^\n]*|Your workspace is out of c
 const RATE = /exceeded retry limit, last status: 429|Automatically switched to [^\n]* due to usage limits/i;
 const RETRY_IN = /try again in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\b\s*,?\s*(?:and\s+)?)+)/i;
 const UNIT_SEC: Record<string, number> = { d: 86400, h: 3600, m: 60 };
+/** #4002: Codex opens its skill ($) or mention (@) popup while the last word starts with one, and the Enter that submits
+ *  then picks from the popup: the message sits unsent while herdr reports it sent. A trailing space ends the word first.
+ *  Trailing whitespace is trimmed before the test: a final newline would otherwise hide the word from `$`. */
+export const codexPromptText = (text: string) => { const t = text.replace(/\s+$/, ''); return /(?:^|\s)[$@]\S*$/.test(t) ? `${t} ` : text; };
+
 /** "try again in 2 hours 5 minutes" in seconds; undefined when the text names a clock time or nothing. */
 function retryAfterSec(text: string): number | undefined {
   const m = RETRY_IN.exec(text);
@@ -53,13 +57,18 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
       const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
-      const env = Object.fromEntries(Object.entries(l.env ?? {}).filter(([k]) => !FORBIDDEN_ENV.test(k)));
+      const env = stripClaudeOnly(l.env);
       return {
         kind: 'codex',
         args: [
           '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
           ...(l.model ? ['-m', l.model] : []),
           '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
+          // #4002 install gate (Ahmed, Q3004): Codex runs hooks only once a person trusts them, and Esc on "Hooks need
+          // review" goes on without them (the guard fails open). With this flag the installed hooks always run; the
+          // prestart refuses a seat whose hooks.json has no cb guard entry, and the fence keeps every seat out of hooks.json
+          // and config.toml. DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too.
+          '--dangerously-bypass-hook-trust',
           '-s', readOnly ? 'read-only' : 'workspace-write',
           // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
           ...(readOnly ? [] : ['-c', 'sandbox_workspace_write.network_access=true']),
@@ -69,14 +78,17 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
           ...adapter.instructionMapping(l).extraArgs,
         ],
         env,
+        prestart: { args: [] },
       };
     },
+
+    promptText: codexPromptText,
 
     // herdr types the text and submits it; it refuses with agent_blocked before sending a byte while a dialog is open, and a
     // busy turn takes it as a steer. Any failure throws, so the relay does not advance and the message retries.
     async deliver(seat, text) {
       if (!seat.herdrName) throw new Error('no herdr name for this codex seat');
-      const r = run(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, text], 15_000);
+      const r = run(seat.herdr ?? null, ['agent', 'prompt', seat.herdrName, codexPromptText(text)], 15_000);
       if (r.error || r.status !== 0) throw new Error(`herdr agent prompt failed (exit ${r.status}): ${String(r.error?.message ?? r.stderr ?? '').replace(/\s+/g, ' ').slice(0, 120)}`);
     },
 
@@ -119,7 +131,7 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
         matchers: { win32: re([...HANDLED_TOOLS]), darwin: re(base), linux: re(base) },
-        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json makes Codex show \"Hooks need review\" at the next start: only Ahmed trusts it, the board never answers it.",
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
       };
     },
 
@@ -133,11 +145,12 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
       };
     },
 
-    // Two startup dialogs in a row on 0.160+: "Update available" is pre-empted by the flag; "Hooks need review" is not,
-    // and is never answered by the board: the seat parks as agent_not_ready until a person trusts the hooks.
+    // Startup dialogs on 0.160+: "Update available" is pre-empted by the -c flag; "Hooks need review" by the launch's
+    // --dangerously-bypass-hook-trust (Q3004). A folder not under [projects] still shows the folder trust dialog: the seat
+    // parks as agent_not_ready until a person answers it; the board never does.
     trustSpec() {
       return {
-        dialogHint: '"Update available" (the launch already turns the update check off), then "Hooks need review": only a person trusts hooks; also the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml',
+        dialogHint: '"Update available" (the launch already turns the update check off); the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml (hook trust is bypassed: the launch runs the installed hooks)',
         preseedPath: '~/.codex/config.toml',
         extraArgs: ['-c', 'check_for_update_on_startup=false'],
       };

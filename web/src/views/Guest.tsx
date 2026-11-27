@@ -9,6 +9,7 @@ import { PRIORITIES, ProjectChip } from '@/components/Chips'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Mark, useTabLamp } from '@/components/Mark'
+import { NAME } from '@/lib/brand'
 import { RingToggle, ThemeToggle } from '@/components/ThemeToggle'
 import { useRing } from '@/lib/ring'
 import { Account } from '@/components/Account'
@@ -36,7 +37,7 @@ export function Guest({ user }: { user: User }) {
       <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-md backdrop-saturate-150">
         <div className="mx-auto flex h-13 max-w-2xl items-center gap-2.5 px-4 sm:px-6">
           <Mark lit={open.length > 0} />
-          <span className="text-[15px] font-semibold tracking-tight [font-stretch:88%]">Claude Board</span>
+          <span className="text-[15px] font-semibold tracking-tight [font-stretch:88%]">{NAME}</span>
           <span className="ml-auto" />
           <Account user={user} />
           <RingToggle />

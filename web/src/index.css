@@ -6,7 +6,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Claude Board: "Tower". Sessions are callsigns, tasks are strips in bays, and one colour, the
+/* Agents Board: "Tower". Sessions are callsigns, tasks are strips in bays, and one colour, the
    amber call lamp, lights only where something waits on Ahmed. See docs/design/brief.md. */
 
 @theme inline {

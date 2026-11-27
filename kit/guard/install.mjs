@@ -107,7 +107,7 @@ const covers = (matcher, tool) => {
   try { return new RegExp(`^(?:${matcher})$`).test(tool); } catch { return matcher === tool; }
 };
 // the quoted or bare words of a command, so each path in it can be compared whole
-const words = (command) => [...command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+export const words = (command) => [...command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
 const isFile = (f) => { try { return statSync(f).isFile(); } catch { return false; } };
 
 export function checkWiring(settingsFile, targetDir, { platform = process.platform, probes = true, home = homedir() } = {}) {

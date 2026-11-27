@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Mark } from '@/components/Mark'
+import { NAME } from '@/lib/brand'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -28,7 +29,7 @@ export function Login() {
       <header className="border-b">
         <div className="mx-auto flex h-13 max-w-2xl items-center gap-2.5 px-4 sm:px-6">
           <Mark />
-          <span className="text-[15px] font-semibold tracking-tight [font-stretch:88%]">Claude Board</span>
+          <span className="text-[15px] font-semibold tracking-tight [font-stretch:88%]">{NAME}</span>
           <span className="ml-auto"><ThemeToggle /></span>
         </div>
       </header>

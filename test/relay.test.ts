@@ -668,7 +668,7 @@ test('type_to: Ahmed\'s dashboard text reaches the session as a bare prompt; nob
     await assert.rejects(() => sql`select cb.type_to('W7@testbox', '   ', 'ahmed')`, /message is required/);
     await sql`select cb.tell('W7@testbox', 'raw is not mine to set', 'orch')`;
     for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
-    assert.match(inbox.got[0].message.content, /^\[Claude Board\]\nMessage from orch/, 'a teammate keeps the board wrapper');
+    assert.match(inbox.got[0].message.content, /^\[Agents Board\]\nMessage from orch/, 'a teammate keeps the board wrapper');
     const k = inbox.got.length;
     await sql`select cb.type_to('W7@testbox', ${'run the tests\nthen tell me'}, 'ahmed')`;
     for (let i = 0; i < 50 && inbox.got.length === k; i++) await new Promise((r) => setTimeout(r, 100));

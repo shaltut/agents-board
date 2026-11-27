@@ -222,6 +222,11 @@ const fenceWrites = [
   `echo x > ~/.cla""ude/settings.json`, `echo x > ~/.cla''ude/settings.json`, String.raw`echo x > ~/.cl\aude/settings.json`,
   'echo x > ~/.cl*/settings.json', 'cp x ~/.claud?/settings.json', 'mv ~/.cl* /tmp/', 'echo x > ~/.claude./settings.json',
   String.raw`del C:\Users\u\CLAUDE~1\settings.json`, 'cp x ~/.claude/settings*.json',
+  // #4002 review of PR 68: git is a reader only through a known read subcommand (fail closed on any form it cannot read),
+  // and a drive letter is not a URL scheme
+  'git -C "/Users/my name/.claude" checkout -- settings.json', 'git --work-tree ~/.claude --git-dir /tmp/g checkout -- settings.json',
+  'git commit .claude/settings.json -m x', 'git diff --output=~/.claude/settings.json', 'echo x > C://Users/me/.claude/settings.json',
+  'rm -rf C://Users/me/.claude-board', 'echo x > ~/.claude/./settings.json', 'cp x ~/.claude/a/../settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -238,6 +243,9 @@ const fenceReads = [
   'node cli/cb.ts doctor ~/.claude-board/guard', 'cd ~/.claude && node -v', 'cd ~/.claude && cat settings.json',
   'cat ~/.claude/settings.json 2> /tmp/err', 'ls ~/.claude/projects | sort > /tmp/l', 'grep -rn foo ~/.claude/ > /tmp/hits',
   'ls ~/.claude/touch', 'grep -rn "create" ~/.claude/settings.json', 'cat ~/.claude/settings.json | tee /tmp/copy',
+  // #4002 review of PR 68 (68-I1): read-only git naming a fence path (blocked before)
+  'git diff .claude/settings.json', 'git log -p -- .claude/settings.json', 'git -C ~/.claude status', 'git --no-pager show HEAD:.claude/settings.json',
+  'curl -s https://h.example/.claude/settings.json -o /tmp/s.json',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {

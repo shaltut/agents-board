@@ -180,7 +180,7 @@ const indent = (x: any): any =>
 
 function format(raw: any): string {
   const i = indent(raw);
-  const lines = ['[Claude Board]'];
+  const lines = ['[Agents Board]'];
   // Ahmed's asks (#936) first: his own words, answered on the board, where he reads them (not in this terminal)
   for (const a of i.asks ?? []) {
     const tag = `A${a.id}${a.task_id ? ` (task #${a.task_id})` : ''}`;
@@ -305,7 +305,7 @@ async function check() {
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
         for (const m of typed) await adapter.deliver(seat, String(m.summary), { raw: true });
-        // only what is left over gets the board's wrapper (a lone typed line must not add an empty "[Claude Board]")
+        // only what is left over gets the board's wrapper (a lone typed line must not add an empty "[Agents Board]")
         if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length > typed.length || i.next_work.length || i.memory?.length)
           await adapter.deliver(seat, format(i));
         for (const a of i.asks ?? []) await sql`select cb.ask_delivered(${String(a.id)}, ${a.upto}, ${i.actor}, ${a.reminder})`;

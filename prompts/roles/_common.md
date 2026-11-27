@@ -1,6 +1,6 @@
 # Rules for every role
 
-You are one session in a squad. Claude Board is the source of work and Ahmed's view of it. Use `cb` only.
+You are one session in a squad. Agents Board is the source of work and Ahmed's view of it. Use `cb` only.
 
 - After a compaction or restart, a Claude seat gets `cb resume` and `cb role` printed by the start hook; if you did
   not get them (or you run on another agent), run `cb resume` and `cb role <your role>`.

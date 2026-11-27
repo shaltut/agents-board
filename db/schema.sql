@@ -1,4 +1,4 @@
--- Claude Board schema. Idempotent: safe to re-run on a live database.
+-- Agents Board schema. Idempotent: safe to re-run on a live database.
 -- NOTE: "create table if not exists" never alters an existing table;
 -- column changes need an explicit "alter table" below the create.
 
@@ -14,6 +14,9 @@ create table if not exists cb.projects (
   archived   boolean not null default false,
   created_at timestamptz not null default now()
 );
+-- #4531: the board's own project shows as Agents Board; its slug stays claude-board (every cb bug claude-board keeps
+-- working). Only the name cb.ensure_project made moves: a name set by hand is kept, and a re-run touches no row.
+update cb.projects set name = 'Agents Board' where slug = 'claude-board' and name = 'Claude Board';
 
 
 -- Old or alternative names for a project: "tamarind" → iris. New work through an alias gets its tags.
@@ -520,7 +523,8 @@ begin
   if slug ~ '^#?[0-9]+$' then
     raise exception '"%" looks like a task number, not a project: use cb log <project> "..." -t %', project, ltrim(project, '#');
   end if;
-  insert into cb.projects (slug, name) values (slug, initcap(replace(slug, '-', ' ')))
+  insert into cb.projects (slug, name)
+  values (slug, case when slug = 'claude-board' then 'Agents Board' else initcap(replace(slug, '-', ' ')) end) -- #4531
   on conflict do nothing;
   return slug;
 end $$;

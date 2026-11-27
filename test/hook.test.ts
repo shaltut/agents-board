@@ -39,7 +39,7 @@ test('SessionStart: a herdr session hears one line when the guard hook is not wi
       return JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
     };
     const bare = start(home);
-    assert.match(bare, /^Claude Board: .*run `cb start`/);
+    assert.match(bare, /^Agents Board: .*run `cb start`/);
     assert.match(bare, /\nGuard: cannot read .*settings\.json.*cb ask/s);
     assert.equal(bare.split('\n').length, 2);
     const target = join(home, '.claude-board', 'guard');
@@ -62,6 +62,6 @@ test('SessionStart hint: a herdr session is told to run cb start; others hear no
   assert.equal(r.status, 0);
   const out = JSON.parse(r.stdout).hookSpecificOutput;
   assert.equal(out.hookEventName, 'SessionStart');
-  assert.match(out.additionalContext, /^Claude Board: .*run `cb start`/);
+  assert.match(out.additionalContext, /^Agents Board: .*run `cb start`/);
   assert.equal(hint({ HERDR_PANE_ID: '' }).stdout, '');
 });

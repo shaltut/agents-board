@@ -1,4 +1,4 @@
-# Claude Board: design brief (#129)
+# Agents Board: design brief (#129)
 
 ## Subject, audience, primary job
 - **Subject:** a local control tower for a fleet of Claude Code sessions (W1@macbook, fetch@vps2 …) building claims software across machines.
@@ -59,11 +59,12 @@ The base is a green-grey graphite, not slate blue and not neutral black: the col
   `prefers-reduced-motion` turns all of it into instant state changes.
 
 ## Logo
-**A racked C with the lamp in its mouth.** Three pill-shaped strips (top, spine, bottom; the top one
-shorter, like strips of different lengths in a rack) form a "C" for Claude, and the call lamp sits
-in its opening. Paper strips and an amber lamp on a graphite tile, so it holds on light and dark
-tab bars. The same SVG is `public/favicon.svg` and the header mark (`components/Mark.tsx`).
-At 16px it is a bold C and a dot. The mark is live: the lamp is amber while anything waits on
+**The bracket (#4531).** Two pill-strip brackets with the call lamp between them: board messages to agents
+come in brackets (`[Agents Board] ...`), so the bracket is the board's own sign. Paper strips and an amber lamp on a
+graphite tile, so it holds on light and dark tab bars. The geometry lives once in `web/src/lib/brand.ts` (`markSvg`);
+`public/favicon.svg` is the same SVG (test/brand.test.ts pins it) and the header mark is `components/Mark.tsx`.
+At 16px it is two bold brackets and a dot, the lamp the biggest of the three. It replaced a racked "C" (for Claude)
+when the board started running any agent. The mark is live: the lamp is amber while anything waits on
 Ahmed and green when nothing does, in the header and in the browser tab (with the count in the title).
 First drafts (three stacked strips with a lamp) read as a hamburger icon at 16px and were dropped.
 
