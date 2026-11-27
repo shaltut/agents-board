@@ -383,6 +383,8 @@ const killPassed = [
   'while read p; do kill $p; done <<< "$(pgrep -P $$)"',
   'while read p; do echo $p; done <<< "$(pgrep node)"',
   'if ($id) { Stop-Process -Id $id } elseif (Get-Process node) { Write-Host "still up" }',
+  'Stop-Process -Id $id; do { Start-Sleep 1 } while (Get-Process node -ErrorAction SilentlyContinue)',
+  'Stop-Process -Id $id; do { Start-Sleep 1 } until (-not (Get-Process node -ErrorAction SilentlyContinue))',
   // #3883 n5: -InputObject of a lookup belongs to its own cmdlet, not to an earlier stop
   'Stop-Process -Id $mockPid; Format-Table -InputObject (Get-Process node)',
   'kill $PID; Measure-Object -InputObject (Get-Process node)',

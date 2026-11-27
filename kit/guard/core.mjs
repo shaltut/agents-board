@@ -251,8 +251,9 @@ const TERMINATE_AFTER = new Set(['-methodname', '-name', 'call', '=', 'methodnam
 const INPUT_OBJECT = /^-inp(?:u(?:t(?:o(?:b(?:j(?:e(?:c(?:t)?)?)?)?)?)?)?)?:?$/;
 // the cmdlets whose -InputObject runs a block on it (ForEach-Object -Process $sb -InputObject (Get-Process node))
 const RUNS_BLOCK = new Set(['foreach-object', '%', 'foreach', 'invoke-command', 'icm']);
-// a segment after a block's closing brace that starts another branch: its words are not that block's arguments
-const BRANCH = new Set(['else', 'elseif', 'catch', 'finally']);
+// a segment after a block's closing brace that starts another branch, or a do loop's condition: its words are not that
+// block's arguments (Stop-Process -Id $id; do { Start-Sleep 1 } while (Get-Process node))
+const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until']);
 
 // seen.lookup / seen.stop: a by-name lookup, or a stop, came earlier in the command; seen.splat: a Terminate named in a
 // hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
