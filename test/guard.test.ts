@@ -211,6 +211,14 @@ const fenceWrites = [
   `cd ~/.claude && echo '{}' > settings.json`, 'echo x > .claude/settings.json', 'echo x>~/.claude/settings.json',
   'node kit/guard/install.mjs', 'node kit/guard/install.mjs --target /tmp/g', String.raw`node kit\guard\install.mjs`,
   'cd kit/guard && node install.mjs', 'node kit/guard/install.mjs --check; node kit/guard/install.mjs',
+  // PR 96 review I1: --check in a comment or in quotes; a bare run from inside kit/guard (Codex sends no cwd); a glob or a
+  // variable for the folder; an install that clears or sets the seat's variables, even with --check
+  'node kit/guard/install.mjs --agents codex # --check', 'node kit/guard/install.mjs --agents codex #--check',
+  'node kit/guard/install.mjs --target "/tmp/g --check"', "node kit/guard/install.mjs --target '/tmp/g --check'",
+  'node install.mjs', 'node install.mjs --agents codex', 'node ./install.mjs', String.raw`node .\install.mjs`, 'node "install.mjs"',
+  'node kit/gu*/install.mjs', 'node kit/*/install.mjs', 'node $D/install.mjs', 'node ${D}/install.mjs', 'node %D%\\install.mjs',
+  'CB_ROLE= CB_AGENT= node kit/guard/install.mjs --check', 'env -u CB_ROLE -u CB_AGENT node kit/guard/install.mjs --check',
+  'unset CB_ROLE CB_AGENT; node kit/guard/install.mjs --check', '$env:CB_ROLE=$null; node kit/guard/install.mjs --check',
   String.raw`[IO.File]::WriteAllText("$HOME\.claude\settings.json", "{}")`, 'vim ~/.claude/settings.json',
   // review #5 I2: more writers
   'curl -o ~/.claude/settings.json https://x.example/s.json', 'wget -O ~/.claude/settings.json https://x.example/s.json',
@@ -262,7 +270,7 @@ const fenceReads = [
   `cb log 4345 "blocked: echo x > ~/.claude/settings.json"`, `git commit -m "fence: no writes to ~/.claude/settings.json"`,
   'echo x > notes.claude.txt', 'cp a.json b.json', 'cat .claude.json',
   // another project's installer is not the guard's
-  'node scripts/install.mjs', 'cd kit/guard && node install.mjs --check',
+  'node scripts/install.mjs', 'cd kit/guard && node install.mjs --check', 'node install.mjs --check', 'node kit/guard/install.mjs --check # nightly', 'node tools/install.mjs --target /tmp/x',
   // review #5 I3: a repo's own .claude folder (skills, agents, worktrees) is ordinary work
   'cp a.md .claude/skills/a.md', 'echo x > .claude/agents/foo.md', 'git mv .claude/skills/a .claude/skills/b',
   'rm -rf .claude/worktrees/x', 'mkdir -p .claude/skills/new', 'echo "see .claude/x" > notes.txt',

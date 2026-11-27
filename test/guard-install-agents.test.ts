@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -137,11 +137,17 @@ test('wiring refuses what it must not overwrite and leaves those files as they w
   writeFileSync(codexToml(w), 'profile = "quiet"\n\n[profiles.quiet.features]\nhooks = false\n');
   assert.ok(wire(w, { agents: ['codex'] }).problems.some((p: string) => /profile "quiet"/.test(p)));
   const TQ = '"'.repeat(3);
-  writeFileSync(codexToml(w), `notes = ${TQ}\n[features]\nnot a table\n${TQ}\n`);
+  // read as text (never as the table), and, since PR 96 review B1, refused rather than given a [features] line of its own:
+  // a second [features] header would stop Codex if this reading were ever wrong
+  const mlText = `notes = ${TQ}\n[features]\nnot a table\n${TQ}\n`;
+  writeFileSync(codexToml(w), mlText);
+  assert.equal(codexHooksFeature(mlText), undefined);
   const ml = wire(w, { agents: ['codex'] });
-  assert.ok(ml.ok, ml.problems.join('\n'));
-  assert.equal(codexHooksFeature(readFileSync(codexToml(w), 'utf8')), true, 'a real [features] table was added after the string');
-  assert.ok(readFileSync(codexToml(w), 'utf8').endsWith(`not a table\n${TQ}\n\n[features]\nhooks = true\n`), readFileSync(codexToml(w), 'utf8'));
+  assert.ok(ml.problems.some((p: string) => /by hand/.test(p)), ml.problems.join('\n'));
+  assert.equal(readFileSync(codexToml(w), 'utf8'), mlText);
+  writeFileSync(codexToml(w), `notes = ${TQ}\nno table here\n${TQ}\n`);
+  assert.ok(wire(w, { agents: ['codex'] }).ok);
+  assert.ok(readFileSync(codexToml(w), 'utf8').endsWith(`no table here\n${TQ}\n\n[features]\nhooks = true\n`), readFileSync(codexToml(w), 'utf8'));
 
   // agy runs a hook command through cmd /c on Windows, with no quotes: a guard path with a space cannot be written
   const spaced = join(w.root, 'my guard');
@@ -244,5 +250,70 @@ test('the CLI: --agents takes only known agents, agy needs --seat, and nothing i
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.ok(existsSync(codexFile(w)) && existsSync(pluginFile(w)));
   const check = run('--check', '--no-wiring', '--agents', 'codex,opencode');
+  assert.equal(check.status, 0, check.stdout + check.stderr);
+});
+
+test('PR 96 review B1: a # inside a one-line string is text, so the real [features] is found; never a second [features] header', (t) => {
+  const w = world(t);
+  assert.ok(install(w, ['codex']).ok);
+  mkdirSync(join(w.home, '.codex'), { recursive: true });
+  const TQ = "'".repeat(3), DQ = '"'.repeat(3);
+  // the owner's explicit false, after a one-line triple-quoted string with ' #' in it: read, and refused, never buried
+  for (const str of [`${TQ}Use # for headings${TQ}`, `${DQ}Use # for headings${DQ}`, '"a # b"', "'a # b'", `${DQ}a \\""" # b${DQ}`]) {
+    const toml = `instructions = ${str}\n[features]\nhooks = false\n`;
+    writeFileSync(codexToml(w), toml);
+    const r = wire(w, { agents: ['codex'], seats: [] });
+    assert.equal(r.ok, false, str);
+    assert.match(r.problems.join('\n'), /hooks = false/, str);
+    assert.equal(readFileSync(codexToml(w), 'utf8'), toml, `${str}: left as it was`);
+    assert.equal(codexHooksFeature(toml), false, str);
+  }
+  // an existing [features] gets hooks = true under it, and still has exactly one header
+  writeFileSync(codexToml(w), `instructions = ${TQ}Use # for headings${TQ} # a comment\n[features]\nweb_search = true\n`);
+  assert.ok(wire(w, { agents: ['codex'], seats: [] }).ok);
+  const after = readFileSync(codexToml(w), 'utf8');
+  assert.equal(after.match(/^\[features\]/gm)?.length, 1, after);
+  assert.equal(codexHooksFeature(after), true);
+  // a [features] header the reader cannot place the key under (here: inside a real multi-line string) is refused, not doubled
+  const odd = `notes = ${DQ}\n[features]\n${DQ}\nmodel = "x"\n`;
+  writeFileSync(codexToml(w), odd);
+  const r = wire(w, { agents: ['codex'], seats: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.problems.join('\n'), /by hand/);
+  assert.equal(readFileSync(codexToml(w), 'utf8'), odd);
+});
+
+test('PR 96 review M1/M2: a rewritten config.toml and hooks.json keep CRLF line endings and their file mode', (t) => {
+  const w = world(t);
+  assert.ok(install(w, ['codex']).ok);
+  mkdirSync(join(w.home, '.codex'), { recursive: true });
+  writeFileSync(codexToml(w), 'model = "x"\r\n[features]\r\nweb_search = true\r\n', { mode: 0o600 });
+  writeFileSync(codexFile(w), '{\r\n  "hooks": {}\r\n}\r\n', { mode: 0o640 });
+  if (process.platform !== 'win32') { spawnSync('chmod', ['600', codexToml(w)]); spawnSync('chmod', ['640', codexFile(w)]); }
+  assert.ok(wire(w, { agents: ['codex'], seats: [] }).ok);
+  for (const f of [codexToml(w), codexFile(w)]) {
+    const text = readFileSync(f, 'utf8');
+    assert.equal(text.replace(/\r\n/g, '').includes('\n'), false, `${f}: every line ends in CRLF`);
+  }
+  assert.match(readFileSync(codexToml(w), 'utf8'), /\[features\]\r\nhooks = true\r\n/);
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(codexToml(w)).mode & 0o777, 0o600);
+    assert.equal(statSync(codexFile(w)).mode & 0o777, 0o640);
+  }
+});
+
+test('PR 96 review I1: in a board seat (CB_ROLE or CB_AGENT set) the installer runs only --check and writes nothing else', (t) => {
+  const w = world(t);
+  const run = (env: Record<string, string>, ...args: string[]) => spawnSync(process.execPath, [INSTALL, '--target', w.target, ...args], { env: { ...w.env, ...env } as NodeJS.ProcessEnv, encoding: 'utf8' });
+  for (const env of [{ CB_ROLE: 'builder' }, { CB_AGENT: 'codex' }, { CB_ROLE: 'reviewer', CB_AGENT: 'claude' }]) {
+    for (const args of [[], ['--agents', 'codex'], ['--agents', 'codex,opencode']]) {
+      const r = run(env, ...args);
+      assert.equal(r.status, 2, `${JSON.stringify(env)} ${args.join(' ')}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /board seat.*--check/s);
+      assert.ok(!existsSync(w.target) && !existsSync(codexFile(w)), 'nothing written');
+    }
+  }
+  assert.equal(run({ CB_ROLE: '  ' }, '--agents', 'codex').status, 0, 'a blank CB_ROLE is not a seat');
+  const check = run({ CB_ROLE: 'builder' }, '--check', '--no-wiring', '--agents', 'codex');
   assert.equal(check.status, 0, check.stdout + check.stderr);
 });

@@ -882,7 +882,17 @@ const IN_PLACE = thenLater(SEGMENTS, String.raw`(?<![\w.-])(?:sed|perl)(?![\w.-]
 // the guard's installer, not any project's install.mjs: the file named under a guard folder, or run from inside one
 const INSTALLER = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
 const GUARD_DIR = /(?:^|[\s"'\\/])guard(?=[\\/\s"';&|)]|$)/i;
-const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && GUARD_DIR.test(s) };
+// PR 96 review I1: Codex sends no cwd, so a bare node install.mjs (or ./install.mjs) may be run from inside kit/guard,
+// and a glob or variable (kit/gu*/install.mjs, $D/install.mjs) hides the folder: each counts as the guard's (fail closed;
+// scripts/install.mjs stays another project's)
+const INSTALLER_DIR = /(?:^|[\s"'=(])([^\s"';&|()]*?)install\.mjs(?![\w.-])/gi;
+const hiddenInstaller = (s) => [...s.matchAll(INSTALLER_DIR)].some((m) => !m[1] || /^\.[\\/]+$/.test(m[1]) || /[*?[\]{}$`%]/.test(m[1]));
+const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && (GUARD_DIR.test(s) || hiddenInstaller(s)) };
+// --check counts only as a word of the command itself: not inside quotes (--target "x --check") or a comment (# --check)
+const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(seg.replace(QUOTED_TEXT, '""').replace(/(?:^|[ \t])#.*$/s, ''));
+// and an install that clears or sets the seat's variables (CB_ROLE= CB_AGENT= node install.mjs, env -u CB_ROLE) is
+// blocked even with --check: those variables are what make the installer itself refuse to run in a seat
+const SEAT_VARS = /CB_(?:ROLE|AGENT)(?![\w])/i;
 const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), the .claude folder itself, ~/.claude-board (the guard, the runner config) and the other agents\' hook and config files (~/.codex hooks.json and *.toml, .agents/hooks.json, ~/.gemini, opencode.json, OpenCode plugins) are Ahmed\'s; a squad seat never writes them or runs the guard installer. Reading them is fine. A change there is his: cb ask';
 // a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
 // original is tested too, so a Windows path keeps its separators)
@@ -945,7 +955,7 @@ const fenceWrite = rawAndJoined(fenceWriteOne);
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
-  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
+  if (GUARD_INSTALL.test(text) && (SEAT_VARS.test(text) || !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || CHECK_WORD(s)))) return FENCE;
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes

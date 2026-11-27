@@ -65,11 +65,11 @@ test('role blocks: a builder cannot push to main or merge; a reviewer cannot com
   assert.equal(run(bash('git log --oneline'), { CB_ROLE: 'reviewer' }).stdout, '{}');
 });
 
-test('request_user_input is denied unless CB_ALLOW_ASK=1, with the cb ask pointer', () => {
-  const r = run(call('request_user_input', { questions: [] })).out.hookSpecificOutput;
+test('in a seat, request_user_input is denied unless CB_ALLOW_ASK=1, with the cb ask pointer', () => {
+  const r = run(call('request_user_input', { questions: [] }), { CB_ROLE: 'builder' }).out.hookSpecificOutput;
   assert.equal(r.permissionDecision, 'deny');
   assert.match(r.permissionDecisionReason, /cb ask/);
-  assert.equal(run(call('request_user_input', { questions: [] }), { CB_ALLOW_ASK: '1' }).stdout, '{}');
+  assert.equal(run(call('request_user_input', { questions: [] }), { CB_ROLE: 'builder', CB_ALLOW_ASK: '1' }).stdout, '{}');
 });
 
 test('an unknown CB_ROLE blocks', () => {
@@ -87,12 +87,26 @@ test('fail closed on unreadable input: every case is a deny object, exit 0', () 
   }
 });
 
-test('unknown tools block, including a missing tool_name and an MCP tool; the Claude-style omitted tool_name is not accepted', () => {
+test('in a seat, unknown tools block, including a missing tool_name and an MCP tool; the Claude-style omitted tool_name is not accepted', () => {
   for (const input of [call('', { command: 'ls' }), call('mcp__postman__run', { command: 'ls' }), call('bash', { command: 'ls' }), call('UnknownTool', {}),
     JSON.stringify({ tool_input: { command: 'ls' } }), JSON.stringify({ tool_name: null, tool_input: { command: 'ls' } }), JSON.stringify({ tool_name: 5, tool_input: { command: 'ls' } })]) {
-    const r = run(input).out.hookSpecificOutput;
-    assert.equal(r.permissionDecision, 'deny', input);
-    assert.match(r.permissionDecisionReason, /^Blocked: unrecognized tool/, input);
+    for (const env of [{ CB_ROLE: 'builder' }, { CB_ROLE: 'reviewer' }]) {
+      const r = run(input, env).out.hookSpecificOutput;
+      assert.equal(r.permissionDecision, 'deny', input);
+      assert.match(r.permissionDecisionReason, /^Blocked: unrecognized tool/, input);
+    }
+  }
+});
+
+test('outside a seat (the hook is machine-wide) the owner\'s own Codex keeps its tools and questions; base rules still apply (PR 96 review I3)', () => {
+  for (const [name, input] of [['update_plan', { plan: [] }], ['view_image', { path: 'a.png' }], ['spawn_agent', { message: 'x' }], ['mcp__postman__run', {}], ['request_user_input', { questions: [] }]] as [string, unknown][]) {
+    assert.equal(run(call(name, input)).stdout, '{}', name);
+    assert.equal(run(call(name, input), { CB_AGENT: 'codex' }).out.hookSpecificOutput?.permissionDecision, 'deny', `${name} in a seat launched without a role`);
+  }
+  assert.equal(run(bash('git reset --hard')).out.hookSpecificOutput?.permissionDecision, 'deny');
+  // unreadable input is never an unknown tool, seat or not
+  for (const input of [call('', { command: 'ls' }), JSON.stringify({ tool_input: {} }), JSON.stringify({ tool_name: 5, tool_input: {} }), call('Bash', {}), 'nope']) {
+    assert.equal(run(input).out.hookSpecificOutput?.permissionDecision, 'deny', input);
   }
 });
 

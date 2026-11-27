@@ -124,15 +124,16 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     },
 
     // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open). #4609: a
-    // catch-all, since Codex 0.160 also has exec_command, unified_exec and write_stdin, which a named list let through;
-    // the shim denies every tool it does not judge (HANDLED_TOOLS), so a new tool is refused, never unguarded.
+    // catch-all, so a tool Codex adds later still reaches the shim. In a board seat the shim denies every tool it does not
+    // judge (HANDLED_TOOLS); outside one it allows them, since the hook is machine-wide and the owner's own Codex keeps its
+    // tools (PR 96 review I3). Codex 0.160's exec_command arrives as Bash, and write_stdin fires no hook (#4618, #4626).
     // node kit/guard/install.mjs --agents codex writes this entry, pointing at the installed shim (AGENT_MATCHERS there).
     guardInstallSpec(boardDir) {
       return {
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
         matchers: { win32: '.*', darwin: '.*', linux: '.*' },
-        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); the installer sets [features] hooks = true in config.toml. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
       };
     },
 

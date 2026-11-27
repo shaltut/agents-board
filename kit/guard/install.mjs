@@ -12,7 +12,7 @@
 // second run changes nothing. Seats never write these files (the fence keeps them out); a person runs this.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -88,7 +88,9 @@ const AGENT_PROBES = {
     cases: [
       { name: 'codex: ls passes', input: { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }, want: 'allow' },
       { name: 'codex: git reset --hard blocks', input: { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git reset --hard' } }, want: DANGER },
-      { name: 'codex: a tool the shim does not know blocks', input: { hook_event_name: 'PreToolUse', tool_name: 'cb_unlisted_tool_probe', tool_input: {} }, want: 'Blocked: ' },
+      // PR 96 review I3: the hook is machine-wide, so an unknown tool blocks in a seat and passes in the owner's own Codex
+      { name: 'codex: in a seat, a tool the shim does not know blocks', input: { hook_event_name: 'PreToolUse', tool_name: 'cb_unlisted_tool_probe', tool_input: {} }, env: { CB_ROLE: 'builder', CB_AGENT: 'codex' }, want: 'Blocked: ' },
+      { name: 'codex: outside a seat, a tool the shim does not know passes', input: { hook_event_name: 'PreToolUse', tool_name: 'cb_unlisted_tool_probe', tool_input: {} }, want: 'allow' },
       { name: 'codex: malformed input blocks', raw: 'not json', want: 'Blocked: ' },
     ],
   },
@@ -109,7 +111,8 @@ const AGENT_PROBES = {
     cases: [
       { name: 'opencode: ls passes', input: { tool: 'bash', args: { command: 'ls' }, sessionID: 'probe' }, want: 'allow' },
       { name: 'opencode: git reset --hard blocks', input: { tool: 'bash', args: { command: 'git reset --hard' }, sessionID: 'probe' }, want: DANGER },
-      { name: 'opencode: a tool the shim does not know blocks', input: { tool: 'cb_unlisted_tool_probe', args: {}, sessionID: 'probe' }, want: 'Blocked: ' },
+      { name: 'opencode: in a seat, a tool the shim does not know blocks', input: { tool: 'cb_unlisted_tool_probe', args: {}, sessionID: 'probe' }, env: { CB_ROLE: 'builder', CB_AGENT: 'opencode' }, want: 'Blocked: ' },
+      { name: 'opencode: outside a seat, a tool the shim does not know passes', input: { tool: 'cb_unlisted_tool_probe', args: {}, sessionID: 'probe' }, want: 'allow' },
       { name: 'opencode: malformed input blocks', raw: 'not json', want: 'Blocked: ' },
     ],
   },
@@ -118,7 +121,7 @@ const AGENT_PROBES = {
 function agentProbeFailures(agent, how) {
   const spec = AGENT_PROBES[agent];
   return spec.cases.map((c) => {
-    const r = runHook(how, c.raw ?? JSON.stringify(c.input), spec.env, c.name);
+    const r = runHook(how, c.raw ?? JSON.stringify(c.input), { ...spec.env, ...(c.env ?? {}) }, c.name);
     if (r.fail) return r.fail;
     let o = null;
     try { o = JSON.parse(r.text); } catch {}
@@ -265,8 +268,22 @@ export function duplicateJsonKey(text) {
   return null;
 }
 
-// a basic """ string ends at """ with no escaping backslash before it (a\""" is an escaped quote and "": round 2 minor 3)
-const tomlCloses = (s, d) => (d === '"""' ? /(?<!\\)(?:\\\\)*"""/ : /'''/).test(s);
+// One line of TOML, quote-aware (PR 96 review B1): its text up to a # that starts a comment (a # inside any string is
+// text: instructions = '''Use # for headings'''), and the multi-line string (""" or ''') still open at its end, or null.
+// `open` is the string the line starts inside. A basic string's backslash escapes the next character (a\""" is an escaped
+// quote and "": round 2 minor 3). One pass over the line.
+function tomlLine(line, open = null) {
+  let st = open;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (st === null) {
+      if (c === '#') return { text: line.slice(0, i), open: null };
+      if (line.startsWith('"""', i) || line.startsWith("'''", i)) { st = line.slice(i, i + 3); i += 2; } else if (c === '"' || c === "'") st = c;
+    } else if ((st === '"' || st === '"""') && c === '\\') i++;
+    else if (line.startsWith(st, i)) { i += st.length - 1; st = null; }
+  }
+  return { text: line, open: st === '"""' || st === "'''" ? st : null }; // an unclosed one-line string ends with its line
+}
 
 /** What a Codex config.toml says about hooks: `hooks`, its top-level [features] hooks (true, false, or undefined when
  *  unset); `profile`, the profile its top level selects; `profiles`, each profile's [profiles.<name>.features] hooks.
@@ -278,17 +295,17 @@ export function readCodexToml(toml) {
   const inlineHooks = (v) => { const m = /\bhooks\s*=\s*(\w+)/.exec(v); return m ? m[1] === 'true' : undefined; };
   let section = '', inTable = false, open = null;
   for (const raw of toml.split(/\r?\n/)) {
-    if (open) { if (tomlCloses(raw, open)) open = null; continue; } // inside a multi-line string: text, not keys
-    const line = raw.replace(/\s+#.*$|^#.*$/, '').trim();
+    if (open) { open = tomlLine(raw, open).open; continue; } // inside a multi-line string: text, not keys
+    const t = tomlLine(raw);
+    const line = t.text.trim();
     const head = /^\[\[?\s*([^\]]+?)\s*\]\]?$/.exec(line); // [table] or [[array.of.tables]] (PR 77 review M2)
     if (head) { section = head[1].replace(/["'\s]/g, ''); inTable = true; continue; }
     const kv = /^([\w."' -]+?)\s*=\s*(.+)$/.exec(line);
     if (!kv) continue;
     const key = [section, kv[1].replace(/["'\s]/g, '')].filter(Boolean).join('.'), val = kv[2].trim();
-    // a multi-line string that runs on past this line: only a value that starts with one (a triple quote inside a
-    // one-line string of the other kind, msg = "it'''s", opens nothing: PR 77 review M2)
-    const ml = /^("""|''')/.exec(val);
-    if (ml && !tomlCloses(val.slice(3), ml[1])) open = ml[1];
+    // a multi-line string that runs on past this line (a triple quote inside a one-line string of the other kind,
+    // msg = "it'''s", opens nothing: PR 77 review M2)
+    open = t.open;
     let m;
     if (key === 'features.hooks') out.hooks = val === 'true';
     else if (key === 'features') { const h = inlineHooks(val); if (h !== undefined) out.hooks = h; }
@@ -309,24 +326,29 @@ function codexTomlWithHooks(toml) {
   if (r.hooks === true) return { toml };
   if (r.hooks === false) return { problem: 'sets [features] hooks = false: that is a choice made on this machine, so change it to true by hand' };
   const lines = toml.split(/\r?\n/);
-  let section = '', open = null;
+  const eol = toml.includes('\r\n') ? '\r\n' : '\n'; // review M1: a CRLF file stays CRLF
+  let section = '', open = null, dotted = false;
   for (let i = 0; i < lines.length; i++) {
-    if (open) { if (tomlCloses(lines[i], open)) open = null; continue; } // a multi-line string's text is not a table header
-    const line = lines[i].replace(/\s+#.*$|^#.*$/, '').trim();
-    const ml = /=\s*("""|''')(.*)$/.exec(line);
-    if (ml && !tomlCloses(ml[2], ml[1])) { open = ml[1]; continue; }
+    if (open) { open = tomlLine(lines[i], open).open; continue; } // a multi-line string's text is not a table header
+    const t = tomlLine(lines[i]);
+    const line = t.text.trim();
+    open = t.open;
     const head = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
     if (head) {
       section = head[1].replace(/["'\s]/g, '');
       // the [features] table: hooks = true goes on the line after its header
-      if (section === 'features') { lines.splice(i + 1, 0, 'hooks = true'); return { toml: lines.join('\n') }; }
+      if (section === 'features') { lines.splice(i + 1, 0, 'hooks = true'); return { toml: lines.join(eol) }; }
       continue;
     }
     if (!section && /^features\s*=/.test(line)) return { problem: 'has an inline features = { ... } table: add hooks = true to it by hand' };
+    if (!section && /^features\s*\./.test(line)) dotted = true;
   }
+  // B1: never a second [features] table (TOML refuses it, and Codex would not start): a header line this reading did not
+  // find as one means the file reads differently from how it looks, so it is left to the owner
+  if (lines.some((l) => /^\s*\[\s*["']?features["']?\s*\]/.test(l))) return { problem: 'has a [features] table this installer could not place hooks = true in (a multi-line string around it?): add hooks = true under [features] by hand' };
   // dotted top-level keys (features.x = ...) forbid a later [features] table: add one more dotted key at the top
-  if (lines.some((l) => /^\s*features\s*\./.test(l))) return { toml: `features.hooks = true\n${toml}` };
-  return { toml: `${toml}${toml && !toml.endsWith('\n') ? '\n' : ''}${toml ? '\n' : ''}[features]\nhooks = true\n` };
+  if (dotted) return { toml: `features.hooks = true${eol}${toml}` };
+  return { toml: `${toml}${toml && !toml.endsWith('\n') ? eol : ''}${toml ? eol : ''}[features]${eol}hooks = true${eol}` };
 }
 
 const fwd = (p) => p.replace(/\\/g, '/');
@@ -335,9 +357,14 @@ const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const readText = (f) => { try { return readFileSync(f, 'utf8'); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } };
 // write only when the text changes, through a temp file and a rename (a reader never sees half a file)
 function writeIfChanged(file, text, changed) {
-  if (readText(file) === text) return;
+  const before = readText(file);
+  if (before?.includes('\r\n') && !text.includes('\r\n')) text = text.replace(/\n/g, '\r\n'); // review M1: a CRLF file stays CRLF
+  if (before === text) return;
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(`${file}.cb-new`, text);
+  let mode;
+  try { mode = statSync(file).mode & 0o7777; } catch {} // review M2: the rewritten file keeps its mode (a 0600 config stays 0600)
+  writeFileSync(`${file}.cb-new`, text, mode === undefined ? undefined : { mode });
+  if (mode !== undefined) chmodSync(`${file}.cb-new`, mode); // writeFileSync's mode is masked by the umask
   renameSync(`${file}.cb-new`, file);
   changed.push(file);
 }
@@ -514,7 +541,13 @@ if (main) {
   // the wiring is this machine's ~/.claude/settings.json for the default target; for another target only when named
   // --no-wiring: the Claude settings file is not checked (CI, a machine with no ~/.claude); named agents always are
   if (checkOnly && !noWiring && !settingsFile && resolve(target) === resolve(defaultTarget)) settingsFile = join(homedir(), '.claude', 'settings.json');
-  if (bad) {
+  // PR 96 review I1: installing changes every session on this machine, so a board seat (CB_ROLE or CB_AGENT in its env)
+  // may only --check; the fence also blocks an install run that clears those variables
+  const seat = ['CB_ROLE', 'CB_AGENT'].find((k) => String(process.env[k] ?? '').trim());
+  if (!bad && !checkOnly && seat) {
+    console.error(`refused: ${seat} is set, so this is a board seat, and installing the guard is the owner's (it changes every session on this machine). Run it with --check, or install from your own terminal`);
+    process.exitCode = 2;
+  } else if (bad) {
     console.error(usage);
     if (agents.some((a) => !Object.hasOwn(AGENT_SHIMS, a))) console.error(`known agents: ${Object.keys(AGENT_SHIMS).join(', ')}`);
     if (agents.includes('agy') && !seats.length) console.error('agy needs --seat <folder> for each seat folder (its hook lives in <folder>/.agents/hooks.json)');

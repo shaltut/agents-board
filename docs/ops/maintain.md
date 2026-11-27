@@ -208,9 +208,11 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
 - **Codex**: one `PreToolUse` entry in `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`), matcher `.*`, command
   `<absolute node> <guard>/shim-codex.mjs`. Every other entry stays as it was, herdr's `SessionStart` included; an older
   guard entry (one pointing at a checkout) is replaced. `config.toml` gets `hooks = true` under `[features]`. A
-  `hooks = false` there, or an inline `features = { ... }`, is refused: change it by hand. The matcher is a catch-all
-  because Codex 0.160 also has `exec_command`, `unified_exec` and `write_stdin`, which the old named list let through
-  unguarded. shim-codex denies every tool it does not judge, so those are now refused until it learns them.
+  `hooks = false` there, or an inline `features = { ... }`, is refused: change it by hand, as is a file this installer
+  cannot read the same way Codex does (a `[features]` header it could not place the key under). The matcher is a
+  catch-all, so a tool Codex adds later still reaches the shim. Codex 0.160's one shell tool, `exec_command`, arrives as
+  `Bash`; there is no `unified_exec`; `write_stdin` fires no hook at all (#4618), so a seat may not open an interactive
+  session for it to type into (#4626).
 - **agy**: group `cb-guard` in `<seat>/.agents/hooks.json`, matcher `.*`, command `node <guard>/shim-agy.mjs`
   (forward slashes, no quotes: agy runs hooks through `cmd /c` on Windows, so a guard path with a space is refused;
   install it elsewhere with `--target`). Other groups stay. `/.agents/` goes into that repo's `info/exclude` (a worktree's
@@ -219,9 +221,19 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
   `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
   call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
 
-A second run changes nothing. `--check` with `--agents` also checks each wiring and runs the probes through its own
-command (for OpenCode: the plugin is exactly what this checkout writes). Seats never write these files: the fence keeps
-them out.
+**These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
+OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, a tool the shim does not judge (Codex `update_plan`,
+`spawn_agent`, `view_image`, MCP tools; OpenCode `webfetch`, `websearch`, `task`, `todowrite`, `skill`, `lsp`) and a
+question are allowed, and only the base rules apply (dangerous commands), exactly as for Claude. In a board seat every
+tool the shim does not judge is denied.
+
+`--agents` also installs the whole guard folder: Claude's shim and `core.mjs` there are replaced with this checkout's,
+exactly as a plain install does, so every agent on the machine runs the same rules.
+
+A second run changes nothing. A rewritten `config.toml`, `hooks.json` or `info/exclude` keeps its line endings and file
+mode. `--check` with `--agents` also checks each wiring and runs the probes through its own command (for OpenCode: the
+plugin is exactly what this checkout writes). Seats never write these files: the fence keeps them out, and the installer
+itself refuses anything but `--check` when `CB_ROLE` or `CB_AGENT` is set.
 
 ## Usage ledger
 

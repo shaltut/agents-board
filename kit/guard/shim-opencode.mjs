@@ -46,18 +46,23 @@ export function parseOpencodeInput(raw) {
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', args: p.args };
   if (READ_TOOLS.has(name)) return { ok: true, tool: 'read', args: p.args, name };
   if (name === 'question') return { ok: true, tool: 'ask' };
-  return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(p.tool)).slice(0, 80)}: this guard reads bash, powershell, edit, write, patch, apply_patch, multiedit, read, grep, glob, list and question` };
+  return { ok: false, unknown: typeof name === 'string' && name !== '', reason: `unrecognized tool ${String(JSON.stringify(p.tool)).slice(0, 80)}: this guard reads bash, powershell, edit, write, patch, apply_patch, multiedit, read, grep, glob, list and question` };
 }
 
 export function runOpencodeShim(raw, env = process.env) {
   try {
     if (!core) return block(`Blocked: guard failed to load core (${detail(loadErr)})`);
     const p = parseOpencodeInput(raw);
-    if (!p.ok) return block(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
-    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     // CB_AGENT without CB_ROLE blocks (a broken seat launch, #4002); an edit carries its targets for the fence and secret rule
     const agent = String(env.CB_AGENT ?? '').trim() || null;
+    // PR 96 review I3: the plugin is machine-wide, so outside a board seat (neither CB_ROLE nor CB_AGENT) the owner's own
+    // OpenCode keeps its tools (webfetch, task, todowrite, skill, lsp, MCP) and its questions; the base rules (dangerous commands)
+    // still apply to every shell command, exactly as for Claude
+    const seat = !!(role || agent);
+    if (!p.ok) return !seat && p.unknown ? {} : block(`Blocked: ${p.reason}`);
+    if (!seat && p.tool === 'ask') return {};
+    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const paths = p.tool === 'edit' || p.tool === 'read' ? core.editTargets(p.args ?? null) : undefined;
     // a file glob names files too: grep's include and glob's pattern (grep's own pattern is the text searched for)
     const glob = p.tool === 'read' && isObject(p.args) ? (p.name === 'grep' ? p.args.include : p.name === 'glob' ? p.args.pattern : undefined) : undefined;
