@@ -1168,7 +1168,12 @@ function fenceWriteOne(command) {
 // keys the CLIs use and from patch headers (*** Add/Update/Delete File:, *** Move to:) in any string of the input,
 // recursively (Codex sends apply_patch as {command: "<patch>"} or {command: ["apply_patch", "<patch>"]}). [] when none:
 // evaluate then blocks the edit, never allows an edit whose target it cannot see.
-const PATH_KEYS = new Set(['file_path', 'filepath', 'path', 'targetfile', 'absolutepath', 'notebook_path', 'move_path']);
+// #4663 (PR 109 review M2, PR 110 M1): a rename's destination and source too (new_path, new_file_path, old_path,
+// old_file_path: names agy's binary holds): moving the hook settings away is as much a write as writing them
+const PATH_KEYS = new Set(['file_path', 'filepath', 'path', 'targetfile', 'absolutepath', 'notebook_path', 'move_path',
+  'new_path', 'new_file_path', 'old_path', 'old_file_path']);
+/** A key that names a file an edit writes, in any case (agy, a Go binary, decodes keys case-insensitively: PR 110 S1). */
+export const isPathKey = (k) => typeof k === 'string' && PATH_KEYS.has(k.toLowerCase());
 // leading whitespace allowed (review 68-M1): an indented header is still read, never skipped
 const PATCH_FILE = /^[ \t]*\*\*\*[ \t]*(?:Add File|Update File|Delete File|Move to)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
 export function editTargets(input) {
@@ -1192,12 +1197,16 @@ export function editTargets(input) {
 const trimSegments = (p) => p.split(/([\\/]+)/).map((s, i) => (i % 2 || /^\.\.?$/.test(s) ? s : s.replace(/[. ]+$/, '') || s)).join('');
 export function editFence(path) {
   if (typeof path !== 'string' || !path.trim()) return 'the edit names an empty target path';
+  if (path.startsWith(UNEXPANDED)) return `the guard could not expand the Windows short name in ${path.slice(UNEXPANDED.length)} to the file it writes (PR 110 S3): name the file by its long name`;
   for (const p of new Set([path, trimSegments(path), fold(trimSegments(path))])) {
     if (fencePath(` ${p}`)) return FENCE;
     if (secretPath(p)) return SECRET;
   }
   return null;
 }
+// A Windows 8.3 short-name segment (SETTIN~1.JSO, GIT~1) and the mark of a path whose short names could not be expanded
+export const SHORT_SEGMENT = /(^|[\\/])[^\\/]*~\d/;
+const UNEXPANDED = 'unexpanded short name:';
 /** The forms of an edit target a shim passes to evaluate (review 68-I2): as given, resolved against the cwd (folds ./ and
  *  ../ in absolute paths too), and through the real path of its nearest existing folder or itself, so a link is judged at
  *  its target. fs is the shim's { resolve, dirname, basename, join, realpathSync }: core stays import-free. */
@@ -1209,7 +1218,16 @@ export function editPathForms(path, cwd, fs) {
     out.add(abs);
     const rest = [];
     for (let dir = abs, i = 0; i < 64; i++) {
-      try { out.add(fs.join(fs.realpathSync(dir), ...rest)); break; } catch { /* not there yet: one folder up */ }
+      try {
+        out.add(fs.join(fs.realpathSync(dir), ...rest));
+        // #4663: Node's JS realpath keeps a Windows 8.3 short name (.claude\SETTIN~1.JSO); the native one expands it to the
+        // file it writes (settings.json)
+        // PR 110 S3: native failing, a short-name segment (~1) cannot be judged by its long name: a form editFence blocks
+        if (typeof fs.realpathSync.native === 'function') try { out.add(fs.join(fs.realpathSync.native(dir), ...rest)); } catch {
+          if (SHORT_SEGMENT.test(abs)) out.add(UNEXPANDED + abs);
+        }
+        break;
+      } catch { /* not there yet: one folder up */ }
       const up = fs.dirname(dir);
       if (up === dir) break;
       rest.unshift(fs.basename(dir));
