@@ -295,6 +295,22 @@ test('muted logins (Ahmed: shaltut, his own workers): what they open, say or com
   assert.deepEqual((await state(sql)).prs, {});
 });
 
+test("a line by Ahmed's own login (not muted) is marked urgent, so his relay never holds it; anyone else's is not (#3221 review M4)", async () => {
+  const urgentOf = async (who: string) => {
+    const { sql, watch } = await board();
+    const f = fakeGh({ [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [pr(30, { title: 'Rulings' })] : [],
+                       [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', who, 'OWNER')] });
+    await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch, owner: 'Shaltut' });
+    const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github' order by id`;
+    assert.equal(rows.length, 1);
+    assert.doesNotMatch(rows[0].summary, /\u0001/, 'the mark never reaches the text');
+    assert.match(rows[0].summary, new RegExp(`^\\[GitHub · untrusted\\] widgets: 1 update\\n  PR #30 "Rulings" → card #2: 1 comment by ${who}\\n`));
+    return rows[0].u;
+  };
+  assert.equal(await urgentOf('shaltut'), 'true', 'his login, case-blind');
+  assert.equal(await urgentOf('dev1'), null, 'anyone else: a routine notice');
+});
+
 
 test('a card per PR: created once, reused, closed on merge or close with a note saying which', async () => {
   const { sql, watch } = await board();

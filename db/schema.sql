@@ -1647,8 +1647,12 @@ begin
     'agent', ag, -- the session's agent (#4002)
     -- #3221: the relay's held window (cb.relay_hold), its age on the board's clock; null: nothing held. The key's
     -- presence says the board keeps holds: a relay that does not see it delivers everything at once
+    -- from: the cursor to read again from, no further back than 24 h (review M5: as messages; a seat down a day with a
+    -- hold open does not replay older memory changes)
     'hold', case when hf is null then null
-                 else jsonb_build_object('from', hf, 'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
+                 else jsonb_build_object('from', greatest(hf, coalesce((select e.id from cb.events e where e.at <= now() - interval '24 hours'
+                                                                         order by e.at desc limit 1), 0)),
+                                         'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
     'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
@@ -1658,11 +1662,17 @@ begin
     -- raw: Ahmed typing from the dashboard (cb.type_to); the relay hands it over as a plain prompt, no board wrapper
     -- notice (#3221): a routine board message the relay may hold (a digest, a stall or ping nudge); null for every
     -- other message, and for a digest that carries a new P0 or a supervisor problem (data.urgent)
+    -- urgent (#3221): never held: marked so (a part freed off me, GitHub lines by Ahmed's login), or about a P0 card (a
+    -- nudge's card, a job's card in data.task), its priority as it is now
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
                                                               'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true',
                                                               'notice', case when e.data ->> 'urgent' = 'true' then null
                                                                              when e.data ? 'digest' then 'digest'
-                                                                             when e.data ? 'nudge' then 'nudge' end) order by e.id)
+                                                                             when e.data ? 'nudge' then 'nudge' end,
+                                                              'urgent', coalesce(e.data ->> 'urgent' = 'true', false)
+                                                                        or exists (select 1 from cb.tasks t where t.priority = 'P0'
+                                                                                      and t.id = coalesce(e.task_id, case when e.data ->> 'task' ~ '^[0-9]{1,18}$'
+                                                                                                                         then (e.data ->> 'task')::bigint end))) order by e.id)
                             from cb.events e
                            where e.kind = 'message' and e.data ->> 'to' = me and e.id > seen
                              and e.at > now() - interval '24 hours'), '[]'),
@@ -1704,10 +1714,7 @@ begin
                               and ((lower(q.reply_to ->> 'machine') = m and q.reply_to ->> 'pane' = pane)
                                    or (coalesce(q.reply_to ->> 'pane', '') = '' and q.asked_by = me))), '[]'),
     'events', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'task_id', e.task_id, 'kind', e.kind, 'summary', e.summary,
-                                                            'actor', e.actor, 'title', t.title, 'status', t.status,
-                                                            -- #3221: what the relay needs to hold an edit or not: a P0
-                                                            -- card, or a card handed to me or taken off me, goes at once
-                                                            'priority', t.priority, 'assignee_changed', e.data ? 'assignee') order by e.id)
+                                                            'actor', e.actor, 'title', t.title, 'status', t.status) order by e.id)
                           from cb.events e join cb.tasks t on t.id = e.task_id
                          where me is not null and e.id > after_event and e.actor <> me
                            and e.kind in ('task_created', 'moved', 'updated', 'done', 'note')
@@ -4191,8 +4198,9 @@ begin
       continue when moved = 0;
       delete from cb.stage_nudges d where d.task_id = r.id;
       insert into cb.events (actor, project, task_id, kind, summary, data)
+      -- urgent (#3221 review M2): a card taken off a seat is never held by its relay; nudge stays (no card activity)
       values ('board', r.project, r.id, 'message', format('#%s went back to the queue: %s', r.id, why),
-              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true));
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'urgent', true));
       n := n + 2;
     elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
@@ -4241,7 +4249,7 @@ begin
               jsonb_build_object('stall', true, 'repo', r.repo));
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message', format('#%s part %s went back to the queue: %s', r.id, r.repo, why),
-              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo));
+              jsonb_build_object('to', r.assignee, 'nudge', true, 'stall', true, 'repo', r.repo, 'urgent', true));  -- as above (M2)
       n := n + 2;
     elsif r.status = 'in_progress' and mins >= 30 and (r.nudged_at is null or r.nudged_at <= r.quiet_since + case when mins >= 24 * 60 then grace else interval '0' end) then
       insert into cb.events (actor, project, task_id, kind, summary, data)
@@ -4312,9 +4320,11 @@ begin
                 count(*) filter (where t.stage = 'merge'), count(*) filter (where t.stage = 'qa'))
     into head from cb.tasks t where t.project = p and t.status not in ('done', 'cancelled');
   with items(grp, p0, id, line) as (
-    -- 1: a P0 card created since the last digest, named so the "at once" digest says what it is about
+    -- 1: a P0 card created since the last digest, or raised to P0 since (#3221 review), named so the "at once" digest
+    -- says what it is about
     select 1, true, t.id, format('#%s is P0: "%s": cb show %s', t.id, left(t.title, 80), t.id)
-      from cb.tasks t where t.project = p and t.priority = 'P0' and t.created_at > since and t.status not in ('done', 'cancelled')
+      from cb.tasks t where t.project = p and t.priority = 'P0' and t.status not in ('done', 'cancelled')
+       and (t.created_at > since or exists (select 1 from cb.events e where e.task_id = t.id and e.at > since and e.data -> 'fields' ? 'priority'))
     union all
     -- 2: freed since the last digest
     select 2, t.priority = 'P0', t.id, format('#%s freed from %s (%s): cb session %s', t.id, m[1], m[2], m[1])
@@ -4481,7 +4491,10 @@ begin
      where s.project = r.slug and cb._role(s.actor) = 'lead' and s.last_seen > now() - interval '1 day';
     continue when leads is null;
     select (st.value ->> 'at')::timestamptz, st.value ->> 'hash' into last_at, last_hash from cb.settings st where st.key = 'digest:' || r.slug;
-    newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0' and t.created_at > last_at);
+    -- a card raised to P0 since counts as new too (#3221 review), as cb.digest's first group names it
+    newp0 := last_at is not null and exists (select 1 from cb.tasks t where t.project = r.slug and t.priority = 'P0'
+                                               and (t.created_at > last_at or exists (select 1 from cb.events e where e.task_id = t.id and e.at > last_at
+                                                                                         and e.data -> 'fields' ? 'priority')));
     continue when last_at is not null and last_at > now() - interval '15 minutes' and not newp0;
     lines := cb.digest(r.slug, coalesce(last_at, now() - interval '15 minutes'));
     -- #3221: a digest with a new P0 or a session the supervisor could not keep up is never held by the lead's relay
@@ -5663,13 +5676,22 @@ end $$;
 -- A repo other than main is named after the recipe: "job #N test (dashboard) at ..." (#3703).
 -- untrusted: the summary is the job's output (code from any origin branch), marked like GitHub lines; the head is not.
 -- Best effort: an unknown requester (session gone, no events) must not stop the job from ending.
+-- data.task (#3221 review M3): the job's card, so the relay never holds a P0 card's result (data, not task_id: a job
+-- result is no activity on the card for the stall and ping clocks).
 create function cb._job_tell(j cb.jobs, untrusted boolean default false) returns void language plpgsql as $$
+declare new_id bigint;
 begin
-  perform cb.tell(j.requester,
+  new_id := cb.tell(j.requester,
     format('job #%s %s%s at %s: %s%s. %s%s', j.id, j.recipe, case when j.repo <> 'main' then format(' (%s)', j.repo) else '' end, left(j.sha, 7), j.state,
            case when j.exit_code is not null then format(' (exit %s)', j.exit_code) else '' end,
            case when untrusted and coalesce(j.summary, '') <> '' then '[job output · untrusted] ' else '' end, coalesce(j.summary, ''))
     || case when j.started_at is not null then E'\nLog: cb job log ' || j.id else '' end, 'runner');
+  begin  -- its own block: a failure here must not take the result back
+    if j.task_id is not null then
+      update cb.events e set data = e.data || jsonb_build_object('task', j.task_id) where e.id = new_id;
+    end if;
+  exception when others then null;
+  end;
 exception when others then null;
 end $$;
 

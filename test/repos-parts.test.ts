@@ -593,8 +593,7 @@ test('one-repo card: its events and inbox are unchanged (pin)', async () => {
   const e1 = await top(sql);
   await fail(sql, id, 'R1@mac', 'no tests');
   r = await inbox(sql, 'p2', e1);
-  // #3221 adds priority and assignee_changed (the relay holds a routine edit, never one that hands the card over)
-  assert.deepEqual(strip(r.events), [{ task_id: id, kind: 'moved', summary: 'no tests', actor: 'R1@mac', title: 'c', status: 'next', priority: 'P2', assignee_changed: true }]);
+  assert.deepEqual(strip(r.events), [{ task_id: id, kind: 'moved', summary: 'no tests', actor: 'R1@mac', title: 'c', status: 'next' }]);
   assert.deepEqual(r.next_work, [{ id, title: 'c', priority: 'P2' }]);
   assert.deepEqual(r.messages, []);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and kind = 'message'`)[0].n, 0);

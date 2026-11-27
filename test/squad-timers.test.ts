@@ -41,6 +41,8 @@ test('a quiet card is nudged at 30 minutes and freed at 90 if nobody answers', a
   assert.deepEqual({ ...t }, { status: 'next', assignee: null, stage: 'build' });
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = 1 and summary like 'freed from B1@mac: %'`)[0].n, 1);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = 1 and kind = 'message' and summary like '#1 went back to the queue: %' and data ->> 'to' = 'B1@mac'`)[0].n, 1);
+  // #3221 review M2: taken off its holder, so its relay never holds it (urgent); still a nudge, so no card activity
+  assert.equal((await sql`select count(*)::int n from cb.events where summary like '#1 went back to the queue: %' and data ->> 'urgent' = 'true' and data ? 'nudge'`)[0].n, 1);
   assert.equal((await sql`select count(*)::int n from cb.stage_nudges`)[0].n, 0);
 });
 
@@ -194,10 +196,18 @@ test('digests go every 15 minutes, at once on a P0, and never empty', async () =
   assert.equal(m[0].to_, 'orch@pc');
   assert.match(m[0].summary, /^Digest for demo:\nStages: design 2/);
   assert.equal(await due(), 0, 'again at once: nothing');
+  const [{ id: later }] = await sql`select cb.task_add(project => 'demo', title => 'turns hot', actor => 'github') as id`; // made before the next digest
   await sql`select cb.task_add(project => 'demo', title => 'on fire', priority => 'P0', actor => 'github')`;
   assert.equal(await due(), 1, 'a new P0 goes out at once');
   // #3221: the lead's relay may hold a routine digest up to 10 minutes; one with a new P0 is marked urgent, never held
   assert.deepEqual((await sql`select data ->> 'urgent' as u from cb.events where data ? 'digest' order by id`).map((r: any) => r.u), [null, 'true']);
+  // #3221 review: a card made before the last digest and raised to P0 since is a new P0 too: at once, named, urgent
+  assert.equal(await due(), 0, 'nothing new: nothing at once');
+  await sql`select cb.task_update(${String(later)}, ${sql.json({ priority: 'P0' })}, 'orch@pc')`;
+  assert.equal(await due(), 1, 'raised to P0: at once');
+  const raised = (await sent()).at(-1)!;
+  assert.match(raised.summary, new RegExp(`^#${later} is P0: "turns hot": cb show ${later}$`, 'm'));
+  assert.equal((await sql`select data ->> 'urgent' as u from cb.events where data ? 'digest' order by id desc limit 1`)[0].u, 'true');
   // quiet: clear every reason to speak, age the last digest 16 minutes
   await sql`update cb.tasks set status = 'cancelled'`;
   await sql`delete from cb.sessions where actor in ('W9@mac', 'B2@mac')`;
