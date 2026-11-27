@@ -123,16 +123,17 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
       return r ? { kind: 'rate_limit', raw: r[0].trim() } : null;
     },
 
-    // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open), so it names
-    // exactly the tools the shim judges (HANDLED_TOOLS; PowerShell only on Windows, where a shell tool may carry that name).
+    // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open). #4609: a
+    // catch-all, so a tool Codex adds later still reaches the shim. In a board seat the shim denies every tool it does not
+    // judge (HANDLED_TOOLS); outside one the hook is machine-wide, so Codex gets exactly what Claude gets there: those tools
+    // pass and shell commands get the dangerous-command rules only (PR 96 review I3, r2 ruling). Codex 0.160's exec_command arrives as Bash, and write_stdin fires no hook (#4618, #4626).
+    // node kit/guard/install.mjs --agents codex writes this entry, pointing at the installed shim (AGENT_MATCHERS there).
     guardInstallSpec(boardDir) {
-      const re = (names: string[]) => `^(${names.join('|')})$`;
-      const base = HANDLED_TOOLS.filter((t: string) => t !== 'PowerShell');
       return {
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
-        matchers: { win32: re([...HANDLED_TOOLS]), darwin: re(base), linux: re(base) },
-        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
+        matchers: { win32: '.*', darwin: '.*', linux: '.*' },
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); the installer sets [features] hooks = true in config.toml. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
       };
     },
 

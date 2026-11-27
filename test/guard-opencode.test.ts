@@ -60,14 +60,29 @@ test('malformed input fails closed', () => {
   }
 });
 
-test('unknown tools, including web fetch, subagents and MCP names, are blocked', () => {
+test('in a seat, unknown tools, including web fetch, subagents and MCP names, are blocked', () => {
   for (const tool of ['webfetch', 'task', 'server_tool', '']) {
-    const r = run(JSON.stringify({ tool, args: { command: 'ls' } }));
+    const r = run(JSON.stringify({ tool, args: { command: 'ls' } }), { CB_ROLE: 'builder' });
     assert.equal(r.out.decision, 'block', tool);
     assert.match(r.out.reason!, /unrecognized tool/, tool);
   }
   assert.equal(run(JSON.stringify({ args: { command: 'ls' } })).out.decision, 'block');
   assert.equal(run(JSON.stringify({ tool: 7, args: {} })).out.decision, 'block');
+});
+
+// PR 96 review r2 ruling on I3: outside a seat OpenCode gets exactly what Claude gets there: its other tools pass,
+// shell commands get the dangerous-command rules only, and a question follows CB_ALLOW_ASK as AskUserQuestion does
+test('outside a seat (the plugin is machine-wide) the owner\'s own OpenCode gets what Claude gets there (PR 96 review I3, r2 ruling)', () => {
+  assert.equal(run(JSON.stringify({ tool: 'question', args: {} })).out.decision, 'block', 'a question without CB_ALLOW_ASK, as for Claude');
+  assert.equal(run(JSON.stringify({ tool: 'question', args: {} }), { CB_ALLOW_ASK: '1' }).raw, '{}');
+  for (const tool of ['webfetch', 'websearch', 'task', 'todowrite', 'skill', 'lsp', 'server_tool']) {
+    assert.equal(run(JSON.stringify({ tool, args: {} })).raw, '{}', tool);
+    assert.equal(run(JSON.stringify({ tool, args: {} }), { CB_AGENT: 'opencode' }).out.decision, 'block', `${tool} in a seat launched without a role`);
+  }
+  assert.equal(run(JSON.stringify({ tool: 'bash', args: { command: 'git reset --hard' } })).out.decision, 'block');
+  for (const input of [JSON.stringify({ tool: '', args: {} }), JSON.stringify({ args: {} }), JSON.stringify({ tool: 7, args: {} }), '{"tool":"bash","args":{}}']) {
+    assert.equal(run(input).out.decision, 'block', input);
+  }
 });
 
 test('unknown CB_ROLE fails closed', () => {
