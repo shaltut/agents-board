@@ -47,8 +47,9 @@ export function squadFile({ machine, repo, board, herdr = null, workspace, model
 }
 
 // The repo-locating variables an operator's terminal may export: they would point git at another repo, so a check would
-// answer for it and an init, config or commit would write into it (#4683). Every git call here runs without them.
-const GIT_REPO_VARS = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)$/i;
+// answer for it and an init, config or commit would write into it (#4683). GIT_CONFIG is git config's default --file, so
+// the scratch identity would land in that file instead (#4694). Every git call here runs without them.
+const GIT_REPO_VARS = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM|CONFIG)$/i;
 const cleanGitEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !GIT_REPO_VARS.test(k)));
 
 function git(dir, args, bin = 'git', env = process.env) {
