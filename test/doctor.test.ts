@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildManifest, readManifest, compareManifest, headSha, FORMAT } from '../cli/release.ts';
+import { buildManifest, codeSha, readManifest, compareManifest, headSha, FORMAT } from '../cli/release.ts';
 import { doctor } from '../cli/doctor.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-doctor-${process.pid}-`));
@@ -142,6 +142,42 @@ test('cb doctor: no manifest, a stale guard and a missing hook each fail it, wor
   // release.json in the checkout is the default manifest
   writeFileSync(join(root, 'release.json'), readFileSync(manifestOf(root, 'd')));
   assert.match(doctor({ root, manifest: null, guardTarget: guard, settingsFile: null }).lines[0]!, /^files: all 5 match release ddddddd$/);
+});
+
+test('cb doctor on a git checkout with no release.json compares with git: clean passes; an uncommitted or untracked release file fails it', () => {
+  const root = checkout();
+  git(root, 'init', '-q');
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'one');
+  const head = git(root, 'rev-parse', 'HEAD');
+  const guard = guardOf(root);
+  const run = () => doctor({ root, manifest: null, guardTarget: guard, settingsFile: null });
+  const ok = run();
+  assert.equal(ok.ok, true, ok.lines.join('\n'));
+  assert.equal(ok.lines[0], `files: a git checkout at ${head.slice(0, 7)}, all 5 release files committed`);
+  assert.equal(ok.json.release, head);
+  assert.equal(ok.lines.at(-1), 'doctor: this machine matches the release');
+
+  put(root, 'cli/scratch.ts', 'untracked\n'); // on disk, not in git: a stray file cb would load
+  const extra = run();
+  assert.equal(extra.ok, false);
+  assert.match(extra.lines[0]!, /^files: 1 differ from release [0-9a-f]{7} \(of 5; 1 extra\)/);
+  assert.ok(extra.lines.includes('  extra: cli/scratch.ts'));
+  unlinkSync(join(root, 'cli/scratch.ts'));
+
+  put(root, 'cli/cb.ts', 'console.log(2)\n'); // a release file changed by hand
+  const changed = run();
+  assert.equal(changed.ok, false);
+  assert.match(changed.lines[0]!, new RegExp(`^files: a git checkout at ${head.slice(0, 7)}: uncommitted changes in the release files[\\s\\S]*cli/cb\\.ts`));
+  assert.equal(changed.json.problems, 1);
+
+  // the commit a relay reports as its code (#4352): a checkout's HEAD, an installed version's folder name, else none
+  assert.equal(codeSha(root), head);
+  const v = join(dir(), 'versions', 'c'.repeat(40));
+  mkdirSync(v, { recursive: true });
+  assert.equal(codeSha(v), 'c'.repeat(40));
+  assert.equal(codeSha(dir()), null);
+  assert.equal(codeSha(join(tmp, 'nowhere')), null);
 });
 
 test('cb doctor runs with the board unreachable and in a bound pane: it never connects', () => {

@@ -10,17 +10,29 @@ export type Project = { base: string; repos: Record<string, Repo> };
 export type RunnerConfig = { name?: string; slots: number; dbLanes: number; laneEnv: string[]; log: { host: string; port: number; peers: string[] }; passEnv: string[]; projects: Record<string, Project> };
 
 const NAME = /^[a-z][a-z0-9-]*$/;
-const SLOT = /\{([^{}]*)\}/g;
+// {name} is a parameter placeholder; {{ and }} are literal braces (#3773).
+const TOKEN = /\{\{|\}\}|\{([^{}]*)\}|([{}])/g;
+const BRACE_HINT = 'write {{ and }} for literal braces';
 const VALUE = /^[A-Za-z0-9@._/-]{1,200}$/;
 const MAX_VALUES = 20;
 const LANE = '{lane}'; // a DB recipe's env names its lane: two DB jobs at once each get their own test stack and ports
 const BASE_ENV = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'NUMBER_OF_PROCESSORS', 'VOLTA_HOME'];
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const slotsOf = (s: string) => [...s.matchAll(SLOT)].map((m) => m[1]!);
+const slotsOf = (s: string) => [...s.matchAll(TOKEN)].flatMap((m) => (m[1] === undefined ? [] : [m[1]]));
+const fill = (s: string, value: (n: string) => string) =>
+  s.replace(TOKEN, (m, n?: string, stray?: string) => (stray !== undefined ? stray : n === undefined ? m[0]! : value(n)));
 
 function fail(path: string, why: string): never {
   throw new Error(`${path}: ${why}`);
+}
+function parseSlots(s: string, path: string): string[] {
+  const out: string[] = [];
+  for (const m of s.matchAll(TOKEN)) {
+    if (m[2] !== undefined) fail(path, `unmatched "${m[2]}" in "${s}" (${BRACE_HINT})`);
+    if (m[1] !== undefined) out.push(m[1]);
+  }
+  return out;
 }
 // a misspelled key (`finaly`, `dbb`) would silently change what runs: refuse it
 function only(o: Record<string, unknown>, path: string, allowed: string[]) {
@@ -47,9 +59,9 @@ function argvList(v: unknown, path: string, params: Record<string, Param>, requi
     const p = `${path}[${i}]`;
     if (!Array.isArray(argv) || !argv.length || argv.some((x) => typeof x !== 'string' || !x)) fail(p, 'must be a non-empty list of strings');
     for (const el of argv as string[]) {
-      const names = slotsOf(el);
+      const names = parseSlots(el, p);
       if (names.length > 1) fail(p, `"${el}" holds more than one slot`);
-      for (const n of names) if (!Object.hasOwn(params, n)) fail(p, `unknown parameter {${n}}`);
+      for (const n of names) if (!Object.hasOwn(params, n)) fail(p, `unknown parameter {${n}} (${BRACE_HINT})`);
     }
     return argv as string[];
   });
@@ -76,8 +88,8 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string
     params[n] = { pattern, min, max, paths: typeof pr.paths === 'boolean' ? pr.paths : n === 'files' };
   }
   const cwd = raw.cwd === undefined ? '.' : str(raw.cwd, `${path}.cwd`);
-  for (const n of slotsOf(cwd)) {
-    if (!Object.hasOwn(params, n)) fail(`${path}.cwd`, `unknown parameter {${n}}`);
+  for (const n of parseSlots(cwd, `${path}.cwd`)) {
+    if (!Object.hasOwn(params, n)) fail(`${path}.cwd`, `unknown parameter {${n}} (${BRACE_HINT})`);
     if (params[n]!.max !== 1) fail(`${path}.cwd`, `{${n}} is a list parameter; cwd may use only max 1`);
     if (params[n]!.min < 1) fail(`${path}.cwd`, `{${n}} may be left out; cwd may use only min 1`);
   }
@@ -216,7 +228,7 @@ export function checkParams(recipe: Recipe, params: Record<string, string[]>): s
 // parameter it needs is missing (checkParams names that).
 function cwdRel(recipe: Recipe, params: Record<string, string[]>): string | null {
   let missing = false;
-  const rel = recipe.cwd.replace(SLOT, (_, n: string) => {
+  const rel = fill(recipe.cwd, (n) => {
     const v = Object.hasOwn(params, n) ? params[n]![0] : undefined;
     if (typeof v !== 'string' || !VALUE.test(v)) { missing = true; return ''; } // unchecked rows: checkParams names it (review M3)
     return v;
@@ -260,13 +272,13 @@ export function recipeFolder(recipe: Recipe, params: Record<string, string[]>): 
 export function expand(argv: string[], params: Record<string, string[]>): string[] {
   return argv.flatMap((el) => {
     const name = slotsOf(el)[0];
-    if (name === undefined) return [el];
-    return (Object.hasOwn(params, name) ? params[name]! : []).map((v) => el.replace(`{${name}}`, () => v));
+    if (name === undefined) return [fill(el, () => '')];
+    return (Object.hasOwn(params, name) ? params[name]! : []).map((v) => fill(el, (n) => (n === name ? v : `{${n}}`)));
   });
 }
 
 export function jobCwd(slotDir: string, recipe: Recipe, params: Record<string, string[]>): string {
-  const cwd = recipe.cwd.replace(SLOT, (_, n: string) => {
+  const cwd = fill(recipe.cwd, (n) => {
     const v = (Object.hasOwn(params, n) ? params[n]![0] : undefined);
     if (v === undefined) throw new Error(`cwd needs parameter ${n}`);
     return v;

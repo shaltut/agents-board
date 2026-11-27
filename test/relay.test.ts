@@ -959,6 +959,11 @@ test('external seat relay starts without CLAUDE_CODE_MESSAGING_SOCKET in its own
     await until(() => inbox.got.length > 0, 5000);
     assert.equal(inbox.got.length, 1);
     assert.match(inbox.got[0].message.content, /Q1.*Ship now/s);
+    // #4352: the relay notes the commit its code is (this checkout's HEAD) on the seat's row, for Today
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const code = async () => (await sql`select code_sha from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.code_sha;
+    for (const t = Date.now(); (await code()) !== head && Date.now() - t < 5000;) await wait(100);
+    assert.equal(await code(), head);
   } finally {
     await inbox.close();
     await stopSeat(pane, relay);

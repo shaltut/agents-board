@@ -125,7 +125,7 @@ function AddWatch({ others, busy, onAdd }: {
           ))}
         </fieldset>
       )}
-      <p className="text-[13px] text-muted-foreground">A watch starts now: older pull requests are not brought in. Adding a repo that is already watched moves its cards to this project and changes only what you fill in.</p>
+      <p className="text-[13px] text-muted-foreground">A watch starts now: older pull requests are not brought in. Adding a repo that is already watched changes only what you fill in: its next pull requests come to this project, and the cards it already made stay where they are.</p>
     </div>
   )
 }
