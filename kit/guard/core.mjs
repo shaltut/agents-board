@@ -650,8 +650,9 @@ const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
 // or another agent's config folder: a .codex or .opencode folder, ~/.gemini, ~/.config/opencode
 const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex\.*|codex~\d|\.opencode\.*|openco~\d)(?:[\\/]|$)/i;
 const IS_HOME_AGENT_DIR = new RegExp(HOME + String.raw`(?:\.gemini\.*|gemini~\d|\.config\.*[\\/]+opencode\.*)(?:[\\/]|$)`, 'i');
+// #4590: the cd's redirects go first (cd ~/.claude 2>/dev/null still enters the fence)
 const fenceDir = (seg) => {
-  const arg = seg.replace(CD, '').trim().replace(/^["']|["']$/g, '');
+  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim().replace(/^["']|["']$/g, '');
   return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
 };
 const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
@@ -732,7 +733,12 @@ function fenceWrite(command) {
   if (!fencePath(text)) return null;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
-    if (CD.test(seg)) { inFence = fenceDir(seg); continue; }
+    // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
+    if (CD.test(seg)) {
+      if (redirects(seg, false)) return FENCE;
+      inFence = fenceDir(seg);
+      continue;
+    }
     const names = fencePath(seg);
     if (!names && !inFence) continue;
     if (redirects(seg, inFence && !names)) return FENCE;

@@ -227,6 +227,11 @@ const fenceWrites = [
   'git -C "/Users/my name/.claude" checkout -- settings.json', 'git --work-tree ~/.claude --git-dir /tmp/g checkout -- settings.json',
   'git commit .claude/settings.json -m x', 'git diff --output=~/.claude/settings.json', 'echo x > C://Users/me/.claude/settings.json',
   'rm -rf C://Users/me/.claude-board', 'echo x > ~/.claude/./settings.json', 'cp x ~/.claude/a/../settings.json',
+  // #4590: a cd segment's own redirect is a write (the shell opens it before cd runs), and a redirect after a cd's
+  // target does not hide that the cd enters the fence
+  'cd /tmp > ~/.claude/settings.json', 'cd /tmp >> ~/.claude/settings.local.json', 'cd>~/.claude/settings.json',
+  'pushd /tmp > ~/.claude-board/runner.json', String.raw`Set-Location /tmp > $HOME\.claude\settings.json`,
+  'cd ~/.claude 2>/dev/null && echo x > settings.json', 'cd ~/.claude >/dev/null; cp evil.json settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -246,6 +251,9 @@ const fenceReads = [
   // #4002 review of PR 68 (68-I1): read-only git naming a fence path (blocked before)
   'git diff .claude/settings.json', 'git log -p -- .claude/settings.json', 'git -C ~/.claude status', 'git --no-pager show HEAD:.claude/settings.json',
   'curl -s https://h.example/.claude/settings.json -o /tmp/s.json',
+  // #4590: a cd's redirect to the null device or an ordinary file, and a quiet cd into the fence that only reads
+  'cd /tmp 2>/dev/null', 'cd /tmp > /dev/null', 'cd /tmp > out.txt', 'cd ~/.claude 2>/dev/null && cat settings.json',
+  'cd ~/.claude && cat settings.json',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
