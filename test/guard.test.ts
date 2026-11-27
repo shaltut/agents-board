@@ -350,6 +350,10 @@ const secretReads = [
   // also hid it from the cheap name test), or splits the reader; CRLF and PowerShell's ` too
   'cat \\\n .env', 'cat .e\\\nnv', 'cp \\\n deploy/.env /tmp/x', 'ca\\\nt .env', 'cat \\\r\n .env', 'cat ~/.ss\\\nh/id_ed25519',
   'Get-Content `\n .env', 'grep TOKEN \\\n  apps/api/.env',
+  // PR 83 review I1, here too: the raw lines are judged as well as the joined text (a PowerShell path's trailing \, a
+  // bash comment's trailing \)
+  'Get-ChildItem C:\\work\\\ncat .env', 'echo a\\\ncat .env', 'ls # x\\\ncat .env',
+  'Set-Location C:\\tmp\\\nGet-Content .env', 'Get-ChildItem C:\\work\\\r\ncat .env',
 ];
 const secretUses = [
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
