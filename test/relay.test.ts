@@ -1205,6 +1205,13 @@ test('a new agent session mid-hold gets the held notices once it binds under the
     assert.ok(await until(() => /dropped 1 held notices: the new session bound under another name/.test(fs.readFileSync(f.log, 'utf8')), 5000), 'the drop is logged');
     assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #6/, 'by count only');
     assert.ok(!text(boxC).includes('job #6'), 'not pushed to another name');
+    // round 3 R1: the agent dies mid-hold and no new one comes: the relay leaves with its copy, logging how many, never what
+    await sql`select cb.tell('R1@test', 'job #7 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.ok(!text(boxC).includes('job #7'), 'held');
+    await boxC.close();
+    assert.ok(await until(() => /leaving: dropped 1 held notices from this relay's copy/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'leaving logs the count');
+    assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #7/, 'by count only');
   } finally {
     await Promise.all([boxA.close(), boxB.close(), boxC.close()]);
     await stopSeat(pane, relay);

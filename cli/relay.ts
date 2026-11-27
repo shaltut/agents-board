@@ -447,6 +447,12 @@ const version = () => CODE.map((f) => { try { return statSync(f).mtimeMs; } catc
 const born = version().join();
 
 const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK, ''); } catch {} };
+// #3221 round 3 R1: the held copy lives only in this relay; a relay that exits drops it (the board keeps what it still
+// returns to the same name, project and session). The log says how many, never what.
+const logCopyDropped = () => {
+  const n = [heldFor, orphan].reduce((k, c) => k + (c ? c.messages.length + c.broadcasts.length + c.memory.length : 0), 0);
+  if (n) log(`leaving: dropped ${n} held notices from this relay's copy`);
+};
 
 /** The agent is gone: clear what it handed over, free the seat, and hand it to a new agent in the same pane if one
  *  wrote its endpoint meanwhile (its hook's relay child may have left on this relay's lock).
@@ -454,6 +460,7 @@ const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK,
  *  and served by that relay, so its endpoint and the lock stay; this relay only closes its own bridge. */
 async function leave(seatTaken = false) {
   log(seatTaken ? 'seat lock taken by another relay; exiting' : 'agent gone; exiting');
+  logCopyDropped();
   try {
     if (seatTaken) { await unbridge(); return; }
     if (claude && lastSocket) clearClaudeEndpoint(M, PANE, lastSocket);
@@ -482,6 +489,7 @@ setInterval(async () => {
     const v = version();
     if (v.join() !== born && Date.now() - Math.max(...v) > 3000) {
       log('relay code changed; restarting');
+      logCopyDropped();
       release(); leaving = true;
       unbridge().finally(() => { relaunch(); process.exit(0); });
       return;
