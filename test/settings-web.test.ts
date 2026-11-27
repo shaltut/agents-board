@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstUnknown, askFirstValue, handEdited, seedChanges,
   CLAUDE_MODELS, OWNER_ONLY_MESSAGE, ROLES, ROLE_TEXT_CAP, RX, STALE_PREFIX, agentLabel, checkSquad, diffSquads, historyLines,
   modelLabel, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
   type Seat, type Squad, type SquadPage,
@@ -31,15 +32,60 @@ const squad = (): Squad => ({
 });
 
 test('rpc() adds no actor to the settings reads: each takes none in db/schema.sql (Postgres would find no function)', () => {
-  for (const fn of ['squad_page', 'squad_options', 'role_text_page', 'github_watches']) {
+  for (const fn of ['squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page']) {
     const m = schema.match(new RegExp(`create function cb\\.${fn}\\(([^)]*)\\)`));
     assert.ok(m, `cb.${fn} is in the schema`);
     assert.ok(!/\bactor\b/.test(m![1]!), `cb.${fn} takes no actor`);
     assert.ok(NO_ACTOR.has(fn), `${fn} is in NO_ACTOR`);
   }
-  for (const fn of ['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute', 'project_pipeline', 'task_ping_bulk']) {
+  for (const fn of ['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute', 'project_pipeline', 'task_ping_bulk', 'project_role_set', 'role_text_import']) {
     assert.ok(!NO_ACTOR.has(fn), `${fn} takes an actor`);
   }
+});
+
+// #4525: the project's addition and who its seats ask first, as the page checks them before cb.project_role_set does
+test('the project addition counts what project_role_set stores, against its 1000 cap; empty removes it', () => {
+  assert.equal(ADDITION_CAP, 1000);
+  assert.match(schema, /if length\(ad\) > 1000 then/, 'the server cap is 1000');
+  assert.deepEqual(additionState('  \n', 'old'), { count: 0, over: false, changed: true, canSave: true });
+  assert.equal(additionState('x'.repeat(1000), '').canSave, true);
+  assert.deepEqual(additionState('x'.repeat(1001), ''), { count: 1001, over: true, changed: true, canSave: false });
+  assert.equal(additionState(' same \n', 'same').canSave, false);
+});
+
+test('who stuck seats ask first: the lead, Ahmed, or a session name the server takes; shown in plain words', () => {
+  assert.ok(schema.includes(`who !~ '^[A-Za-z0-9@._-]{1,64}$'`), 'the server pattern is the page one');
+  assert.equal(SESSION_NAME.source, '^[A-Za-z0-9@._-]{1,64}$');
+  assert.deepEqual(askFirstOf('lead'), { kind: 'lead', name: '' });
+  assert.deepEqual(askFirstOf('KB1@pc'), { kind: 'session', name: 'KB1@pc' });
+  assert.equal(askFirstValue({ kind: 'session', name: ' KB1@pc ' }), 'KB1@pc');
+  assert.equal(askFirstValue({ kind: 'ahmed', name: 'x' }), 'ahmed');
+  assert.equal(askFirstOk({ kind: 'session', name: 'KB1@pc' }), true);
+  for (const bad of ['', 'two words', 'x'.repeat(65), 'Lead']) assert.equal(askFirstOk({ kind: 'session', name: bad }), false, bad);
+  assert.deepEqual(['lead', 'ahmed', 'KB1@pc'].map(askFirstLabel), ['the lead', 'Ahmed', 'KB1@pc']);
+  // review M2: a name the project has not seen lately is warned about on the page, not refused
+  assert.equal(askFirstUnknown({ kind: 'session', name: 'ghost@pc' }, ['KB1@pc']), true);
+  assert.equal(askFirstUnknown({ kind: 'session', name: ' kb1@PC ' }, ['KB1@pc']), false);
+  assert.equal(askFirstUnknown({ kind: 'lead', name: '' }, []), false);
+  assert.equal(askFirstUnknown({ kind: 'session', name: 'two words' }, []), false, 'a bad name gets the refusal line, not this one');
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'settings', 'ProjectRoleText.tsx'), 'utf8'), /askFirstUnknown\(who, data\.sessions\) && \(/);
+});
+
+test('Load the new texts lists the roles whose saved text differs from the release, shared rules first, in role order', () => {
+  const roles = [{ role: '_common', body: 'a' }, { role: 'lead', body: 'b' }, { role: 'builder', body: 'c' }, { role: 'qa', body: 'd' }]
+    .map((r) => ({ ...r, updated_at: '', updated_by: null }))
+  assert.deepEqual(seedChanges({ qa: 'D', builder: 'c', lead: 'B', _common: 'A', reviewer: 'new' }, roles), ['_common', 'lead', 'reviewer', 'qa']);
+  assert.deepEqual(seedChanges({ _common: 'a', lead: 'b' }, roles), []);
+  // review M1: "changed on this page since" is the server's edited flag (a hand edit after the last load), not updated_by
+  const flagged = roles.map((r) => ({ ...r, updated_by: 'ahmed', edited: r.role === 'lead' }))
+  assert.deepEqual(handEdited(['_common', 'lead', 'qa'], flagged), ['lead'])
+  assert.deepEqual(handEdited(['_common', 'lead'], roles), [], 'seeded rows carry no flag')
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleTexts.tsx'), 'utf8'), /const edited = handEdited\(changes, roles\)/);
+  const page = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleTexts.tsx'), 'utf8');
+  assert.match(page, /rpc<\{ changed: string\[\] \}>\('role_text_import', \{ texts: seeds\.data \}\)/, 'one call: every text or none');
+  assert.match(page, /get<Record<string, string>>\('\/api\/role-text-seeds'\)/);
+  const settings = readFileSync(join(root, 'web', 'src', 'views', 'Settings.tsx'), 'utf8');
+  assert.match(settings, /<ProjectRoleText project=\{project\} name=\{name\} \/>\s*<RoleTexts \/>/, 'the project part sits in the Role text section, first');
 });
 
 test('Project settings is owner-only: registered as a screen, hidden from another admin, shown to the owner', () => {
