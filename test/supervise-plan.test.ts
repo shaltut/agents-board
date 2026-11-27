@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planTick, type State, type Session, type TickInput } from '../cli/supervise-plan.ts';
+import { seatShaped } from '../cli/squad-up.ts';
 
 const NOW = Date.parse('2026-11-23T12:00:00Z');
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
@@ -24,7 +25,7 @@ const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, he
 const names = (l: { name: string }[]) => l.map((x) => x.name);
 
 test('not supervised: empty plan', () => {
-  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [] });
+  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [], leaving: [] });
 });
 
 test('starts up to the count', () => {
@@ -103,7 +104,7 @@ test('restore, down_again, herdr down, and no reuse of a holding name', () => {
   assert.deepEqual([again.restore, again.notes], [[], [{ what: 'down_again', session: 'sv-B1@macbook' }]]);
   assert.deepEqual(tick(state({ sessions: [{ ...down, last_restore: ago(10), down_again_logged: true }] })).notes, []);
   assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(31) }] })).restore.length, 1);
-  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [] });
+  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [], leaving: [] });
   const quiet = sess('sv-B2@macbook', 'builder', { last_event: ago(21) });
   const idleB2 = { herdrStatus: { 'sv-b2-macbook': 'idle' } };
   assert.deepEqual(tick(state({ sessions: [quiet] }), { ...idleB2, herdrDown: new Set(['macbook']) }).close, []);
@@ -210,4 +211,44 @@ test('3 starts per tick and the Mac cap hold across repo groups', () => {
   const st = zed({ api: 2, dashboard: 1 }); st.waiting.reviewer = { api: 1, dashboard: 1 };
   assert.equal(tick(st, { startsLeft: 3 }).start.length, 3);
   assert.equal(tick(st, { startsLeft: 5 }).start.length, 5);
+});
+
+// #3770: the lead moved the reviewers from the PC to the Mac in the squad file; the PC seats are leaving
+test('seats the squad file no longer generates: counted nowhere, closed once idle whatever waits, listed while busy or down', () => {
+  const moved = { ...squad, roles: { ...squad.roles, reviewer: { count: 2, model: 'opus', machine: 'macbook' } } };
+  const st = (sessions: Session[]): State => ({ ...state({ sessions, waiting: { reviewer: { main: 2 } } }), squad: moved });
+  const busy = sess('sv-R1@shaltoot', 'reviewer', { machine: 'shaltoot', holds: 1 });
+  const quiet = sess('sv-R2@shaltoot', 'reviewer', { machine: 'shaltoot', last_event: ago(21) });
+  const ready = { herdrStatus: { 'sv-r1-shaltoot': 'idle', 'sv-r2-shaltoot': 'idle' } };
+  const p = tick(st([busy, quiet]), ready);
+  assert.deepEqual(names(p.start), ['sv-R1@macbook', 'sv-R2@macbook']); // the old seats take none of the new machine's slots
+  assert.deepEqual(p.close, ['sv-R2@shaltoot']); // idle and ready: closed though review work waits
+  assert.deepEqual(p.leaving, [{ session: 'sv-R1@shaltoot', why: 'busy' }]); // holds a card: never closed, a visible step
+  // idle under 20 minutes, or herdr shows it working: not closed yet, and not listed (nothing for a person to do)
+  assert.deepEqual([tick(st([{ ...quiet, last_event: ago(5) }]), ready).close, tick(st([quiet]), { herdrStatus: { 'sv-r2-shaltoot': 'working' } }).close], [[], []]);
+  // down holding a card: never restored under its old name, listed; a dead row holding nothing: ignored
+  const down = tick(st([{ ...busy, live: false }, { ...quiet, live: false }]), ready);
+  assert.deepEqual([down.restore, down.close, down.leaving], [[], [], [{ session: 'sv-R1@shaltoot', why: 'down' }]]);
+  // its machine left the squad file too: its herdr is unknown, so it is listed, never closed
+  const gone = tick(st([{ ...quiet, actor: 'sv-R2@oldbox', machine: 'oldbox' }]), { herdrLive: new Set(['sv-r2-oldbox']), herdrStatus: { 'sv-r2-oldbox': 'idle' } });
+  assert.deepEqual([gone.close, gone.leaving], [[], [{ session: 'sv-R2@oldbox', why: 'machine' }]]);
+  // a lowered count: B3 at count 2 is leaving; it cancels no waiting build work and closes while it waits
+  const b3 = sess('sv-B3@macbook', 'builder', { last_event: ago(21) });
+  const low = tick(state({ sessions: [b3], waiting: { builder: { main: 1 } } }), { herdrStatus: { 'sv-b3-macbook': 'idle' } });
+  assert.deepEqual([names(low.start), low.close], [['sv-B1@macbook'], ['sv-B3@macbook']]);
+  // a hand-started name and the lead are never leaving
+  const keep = tick(state({ sessions: [sess('foo@macbook', 'builder', { last_event: ago(30) }), sess('orch@shaltoot', 'lead', { last_event: ago(90) })] }),
+    { herdrStatus: { 'foo-macbook': 'idle', 'orch-shaltoot': 'idle' } });
+  assert.deepEqual([keep.close, keep.leaving], [[], []]);
+});
+
+test('seatShaped: the names wantList gives a role, on any machine, count, area or repo', () => {
+  const yes = [['builder', 'sv-B3@shaltoot'], ['builder', 'sv-dashboard-B1@macbook'], ['reviewer', 'sv-R2@x'], ['owner', 'sv-O-claims@x'],
+    ['architect', 'sv-A1@x'], ['qa', 'sv-Q1@x'], ['investigator', 'sv-I2@x']] as const;
+  const no = [['builder', 'foo@macbook'], ['builder', 'sv-R1@x'], ['architect', 'sv-dash-A1@x'], ['lead', 'orch@x'], ['lead', 'sv-orch@x'],
+    ['builder', 'other-B1@x'], ['builder', 'sv-B1'], ['owner', 'sv-O-@x']] as const;
+  for (const [role, name] of yes) assert.ok(seatShaped('sv', role, name), name);
+  for (const [role, name] of no) assert.ok(!seatShaped('sv', role, name), name);
+  assert.ok(seatShaped('a.b', 'builder', 'a.b-B1@x'));
+  assert.ok(!seatShaped('a.b', 'builder', 'axb-B1@x')); // the project is matched as written
 });

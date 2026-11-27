@@ -93,6 +93,15 @@ export function wantList(project: string, squad: Squad): Want[] {
   return want;
 }
 
+/** Whether a name has the shape wantList gives the role's seats in this project on any machine, at any count, area or
+ *  repo (#3770): a seat the squad file may no longer generate (moved machine, lower count, dropped role). Never the lead,
+ *  never a hand-started name (foo@m). */
+export function seatShaped(project: string, role: string, name: string): boolean {
+  const p = project.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tail = role === 'owner' ? 'O-[^@]+' : LETTER[role] ? `${role === 'builder' || role === 'reviewer' ? '(?:[^@]+-)?' : ''}${LETTER[role]}\\d+` : null;
+  return tail !== null && new RegExp(`^${p}-${tail}@[^@]+$`).test(name);
+}
+
 /** A seat's agent, model and fallback: the seat's own override the role's; a seat's fallback, when it has one, replaces
  *  the role's (as cb._expected_model reads them). No agent anywhere: claude. */
 export function seatSpec(squad: Squad, w: Want): { agent: AgentKind; model: string; fallback?: Fallback } {

@@ -62,7 +62,7 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
-  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>() });
+  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -137,6 +137,28 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   assert.equal((await events(sql, 'close')).length, 1);
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
+});
+
+// #3770: the squad file's builder count is 2, so B3 and B4 are seats it no longer generates
+test('seats the squad file dropped: the idle one closes while work waits, the busy one is said once and kept', async () => {
+  const { sql, sup } = await setup();
+  await card(sql); // build work waits
+  await session(sql, 'sv-B3@macbook', 'builder', { startedMin: 21 });
+  await session(sql, 'sv-B4@macbook', 'builder', { startedMin: 21 });
+  await card(sql, { assignee: 'sv-B4@macbook', status: 'in_progress' });
+  const h = fakeHerdr();
+  h.live.set('sv-b3-macbook', 'w1:p8'); h.live.set('sv-b4-macbook', 'w1:p9');
+  const dry = await tick(deps(sup, h.run, { dryRun: true }));
+  assert.ok(dry.includes('would close sv-B3@macbook'), dry.join('\n'));
+  assert.ok(dry.some((l) => l.startsWith('would keep sv-B4@macbook open (left the squad file): it holds work')), dry.join('\n'));
+  const memory = deps(sup, h.run).memory;
+  const out = await tick(deps(sup, h.run, { memory }));
+  assert.ok(out.includes('closed sv-B3@macbook'), out.join('\n'));
+  assert.ok(out.some((l) => l.includes('started sv-B1@macbook')), out.join('\n')); // B3 and B4 took none of the two slots
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b4-macbook', '/exit'), out.join('\n'));
+  assert.equal(out.filter((l) => l.startsWith('sv-B4@macbook left the squad file but stays open')).length, 1, out.join('\n'));
+  const again = await tick(deps(sup, h.run, { memory }));
+  assert.ok(!again.some((l) => l.startsWith('sv-B4@macbook left')), again.join('\n')); // said once per reason
 });
 
 // #4002: the agent running in the seat judges and closes it; one with no adapter yet is never closed
