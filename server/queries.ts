@@ -3,11 +3,13 @@ import { sql } from './db.ts';
 
 const proj = (p?: string) => (p ? sql`and project = ${p}` : sql``);
 
+/** Every project, archived ones included (#4559): state, who set it and when, so the Projects page can fold them and a
+ *  link to a disabled project still finds its name. Pickers keep only the enabled ones. */
 export const projects = () => sql`
-  select p.slug, p.name, p.color, p.repo_path, p.pipeline,
+  select p.slug, p.name, p.color, p.repo_path, p.pipeline, p.state, p.state_by, p.state_at,
     (select count(*)::int from cb.tasks t where t.project = p.slug and t.status not in ('done','cancelled','backlog')) as open_count,
     (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') as question_count
-  from cb.projects p where not p.archived order by p.name`;
+  from cb.projects p order by p.name`;
 
 /** The board's card list. No descriptions (`body`): no list view shows them, the panel reads them from task(id), and
  *  they were half of the ~2 MB every open page re-read on each board change. */
@@ -87,7 +89,10 @@ export function questions(project?: string, status?: string) {
   const which = status === 'answered_today'
     ? sql`and (status = 'answered' or (status = 'delivered' and answered_at > now() - interval '24 hours'))`
     : status ? sql`and status = ${status}` : sql``;
-  return sql`select q.*, ${followups()} from cb.questions q where true ${proj(project)} ${which}
+  // #4559 (Q3019): with no project chosen (Today, the lamp count), a disabled or archived project's open questions wait
+  // out of sight; on that project's own page they stay answerable
+  const live = !project && status === 'open' ? sql`and cb._live(q.project)` : sql``;
+  return sql`select q.*, ${followups()} from cb.questions q where true ${proj(project)} ${which} ${live}
     order by (status = 'open') desc, blocking desc, created_at`;
 }
 

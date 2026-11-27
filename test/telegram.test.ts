@@ -353,3 +353,16 @@ test('Hand to: one tap gives the question to that person; only people on its pro
   await until(() => calls('editMessageText').some((c) => c.body.message_id === msg && /Handed to cai/.test(c.body.text) && !c.body.reply_markup.inline_keyboard.length), 'message closed');
   await until(() => calls('answerCallbackQuery').some((c) => c.body.text === 'Handed to Cai.'), 'toast');
 });
+
+test('a disabled project: its open questions are not sent; enabling the project sends them (#4559, Q3019)', async () => {
+  const sql = await paired();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.project_state('demo', 'disabled', 'ahmed')`;
+  // asked before the disable, never sent (asking now is refused): stored straight in the table
+  const [{ id }] = await sql`insert into cb.questions (project, asked_by, body) values ('demo', 'W1', 'Which parser?') returning id`;
+  const other = Number((await sql`select cb.ask(project => 'zed', body => 'still live?', actor => 'W1') as id`)[0].id); // another project: proves the pass ran
+  await until(() => sentFor(other).length, 'the live question');
+  assert.equal(sentFor(Number(id)).length, 0, 'held while disabled');
+  await sql`select cb.project_state('demo', 'enabled', 'ahmed')`;
+  await until(() => sentFor(Number(id)).length, 'sent on enable');
+});

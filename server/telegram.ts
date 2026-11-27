@@ -149,6 +149,7 @@ async function pass() {
   // asked_at as text: created_at has microseconds, which a JS Date would drop (and every pass would re-send)
   const fresh = await sql`select q.*, ${HANDS()}, ${PICS()}, q.created_at::text as asked_at from cb.questions q left join cb.telegram_messages m on m.question_id = q.id
     where q.status = 'open' and q.assigned_to is null and (m.question_id is null or m.state <> 'open' or m.chat_id <> ${chat})
+      and cb._live(q.project) -- #4559 (Q3019): a disabled project's questions wait; enabling it sends them (startBot hears projects)
     order by q.created_at, q.id`;
   for (const q of fresh) {
     try {
