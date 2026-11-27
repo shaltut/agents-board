@@ -18,8 +18,9 @@ export const ADAPTERS: Readonly<Record<AgentKind, AgentAdapter>> = {
 };
 /** The agents the board may run. An adapter joins this list only once relay, squad up, the supervisor and the guard
  *  installer are wired for it and its live checks pass (#4002): until then cb relay, squad up and the supervisor
- *  refuse it exactly as before it was written. */
-const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude']);
+ *  refuse it exactly as before it was written. The save gate's list is cb._agents_main() (db/schema.sql): add an agent
+ *  to both (test/settings.test.ts compares them). */
+export const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude']);
 
 /** The kinds whose MCP gate the owner has checked: CB_MCP_GATE_OK=codex,agy (comma separated, any case). It is a claim about
  *  every machine that runs those seats, so it is read where getAdapter runs: squad up, the supervisor and the seat's relay. */

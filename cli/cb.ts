@@ -39,7 +39,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
-  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' },
+  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
 
@@ -479,83 +479,42 @@ async function run(): Promise<unknown> {
       return { out: rows.map((r: any) => `${r.name.padEnd(12)} ${r.display}${r.role === 'admin' ? ' (admin)' : ''}: ${r.open_questions} questions, ${r.open_tasks} tasks open`).join('\n') || 'no users (cb user add cai "Cai")', json: rows };
     }
     case 'github': {
-      // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts).
+      // The GitHub watch (#1207): one cb.settings row per repo; the board server polls them (server/github.ts). The rules
+      // (Ahmed only, the defaults, the checkpoint) are SQL, shared with the project settings page (#4523, #4332).
       const sub = args[0];
       if (sub === 'add' || sub === 'remove') {
         need(2, 'github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]   or   cb github remove <owner/repo>');
-        const repo = args[1], key = `github:${repo}`;
-        // no part starting with a dot: ../.., .github/x and owner/.. never reach gh as a path
-        if (!/^[\w-][\w.-]*\/[\w-][\w.-]*$/.test(repo)) throw new Error(`"${repo}" is not owner/repo, e.g. cb github add acme/widgets`);
-        return await sql.begin(async (tx: any) => {
-          // What the board watches, and whom it tells, is Ahmed's call: the same guard as his People and Epics pages
-          // (a session pointing it at another repo Ahmed's gh reads would pour that text onto a board guests see)
-          // The refusal never names the way past it: a session (or a comment steering one) would learn it here.
-          await tx`select cb.dashboard_only('GitHub')`.catch(() => {
-            throw new Error(`only Ahmed adds or removes watched repos: ask him to (cb ask), saying which repo and why`);
-          });
-          if (sub === 'remove') {
-            if (!(await tx`delete from cb.settings where key = ${key} returning key`).length) throw new Error(`${repo} is not watched: cb github lists the repos`);
-            return { out: `stopped watching ${repo}; its cards stay on the board`, json: { repo, watched: false } };
-          }
-          // adding it again changes only what was given and keeps its checkpoint: a watched repo needs no flag
-          const [had] = await tx`select 1 from cb.settings where key = ${key} for update`;
-          const proj = o.project ?? (had ? null : sessionProject);
-          if (!had && !proj) {
-            const [{ known }] = await tx`select string_agg(slug, ', ' order by slug) as known from cb.projects`;
-            throw new Error(`name the project its PR cards go in: cb github add ${repo} --project <project> (known: ${known ?? 'none yet'})`);
-          }
-          const p = proj ? (await tx`select cb.read_project(${proj}) as p`)[0].p : null;
-          let to = o.to;
-          if (!had && !to) {
-            // whom it tells defaults to the project's lead (cb._is_lead), when it has exactly one
-            const leads = (await tx`select distinct s.actor from cb.sessions s where s.project = ${p} and cb._is_lead(s.actor, ${p}) order by s.actor`).map((x: any) => x.actor);
-            if (leads.length !== 1) throw new Error(leads.length
-              ? `${p} has several leads (${leads.join(', ')}): say which one is told: cb github add ${repo} --project ${p} --to <session>`
-              : `${p} has no lead session to tell: cb github add ${repo} --project ${p} --to <session> (cb sessions lists them)`);
-            to = leads[0];
-          }
-          // --cards-in (#4334): more projects whose cards a PR may name (fix/<card>-..., "(card <n>)"); "" clears them
-          const also = o['cards-in'] === undefined ? undefined : await Promise.all(String(o['cards-in']).split(',').map((x) => x.trim())
-            .filter(Boolean).map(async (x) => (await tx`select cb.read_project(${x}) as p`)[0].p as string));
-          const patch = { ...(o.to ? { to } : {}), ...(o.project ? { project: p } : {}), ...(also ? { card_projects: also } : {}) };
-          // a new repo starts now (no backfill)
-          const [r] = await tx`insert into cb.settings (key, value)
-            values (${key}, ${tx.json({ since: new Date().toISOString(), to, project: p, ...(also ? { card_projects: also } : {}), last_ok: null, last_error: null, prs: {} })})
-            on conflict (key) do update set value = cb.settings.value || ${tx.json(patch)} returning value`;
-          return { out: `watching ${repo}: ${r.value.to} is told, PR cards go in ${r.value.project}${r.value.card_projects?.length
-            ? ` (a PR naming a card in ${[r.value.project, ...r.value.card_projects].join(', ')} logs on that card)` : ''}, events from ${r.value.since} on`, json: r.value };
-        });
+        const repo = args[1];
+        if (sub === 'remove') {
+          await callFn('github_watch_remove', { repo, actor });
+          return { out: `stopped watching ${repo}; its cards stay on the board`, json: { repo, watched: false } };
+        }
+        // --cards-in (#4334): more projects whose cards a PR may name (fix/<card>-..., "(card <n>)"); "" clears them
+        const cardsIn = o['cards-in'] === undefined ? null : String(o['cards-in']).split(',').map((x) => x.trim()).filter(Boolean);
+        // the pane's project is the default only for a repo not watched yet (SQL decides): a bare re-add changes nothing
+        const v: any = await callFn('github_watch_add', { repo, project: o.project ?? null, tell: o.to ?? null, cards_in: cardsIn,
+          default_project: sessionProject, actor });
+        return { out: `watching ${repo}: ${v.to} is told, PR cards go in ${v.project}${v.card_projects?.length
+          ? ` (a PR naming a card in ${[v.project, ...v.card_projects].join(', ')} logs on that card)` : ''}, events from ${v.since} on`, json: v };
       }
       if (sub === 'mute' || sub === 'unmute') {
         // a login whose PRs, comments, reviews and commits the watch drops (Ahmed's own workers post as one): his call
         need(2, 'github mute <login>   or   cb github unmute <login>');
         const login = args[1].toLowerCase();
-        if (!/^[a-z0-9](?:[a-z0-9-]{0,38})$/.test(login)) throw new Error(`"${args[1]}" is not a GitHub login`);
-        return await sql.begin(async (tx: any) => {
-          await tx`select cb.dashboard_only('GitHub')`.catch(() => {
-            throw new Error(`only Ahmed mutes or unmutes GitHub logins: ask him to (cb ask), saying which login and why`);
-          });
-          const [r] = await tx`select value from cb.settings where key = 'github-muted' for update`;
-          const cur: string[] = r?.value ?? [];
-          if (sub === 'unmute' && !cur.includes(login)) throw new Error(`${login} is not muted: cb github lists the muted logins`);
-          const next = sub === 'mute' ? [...new Set([...cur, login])].sort() : cur.filter((x) => x !== login);
-          await tx`insert into cb.settings (key, value) values ('github-muted', ${tx.json(next)})
-                   on conflict (key) do update set value = excluded.value`;
-          return { out: sub === 'mute' ? `muted ${login}: its PRs, comments, reviews and commits no longer reach the watch (failed CI runs still do)`
-            : `unmuted ${login}`, json: next };
-        });
+        const next = await callFn('github_mute', { login: args[1], mute: sub === 'mute', actor });
+        return { out: sub === 'mute' ? `muted ${login}: its PRs, comments, reviews and commits no longer reach the watch (failed CI runs still do)`
+          : `unmuted ${login}`, json: next };
       }
       if (sub) throw new Error(`unknown github command "${sub}": cb github lists, cb github add <owner/repo>, cb github remove <owner/repo>, cb github mute <login>`);
-      const rows = await sql`select key, value from cb.settings where key like 'github:%' and key not like 'github:outbox:%' order by key`;
-      const [mu] = await sql`select value from cb.settings where key = 'github-muted'`;
-      const out = rows.map(({ key, value: v }: any) => {
+      const { watches, muted }: any = await callFn('github_watches', {});
+      const out = watches.map((v: any) => {
         const cards = Object.entries(v.prs ?? {});
-        return [`${key.slice(7)} → ${v.to} (${v.project}${v.card_projects?.length ? `; named cards also in ${v.card_projects.join(', ')}` : ''}) · last poll ${v.last_ok ? `${dur((Date.now() - Date.parse(v.last_ok)) / 60000)} ago` : 'never'} · since ${v.since}` +
+        return [`${v.repo} → ${v.to} (${v.project}${v.card_projects?.length ? `; named cards also in ${v.card_projects.join(', ')}` : ''}) · last poll ${v.last_ok ? `${dur((Date.now() - Date.parse(v.last_ok)) / 60000)} ago` : 'never'} · since ${v.since}` +
           (v.last_error ? ` · last error: ${flat(v.last_error.message)} (since ${v.last_error.at})` : ''),
           ...(cards.length ? [`  open PR cards: ${cards.map(([n, id]) => `PR #${n} → card #${id}`).join(', ')}`] : [])].join('\n');
       });
-      if (mu?.value?.length) out.push(`muted (their events are dropped): ${mu.value.join(', ')}`);
-      return { out: out.join('\n') || 'no repos watched (Ahmed adds them: cb github add <owner/repo>)', json: rows.map((r: any) => ({ repo: r.key.slice(7), ...r.value })) };
+      if (muted?.length) out.push(`muted (their events are dropped): ${muted.join(', ')}`);
+      return { out: out.join('\n') || 'no repos watched (Ahmed adds them: cb github add <owner/repo>)', json: watches };
     }
     case 'assign': {
       need(2, 'assign <Q12|#34> <user|ahmed>   hand a question or task to a user (ahmed takes a question back)');
@@ -837,19 +796,34 @@ ${body}`, json: pg };
       return { out: resumeText(r), json: r };
     }
     case 'squad': {
-      if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->  |  cb squad up <project> [--dry-run]');
+      if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]');
       if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], callFn); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
       if (args[0] === 'set') {
         if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
         const text = o.file === '-' ? await fromStdin('-', 'squad') : readFileSync(o.file, 'utf8');
-        let squad: unknown;
+        let squad: any;
         try { squad = JSON.parse(text as string); } catch { throw new Error('the squad file is not valid JSON'); }
-        const saved = await callFn('squad_set', { project: args[1], squad, actor });
-        return { out: `squad saved for ${args[1]}`, json: saved };
+        // #4332: "version" (from cb squad show --json) is the copy's base, not part of the squad: a squad saved since that
+        // version is refused (cb.squad_set), so an old file can't silently undo a newer change made on the page
+        const doc = squad && typeof squad === 'object' && !Array.isArray(squad) ? { ...squad } : squad;
+        const hasVersion = doc && typeof doc === 'object' && !Array.isArray(doc) && 'version' in doc;
+        const base = hasVersion ? doc.version : null;
+        if (hasVersion) delete doc.version;
+        if (hasVersion && !(Number.isInteger(base) && base >= 0))
+          throw new Error(`"version" in the squad file must be the number cb squad show ${args[1]} --json printed`);
+        // a file with no version: the version just read is its base, so it may not undo a newer change unless --overwrite
+        // says replace what is there. Even then a save made between this read and the set is refused (the race check).
+        const now = ((await callFn('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
+        if (!hasVersion && now > 0 && !o.overwrite)
+          throw new Error(`${args[1]}'s squad was saved as version ${now}, and this file has no version, so it could undo a newer change. Take the current squad with cb squad show ${args[1]} --json, edit that and set it again. (--overwrite replaces the current squad with this file, including any change made on the settings page.)`);
+        const saved: any = await callFn('squad_set', { project: args[1], squad: doc, actor, base: o.overwrite || !hasVersion ? now : base, with_version: true });
+        return { out: saved.changed ? `squad saved for ${args[1]} (version ${saved.version})`
+          : `nothing changed for ${args[1]}: the squad is already this (version ${saved.version})`, json: saved };
       }
-      const sq = await callFn('squad_get', { project: args[1] }) as any;
+      const sq = await callFn('squad_get', { project: args[1], with_version: true }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
-      return { out: squadShow(sq), json: sq };
+      const { version: _v, ...plain } = sq;
+      return { out: squadShow(plain), json: sq };
     }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
