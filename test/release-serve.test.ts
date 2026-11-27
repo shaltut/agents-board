@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { serve } from '@hono/node-server';
-import { releaseApp, setRelease } from '../server/release.ts';
+import { releaseApp, setRelease, loadRelease, releaseWhy } from '../server/release.ts';
 import { readArchive, releaseAt, releaseFromArchive, gitArchive } from '../cli/release-archive.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-release-${process.pid}-`));
@@ -95,6 +95,26 @@ test('the image (no .git) serves the release.tgz made at deploy; without one it 
   assert.throws(() => releaseAt(dir()), /no release\.tgz in .* and no git checkout: make it at deploy/);
 });
 
+// review I1: release.tgz is untracked and stays on the host; a deploy that skips making it again bakes the old one in
+test('the board serves its archive only when it is the code the board runs: a stale release.tgz serves none, saying why in the log', async () => {
+  const root = repo();
+  const image = dir(); // the image: the release folders as copied, and release.tgz
+  for (const p of TRACKED) { mkdirSync(join(image, p, '..'), { recursive: true }); copyFileSync(join(root, p), join(image, p)); }
+  writeFileSync(join(image, 'cli/cb.ts'), 'console.log(1)\n'); // the committed bytes
+  put(image, 'cli/.env', 'NOT_SHIPPED=1\n'); // an env file is never an extra
+  writeFileSync(join(image, 'release.tgz'), gitArchive(root));
+  loadRelease(image);
+  assert.equal(releaseWhy(), '');
+  assert.equal((await fetch(`${base}/release/current.json`)).status, 200);
+
+  writeFileSync(join(image, 'cli/cb.ts'), 'console.log("the next release")\n'); // new code, the old archive
+  loadRelease(image);
+  assert.match(releaseWhy(), /^the archive \([0-9a-f]{7}\) is not the code this board runs: 1 files differ \(cli\/cb\.ts\); make release\.tgz again at deploy/);
+  const none = await fetch(`${base}/release/current.json`);
+  assert.equal(none.status, 404);
+  assert.deepEqual(await none.json(), { ok: false, error: 'this board serves no release: its log says why (release: none served)' });
+});
+
 /** A hand-made tar: a pax global header naming a commit, then the entries. */
 function tarOf(entries: { name: string; type?: string; body?: string; link?: string }[], commit = 'a'.repeat(40)) {
   const block = (name: string, type: string, body: Buffer, link = '') => {
@@ -106,7 +126,7 @@ function tarOf(entries: { name: string; type?: string; body?: string; link?: str
     return Buffer.concat([h, body, Buffer.alloc((512 - (body.length % 512)) % 512)]);
   };
   const rec = `comment=${commit}\n`;
-  const pax = `${rec.length + 3} ${rec}`; // the length counts its own 2 digits and the space // "<len> comment=<sha>\n"
+  const pax = `${rec.length + 3} ${rec}`; // "<len> comment=<sha>\n": the length counts its own 2 digits and the space
   return gzipSync(Buffer.concat([block('pax_global_header', 'g', Buffer.from(pax)),
     ...entries.map((e) => block(e.name, e.type ?? '0', Buffer.from(e.body ?? ''), e.link)), Buffer.alloc(1024)]));
 }
@@ -140,10 +160,13 @@ test('GET /release/current.json and /release/<sha>.tgz serve the release from me
     assert.equal(x.status, 404, p);
     assert.match(String(x.headers.get('content-type')), /json/, p);
   }
+  // review M1: why none is served (paths, git's errors) stays in the log; the public answer is plain
   setRelease(null, 'no release.tgz in /app and no git checkout');
   const none = await fetch(`${base}/release/current.json`);
   assert.equal(none.status, 404);
-  assert.deepEqual(await none.json(), { ok: false, error: 'this board serves no release: no release.tgz in /app and no git checkout' });
+  const body = await none.text();
+  assert.equal(body, JSON.stringify({ ok: false, error: 'this board serves no release: its log says why (release: none served)' }));
+  assert.doesNotMatch(body, /\/app|git/);
 });
 
 test('cb update --check: a copy matching the served release passes; a changed file fails; it never touches the database', async () => {
@@ -154,12 +177,14 @@ test('cb update --check: a copy matching the served release passes; a changed fi
   writeFileSync(join(copy, 'cli/cb.ts'), 'console.log(1)\n'); // the committed bytes (root's working tree was not edited here)
 
   const t0 = Date.now();
-  const good = await cb(['update', '--check', '--from', base, '--root', copy]);
+  // review M3: a user:pass@ in the address is never printed (nor sent)
+  const good = await cb(['update', '--check', '--from', base.replace('//', '//someone:hunter2-not-real@'), '--root', copy]);
   assert.ok(Date.now() - t0 < 20_000, 'update waited on the database');
   assert.equal(good.code, 0, good.err + good.out);
   assert.match(good.out, new RegExp(`^release: [0-9a-f]{7} from ${base.replace(/\./g, '\\.')} \\(5 files; archive \\d+ KB, verified\\)$`, 'm'));
   assert.match(good.out, /^files: all 5 match release [0-9a-f]{7}$/m);
   assert.match(good.out, /^update: this machine is on the release$/m);
+  assert.doesNotMatch(good.out + good.err, /hunter2|someone/);
 
   writeFileSync(join(copy, 'cli/cb.ts'), 'console.log("old")\n');
   put(copy, 'cli/dropped.ts', 'a release removed me\n');
@@ -188,8 +213,8 @@ test('cb update --check: a tampered archive is caught; no address and bare cb up
   assert.equal(away.code, 1);
   assert.match(away.err, /cannot reach http:\/\/127\.0\.0\.1:9\/release\/current\.json/);
   const noUrl = await cb(['update', '--check', '--from', 'ftp://x']);
-  assert.match(noUrl.err, /not a board address: "ftp:\/\/x"/);
+  assert.match(noUrl.err, /not a board address: --from, CB_PUBLIC_URL or PUBLIC_URL must be an http:\/\/ or https:\/\/ URL/);
   setRelease(null, 'none built');
   const none = await cb(['update', '--check', '--from', base]);
-  assert.match(none.err, /the board at .* gave no release: this board serves no release: none built/);
+  assert.match(none.err, /the board at .* gave no release: this board serves no release: its log says why/);
 });

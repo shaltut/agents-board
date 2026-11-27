@@ -89,7 +89,9 @@ function onDisk(root: string): string[] {
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch (e: any) { if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return; throw e; }
     for (const e of entries) {
       const full = join(dir, e.name);
-      if (e.isDirectory()) { if (!NOT_RELEASED.has(e.name)) walk(full); } else out.push(relative(root, full).split(sep).join('/'));
+      const rel = relative(root, full).split(sep).join('/');
+      if (neverReleased(rel)) continue; // an env file is never part of a release, so never an extra either
+      if (e.isDirectory()) { if (!NOT_RELEASED.has(e.name)) walk(full); } else out.push(rel);
     }
   };
   for (const d of RELEASE_DIRS) walk(join(root, d));

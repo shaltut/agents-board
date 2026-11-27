@@ -16,18 +16,30 @@ async function get(url: string, cap: number, ms: number) {
   try { res = await fetch(url, { signal: AbortSignal.timeout(ms) }); } catch (e: any) {
     throw new Error(`cannot reach ${url} (${e?.cause?.code ?? e?.name ?? e?.message ?? e})`);
   }
-  if (Number(res.headers.get('content-length') ?? 0) > cap) throw new Error(`${url} is larger than ${cap} bytes`);
-  const body = Buffer.from(await res.arrayBuffer());
-  if (body.length > cap) throw new Error(`${url} is larger than ${cap} bytes`);
-  return { status: res.status, body };
+  const big = () => new Error(`${url} is larger than ${cap} bytes`);
+  if (Number(res.headers.get('content-length') ?? 0) > cap) throw big();
+  // counted as it arrives: a body with no length (chunked) stops at the cap, never buffered whole first
+  const parts: Buffer[] = [];
+  let n = 0;
+  for await (const chunk of (res.body ?? []) as AsyncIterable<Uint8Array>) {
+    n += chunk.length;
+    if (n > cap) { await res.body?.cancel().catch(() => {}); throw big(); }
+    parts.push(Buffer.from(chunk));
+  }
+  return { status: res.status, body: Buffer.concat(parts) };
 }
 
 export async function updateCheck(o: { root: string; from: string; timeoutMs?: number }) {
   const root = resolve(o.root);
   const ms = o.timeoutMs ?? 20_000;
   let base: string;
-  try { const u = new URL(o.from); if (!/^https?:$/.test(u.protocol)) throw 0; base = u.href.replace(/\/+$/, ''); } catch {
-    throw new Error(`not a board address: ${JSON.stringify(o.from)} (an http:// or https:// URL)`);
+  try {
+    const u = new URL(o.from);
+    if (!/^https?:$/.test(u.protocol)) throw 0;
+    u.username = ''; u.password = ''; // a user:pass@ in the address is never printed or sent (the routes need no sign-in)
+    base = u.href.replace(/\/+$/, '');
+  } catch {
+    throw new Error('not a board address: --from, CB_PUBLIC_URL or PUBLIC_URL must be an http:// or https:// URL');
   }
   const lines: string[] = [];
   const json: any = { root, from: base, checkout_sha: headSha(root) };

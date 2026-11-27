@@ -4,14 +4,21 @@
 // Read-only and from memory: built once at start, served by exact name, no path ever built from the URL.
 import { Hono } from 'hono';
 import { releaseAt, type Release } from '../cli/release-archive.ts';
+import { compareManifest } from '../cli/release.ts';
 
 let current: Release | null = null;
 let why = 'not built yet';
 
-/** Build the release from root (at server start). A failure leaves the board up with no release, and says why. */
+/** Build the release from root (at server start). A failure leaves the board up with no release, and says why in the
+ *  log. The archive must be the code this board runs: a stale release.tgz left on the host from an earlier deploy would
+ *  otherwise be baked into a new image and announce an old commit, telling current workers they are behind. */
 export function loadRelease(root: string) {
   try {
-    current = releaseAt(root);
+    const r = releaseAt(root);
+    const d = compareManifest(root, r.manifest);
+    const off = [...d.missing, ...d.changed, ...d.extra, ...d.outside];
+    if (off.length) throw new Error(`the archive (${r.manifest.sha.slice(0, 7)}) is not the code this board runs: ${off.length} files differ (${off.slice(0, 5).join(', ')}${off.length > 5 ? ', ...' : ''}); make release.tgz again at deploy (docs/ops/maintain.md, Upgrade)`);
+    current = r;
     why = '';
     console.log(`release: serving ${current.manifest.sha.slice(0, 7)} (${Object.keys(current.manifest.files).length} files)`);
   } catch (e: any) {
@@ -22,8 +29,10 @@ export function loadRelease(root: string) {
 }
 /** For tests: serve this release (or none, with the reason). */
 export function setRelease(r: Release | null, reason = 'none') { current = r; why = r ? '' : reason; }
+/** Why none is served (the log's words; tests read it). Never sent to a client: it holds paths and git's errors. */
+export const releaseWhy = () => why;
 
-const none = (c: any) => c.json({ ok: false, error: `this board serves no release: ${why}` }, 404);
+const none = (c: any) => c.json({ ok: false, error: "this board serves no release: its log says why (release: none served)" }, 404);
 
 export const releaseApp = new Hono();
 releaseApp.get('/release/current.json', (c) => {
