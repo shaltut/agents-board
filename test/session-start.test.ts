@@ -62,6 +62,10 @@ test('after a compaction or a resume, a bound pane gets what cb resume and cb ro
     assert.ok(r.ms < 3000, `took ${r.ms} ms`);
     console.log(`# hook wall time, ${source}, bound pane, board up: ${r.ms} ms`);
   }
+  // bound with no role (an orchestrator's cb iam names none): cb resume alone
+  const plain = paneOf('plain');
+  await sql`select cb.iam(${M}, ${plain}, 'W8@testbox', 'demo')`;
+  assert.equal(contextOf(await hook(plain, 'compact')), `${hint}\n\nClaude Board, after this compact: what \`cb resume\` prints now.\n\n${cb(plain, ['resume'])}`);
   // clear, no source, or not JSON: today's hint only
   for (const source of ['clear', null]) assert.equal(contextOf(await hook(bound, source)), hint);
   // a pane the relay knows but cb iam never bound, and a pane with no row at all
@@ -113,8 +117,10 @@ test('the re-injected block is capped near 6000 characters and says which comman
 });
 
 test('a stdin left open after its JSON does not hold a plain start (#4351)', { timeout: 30_000 }, async () => {
+  const down = { CB_DATABASE_URL: 'postgres://nobody@127.0.0.1:1/none' };
+  const ended = (await hook(paneOf('open'), 'startup', down)).ms;
   const t0 = Date.now();
-  const c = spawn('node', ['hooks/session-start.mjs'], { env: envFor(paneOf('open'), { CB_DATABASE_URL: 'postgres://nobody@127.0.0.1:1/none' }) });
+  const c = spawn('node', ['hooks/session-start.mjs'], { env: envFor(paneOf('open'), down) });
   let stdout = '';
   c.stdout.on('data', (d) => { stdout += d; });
   c.stdin.write(JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' })); // never ended
@@ -123,7 +129,7 @@ test('a stdin left open after its JSON does not hold a plain start (#4351)', { t
   c.stdin.destroy();
   assert.equal(status, 0);
   assert.match(contextOf({ stdout }), /^Claude Board: /);
-  assert.ok(ms < 900, `took ${ms} ms`); // not the 1 s stdin wait
+  assert.ok(ms < ended + 500, `took ${ms} ms, ${ended} ms with stdin ended`); // not the 1 s stdin wait
 });
 
 test('the board unreachable (refused, silent, or an error): the hint alone, exit 0, nothing on stderr, under 3 s (#4351)', { timeout: 60_000 }, async () => {

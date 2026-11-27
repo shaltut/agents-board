@@ -17,13 +17,13 @@ function readStdin(ms) {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) return resolve('');
     let s = '';
-    const done = () => { clearTimeout(t); process.stdin.removeAllListeners(); process.stdin.pause(); resolve(s); };
+    // the error listener stays: a stdin error after this read must not throw (stderr, exit 1) while the board answers
+    const done = () => { clearTimeout(t); process.stdin.off('data', data).off('end', done); process.stdin.pause(); resolve(s); };
+    // done at the first whole object: a start never waits on a stdin that stays open
+    const data = (d) => { s += d; try { JSON.parse(s); done(); } catch { if (s.length > 100_000) done(); } };
     const t = setTimeout(done, ms);
     process.stdin.setEncoding('utf8');
-    // done at the first whole object: a start never waits on a stdin that stays open
-    process.stdin.on('data', (d) => { s += d; try { JSON.parse(s); done(); } catch { if (s.length > 100_000) done(); } });
-    process.stdin.on('end', done);
-    process.stdin.on('error', done);
+    process.stdin.on('data', data).on('end', done).on('error', done);
   });
 }
 
