@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
-import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
+import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
 import { mayBeLeaving, pastSeatNames, planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
@@ -23,8 +23,10 @@ const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC:
 // closeSkipAt: names herdr lists but could not find for a close (an unnamed pane), skipped 10 minutes
 // elsewhereToldAt: per project, when "its PC is another machine" was last said; runnerPane: the runner tab this run opened
 // leavingTold (#3770): per leaving seat, the reason last said in the log: said again only when it changes
+// restartTried (#4332): per seat, the setting this run closed it to restart on, or refused: planTick's restartTried
 export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
-  closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; runnerPane?: { pane: string; terminal?: string } };
+  closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; restartTried: Map<string, string>;
+  runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
@@ -97,9 +99,10 @@ export async function tick(d: Deps): Promise<string[]> {
       // 20), read only when a live or holding session is one the squad does not want now (events has no project index)
       const pastSeats = mayBeLeaving(state, herdrLive) ? pastSeatNames(state.project, (await sql`select e.data -> 'squad' as squad from cb.events e
         where e.project = ${state.project} and e.kind = 'updated' and e.summary = 'squad updated' order by e.id desc limit 20`).map((r: any) => r.squad)) : new Set<string>();
-      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats });
+      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats,
+        restartTried: memory.restartTried, startProblem });
       const launches = [...plan.restore, ...plan.start];
-      startsLeft -= launches.length;
+      startsLeft -= launches.length + plan.restart.length; // a restart's close frees its own Mac slot: macLive stays
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
       await act(d, state, plan, out, log);
     } catch (e) {
@@ -131,40 +134,68 @@ async function safeToCloseOf(state: State, herdrStatus: Record<string, string>):
   }
   return safe;
 }
+// #4332: why this machine cannot start a launch, as startOne would refuse it before any pane; null when it can
+const startProblem = (l: Launch) => { try { launchSpec(l); return null; } catch (e) { return msg(e); } };
+// the board keeps a short reason: the adapter's first clause (agent "codex" is not installed yet); the rest goes to the PC log
+const shortWhy = (why: string) => why.split(/[:(]/)[0]!.trim().slice(0, 100);
 // the live session bound to the project in the lead role, whatever its name
 const leadOf = (s: State) => s.sessions.find((x) => x.role === 'lead' && x.live)?.actor;
 
 async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Log) {
   const { run, dryRun, now, memory } = d, project = state.project;
   const tabs: Record<string, { pane: string; panes: number }> = {};
+  const launch = async (what: 'restore' | 'start', l: Launch) => {
+    const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
+    if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); return; }
+    const r = startOne(l, run, tabs);
+    out.push(what === 'restore' ? r.line.replace(/^started /, 'restored ') : r.line);
+    if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
+    // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
+    // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
+    const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
+    if (kind === 'start failed') {
+      memory.failedAt.set(l.name, now);
+      await log(project, 'failed', l.name, kind);
+    } else if (kind) {
+      await log(project, 'blocked', l.name, r.blocked ? r.pane : `${kind}, pane ${r.pane}`);
+      if (!memory.blockedTold.has(l.name) && await tellLead(d, state, l, r.pane!, r.blocked ? 'dialog' : 'prompt', out)) memory.blockedTold.add(l.name);
+    }
+    // a restore is logged however it ended, so its 30-minute limit holds across failures and supervisor restarts
+    if (!kind || what === 'restore') await log(project, what, l.name, kind ?? l.role);
+  };
   for (const [what, list] of [['restore', plan.restore], ['start', plan.start]] as const) {
     for (const l of list) {
       d.signal?.throwIfAborted();
-      if (dryRun) { out.push(`would ${what} ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`); continue; }
-      const seen = classifyAgentGet(run(l.herdr, ['agent', 'get', herdrName(l.name)], 30_000));
-      if (seen !== 'absent') { out.push(`skip ${l.name}: ${seen === 'live' ? 'running in herdr' : `could not check herdr on ${l.machine}`}`); continue; }
-      const r = startOne(l, run, tabs);
-      out.push(what === 'restore' ? r.line.replace(/^started /, 'restored ') : r.line);
-      if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
-      // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
-      // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
-      const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
-      if (kind === 'start failed') {
-        memory.failedAt.set(l.name, now);
-        await log(project, 'failed', l.name, kind);
-      } else if (kind) {
-        await log(project, 'blocked', l.name, r.blocked ? r.pane : `${kind}, pane ${r.pane}`);
-        if (!memory.blockedTold.has(l.name) && await tellLead(d, state, l, r.pane!, r.blocked ? 'dialog' : 'prompt', out)) memory.blockedTold.add(l.name);
-      }
-      // a restore is logged however it ended, so its 30-minute limit holds across failures and supervisor restarts
-      if (!kind || what === 'restore') await log(project, what, l.name, kind ?? l.role);
+      if (dryRun) out.push(`would ${what} ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
+      else await launch(what, l);
     }
   }
   for (const name of plan.close) {
     d.signal?.throwIfAborted();
     if (now - (memory.closeSkipAt.get(name) ?? -Infinity) < CLOSE_RETRY) continue;
     if (dryRun) out.push(`would close ${name}`);
-    else out.push(await closeOne(d, state, name, log));
+    else out.push((await closeOne(d, state, name, log)).line);
+  }
+  // #4332 (Q2970): a seat on an old agent or model whose new one this machine cannot start: kept, said once (restartTried)
+  for (const r of plan.refused) {
+    if (dryRun) { out.push(`would not restart ${r.session} on ${r.to}: ${r.why}`); continue; }
+    memory.restartTried.set(r.session, r.to);
+    out.push(`${r.session} runs an older setting than its seat, but ${r.to} cannot start here, so it keeps running: ${r.why}`);
+    await log(project, 'restart', r.session, `refused, ${r.to} cannot start: ${shortWhy(r.why)}`);
+  }
+  // an idle seat on an old setting: closed as an idle close is, then started under its name on the seat's setting. A close
+  // that did not happen (it took work, herdr lost it) is tried on a later tick; once closed, never again for this setting
+  for (const { launch: l, from, to } of plan.restart) {
+    d.signal?.throwIfAborted();
+    if (now - (memory.closeSkipAt.get(l.name) ?? -Infinity) < CLOSE_RETRY) continue;
+    if (dryRun) { out.push(`would restart ${l.name} (${from} to ${to})`); continue; }
+    const c = await closeOne(d, state, l.name, log);
+    out.push(c.line);
+    if (!c.gone) continue;
+    memory.restartTried.set(l.name, to);
+    await log(project, 'restart', l.name, `${from} to ${to}`);
+    d.signal?.throwIfAborted();
+    await launch('start', l);
   }
   // #3770: a seat the squad file no longer generates that stays open: said once per reason, never closed or freed here
   for (const l of plan.leaving) {
@@ -207,26 +238,26 @@ async function tell(d: Deps, to: string, text: string, out: string[]) {
 }
 
 // Mark closing, find its pane, re-check on a fresh statement, /exit (its agent adapter's close), wait for herdr to drop
-// the agent, close its pane.
-async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<string> {
+// the agent, close its pane. gone: the agent left herdr (#4332: only then does a restart start it again)
+async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<{ line: string; gone?: true }> {
   const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
-  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return `skip closing ${name}: it holds work or has no session`;
+  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return { line: `skip closing ${name}: it holds work or has no session` };
   const m = state.squad.machines[name.split('@')[1]!]?.herdr ?? null, hn = herdrName(name);
   let pane: string | undefined, status: string | undefined, s: Session | undefined;
   try { // a throw before /exit is sent (the re-check, herdr) clears the mark too
     try { const got = herdrJson(run, m, ['agent', 'get', hn], 30_000); pane = find(got, 'pane_id'); status = find(got, 'agent_status'); } catch {}
-    if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return `could not close ${name}: herdr does not show it`; }
+    if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return { line: `could not close ${name}: herdr does not show it` }; }
     // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
     s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
-    if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return `skip closing ${name}: it took work`; }
+    if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return { line: `skip closing ${name}: it took work` }; }
     // the agent running there now judges and closes it (#4002); one with no adapter yet is never closed
     let adapter: AgentAdapter;
-    try { adapter = getAdapter(s.agent ?? 'claude'); } catch (e) { await unmark(); return `skip closing ${name}: ${msg(e)}`; }
+    try { adapter = getAdapter(s.agent ?? 'claude'); } catch (e) { await unmark(); return { line: `skip closing ${name}: ${msg(e)}` }; }
     const seat = seatOf(state, name, adapter.kind, pane, s.machine);
-    if (status !== undefined && !(await adapter.readStatus(seat, { agent_status: status })).safeToClose) { await unmark(); return `skip closing ${name}: herdr shows it ${status}`; }
+    if (status !== undefined && !(await adapter.readStatus(seat, { agent_status: status })).safeToClose) { await unmark(); return { line: `skip closing ${name}: herdr shows it ${status}` }; }
     d.signal?.throwIfAborted(); // last moment before /exit: an abandoned tick sends none
-    if (await adapter.close(seat, run) !== 'sent') { await unmark(); return `could not close ${name}: /exit was not sent`; }
+    if (await adapter.close(seat, run) !== 'sent') { await unmark(); return { line: `could not close ${name}: /exit was not sent` }; }
   } catch (e) { await unmark(); throw e; }
   for (const until = clock() + CLOSE_WAIT; clock() < until;) { // wall time: one agent get can take 30 s
     await sleep(POLL);
@@ -234,10 +265,10 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
     if (classifyAgentGet(run(m, ['agent', 'get', hn], 30_000)) !== 'absent') continue;
     const closed = run(m, ['pane', 'close', pane], 30_000).status === 0;
     await log(state.project, 'close', name, s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
-    return closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`;
+    return { line: closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`, gone: true };
   }
   // /exit was sent and it may still be exiting: the mark stays and lapses in 5 minutes, so no card lands on it meanwhile
-  return `could not close ${name}`;
+  return { line: `could not close ${name}` };
 }
 
 // The PC runner: no beat for 3 minutes → start it in a herdr tab, at most once per 10 minutes, unless its log port is
@@ -339,7 +370,7 @@ if (import.meta.main) {
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
-    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map() };
+    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map() };
   let code = 0;
   for (;;) {
     try {

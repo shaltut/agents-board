@@ -24,7 +24,7 @@ const tick = (st: State, o: Partial<TickInput> = {}) => planTick({ state: st, he
 const names = (l: { name: string }[]) => l.map((x) => x.name);
 
 test('not supervised: empty plan', () => {
-  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [], leaving: [] });
+  assert.deepEqual(tick(state({ supervised: false, waiting: { builder: { main: 5 } } })), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [] });
 });
 
 test('starts up to the count', () => {
@@ -103,7 +103,7 @@ test('restore, down_again, herdr down, and no reuse of a holding name', () => {
   assert.deepEqual([again.restore, again.notes], [[], [{ what: 'down_again', session: 'sv-B1@macbook' }]]);
   assert.deepEqual(tick(state({ sessions: [{ ...down, last_restore: ago(10), down_again_logged: true }] })).notes, []);
   assert.equal(tick(state({ sessions: [{ ...down, last_restore: ago(31) }] })).restore.length, 1);
-  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [], leaving: [] });
+  assert.deepEqual(tick(state({ sessions: [down] }), { herdrDown: new Set(['macbook']) }), { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [] });
   const quiet = sess('sv-B2@macbook', 'builder', { last_event: ago(21) });
   const idleB2 = { herdrStatus: { 'sv-b2-macbook': 'idle' } };
   assert.deepEqual(tick(state({ sessions: [quiet] }), { ...idleB2, herdrDown: new Set(['macbook']) }).close, []);
@@ -272,4 +272,72 @@ test('pastSeatNames: every non-lead name the saved versions generated; one it ca
   const n = pastSeatNames('sv', [{}, old]);
   assert.ok(n.has('sv-R3@shaltoot') && n.has('sv-B3@macbook') && n.has('sv-O-kb@macbook') && n.has('sv-A1@macbook'));
   assert.ok(!n.has('orch@shaltoot') && !n.has('sv-B4@macbook'));
+});
+
+// #4332 (Q2970): the squad changed a seat's model or agent; the supervisor restarts the idle seats still on the old one
+const restarts = (p: { restart: { launch: { name: string } }[] }) => p.restart.map((r) => r.launch.name);
+const readyAll = { herdrStatus: { 'sv-b1-macbook': 'idle', 'sv-b2-macbook': 'idle', 'sv-r1-macbook': 'idle', 'orch-shaltoot': 'idle', 'foo-macbook': 'idle', 'sv-b3-macbook': 'idle' } };
+
+test('a seat on an old model restarts on the new one once idle 5 minutes; busy or not ready, it waits', () => {
+  const old = sess('sv-B1@macbook', 'builder', { model: 'opus', last_event: ago(6) }); // builders run sonnet now
+  const p = tick(state({ sessions: [old] }), readyAll);
+  assert.deepEqual([restarts(p), p.close, p.refused], [['sv-B1@macbook'], [], []]);
+  assert.deepEqual([p.restart[0]!.from, p.restart[0]!.to, p.restart[0]!.launch.model], ['opus', 'sonnet', 'sonnet']);
+  assert.ok(p.restart[0]!.launch.prompt.includes('--model sonnet') && p.restart[0]!.launch.prompt.endsWith('then cb next'));
+  const none = (o: Partial<Session>, t: Partial<TickInput> = readyAll) => assert.deepEqual(restarts(tick(state({ sessions: [{ ...old, ...o }] }), t)), [], JSON.stringify(o));
+  none({ last_event: ago(4) }); // under the 5-minute grace
+  for (const k of ['holds', 'questions', 'jobs', 'asks'] as const) none({ [k]: 1 }); // holds work: waits until idle
+  none({ closing: true });
+  none({ live: false });
+  none({}, { herdrStatus: { 'sv-b1-macbook': 'working' } }); // mid-turn
+  none({}, { ...readyAll, herdrDown: new Set(['macbook']) });
+  none({}, { ...readyAll, launched: new Set(['sv-B1@macbook']) });
+  none({ model: 'claude-sonnet-4-6' }); // a full model id that names the seat's model: on the right one
+  none({ model: 'SONNET' });
+  none({ model: null }); // no model known: not judged
+  // already restarted (or refused) for this setting in this run: never again; for an older setting: yes
+  none({}, { ...readyAll, restartTried: new Map([['sv-B1@macbook', 'sonnet']]) });
+  assert.deepEqual(restarts(tick(state({ sessions: [old] }), { ...readyAll, restartTried: new Map([['sv-B1@macbook', 'haiku']]) })), ['sv-B1@macbook']);
+  // idle 20 minutes with no waiting work: the idle close wins (its next start runs the new model); with work waiting it restarts
+  const quiet = { ...old, last_event: ago(21) };
+  const closed = tick(state({ sessions: [quiet] }), readyAll);
+  assert.deepEqual([closed.close, restarts(closed)], [['sv-B1@macbook'], []]);
+  assert.deepEqual(restarts(tick(state({ sessions: [quiet], waiting: { builder: { main: 1 } } }), readyAll)), ['sv-B1@macbook']);
+  assert.deepEqual(restarts(tick(state({ supervised: false, sessions: [old] }), readyAll)), []);
+});
+
+test('an agent change restarts too; a setting this machine cannot start is refused, said once, and makes no loop', () => {
+  const codexB1 = { ...squad, roles: { ...squad.roles, builder: { ...squad.roles.builder, seats: { '1': { agent: 'codex' as const, model: 'gpt-6.1-sol' } } } } };
+  const st = (o: Partial<Session> = {}): State => ({ ...state({ sessions: [sess('sv-B1@macbook', 'builder', { model: 'sonnet', agent: 'claude', last_event: ago(6), ...o })] }), squad: codexB1 });
+  const p = tick(st(), readyAll);
+  assert.deepEqual([restarts(p), p.restart[0]?.from, p.restart[0]?.to, p.restart[0]?.launch.agent], [['sv-B1@macbook'], 'sonnet', 'codex/gpt-6.1-sol', 'codex']);
+  // a session row with no agent named runs claude: the same restart
+  assert.deepEqual(restarts(tick(st({ agent: null, model: null }), readyAll)), ['sv-B1@macbook']);
+  const notInstalled = (l: { agent: string }) => (l.agent === 'codex' ? 'agent "codex" is not installed yet' : null);
+  const r = tick(st(), { ...readyAll, startProblem: notInstalled });
+  assert.deepEqual([restarts(r), r.refused], [[], [{ session: 'sv-B1@macbook', to: 'codex/gpt-6.1-sol', why: 'agent "codex" is not installed yet' }]]);
+  // said at once even while busy (nothing is closed either way)
+  assert.equal(tick(st({ holds: 1 }), { ...readyAll, startProblem: notInstalled }).refused.length, 1);
+  // once refused (restartTried), nothing more: no restart, no second refusal
+  const again = tick(st(), { ...readyAll, startProblem: notInstalled, restartTried: new Map([['sv-B1@macbook', 'codex/gpt-6.1-sol']]) });
+  assert.deepEqual([restarts(again), again.refused], [[], []]);
+  // the right agent and model: nothing
+  assert.deepEqual(restarts(tick(st({ agent: 'codex', model: 'gpt-6.1-sol' }), readyAll)), []);
+});
+
+test('restarts: 2 a tick from the shared start budget, after starts; never the lead, a hand-started seat or a leaving one', () => {
+  const onHaiku = (n: string, role = 'builder') => sess(n, role, { model: 'haiku', last_event: ago(6) });
+  const three = [onHaiku('sv-B1@macbook'), onHaiku('sv-B2@macbook'), onHaiku('sv-R1@macbook', 'reviewer')];
+  assert.deepEqual(restarts(tick(state({ sessions: three }), readyAll)), ['sv-B1@macbook', 'sv-B2@macbook']);
+  assert.deepEqual(restarts(tick(state({ sessions: three }), { ...readyAll, startsLeft: 1 })), ['sv-B1@macbook']);
+  assert.deepEqual(restarts(tick(state({ sessions: three }), { ...readyAll, startsLeft: 0 })), []);
+  // waiting work starts first: the one start left goes to the architect
+  const first = tick(state({ sessions: three, waiting: { architect: 1 } }), { ...readyAll, startsLeft: 1 });
+  assert.deepEqual([names(first.start), restarts(first)], [['sv-A1@macbook'], []]);
+  // the Mac at its cap: a restart frees its own slot, so it still goes ahead
+  assert.deepEqual(restarts(tick(state({ sessions: [three[0]!] }), { ...readyAll, macLive: 8 })), ['sv-B1@macbook']);
+  // the lead on the wrong model, idle and holding nothing; a hand-started builder; a seat the squad dropped (B3 at count 2)
+  const lead = sess('orch@shaltoot', 'lead', { machine: 'shaltoot', model: 'sonnet', last_event: ago(90) });
+  const p = tick(state({ sessions: [lead, onHaiku('foo@macbook'), onHaiku('sv-B3@macbook')] }), { ...readyAll, pastSeats: past });
+  assert.deepEqual([restarts(p), p.refused], [[], []]);
 });

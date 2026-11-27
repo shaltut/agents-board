@@ -345,6 +345,14 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
   the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
   under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
+- restarts a squad seat running another agent or model than the squad file now names for it (#4332, Q2970: the
+  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them) once it is
+  idle as above and quiet 5 minutes: it closes it as above, then starts it under the same name on the new setting, at
+  most 2 a tick, each taking one of the 3 starts (waiting work starts first). Busy, it waits until idle. Never the lead,
+  a hand-started name or a leaving seat; one idle 20 minutes with no waiting work is simply closed. Each restart is a
+  `restart` board event (`restart <seat> (opus to sonnet)`). A setting its machine cannot start (an agent not installed,
+  a model its adapter refuses) is refused once per setting per supervisor run, logged, and the seat keeps running; a
+  seat restarted once for a setting is not restarted again for it in that run;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
