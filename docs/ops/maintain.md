@@ -59,6 +59,11 @@ Then the workers, right away, because their `cb` must match the schema:
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
   broke every `cb` on the Mac for 15 minutes.
+- **Check each worker** after its update (#4352): build the manifest in the updated checkout on the PC
+  (`node cli/release.ts --out /tmp/release.json`; it refuses a tree with uncommitted release files), copy it next to
+  the archive, and run `cb doctor --manifest <file>` on the worker. It names every missing or changed file, checks the
+  installed guard and its hook (as `node kit/guard/install.mjs --check`), writes nothing, never connects to the board,
+  and exits 0 only when everything matches.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac
@@ -163,15 +168,15 @@ turn in the session's transcript, and in its subagents' transcripts. It then sen
 Switching it on changes `~/.claude`, which every Claude session on the machine reads: **only with Ahmed's yes**. The
 board's schema must already have `cb.session_usage` (the board applies it on start, after a backup).
 
-1. **Find the real node.** Use the node executable itself, not a version-manager shim: a shim (Volta's
-   `C:/Program Files/Volta/node.exe`, for one) starts another process on every Stop. Absolute paths only: a bare
-   `node` missing from the hook shell's PATH just fails, silently.
-   - **PC:** `C:/Program Files/nodejs/node.exe` when Node came from the installer. Check it with
-     `"C:/Program Files/nodejs/node.exe" --version` (24.x).
-   - **Mac:** `command -v node` in a login shell, then `realpath` of it if it is a link (Homebrew on Apple silicon:
-     `/opt/homebrew/bin/node`).
-2. **Add the hook.** In `~/.claude/settings.json`, add a `Stop` entry that runs the checkout's hook. Write Windows
-   paths with forward slashes.
+1. **Pick the node.** On each machine, use the same node path that machine's SessionStart hook entry in
+   `~/.claude/settings.json` already uses: it is known to work from the hook shell. It must be an absolute path to the
+   node executable itself (a bare `node` missing from the hook shell's PATH just fails, silently), not a
+   version-manager shim such as Volta's `C:/Program Files/Volta/node.exe`, which starts another process on every Stop.
+   Examples only:
+   - **PC:** the installer's `C:/Program Files/nodejs/node.exe`.
+   - **Mac:** nvm's `/Users/<you>/.nvm/versions/node/v24.<x>/bin/node`, or Homebrew's `/opt/homebrew/bin/node`.
+2. **Add the hook.** In `~/.claude/settings.json`, add a `Stop` entry that runs the checkout's hook, with the node
+   from step 1. Write Windows paths with forward slashes. The node paths below are the examples from step 1.
    - **PC** (checkout `C:/work/claude-board`):
 
      ```json
@@ -181,7 +186,7 @@ board's schema must already have `cb.session_usage` (the board applies it on sta
    - **Mac** (checkout `~/Work/claude-board`, written out in full, since `~` is not expanded inside the quotes):
 
      ```json
-     "Stop": [{ "hooks": [{ "type": "command", "command": "\"/opt/homebrew/bin/node\" \"/Users/<you>/Work/claude-board/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
+     "Stop": [{ "hooks": [{ "type": "command", "command": "\"/Users/<you>/.nvm/versions/node/v24.<x>/bin/node\" \"/Users/<you>/Work/claude-board/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
      ```
 
    If `Stop` already has entries, add this one beside them. Existing hooks in `hooks/` are wired the same way: they run

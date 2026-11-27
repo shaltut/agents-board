@@ -19,7 +19,9 @@ import { titleBody } from './title-body.ts';
 import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
+import { cardBlock, resumeText } from './resume-text.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { doctorCmd } from './doctor.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -35,6 +37,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' },
+  root: { type: 'string' }, manifest: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -77,7 +80,7 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
 const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
 let sql: any = direct;
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
+if (pane && !process.env.PGAPPNAME && cmd !== 'help' && cmd !== 'doctor' && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
@@ -236,17 +239,6 @@ function printBrief(b: any) {
   sec('ANSWERED — DELIVER THESE', b.answered_pending, (q) =>
     `Q${q.id} → ${q.asked_by}${q.reply_to?.pane ? ` (pane ${q.reply_to.pane}@${q.reply_to.machine})` : ''}: ${q.answer}${q.was != null ? ` (CHANGED, was: ${q.was})` : ''}`);
   sec('RULES & FACTS', b.memory?.entries ?? [], memLine);
-}
-
-/** A staged card's block for cb resume and cb next: the words, the finish line, the page it is built from, notes, questions. */
-function cardBlock(c: any, head = true): string {
-  const ind = (s: string) => s.split('\n').map((l) => `    ${l}`).join('\n');
-  return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`,
-    c.part && `  your part: ${c.part.repo}`, c.parts && `  parts: ${c.parts}`, `  finish with: ${c.finish}`,
-    c.page && `  page (v${c.page.version}${c.page.approved ? ', approved' : ''}):\n${ind(c.page.body)}`,
-    c.notes.length && `  notes:\n${c.notes.map((n: any) => `    ${new Date(n.at).toISOString().slice(0, 16).replace('T', ' ')} ${n.actor}: ${flat(n.summary)}`).join('\n')}`,
-    c.questions.length && `  questions:\n${c.questions.map((q: any) => `    Q${q.id}${q.status === 'answered' ? ' answered:' : ''} ${flat(q.body)}`).join('\n')}`,
-  ].filter(Boolean).join('\n');
 }
 
 /** cb pass, fail and stage: where the card went and who takes it (cb.next_step), as a line and as json. */
@@ -435,7 +427,8 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 }
 
 async function run(): Promise<unknown> {
-  await resolveActor();
+  // cb doctor looks at this machine only, never the board: it must work on a stale worker and while the board is down
+  if (cmd !== 'doctor') await resolveActor();
   if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
@@ -835,9 +828,7 @@ ${body}`, json: pg };
     }
     case 'resume': {
       const r: any = await callFn('resume', { actor });
-      const roleLine = r.role ? `\n\nYour role: cb role ${r.role}` : '';
-      return { out: (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
-        : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine, json: r };
+      return { out: resumeText(r), json: r };
     }
     case 'squad': {
       if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->  |  cb squad up <project> [--dry-run]');
@@ -871,6 +862,8 @@ ${body}`, json: pg };
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'supervise.ts'), ...flags], { stdio: 'inherit' });
       return { code: r.status ?? 1 };
     }
+    case 'doctor':
+      return doctorCmd({ root: o.root, manifest: o.manifest });
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');
       const text = await callFn('role_text', { role: args[0] }) as string;

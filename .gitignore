@@ -5,3 +5,4 @@ dist/
 .pgdata/
 web/dist/
 .playwright-mcp/
+release.json

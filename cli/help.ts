@@ -25,10 +25,10 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       eg: 'cb iam W3@macbook iris --role builder --area claims --model sonnet',
       more: 'Needs a herdr pane ($HERDR_PANE_ID). Without one, put --as <name> on every command (or export CB_ACTOR=<name>) and name the project in each command.' },
     role: { reads: true, use: 'cb role <role> [--json]', topic: 'start',
-      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start and again after a compaction. Read-only.',
+      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start. After a compaction or a resume, the SessionStart hook prints it in a bound pane by itself (with cb resume); run it again if it was cut or not printed. Read-only.',
       eg: 'cb role builder' },
     resume: { reads: true, use: 'cb resume [--json]', topic: 'start',
-      does: 'After a compaction or restart: every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
+      does: 'After a compaction or restart (after a compaction or a resume the SessionStart hook prints it by itself in a bound pane): every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
       eg: 'cb resume' },
     relay: { use: 'cb relay [--agent <agent>] [--restart]', topic: 'relay',
       does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. One relay per pane: the SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name. A relay that starts some other way (the hook, a restart after a code change) and cannot serve the agent in its pane tells the project of that pane once, as a new bug is routed (its leads seen today, else its recent sessions), and exits 1; cb relay then fails instead of saying the relay is on.',
@@ -229,6 +229,11 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     runner: { use: 'cb runner',
       does: 'The PC only: starts the job runner in this terminal (a herdr pane), reading ~/.claude-board/runner.json. Stays up; Ctrl+C stops it. Setup: docs/ops/maintain.md, "PC job runner".',
       eg: 'cb runner' },
+  }],
+  ['CHECK THIS MACHINE', {
+    doctor: { use: 'cb doctor [--root <dir>] [--manifest <file>] [--json]',
+      does: "Is this machine's cb what the release says? Compares the release files (bin cli db prompts server hooks kit) under <dir> (default: this cb's checkout) with a release manifest: --manifest, else release.json in <dir>; build one in an up-to-date clone with node cli/release.ts. Then checks that the installed guard (~/.claude-board/guard) matches <dir>'s kit/guard and that the PreToolUse hook in ~/.claude/settings.json runs it (6 probes), as node kit/guard/install.mjs --check does. Prints each missing or changed file, the release and this checkout's commit, and exits 1 when any check fails or could not run (no manifest included). Writes nothing and never connects to the board, so it works while the board is down. Fixing the guard or the hook is Ahmed's: ask him.",
+      eg: 'cb doctor --manifest ~/release.json' },
   }],
 ];
 
