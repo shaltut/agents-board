@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, onProject, TEST_URL } from './helpers.ts';
@@ -76,6 +76,17 @@ test('cb ask again while the same question is open returns it; any field that di
   assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'yes']), /^Q9 is already/, 'a follow-up, resent');
   assert.match(ask(['Then which day?', '-o', 'Mon', '-o', 'Tue', '--after', 'Q3', '--if', 'No']), /^Q10 posted/, 'another --if');
   assert.equal((await sql`select count(*)::int as n from cb.questions`)[0].n, 10);
+  // pictures: always posted, so new ones are never dropped behind an old question's
+  const dir = mkdtempSync(join(tmpdir(), 'cb-3331-'));
+  const png = (name: string, tail: string) => { const p = join(dir, name); writeFileSync(p, Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from(tail)])); return p; };
+  try {
+    assert.match(ask(['Which layout?', '-o', 'A', '-o', 'B', '-i', `Now=${png('a.png', 'a')}`]), /^Q11 posted with 1 picture/);
+    assert.match(ask(['Which layout?', '-o', 'A', '-o', 'B', '-i', `Now=${png('b.png', 'b')}`]), /^Q12 posted with 1 picture/, 'new pictures, new question');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  // a bad id is refused as cb.ask refuses it, never read as "no parent" and matched to a top-level question
+  const bad = cb(['ask', 'demo', 'What is the sandbox URL?', '--free', '--after', 'Qx2']);
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /bad id/);
 });
 
 test('bad status exits 1 with message', async () => {

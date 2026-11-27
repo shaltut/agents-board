@@ -266,7 +266,7 @@ test('cb ask: a stored question exits 0 even when the board drops right after, a
   const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
   // a relay whose board connection drops once the question is in: the insert runs in cb's own transaction, the
   // reads after it come through here and time out, as seen live ("board unreachable (CONNECT_TIMEOUT)", then a duplicate)
-  const flaky: any = (strings: any, ...values: any[]) => Array.isArray(strings?.raw) && strings.join('$').includes('from cb.sessions where actor')
+  const flaky: any = (strings: any, ...values: any[]) => Array.isArray(strings?.raw) && /from cb\.sessions where actor|select parent_id, if_answer/.test(strings.join('$'))
     ? Promise.reject(Object.assign(new Error('write CONNECT_TIMEOUT'), { code: 'CONNECT_TIMEOUT' })) : relaySql(strings, ...values);
   flaky.unsafe = (...a: any[]) => relaySql.unsafe(...a);
   const stop = await serveBridge(flaky, seatKey('testbox', pane), TEST_URL, undefined,
@@ -291,5 +291,9 @@ test('cb ask: a stored question exits 0 even when the board drops right after, a
     await sql`select cb.withdraw('1', 'W5@test')`;
     const third = await ask('-o', 'Yes', '-o', 'No');
     assert.match(third.out, /^Q3 posted/, third.err);
+    // a follow-up: its parent read fails too, and the message falls back to what was asked
+    const follow = await ask('-o', 'Yes', '-o', 'No', '--after', 'Q2', '--if', 'Yes');
+    assert.equal(follow.code, 0, follow.err);
+    assert.match(follow.out, /^Q4 posted as a follow-up to Q2: it opens only if Q2 is answered "Yes"/);
   } finally { await stop(); }
 });
