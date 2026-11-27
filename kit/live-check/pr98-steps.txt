@@ -1,0 +1,16 @@
+# The PR 98 review's 14-step live check (#4610, #4612), one numbered line each: check.mjs reads every line that
+# starts with a number. PC: find a process by its pid, never by image name.
+1. squad up prints the seat started; the prestart line says `cb-seat-ready`; `agent start` succeeds without an `agent_pane_busy` retry caused by the relay (Windows especially).
+2. Exactly one relay process for the pane: `<tmp>/cb-relay-<key>.pid` holds one live pid whose args are only `relay.ts --child --pane <pane> --agent <kind>`; no second relay for that pane (PC: look it up by that pid, never by image name; Mac: `ps -o pid,args | grep relay.ts`).
+3. The relay log shows `relay <ver> up for <pane>@<machine>` with `<machine>` the same string as the seat name's machine and the OpenCode endpoint's, then `herdr agent in this pane: <the seat's herdr name>` (codex, agy, OpenCode), and no repeating `check failed` lines after the seat's `cb iam`.
+4. The board: the seat's row has actor = the seat name, agent = its kind, last_seen renewing at least every 30 s.
+5. Idle seat: one `cb tell <seat> '<unique made-up text>'` of two or more lines arrives as exactly one new turn, the lines intact (not split into several submissions), and the relay log says `pushed ... 1 messages`. Same for one answer to a question the seat asked, and one note on its card by someone else.
+6. Busy seat: a `cb tell` sent while the seat is mid-turn arrives once, the turn is not broken, and the seat acts on it (Codex steer or queue; agy; OpenCode `prompt_async` on a busy session). Say what each CLI did.
+7. A seat at a dialog (if one can be produced): the relay log shows the delivery refused and retried, nothing typed into the dialog, and the message arrives once after.
+8. Exit: `/exit` the agent, then close the pane: the relay log says `agent gone; exiting` within about 5 s, the lock file is empty, no relay process is left, and the row stops renewing (ages out in 90 s).
+9. Failed start: a seat whose CLI exits at start (for example a bad model name): codex and OpenCode relays leave within about 3 minutes; **agy too (the I1 fix)**; no `<pane>@<machine>` row keeps renewing.
+10. squad up run again: the seat is skipped and there is still one relay. A second manual `cb relay --agent <kind>` for the same pane (from a shell with that HERDR_PANE_ID) exits and leaves one relay.
+11. A Claude seat in the same squad: its relay log and behaviour as before; nothing is typed into it while it is quiet; one relay for its pane.
+12. No secret in any relay's args or log (no password, token or database URL).
+13. PC (after the I2 fix): a Codex and an agy seat sit idle for 2 minutes and no console window opens on the PC screen.
+14. Restart in the same pane: after `/exit`, start the agent again in that pane: either it has a relay (log and heartbeat) or the gap is accepted and written in `cb help relay`; say which.
