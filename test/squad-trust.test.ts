@@ -2,7 +2,7 @@
 // guard's block. Pure: no database, and never the real home folder (every file is under a temp HOME).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ADAPTERS } from '../cli/agents/index.ts';
@@ -95,21 +95,28 @@ test('squadTrust: writes each agent\'s entry once under the given home; a second
   try {
     put(h, CLAUDE, JSON.stringify({ projects: {} }, null, 2));
     put(h, CODEX, 'model = "gpt"\n');
+    // the seat folder: a real one (the squad file's path is resolved to its real folder before anything is written)
+    const repo = join(h, 'Work', 'demo');
+    mkdirSync(repo, { recursive: true });
+    const real = realpathSync.native(repo), key = real.replace(/\\/g, '/');
+    const sq = { ...SQUAD, machines: { ...SQUAD.machines, pc: { herdr: null, repo: `${repo}/`, board: 'C:/b' } } };
     // agy never ran here: its file is missing, so it is named, not made
-    const call = async (fn: string) => (fn === 'squad_get' ? SQUAD : null);
-    const dry = await squadTrust('demo', { machine: 'pc', dryRun: true, home: h, platform: 'win32', env: {}, callFn: call });
-    assert.match(dry, /would add claude: C:\/w\/demo/);
+    const call = async (fn: string) => (fn === 'squad_get' ? sq : null);
+    const o = { machine: 'pc', home: h, platform: process.platform, env: {}, thisMachine: 'pc', callFn: call };
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const dry = await squadTrust('demo', { ...o, dryRun: true });
+    assert.match(dry, new RegExp(`would add claude: ${esc(real)}`));
     assert.deepEqual(JSON.parse(readFileSync(join(h, CLAUDE), 'utf8')), { projects: {} });
-    const out = await squadTrust('demo', { machine: 'pc', home: h, platform: 'win32', env: {}, callFn: call });
-    assert.match(out, /added claude: C:\/w\/demo/);
-    assert.match(out, /added codex: C:\/w\/demo/);
+    const out = await squadTrust('demo', o);
+    assert.match(out, new RegExp(`added claude: ${esc(real)}`));
+    assert.match(out, new RegExp(`added codex: ${esc(real)}`));
     assert.match(out, /skip agy: .*settings\.json not found: start agy once on this machine/);
     assert.match(out, /on mac: cb squad trust demo --machine mac/);
-    assert.equal(JSON.parse(readFileSync(join(h, CLAUDE), 'utf8')).projects['C:/w/demo'].hasTrustDialogAccepted, true);
-    assert.match(readFileSync(join(h, CODEX), 'utf8'), /\[projects\.'c:\\w\\demo'\]\ntrust_level = "trusted"/);
+    assert.equal(JSON.parse(readFileSync(join(h, CLAUDE), 'utf8')).projects[key].hasTrustDialogAccepted, true);
+    assert.equal(ADAPTERS.codex.trustSpec([], process.platform).preseed!.state(readFileSync(join(h, CODEX), 'utf8'), real), 'trusted');
     assert.ok(!existsSync(join(h, AGY)));
-    const again = await squadTrust('demo', { machine: 'pc', home: h, platform: 'win32', env: {}, callFn: call });
-    assert.match(again, /already claude: C:\/w\/demo/);
+    const again = await squadTrust('demo', o);
+    assert.match(again, new RegExp(`already claude: ${esc(real)}`));
     assert.doesNotMatch(again, /added/);
   } finally { rmSync(h, { recursive: true, force: true }); }
 });
@@ -150,6 +157,36 @@ test('squadTrust: refused inside a squad seat, and the machine must be named whe
   const two = { ...SQUAD, machines: { a: { herdr: null, repo: '/a', board: '/b' }, b: { herdr: null, repo: '/c', board: '/b' } } };
   await assert.rejects(squadTrust('demo', { home: '/nowhere', platform: 'win32', env: {}, callFn: async () => two }), /--machine/);
   await assert.rejects(squadTrust('demo', { home: '/nowhere', platform: 'win32', env: {}, callFn: async () => null }), /no squad/);
+  // review 89 L4: on a machine the squad names, --machine may not name another one (its paths would be trusted here)
+  await assert.rejects(squadTrust('demo', { machine: 'pc', home: '/nowhere', platform: 'win32', env: {}, thisMachine: 'MAC', callFn: call }), /--machine pc is not this machine \(mac\)/);
+});
+
+test('squadTrust: only a real seat folder is trusted; roots, shares, home and its parents, . and .. parts and missing folders are refused (review 89 M2)', async () => {
+  const h = home();
+  try {
+    put(h, CLAUDE, JSON.stringify({ projects: {} }, null, 2));
+    const ok = join(h, 'Work', 'demo');
+    mkdirSync(ok, { recursive: true });
+    const bad = [process.platform === 'win32' ? 'C:/' : '/', '//srv/share', `${ok}/../demo`, `${ok}/./x`, h, dirname(h), join(h, 'missing')];
+    const sq = { machines: { pc: { herdr: null, board: '/b' } }, repos: Object.fromEntries([ok, ...bad].map((p, i) => [`r${i}`, { home: i === 0, paths: { pc: p } }])),
+      roles: { builder: { count: 1, model: 'sonnet', machine: 'pc' } }, areas: [] };
+    const out = await squadTrust('demo', { home: h, platform: process.platform, env: {}, thisMachine: 'pc', callFn: async () => sq });
+    for (const p of bad) assert.ok(out.split('\n').some((l) => l.startsWith(`refused ${p}: `)), `${p}\n${out}`);
+    const keys = Object.keys(JSON.parse(readFileSync(join(h, CLAUDE), 'utf8')).projects);
+    assert.deepEqual(keys, [realpathSync.native(ok).replace(/\\/g, '/')]);
+  } finally { rmSync(h, { recursive: true, force: true }); }
+});
+
+test('codex: a folder written by hand as an inline or dotted entry is left alone, never given a second table (review 89 L1)', () => {
+  const w = pre('codex', 'win32');
+  for (const text of [`[projects]\n'c:\\w\\x' = { trust_level = "trusted" }\n`, `projects.'c:\\w\\x'.trust_level = "trusted"\n`]) {
+    assert.equal(w.state(text, 'C:/w/x'), 'other', text);
+    assert.throws(() => w.add(text, 'C:/w/x'), /by hand/);
+  }
+});
+
+test('claude: a projects that is not an object is refused, never reported added (review 89 L3)', () => {
+  assert.throws(() => pre('claude', 'win32').add('{"projects":[]}', 'C:/w/x'), /not an object/);
 });
 
 test('squad up: a seat whose folder is not trusted for its agent stops before any pane, naming cb squad trust', async () => {
@@ -174,7 +211,10 @@ test('squad up: a seat whose folder is not trusted for its agent stops before an
 
 test('guard: no role runs cb squad trust; a message that mentions it is text; a hand-started session may', () => {
   for (const role of ['lead', 'builder', 'reviewer']) {
-    for (const cmd of ['cb squad trust demo', 'cd x && cb --as me squad trust demo --machine pc', 'bash -c "cb squad trust demo"']) {
+    for (const cmd of ['cb squad trust demo', 'cd x && cb --as me squad trust demo --machine pc', 'bash -c "cb squad trust demo"',
+      // review 89 M1: cb takes options anywhere, so a flag between squad and trust still runs it
+      'cb squad --machine pc trust iris', 'cb squad --machine=pc trust iris', 'cb squad -- trust iris', 'cb --tag squad squad trust x',
+      'cb squa`d trust x', 'CB_ROLE= CB_AGENT= cb squad --machine pc trust x', 'cb SQUAD Trust x']) {
       const r = evaluate({ tool: 'shell', command: cmd, role });
       assert.equal(r.allow, false, `${role}: ${cmd}`);
       assert.match(r.reason, /cb squad trust/);

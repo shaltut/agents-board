@@ -802,10 +802,14 @@ export function editPathForms(path, cwd, fs) {
 // shell runs it (runnerArg), so a message or a grep that names it is text. Kept apart from the fence on purpose.
 const CB_NAMES = new Set(['cb', 'cb.cmd', 'cb.ps1', 'cb.ts', 'cb.mjs', 'cb.js']);
 const SQUAD_TRUST = 'cb squad trust writes the agents\' own config files to mark folders trusted (#4575): Ahmed runs it once in his own terminal, never a squad seat. A folder that needs it: cb ask';
+// Fail closed (review 89 M1): cb takes its options anywhere (cb squad --machine pc trust x, cb --tag squad squad trust x),
+// so any cb command holding both words is blocked, in any case. A PowerShell backtick escape inside a word (squa`d) is
+// dropped first, as pwsh does.
 function squadTrustRun(command) {
-  return scanCommands(command, CB_NAMES, (w, i) => {
-    for (let j = i + 1; j < w.length - 1; j++) if (w[j] === 'squad') return w[j + 1] === 'trust' ? SQUAD_TRUST : null;
-    return null;
+  return scanCommands(String(command ?? '').replace(/`(?=\w)/g, ''), CB_NAMES, (w, i) => {
+    let squad = false, trust = false;
+    for (let j = i + 1; j < w.length; j++) { const x = w[j].toLowerCase(); squad ||= x === 'squad'; trust ||= x === 'trust'; }
+    return squad && trust ? SQUAD_TRUST : null;
   }, runnerArg);
 }
 
