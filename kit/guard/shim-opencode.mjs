@@ -43,7 +43,7 @@ export function parseOpencodeInput(raw) {
     return { ok: true, tool: 'shell', command: p.args.command };
   }
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', args: p.args };
-  if (READ_TOOLS.has(name)) return { ok: true, tool: 'read', args: p.args };
+  if (READ_TOOLS.has(name)) return { ok: true, tool: 'read', args: p.args, name };
   if (name === 'question') return { ok: true, tool: 'ask' };
   return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(p.tool)).slice(0, 80)}: this guard reads bash, powershell, edit, write, patch, apply_patch, multiedit, read, grep, glob, list and question` };
 }
@@ -58,6 +58,9 @@ export function runOpencodeShim(raw, env = process.env) {
     // CB_AGENT without CB_ROLE blocks (a broken seat launch, #4002); an edit carries its targets for the fence and secret rule
     const agent = String(env.CB_AGENT ?? '').trim() || null;
     const paths = p.tool === 'edit' || p.tool === 'read' ? core.editTargets(p.args ?? null) : undefined;
+    // a file glob names files too: grep's include and glob's pattern (grep's own pattern is the text searched for)
+    const glob = p.tool === 'read' && isObject(p.args) ? (p.name === 'grep' ? p.args.include : p.name === 'glob' ? p.args.pattern : undefined) : undefined;
+    if (typeof glob === 'string' && glob.trim()) paths.push(glob.trim());
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';

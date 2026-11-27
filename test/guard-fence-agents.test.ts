@@ -75,6 +75,11 @@ test('OpenCode read tools: a secret file is blocked for a seat; other reads, the
   }
   assert.match(String(opencode('read', { filePath: '/tmp/cb-seat-0a1b2c3d4e5f.opencode.json' }, OPENCODE)), /secret file/);
   assert.equal(opencode('read', { filePath: '/home/someone/.codex/hooks.json' }, OPENCODE), true);
+  // a file glob: grep's include and glob's pattern; grep's pattern is the searched text, not a file
+  assert.match(String(opencode('grep', { pattern: 'API', include: '**/.env' }, OPENCODE)), /secret file/);
+  assert.match(String(opencode('glob', { pattern: '.env*' }, OPENCODE)), /secret file/);
+  assert.equal(opencode('grep', { pattern: '.env', include: '*.ts' }, OPENCODE), true);
+  assert.equal(opencode('glob', { pattern: 'src/**/*.ts' }, OPENCODE), true);
 });
 
 test('shell writes to another agent\'s hook or config file are fenced for every shim; reads pass', () => {
