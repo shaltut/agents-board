@@ -28,10 +28,9 @@ and Ahmed's view of what you do. Keep it true at all times. Use the `cb` command
     - `cb log <id> "<what happened>"`: findings worth reading in the morning
     - `cb move <id> review "<note>"`: when it needs Ahmed's eyes
     - `cb done <id> "<one-line summary>" --pr <url> --commit <sha>`: when finished
-11. Bugs: found a bug in your project's code outside your task? File it, then keep working on your task
-    unless it blocks you: `cb bug <project> "<title>" -b "<what happened, how to reproduce, expected vs actual>"`.
-    The orchestrator assigns it. A problem with Claude Board itself (cb, the relay, the web board):
-    `cb bug claude-board "<title>" -b "..."`. You are its test user: report what confused you, too.
+11. Bugs: found a fault outside your task? Read `cb help bug` first (duplicates, Ahmed's recent changes, which
+    project, what to write), then `cb bug <project> "<title>" -b "..."` and keep working unless it blocks you; the
+    orchestrator triages it. Claude Board's own faults go to `claude-board`: you are its test user, report confusion too.
 12. The shared DB test lock lives on the board: `cb lock take db` before a run that needs it (exit 0 = yours; exit 2 = queued, so do not start: it queues
     you if taken; a message says when it is yours), `cb lock release db` the moment the run ends.
 13. Epics and blockers. Ahmed groups tasks into epics (E3, `cb epics`); their order is a plan, not a lock.

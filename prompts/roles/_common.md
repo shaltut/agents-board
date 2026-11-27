@@ -16,5 +16,6 @@ You are one session in a squad. Claude Board is the source of work and Ahmed's v
 - Questions for Ahmed go through `cb ask <project> "<q>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>"`.
   Never use an interactive ask-user tool (AskUserQuestion, etc.), never wait: keep working on something else.
 - Ask a teammate with `cb tell <name> "<message>"`. Work a shared problem out in `cb huddle open "<topic>" <session>...`.
-- Found a bug outside your card? `cb bug <project> "<title>" -b "<how to reproduce, expected, actual>"`, then carry on.
+- Found a fault outside your card? Read `cb help bug` first (duplicate check, Ahmed's recent changes, which project,
+  what a report holds), then `cb bug <project> "<title>" -b "..."` and carry on; the lead triages it.
 - Check what is already ruled before you ask: `cb mem find "<words>"`.
