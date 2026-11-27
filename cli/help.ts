@@ -31,7 +31,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. One relay per pane: the SessionStart hook usually starts it; running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name.',
       eg: 'cb relay' },
     brief: { use: 'cb brief [project] [--tag <tag>] [--type <type>]',
-      does: 'The project at a glance: Ahmed\'s active goals, in progress, next, blocked, review, waiting on Ahmed, broadcasts, answers to deliver. --tag / --type filter it (--type bug = open bugs).',
+      does: 'The project at a glance: Ahmed\'s active goals, in progress, next, blocked, review, waiting on Ahmed, broadcasts, answers to deliver. --tag / --type filter it (--type bug = open bugs). With --json each card also carries stage and stage_words in a pipeline project (null otherwise): a Next card at merge or qa is already built, not build work.',
       eg: 'cb brief --type bug' },
     help: { use: 'cb help [topic|command]',
       does: 'This manual. A topic or a command name prints the detailed page; an unknown name lists what exists.',
