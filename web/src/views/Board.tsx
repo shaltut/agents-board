@@ -8,11 +8,10 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { BellRing, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, usePipeline, useTasks, type Status, type ListTask } from '@/lib/api'
+import { rpc, useTasks, type Status, type ListTask } from '@/lib/api'
 import { STATUS } from '@/lib/format'
 import { bandRank, byQueue, dropIndex } from '@/lib/rank'
-import { go, href, isOwner, type Route } from '@/lib/route'
-import { useWho } from '@/components/Account'
+import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
 import { StatusDot } from '@/components/Chips'
 import { TaskCard } from '@/components/TaskCard'
@@ -95,20 +94,6 @@ function PingAll({ tasks }: { tasks: ListTask[] }) {
   )
 }
 
-/** The pipeline switch lives on Project settings (#4332): the Board says whether it is on and links there, for the owner
- *  only (the page is hidden from other admins). */
-function PipelineLink({ project }: { project: string }) {
-  const { data: who } = useWho()
-  const on = usePipeline(project)
-  if (!isOwner(who)) return null
-  return (
-    <p className="mb-2 text-[13px] text-muted-foreground">
-      Squad pipeline: {on ? 'on' : 'off'} ·{' '}
-      <a href={href({ view: 'settings', project })} className="underline-offset-4 hover:text-foreground hover:underline">Project settings</a>
-    </p>
-  )
-}
-
 export function Board({ route }: { route: Route }) {
   const qc = useQueryClient()
   const { data = [], isLoading } = useTasks(route.project)
@@ -155,7 +140,6 @@ export function Board({ route }: { route: Route }) {
   return (
     <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onStart} onDragEnd={onEnd} onDragCancel={() => setActive(null)}>
       <h1 className="sr-only">Board</h1>
-      {route.project && <PipelineLink project={route.project} />}
       <div className="-mx-4 grid auto-cols-[minmax(15.5rem,1fr)] grid-flow-col gap-3 overflow-x-auto px-4 pb-4 snap-x snap-proximity scroll-px-4 xl:snap-none sm:-mx-6 sm:px-6 xl:auto-cols-[minmax(0,1fr)]">
         {COLUMNS.map((s) => <Column key={s} status={s} tasks={columns[s]} showProject={!route.project} />)}
       </div>

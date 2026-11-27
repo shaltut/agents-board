@@ -33,7 +33,7 @@ const squad = (): Squad => ({
 });
 
 /** Each cb.<fn>'s parameter names per definition, from the schema text: parentheses balanced (a default like now() has
- *  its own), commas split at the top level only, nothing inside a quoted default counted. */
+ *  its own), commas split at the top level only, nothing inside a quoted default or a -- comment counted. */
 function schemaParams(sqlText: string): Map<string, string[][]> {
   const out = new Map<string, string[][]>();
   for (const m of sqlText.matchAll(/create (?:or replace )?function cb\.([a-z_0-9]+)\(/g)) {
@@ -41,6 +41,7 @@ function schemaParams(sqlText: string): Map<string, string[][]> {
     let depth = 1, quoted = false, cur = '';
     for (let i = m.index! + m[0].length; i < sqlText.length; i++) {
       const c = sqlText[i]!;
+      if (!quoted && c === '-' && sqlText[i + 1] === '-') { const nl = sqlText.indexOf('\n', i); i = nl < 0 ? sqlText.length : nl - 1; continue; } // a -- comment, its apostrophes too
       if (c === "'") quoted = !quoted;
       else if (!quoted && c === '(') depth++;
       else if (!quoted && c === ')' && --depth === 0) break;
@@ -70,7 +71,7 @@ function webCalls(): { direct: Set<string>; called: Set<string> } {
 
 test('NO_ACTOR is exactly the functions the web calls that take no actor in db/schema.sql (review M-1: derived, not a hand list)', () => {
   // the parser reads a default with its own parentheses (digest's now()) and a signature over two lines
-  assert.deepEqual(schemaParams("create function cb.f(at timestamptz default now(), note text default 'a, (b)',\n  actor text default null) returns int"),
+  assert.deepEqual(schemaParams("create function cb.f(at timestamptz default now(), note text default 'a, (b)', -- it's (a note)\n  actor text default null) returns int"),
     new Map([['f', [['at', 'note', 'actor']]]]));
   const params = schemaParams(schema);
   const { direct, called } = webCalls();
@@ -275,16 +276,14 @@ test('the watch help says what re-adding a watched repo does: later pull request
   assert.match(page, /its next pull requests come to this project, and the cards it already made stay where they are/);
 });
 
-test('the design\'s ways in: a gear beside the project switcher and the Board\'s pipeline line, both to Project settings, owner only', () => {
+test('a gear beside the project switcher opens Project settings, owner only, not on a phone; the Board header stays clear', () => {
   const sw = readFileSync(join(root, 'web', 'src', 'components', 'ProjectSwitcher.tsx'), 'utf8');
   assert.match(sw, /href\(\{ view: 'settings', project \}\)/);
   assert.match(sw, /\{settings && \(/, 'the gear only for a viewer who gets the page');
+  assert.match(sw, /className="-ml-2 hidden size-8 shrink-0 sm:grid /, 'hidden below sm: the nav\'s Settings menu has the page on a phone');
   assert.match(readFileSync(join(root, 'web', 'src', 'components', 'TopBar.tsx'), 'utf8'), /<ProjectSwitcher project=\{route\.project\} settings=\{pages\.some\(\(p\) => p\.view === 'settings'\)\} \/>/);
   const board = readFileSync(join(root, 'web', 'src', 'views', 'Board.tsx'), 'utf8');
-  assert.match(board, /if \(!isOwner\(who\)\) return null/);
-  assert.match(board, /Squad pipeline: \{on \? 'on' : 'off'\}/);
-  assert.match(board, /href=\{href\(\{ view: 'settings', project \}\)\}/);
-  assert.doesNotMatch(board, /type="checkbox"/, 'a link, not the old switch');
+  assert.doesNotMatch(board, /pipeline/i, 'PR 73: no pipeline switch or line on the Board');
   assert.match(schema, /perform cb\.dashboard_only\('Project settings'\);\s+a := cb\.set_actor\(coalesce\(actor, 'ahmed'\)\);\s+update cb\.projects pr set pipeline/,
     'project_pipeline\'s refusal names the page the switch is on');
 });

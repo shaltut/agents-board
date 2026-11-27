@@ -7,7 +7,8 @@ import { go, href } from '@/lib/route'
 import { ProjectDot } from './Chips'
 
 /** settings: the viewer gets Project settings (the owner): a gear beside the switcher opens the shown project's
- *  settings, or the project chooser on All projects (#4332). */
+ *  settings, or the project chooser on All projects (#4332). Not on a phone: it would squeeze the project name, and the
+ *  nav's Settings menu has the page there. */
 export function ProjectSwitcher({ project, settings }: { project?: string; settings?: boolean }) {
   const [open, setOpen] = useState(false)
   const { data: projects = [] } = useProjects()
@@ -51,7 +52,7 @@ export function ProjectSwitcher({ project, settings }: { project?: string; setti
       </Popover>
       {settings && (
         <a href={settingsHref(current?.slug)} aria-label={current ? `Settings of ${current.name}` : 'Project settings'} title={current ? `Settings of ${current.name}` : 'Project settings'}
-          className="-ml-2 grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-raised hover:text-foreground">
+          className="-ml-2 hidden size-8 shrink-0 sm:grid place-items-center rounded-md text-muted-foreground transition-colors hover:bg-raised hover:text-foreground">
           <Settings className="size-3.5" />
         </a>
       )}
