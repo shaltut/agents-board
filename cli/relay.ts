@@ -23,6 +23,7 @@ import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, sock
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
 import { startedAs } from './started-as.ts';
+import { codeSha } from './release.ts';
 
 // the path this relay was started with: a release flip (cb update) changes what it points at (started-as.ts)
 const SELF = startedAs(process.argv[1], import.meta.filename);
@@ -125,6 +126,23 @@ const sessionNow = () => { try { return adapter.sessionId?.(seat) || null; } cat
 let lastSession: string | null | undefined; // the id the last inbox read was made with
 let inboxTakesSession = true; // false once a board older than #4379 (a 3-argument cb.inbox) refused the 4th
 let busy = false, again = false;
+
+// #4352: the commit this relay's code is (the real folder of its path: an installed version's, or a checkout's HEAD),
+// on the seat's row for the Today page's "seats on other code" line. Sent after an inbox read (the row exists then) and
+// again every 5 minutes: a git pull that misses the relay's own files does not restart it, and a row can be made anew.
+// After a cb update flip the relay restarts into the new version within seconds, and its first read sends the new sha.
+const CODE_ROOT = join(HERE, '..');
+let codeDue = 0; // Infinity: a board from before cb.seat_code
+async function sendCode() {
+  if (Date.now() < codeDue) return;
+  try {
+    const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeSha(CODE_ROOT)}) as ok`;
+    if (ok) codeDue = Date.now() + 300_000; // no row yet: the next read tries again
+  } catch (e: any) {
+    if (e?.code === '42883') codeDue = Infinity;
+    else log(`code sha not sent: ${e?.code ?? e?.message}`);
+  }
+}
 
 // This pane's binding (cb iam), handed to its cb calls with the bridge's hello so a call skips its own lookup (#3256).
 // Dropped the moment it may have changed: a cb_bind notice for this pane (any writer: the dashboard, a cb without the
@@ -317,6 +335,7 @@ async function check() {
         log(`pushed ${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
       after = Number(i.last_event);
+      await sendCode();
     } while (again);
   } catch (e: any) {
     log(`check failed: ${e?.message}`); // board asleep or inbox busy: the next notify or poll retries

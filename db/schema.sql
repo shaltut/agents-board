@@ -5876,3 +5876,53 @@ begin
                  'updated_at', r.updated_at)
                  order by r.cost_usd desc nulls last, r.output_tokens desc) from r), '[]'::jsonb)));
 end $$;
+
+-- Releases (#4352). cb update installs on a worker the release the board serves; these say what the board's database
+-- runs and which code each seat runs.
+--
+-- The schema this database runs: db/setup.ts writes cb.schema_applied() after every apply, as
+-- {"current": <sha256 of the db/schema.sql applied last>, "seen": [each sha256 ever applied, in the order first applied]}.
+-- A function, not a row: it lives with the schema, and tests truncate every table. A release needs the schema its own
+-- db/schema.sql hashes to (its manifest has that hash). The database has it when the hash is the current one, or was
+-- first applied before the current one: the schema is applied forward only, so a later schema keeps what an earlier one
+-- made (an old cb against new columns works). Never applied, or first applied after the current one (the board was
+-- rolled back since): the database is older than the release needs.
+drop function if exists cb.schema_covers cascade;
+drop function if exists cb.seat_code cascade;
+drop function if exists cb.seats_code cascade;
+-- plpgsql: its body is checked when called, so it may name cb.schema_applied, which setup.ts creates after this file
+create function cb.schema_covers(need text) returns boolean language plpgsql stable as $$
+declare a jsonb := cb.schema_applied(); cur bigint; nd bigint;
+begin
+  select x.i into cur from jsonb_array_elements_text(a -> 'seen') with ordinality x(h, i) where x.h = a ->> 'current';
+  select x.i into nd from jsonb_array_elements_text(a -> 'seen') with ordinality x(h, i) where x.h = need;
+  return coalesce(nd <= cur, false);
+end $$;
+
+-- The commit a seat's relay runs (cli/release.ts codeSha: a checkout's HEAD, or an installed version's folder name);
+-- null: not known (a relay from before this, or a copy that is neither). The relay sends it after its first inbox read
+-- and every few minutes; true when the seat has a row. Not a binding change: no cb_bind notice.
+alter table cb.sessions add column if not exists code_sha text;
+create function cb.seat_code(machine text, pane text, code_sha text) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+declare c text := case when code_sha ~ '^[0-9a-f]{40}$' then code_sha end;
+begin
+  update cb.sessions s set code_sha = c
+   where s.machine = lower(trim(machine)) and s.pane = trim(pane) and s.code_sha is distinct from c;
+  return exists (select 1 from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane));
+end $$;
+
+-- The live seats (relay heard in the last 90 s, as cb.sessions_overview counts them) whose code is not the board's
+-- commit `board`, by machine; an unknown code counts (a relay too old to say it runs older code). Today shows one line.
+create function cb.seats_code(board text, project text default null) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := nullif(cb.resolve(project), '');  -- not read_project: an unknown project shows no seats, never fails Today
+begin
+  return jsonb_build_object('board', board,
+    'live', (select count(*) from cb.sessions s where s.last_seen > now() - interval '90 seconds' and (p is null or s.project = p)),
+    'off', coalesce((select jsonb_agg(jsonb_build_object('machine', x.machine, 'seats', x.n) order by x.n desc, x.machine) from (
+              select s.machine, count(*) as n from cb.sessions s
+               where s.last_seen > now() - interval '90 seconds' and (p is null or s.project = p)
+                 and s.code_sha is distinct from board
+               group by s.machine) x), '[]'::jsonb));
+end $$;

@@ -12,7 +12,7 @@ import { callFn, RpcError } from './rpc.ts';
 import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
-import { releaseApp, loadRelease } from './release.ts';
+import { releaseApp, loadRelease, servedSha } from './release.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const DIST = join(ROOT, 'web', 'dist');
@@ -267,7 +267,7 @@ app.get('/api/events', async (c) => {
 });
 app.get('/api/today', async (c) => {
   const since = c.req.query('since') || new Date(Date.now() - 86_400_000).toISOString();
-  return c.json(await q.today(opt(c.req.query('project')), since));
+  return c.json(await q.today(opt(c.req.query('project')), since, servedSha()));
 });
 app.get('/api/last-seen', async (c) => c.json(await q.lastSeen()));
 // No tokens or hashes here: the For picker and the assignee list use it, to offer people on the item's project.

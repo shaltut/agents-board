@@ -62,7 +62,8 @@ Then the workers, right away, because their `cb` must match the schema:
   broke every `cb` on the Mac for 15 minutes.
 - **Check each worker** after its update (#4352): build the manifest in the updated checkout on the PC
   (`node cli/release.ts --out /tmp/release.json`; it refuses a tree with uncommitted release files), copy it next to
-  the archive, and run `cb doctor --manifest <file>` on the worker. It names every missing or changed file, checks the
+  the archive, and run `cb doctor --manifest <file>` on the worker (on the PC's own checkout plain `cb doctor` compares
+  with git: every release file committed and none untracked). It names every missing or changed file, checks the
   installed guard and its hook (as `node kit/guard/install.mjs --check`), writes nothing, never connects to the board,
   and exits 0 only when everything matches.
   Or, once the board serves the release (the `git archive` line above; its log says `release: serving <sha>`):
@@ -70,10 +71,17 @@ Then the workers, right away, because their `cb` must match the schema:
   `/release/current.json` and `/release/<sha>.tgz` (no sign-in: the public repo's tracked files only; the board refuses
   an archive holding an env file or node_modules), verifies the archive, and compares the worker's files the same way.
   It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
+  The Today page says it too: each relay notes the commit its code is (`cb.sessions.code_sha`), and Today shows one
+  line, `N seats run other code than the board (<sha>): <machine> <count>, ...`, while any live seat differs (a relay
+  too old to say counts), and nothing when all match.
 - **Install the release on a copy** (#4352): `cb update --from <board https address>` on the worker (the Mac),
   instead of the tar lines above. A git checkout (the PC) is refused: it updates with `git pull --ff-only`.
   Once a copy has had one `cb update`, never use the tar lines on it again: they would extract into the version in
   use (through the link) instead of a new one. This change touches `cli/relay.ts`, so the Mac gate below applies.
+  - Schema first: before writing anything, `cb update` asks the board's database whether it has the schema the release
+    needs (the sha256 of the release's `db/schema.sql`; `db/setup.ts` notes each schema it applies in
+    `cb.schema_applied()`, and `cb.schema_covers` answers). A board whose schema is older, or one from before this check,
+    is refused with what to deploy first: deploy the board (above), then `cb update` again.
   - First run: the copy moves to `<copy>.home` and `<copy>` becomes a link to it (a symlink; a junction on Windows),
     the same code. Each release goes in `<copy>.home/versions/<sha>`: written from the verified archive, `bin/cb` made
     executable (git stores it 644), checked file by file against the manifest, then `cb help` and `cb sessions` run
