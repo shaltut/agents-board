@@ -602,8 +602,11 @@ export function secretPath(path) {
 }
 // Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first). A
 // backtick substitution inside a message runs before the message goes anywhere (review I1), so with one the message
-// text is judged too.
-function secretRead(command) {
+// text is judged too. #4589: the joined text is judged as well as the raw lines (rawAndJoined, as for the fence, #4587):
+// cat \<newline>.env split the reader from the name, and .e\<newline>nv hid the name from the cheap test.
+// (called through, not built here: rawAndJoined is defined further down)
+function secretRead(raw) { return rawAndJoined(secretReadOne)(raw); }
+function secretReadOne(command) {
   if (!SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
   const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
   for (const seg of text.match(SEGMENTS) ?? []) {
@@ -653,8 +656,9 @@ const IS_CLAUDE_DIR = /(?:^|[\\/~])(?:\.claude\.*|claude~\d)[\\/]*$/i;
 // or another agent's config folder: a .codex or .opencode folder, ~/.gemini, ~/.config/opencode
 const IS_AGENT_DIR = /(?:^|[\\/~])(?:\.codex\.*|codex~\d|\.opencode\.*|openco~\d)(?:[\\/]|$)/i;
 const IS_HOME_AGENT_DIR = new RegExp(HOME + String.raw`(?:\.gemini\.*|gemini~\d|\.config\.*[\\/]+opencode\.*)(?:[\\/]|$)`, 'i');
+// #4590: the cd's redirects go first (cd ~/.claude 2>/dev/null still enters the fence)
 const fenceDir = (seg) => {
-  const arg = seg.replace(CD, '').trim().replace(/^["']|["']$/g, '');
+  const arg = seg.replace(CD, '').replace(REDIRECT_TARGET, ' ').trim().replace(/^["']|["']$/g, '');
   return forms(arg).some((a) => IN_BOARD_DIR.test(a) || IS_CLAUDE_DIR.test(a) || IS_AGENT_DIR.test(a) || IS_HOME_AGENT_DIR.test(a));
 };
 const CD = /^\s*(?:cd|pushd|chdir|set-location|sl)\s+/i;
@@ -886,7 +890,22 @@ const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
 const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
 // judged with quoted text blanked (round 2: grep -E "a|function b" opencode.json is a search, not a definition)
 const QUOTED_TEXT = /"(?:\\.|[^"\\])*"|'[^']*'/g;
-function fenceWrite(command) {
+// #4587: a line continuation, joined as the shell joins it, before anything reads the command (the prefilter too: a
+// split open\<newline>code.json names no fence word). bash drops a backslash-newline with nothing between, so
+// .cla\<newline>ude is .claude: SHELL_ESCAPES's space would leave that split. Only an odd run of backslashes continues
+// (\\<newline> is a backslash, then a real line end), read from the run's first backslash, so the pass stays linear.
+// PowerShell's ` continuation reads as a space, as in SHELL_ESCAPES.
+// PR 83 review I1: the joined text is judged as well as the raw lines, never instead of them. Which shell runs the
+// command is not known here, and a trailing \ is not always a continuation: in PowerShell it ends a path (Set-Location
+// C:\tmp\<newline>Copy-Item ...), and in a bash comment the newline still ends the line (ls # x\<newline>cp ...). Each
+// reading blocks on its own; the joined one runs only when joining changed something, so the cost is at most two passes.
+const joinLines = (t) => t.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, '$1').replace(/`\r?\n/g, ' ');
+const rawAndJoined = (check) => (raw) => {
+  const joined = joinLines(raw);
+  return check(raw) ?? (joined === raw ? null : check(joined));
+};
+const fenceWrite = rawAndJoined(fenceWriteOne);
+function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
@@ -896,7 +915,12 @@ function fenceWrite(command) {
   if (DEFINES_FN.test(text.replace(QUOTED_TEXT, '""'))) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
-    if (CD.test(seg)) { inFence = fenceDir(seg); continue; }
+    // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
+    if (CD.test(seg)) {
+      if (redirects(seg, false)) return FENCE;
+      inFence = fenceDir(seg);
+      continue;
+    }
     const names = fencePath(seg);
     if (!names && !inFence) continue;
     if (redirects(seg, inFence && !names)) return FENCE;

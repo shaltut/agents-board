@@ -4904,9 +4904,9 @@ begin
 end $$;
 
 -- The agents a seat may run as its main agent (#4332): the save gate's one list (_check_seat), read by the settings page
--- (cb.squad_options). The launch gate is INSTALLED in cli/agents/index.ts; test/settings.test.ts fails when the two differ,
--- so phase 2 adds an agent to both.
-create function cb._agents_main() returns text[] language sql immutable as $$ select array['claude']::text[] $$;
+-- (cb.squad_options). The launch gate is INSTALLED in cli/agents/index.ts; test/settings.test.ts fails when the two differ.
+-- All four in every project since #4585 (Q3024).
+create function cb._agents_main() returns text[] language sql immutable as $$ select array['claude', 'codex', 'opencode', 'agy']::text[] $$;
 
 -- One seat's agent, model and fallback (#4002): a role's own, or a seat's override of its role. ag and mo are what it
 -- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
@@ -4921,11 +4921,10 @@ begin
       raise exception '% agent must be one of claude, codex, opencode, agy (got %)', label, spec->'agent';
     end if;
     a := spec->>'agent';
-    -- phase 1 starts claude only: a saved codex seat would be started as claude by a cb without its adapter (or a
-    -- rolled-back one), and retried by the supervisor every 10 minutes. A fallback may name any agent: nothing
-    -- switches to it yet. Phase 2 adds its agent to cb._agents_main.
+    -- only an agent cb can start: a seat saved for another would be refused by squad up and retried by the supervisor
+    -- every 10 minutes. A fallback may name any agent: nothing switches to it yet.
     if a <> all(cb._agents_main()) then
-      raise exception '% agent "%" cannot be assigned as a primary seat yet (phase 1 supports % only; non-Claude agents are allowed in fallback)', label, a, array_to_string(cb._agents_main(), ', ');
+      raise exception '% agent "%" cannot be assigned as a primary seat yet (the board starts % only; other agents are allowed in fallback)', label, a, array_to_string(cb._agents_main(), ', ');
     end if;
   end if;
   if spec ? 'model' then
