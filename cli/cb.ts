@@ -18,6 +18,7 @@ import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
 import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
+import { usageCmd } from './usage.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 
 const OPTIONS = {
@@ -33,7 +34,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
-  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' },
+  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -856,6 +857,7 @@ ${body}`, json: pg };
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
+    case 'usage': return usageCmd(o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');
       return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail);

@@ -142,6 +142,38 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 
+## Usage ledger
+
+`hooks/usage-stop.mjs` (#4349) is a Claude Code **Stop** hook. At each Stop it sums the token usage of every assistant
+turn in the session's transcript, and in its subagents' transcripts. It then sends the session's running totals to
+`cb.usage_report`, which keeps one row per session in `cb.session_usage`. `cb usage [project] [--since 24h]` reads them.
+
+- **What it sends:** only input, output, cache read and cache write tokens, the model id, the session id, the machine
+  and the pane. It never sends transcript text or paths. Cost goes with them only when the status line wrote a fresh
+  one (today the claude-hud status line, and only with its daily or weekly cost display on). Nothing is priced from a
+  table.
+- **Cost to a session:** it prints nothing and starts no child process. It always exits 0 and gives up after 1.9 s.
+- **How it reads transcripts:** incrementally, keeping an offset per file in `cb-usage-<session>.json` in the OS temp
+  folder. Each Stop reads at most 32 MB, so a long transcript catches up over a few Stops.
+- **Where it runs:** only in herdr panes. `CB_USAGE_OFF=1` switches it off.
+
+Switching it on changes `~/.claude`, which every Claude session on the machine reads: **only with Ahmed's yes**. The
+board's schema must already have `cb.session_usage` (the board applies it on start, after a backup).
+
+1. **Add the hook.** In `~/.claude/settings.json`, add a `Stop` entry that runs the checkout's hook. Write node and the
+   checkout as absolute paths (a bare `node` missing from the hook shell's PATH just fails, silently):
+
+   ```json
+   "Stop": [{ "hooks": [{ "type": "command", "command": "\"<abs node>\" \"<checkout>/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
+   ```
+
+   If `Stop` already has entries, add this one beside them. Existing hooks in `hooks/` are wired the same way: they run
+   from the checkout, and only the guard is copied out (`kit/guard/install.mjs`).
+2. **Check it.** After the session's next reply, `cb usage --all --since 1h` lists that session. Its numbers grow at
+   each Stop.
+3. **Mac.** The tar step above already ships `hooks/`, so the Mac needs only the same settings entry.
+4. **Switch it off.** Remove that entry, or set `CB_USAGE_OFF=1` in the session's environment.
+
 ## Backups
 
 `deploy/backup.sh` runs nightly from root's crontab ([deploy.md](deploy.md#6-backups)): a `pg_dump -Fc` in

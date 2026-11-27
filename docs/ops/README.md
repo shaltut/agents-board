@@ -48,7 +48,8 @@ his PC and MacBook and the people he shares it with all use one board.
 - **The relay** (`cli/relay.ts`): one per session, started by the SessionStart hook; LISTENs and pushes answers and
   messages into that Claude Code session as they happen.
 - **Hooks** (`hooks/`): `deny-ask.mjs` turns Claude's AskUserQuestion into `cb ask`; `session-start.mjs` points new
-  sessions at `cb start`.
+  sessions at `cb start`; `usage-stop.mjs` (off until switched on: maintain.md, "Usage ledger") sends each session's
+  token totals to the board.
 
 ## Who can do what
 
