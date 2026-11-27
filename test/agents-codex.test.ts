@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { codexAdapter, codexModelProblem, createCodexAdapter } from '../cli/agents/codex.ts';
 import { READ_ONLY_ROLES } from '../kit/guard/core.mjs';
-import { HANDLED_TOOLS, parseCodexInput } from '../kit/guard/shim-codex.mjs';
+import { HANDLED_TOOLS, parseCodexInput, runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { ADAPTERS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
 
@@ -49,16 +49,22 @@ test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; confi
   }
 });
 
-test('buildLaunch: reviewer, qa and investigator get a read-only sandbox; other roles no sandbox (Q3023) and no network flag', () => {
-  for (const role of ['reviewer', 'qa', 'investigator']) {
-    const a = codexAdapter.buildLaunch(input({ role })).args;
-    assert.equal(a[a.indexOf('-s') + 1], 'read-only', role);
-    assert.ok(!a.some((x) => x.startsWith('sandbox_workspace_write')), role);
-  }
-  for (const role of ['lead', 'architect', 'owner', 'builder']) {
+test('buildLaunch (Q3023, #4611): every role runs with no CLI sandbox, read-only roles too, and no network flag', () => {
+  for (const role of ['reviewer', 'qa', 'investigator', 'lead', 'architect', 'owner', 'builder']) {
     const a = codexAdapter.buildLaunch(input({ role })).args;
     assert.equal(a[a.indexOf('-s') + 1], 'danger-full-access', role);
+    assert.ok(!a.includes('read-only'), role);
     assert.ok(!a.some((x) => x.startsWith('sandbox_workspace_write')), role);
+  }
+});
+
+test('#4611: a read-only seat is fenced by the guard, not a sandbox: its apply_patch, commit and push are blocked, cb runs', () => {
+  const hook = (role: string, tool: string, input: unknown) => runCodexShim(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, cwd: '/w/demo' }), { CB_ROLE: role, CB_AGENT: 'codex' });
+  for (const role of READ_ONLY_ROLES) {
+    assert.match(JSON.stringify(hook(role, 'apply_patch', { input: ['*** Begin Patch', '*** Update File: a.ts', '@@', '-x', '+y', '*** End Patch'].join('\n') })), /deny/, role);
+    assert.match(JSON.stringify(hook(role, 'Bash', { command: 'git commit -m x' })), /deny/, role);
+    assert.match(JSON.stringify(hook(role, 'Bash', { command: 'git push origin fix/x' })), /deny/, role);
+    assert.deepEqual(hook(role, 'Bash', { command: 'cb show 1' }), {}, role);
   }
 });
 
@@ -168,9 +174,6 @@ test('matcher and shim agree: every tool the shim judges matches (PowerShell onl
   }
 });
 
-test('READ_ONLY_ROLES: the sandbox choice follows the guard list', () => {
-  for (const role of READ_ONLY_ROLES) { const a = codexAdapter.buildLaunch(input({ role })).args; assert.equal(a[a.indexOf('-s') + 1], 'read-only', role); }
-});
 
 test('instructionMapping: AGENTS.md native, CLAUDE.md as the fallback filename, no env', () => {
   const m = codexAdapter.instructionMapping(input());
