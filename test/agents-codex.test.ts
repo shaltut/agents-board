@@ -27,13 +27,14 @@ test('registry: codex resolves to the codex adapter; its default model is null (
 test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a builder, exact argv', () => {
   assert.deepEqual(codexAdapter.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
     kind: 'codex',
-    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '-s', 'workspace-write',
+    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'workspace-write',
       '-c', 'sandbox_workspace_write.network_access=true',
       '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
       '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
     env: { CB_ROLE: 'builder', CB_AGENT: 'codex' },
+    prestart: { args: [] },
   });
 });
 
@@ -60,16 +61,21 @@ test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no 
   }
 });
 
-test('buildLaunch: never answers a dialog, never trusts hooks, no Claude flags', () => {
+// #4002 install gate (Ahmed, Q3004): untrusted hooks never run (Esc on Hooks need review goes on without them), so every
+// Codex launch runs the installed hooks without the trust step; a seat whose hooks.json lacks the cb guard entry is refused
+// by the prestart (test/seat-prestart.test.ts)
+test('buildLaunch: never answers a dialog, always runs the installed hooks (no trust step to skip), no Claude flags', () => {
   const a = codexAdapter.buildLaunch(input()).args;
   assert.equal(a[0], '--no-daemon');
-  for (const bad of ['--dangerously-bypass-hook-trust', '--dangerously-bypass-approvals-and-sandbox', '--permission-mode', '--settings', '--approve-for-me', '-p'])
+  assert.ok(a.includes('--dangerously-bypass-hook-trust'));
+  for (const bad of ['--dangerously-bypass-approvals-and-sandbox', '--permission-mode', '--settings', '--approve-for-me', '-p'])
     assert.ok(!a.includes(bad), bad);
 });
 
-test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN and CLAUDE_CODE_* are dropped from the env (any case); others pass', () => {
+test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN, CLAUDE_CODE_*, ANTHROPIC_* and CLAUDECODE are dropped from the env (any case); others pass', () => {
   const env = codexAdapter.buildLaunch(input({ env: {
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't',
+    ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'e', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' } })).env;
   assert.deepEqual(env, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
   assert.deepEqual(codexAdapter.buildLaunch(input()).env, {});
@@ -172,14 +178,13 @@ test('instructionMapping: AGENTS.md native, CLAUDE.md as the fallback filename, 
   assert.deepEqual(m.env, {});
 });
 
-test('trustSpec: pre-empts Update available; says Hooks need review parks the seat for a person; never trusts hooks itself', () => {
+test('trustSpec: pre-empts Update available; names the folder trust dialog; hook trust is the launch flag, not a dialog', () => {
   const t = codexAdapter.trustSpec(['C:/w/x'], 'win32');
   assert.deepEqual(t.extraArgs, ['-c', 'check_for_update_on_startup=false']);
   assert.equal(t.preseedPath, '~/.codex/config.toml');
   assert.match(t.dialogHint, /Update available/);
-  assert.match(t.dialogHint, /Hooks need review/);
-  assert.match(t.dialogHint, /only a person trusts hooks/);
-  assert.ok(!JSON.stringify(t).includes('bypass-hook-trust'));
+  assert.match(t.dialogHint, /hook trust is bypassed/);
+  assert.ok(!t.extraArgs.includes('--dangerously-bypass-hook-trust')); // buildLaunch adds it, once
 });
 
 test('disableAskSpec: request_user_input denied by the hook shim', () => {

@@ -1,6 +1,7 @@
 // cb squad up: start a project's missing squad sessions through herdr. planSquad is pure (tested);
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 
@@ -196,21 +197,62 @@ const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffe
 
 /** A launch's adapter and native command, as startOne makes them before any pane. Throws an agent not installed, one
  *  whose MCP check is not confirmed here, or a model its adapter refuses (#4332: the supervisor asks before a restart). */
-export function launchSpec(l: Launch): { adapter: AgentAdapter; spec: LaunchSpec } {
-  const adapter = getAdapter(l.agent);
+// gate: for tests only, getAdapter's options (an installed set in place of INSTALLED, the env CB_MCP_GATE_OK is read from)
+export type AdapterGate = { installed?: ReadonlySet<AgentKind>; env?: NodeJS.ProcessEnv };
+export function launchSpec(l: Launch, gate: AdapterGate = {}): { adapter: AgentAdapter; spec: LaunchSpec } {
+  const adapter = getAdapter(l.agent, gate);
   return { adapter, spec: adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, board: l.board, cwd: l.cwd, env: l.env }) };
+}
+
+const PRESTART_WORD = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,63}$/; // never a leading -: pwsh would read it as a parameter name
+/** The pane's shell as prestart needs it: 'pwsh', 'posix' (bash, zsh), another name, or '' while the pane is starting. */
+export function paneShell(info: unknown): string {
+  const p = find(info, 'foreground_processes')?.[0];
+  const name = String(p?.argv0 ?? p?.name ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '').replace(/^-/, '');
+  return /^(?:pwsh|powershell)$/.test(name) ? 'pwsh' : /^(?:bash|zsh)$/.test(name) ? 'posix' : name;
+}
+/** The line that dot-sources the seat prestart in this shell: plain words only, the board path single-quoted. */
+export function prestartLine(shell: 'pwsh' | 'posix', board: string, words: string[]): string {
+  const b = board.replace(/[\\/]+$/, '');
+  // pwsh also reads the curly single quotes as quotes
+  if (!b || /['‘’‚‛\r\n]/.test(b)) throw new Error('prestart: the board path is empty or holds a quote or line break');
+  const bad = words.find((w) => !PRESTART_WORD.test(w));
+  if (bad !== undefined) throw new Error(`prestart: ${JSON.stringify(bad)} is not a plain word`);
+  const [agent, machine, pane, nonce, port] = words;
+  return shell === 'pwsh'
+    ? `. '${b}/kit/seat/prestart.ps1' -Board '${b}' -Agent ${agent} -Machine ${machine} -Pane ${pane} -Nonce ${nonce}${port ? ` -Port ${port}` : ''}`
+    : `. '${b}/kit/seat/prestart.sh' '${b}' ${words.join(' ')}`;
+}
+/** #4002 install gates: herdr --env only adds to the pane's env, which herdr's own process fills (a token, CLAUDE_CODE_*,
+ *  ANTHROPIC_* on this PC). So before a non-Claude agent starts, its pane's shell runs the seat prestart: the Claude-only
+ *  names go from the shell itself, OpenCode's password is made there (never on argv), and a child of that shell checks the
+ *  env and that the guard will run. Throws unless it prints cb-seat-ready: the caller closes the pane. */
+function prestartPane(l: Launch, pane: string, args: string[], run: Runner, pause: (ms: number) => void) {
+  const herdr = (a: string[], timeout?: number) => herdrJson(run, l.herdr, a, timeout);
+  let shell = '';
+  for (let i = 1; ; i++) {
+    shell = paneShell(herdr(['pane', 'process-info', '--pane', pane]));
+    if (shell === 'pwsh' || shell === 'posix') break;
+    if (shell || i >= BUSY_TRIES) throw new Error(`prestart: the pane's shell is ${shell ? `"${shell}"` : 'not up'}: only pwsh, bash and zsh can drop the Claude-only env`);
+    pause(BUSY_WAIT_MS);
+  }
+  const nonce = randomBytes(6).toString('hex'); // the answer names it: an older line in the pane never counts
+  herdr(['pane', 'run', pane, prestartLine(shell as 'pwsh' | 'posix', l.board, [l.agent, l.machine, pane, nonce, ...args])]);
+  const r = herdr(['pane', 'wait-output', pane, '--regex', `cb-seat-(?:ready|refused):${nonce}[^\\r\\n]*`, '--timeout', '30000'], 40_000);
+  const line = String(find(r, 'matched_line') ?? '').trim();
+  if (line !== `cb-seat-ready:${nonce}`) throw new Error(`prestart: ${line.replace(`:${nonce}`, '') || 'no answer'}`);
 }
 
 /** Start one session: a pane (a new tab, or a split of a tab in `tabs`, two panes per tab), the agent its adapter
  *  launches, its first prompt. ok: the agent is up (blocked: up but waiting on a startup dialog; the pane is kept). A
  *  launch that did not come up has its own pane closed, never any other. "started, prompt not sent" is ok: false with
  *  its pane. An agent with no adapter fails before any pane. */
-export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: string; panes: number }>, pause: (ms: number) => void = sleep): { line: string; pane?: string; blocked?: boolean; ok: boolean } {
+export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: string; panes: number }>, pause: (ms: number) => void = sleep, gate: AdapterGate = {}): { line: string; pane?: string; blocked?: boolean; ok: boolean } {
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   if (!validHerdrName(herdrName(l.name))) return { ok: false, line: `failed ${l.name}: herdr name ${herdrName(l.name)} is invalid` };
   // the seat's agent adapter, before any pane (#4002): an agent without one fails here, never started as Claude instead
   let adapter: AgentAdapter, spec: LaunchSpec;
-  try { ({ adapter, spec } = launchSpec(l)); } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
+  try { ({ adapter, spec } = launchSpec(l, gate)); } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
   let pane: string | undefined, started = false;
   // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
   const env = Object.entries(spec.env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
@@ -227,6 +269,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     }
     else pane = find(herdr(l.herdr, ['tab', 'create', '--cwd', l.cwd, '--label', l.name, '--no-focus', ...env]), 'pane_id');
     if (!pane) throw new Error('herdr returned no pane id');
+    if (spec.prestart) prestartPane(l, pane, spec.prestart.args, run, pause);
     let blocked = false;
     try {
       for (let i = 1; ; i++) {
@@ -248,7 +291,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
     // the hint names the agent's own dialog; the platform is this machine's (a dialog's name does not depend on it for claude)
     if (blocked) return { ok: true, blocked, pane, line: `blocked ${l.name}: a startup dialog is waiting (${adapter.trustSpec([l.cwd], process.platform).dialogHint}). Answer it in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}, then run: ${promptCommand(l)}` };
-    herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), l.prompt]);
+    herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), adapter.promptText?.(l.prompt) ?? l.prompt]);
     return { ok: true, pane, line: `started ${l.name}` };
   } catch (e) {
     if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
