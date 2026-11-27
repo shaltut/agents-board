@@ -232,6 +232,20 @@ const fenceWrites = [
   'cd /tmp > ~/.claude/settings.json', 'cd /tmp >> ~/.claude/settings.local.json', 'cd>~/.claude/settings.json',
   'pushd /tmp > ~/.claude-board/runner.json', String.raw`Set-Location /tmp > $HOME\.claude\settings.json`,
   'cd ~/.claude 2>/dev/null && echo x > settings.json', 'cd ~/.claude >/dev/null; cp evil.json settings.json',
+  // #4587: a line continuation splits a writer from its target (the PR 77 review's two forms), splits a word (bash joins
+  // backslash-newline with nothing between: .cla\<newline>ude is .claude), hides a name from the raw prefilter
+  // (open\<newline>code.json, ~/.gem\<newline>ini) or the installer, or a cd's target from its cd
+  'cp evil.json \\\n  .claude/settings.json', 'git \\\n  checkout -- opencode.json', 'cp evil.json \\\r\n  .claude/settings.json',
+  'cp x ~/.cla\\\nude/settings.json', 'c\\\np x ~/.claude/settings.json', 'echo x >\\\n ~/.claude/settings.json',
+  'git checkout -- open\\\ncode.json', 'cp x ~/.gem\\\nini/settings.json', 'node kit/guard/inst\\\nall.mjs',
+  'cd \\\n ~/.claude && echo x > settings.json', 'Copy-Item evil.json `\n  $HOME\\.claude\\settings.json',
+  // an escaped backslash before a newline is a real line end: the next line is its own command
+  'echo a\\\\\ncp x ~/.claude/settings.json',
+  // PR 83 review I1: the joined text is judged as well as the raw lines, never instead of them. In PowerShell a trailing
+  // \ is a real line end (a path), and in a bash comment the newline still ends the line
+  'Set-Location C:\\tmp\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'Set-Location C:\\tmp\\\r\nCopy-Item evil.json $HOME\\.claude\\settings.json',
+  'Get-ChildItem C:\\work\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'cd C:\\tmp\\\nSet-Content $HOME\\.claude\\settings.json x',
+  'echo a\\\ncp x ~/.claude/settings.json', 'ls # x\\\ncp evil.json ~/.claude/settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -254,6 +268,8 @@ const fenceReads = [
   // #4590: a cd's redirect to the null device or an ordinary file, and a quiet cd into the fence that only reads
   'cd /tmp 2>/dev/null', 'cd /tmp > /dev/null', 'cd /tmp > out.txt', 'cd ~/.claude 2>/dev/null && cat settings.json',
   'cd ~/.claude && cat settings.json',
+  // #4587: a continued read stays a read
+  'cat \\\n  ~/.claude/settings.json', 'git diff \\\n  -- opencode.json', 'cp a.json \\\n  b.json',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
@@ -462,6 +478,9 @@ test('long commands stay fast', () => {
     ['fence, 200 KB of ~.c* glob words', asBuilder('ls ' + kb200('~.c*'))],
     ['fence, a 200 KB cd into ~/.claude-board', asBuilder('cd ' + kb200('/.claude-board') + ' && echo x')],
     ['fence, 200 KB of hidden spellings', asBuilder(kb200(`~/.cla""ude ~/.cl\\aude `) + '; cp a b')],
+    // #4587: line continuations are joined in one pass; a long run of backslashes is read once, not from each one
+    ['fence, 200 KB of continued fence paths', asBuilder(kb200('cat \\\n ~/.claude/settings.json ') + '; cp a b')],
+    ['fence, 200 KB of backslashes then a newline', asBuilder('cat ~/.claude/settings.json ' + '\\'.repeat(200000) + '\n')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

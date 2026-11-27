@@ -726,7 +726,22 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
-function fenceWrite(command) {
+// #4587: a line continuation, joined as the shell joins it, before anything reads the command (the prefilter too: a
+// split open\<newline>code.json names no fence word). bash drops a backslash-newline with nothing between, so
+// .cla\<newline>ude is .claude: SHELL_ESCAPES's space would leave that split. Only an odd run of backslashes continues
+// (\\<newline> is a backslash, then a real line end), read from the run's first backslash, so the pass stays linear.
+// PowerShell's ` continuation reads as a space, as in SHELL_ESCAPES.
+// PR 83 review I1: the joined text is judged as well as the raw lines, never instead of them. Which shell runs the
+// command is not known here, and a trailing \ is not always a continuation: in PowerShell it ends a path (Set-Location
+// C:\tmp\<newline>Copy-Item ...), and in a bash comment the newline still ends the line (ls # x\<newline>cp ...). Each
+// reading blocks on its own; the joined one runs only when joining changed something, so the cost is at most two passes.
+const joinLines = (t) => t.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, '$1').replace(/`\r?\n/g, ' ');
+const rawAndJoined = (check) => (raw) => {
+  const joined = joinLines(raw);
+  return check(raw) ?? (joined === raw ? null : check(joined));
+};
+const fenceWrite = rawAndJoined(fenceWriteOne);
+function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
