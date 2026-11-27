@@ -626,6 +626,40 @@ test('startOne: no value survives in the pane lines: env sets, tokens, passwords
   assert.match(line, /error: no such file …/);
 });
 
+// #4617 (PR 93 re-review): a flag is a flag's shape, not anything after a dash; a secret-sounding word cuts the next one
+// whatever its form; tabs and curly quotes neither glue nor hide words
+test('startOne: only flag-shaped flags survive; secret-ish words cut the next word; tabs split, curly quotes trim (#4617)', () => {
+  const lineFor = (text: string) => {
+    const f = fake((c) => {
+      if (c.args[0] === 'tab') return paneOut('w5:p1');
+      if (c.args[1] === 'start') return TIMEOUT;
+      if (c.args[1] === 'read') return paneText(text);
+    });
+    return startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line;
+  };
+  // S1: random tokens after a dash, a password stuck to a short flag, upper-case or over-long "flags"
+  const s1 = lineFor('error: bad option -aB3dEf9xQ\nerror: invalid -pHunter6pw\nerror: unknown --Hunter7Secret\n'
+    + `error: unknown --${'a'.repeat(70)}\nerror: invalid --x_y_hunter8\n`);
+  for (const v of ['aB3dEf9xQ', 'Hunter6pw', 'Hunter7Secret', 'a'.repeat(70), 'hunter8']) assert.ok(!s1.includes(v), `"${v}" leaked: ${s1}`);
+  // real flags stay whole
+  const ok = lineFor("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: unknown option -m\nerror: invalid --model=gpt\n");
+  assert.match(ok, /'--dangerously-bypass-hook-trust' found/);
+  assert.match(ok, /unknown option -m/);
+  assert.match(ok, /invalid --model=…/);
+  // L1: plain-word secrets and names
+  const l1 = lineFor(['error: API_KEY: hunter9', 'error: bad access_token hunterA', 'error: wrong passphrase hunterB', 'error: unknown profile clientco',
+    'error: no such user jdoe', 'error: account acmecorp denied', 'error: org globex not found', 'error: login mallory failed', 'error: mysql -p hunterC refused',
+    'error: invalid credentials hunterD', 'error: authorization hunterE denied'].join('\n'));
+  for (const v of ['hunter9', 'hunterA', 'hunterB', 'clientco', 'jdoe', 'acmecorp', 'globex', 'mallory', 'hunterC', 'hunterD', 'hunterE']) assert.ok(!l1.includes(v), `"${v}" leaked: ${l1}`);
+  // L2: a tab splits words (it no longer glues a value onto a kept word); L3: curly quotes are trimmed like straight ones
+  const l2 = lineFor('error: invalid token\thunterF\nerror: unexpected argument \u201c--full-auto\u201d found\nerror: unknown \u2018--no-daemon\u2019\n');
+  assert.ok(!l2.includes('hunterF'), l2);
+  assert.match(l2, /\u201c--full-auto\u201d found/);
+  assert.match(l2, /unknown \u2018--no-daemon\u2019/);
+  // cosmetic: after bypass or oauth the next word is kept
+  assert.match(lineFor('error: --dangerously-bypass-hook-trust conflicts with sandbox\nerror: oauth provider rejected\n'), /bypass-hook-trust conflicts with sandbox.*oauth provider rejected/);
+});
+
 test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
   const unreadable = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('w5:p1');
