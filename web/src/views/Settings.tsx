@@ -214,7 +214,7 @@ function Switches({ project, page, squad, edit }: { project: string; page: Squad
   }
   return (
     <Section id="switches" title="Switches and reminders" who="any"
-      intro="The pipeline switch and the reminders are open to every admin (reminders also on Board and Backlog). The supervisor switch belongs to the squad: only Ahmed changes it, and it is saved with the squad.">
+      intro="Other admins can also change the pipeline switch and the reminders, from the command line (reminders also on Board and Backlog); this page is only yours. The supervisor switch belongs to the squad: only Ahmed changes it, and it is saved with the squad.">
       <div className="space-y-4">
         <label className="flex items-start gap-3 rounded-lg border bg-card p-3">
           <input type="checkbox" className="mt-0.5 size-4" checked={page.pipeline} disabled={busy}
