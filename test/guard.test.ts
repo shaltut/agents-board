@@ -255,6 +255,15 @@ const fenceWrites = [
   // #4594: >| (bash's noclobber override) is a redirect, not a pipe: the target was cut off into its own segment
   'echo x >| ~/.claude/settings.json', 'echo x 2>| ~/.claude/settings.json', 'echo x 1>| ~/.claude/settings.json',
   'echo x >|~/.claude-board/runner.json', 'cd ~/.claude && echo x >| settings.json',
+  // #4631: zsh's clobber forms (Mac seat panes run zsh), directly and through zsh -c, and a multi-digit fd (Git Bash
+  // truncates the target), and Push-Location as a cd word
+  'echo x >! ~/.claude/settings.json', 'echo x >>! ~/.claude/settings.json', 'echo x >>| ~/.claude/settings.json',
+  'echo x &>| ~/.claude/settings.json', 'echo x >&| ~/.claude/settings.json', 'echo x &>>| ~/.claude/settings.json',
+  'echo x &>! ~/.claude/settings.json', 'echo x 2>! ~/.claude/settings.json', 'echo x >!~/.claude-board/runner.json',
+  'zsh -c "echo x >! ~/.claude/settings.json"', 'zsh -c "echo x &>>| ~/.claude/settings.json"',
+  'cd ~/.claude && echo x >! settings.json', 'echo x 10> ~/.claude/settings.json', 'echo x 99>> ~/.claude/settings.json',
+  'echo x >& ~/.claude/settings.json', 'echo x >&~/.claude/settings.json',
+  String.raw`Push-Location $HOME\.claude; Set-Content settings.json x`, String.raw`push-location $HOME\.claude; Set-Content settings.json x`,
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -284,6 +293,10 @@ const fenceReads = [
   'sl ~/work -ea 0; echo x > notes.txt', 'cd ~/.claude -- && cat settings.json',
   // #4594: a >| to an ordinary file, and a real pipe after a read
   'echo x >| /tmp/out.txt', 'cat ~/.claude/settings.json | grep hooks',
+  // #4631: the zsh forms and a multi-digit fd to an ordinary file, a ! that is not after a redirect, a quiet Push-Location
+  'echo x >! /tmp/out.txt', 'echo x &>>| /tmp/out.txt', 'echo x 10> /tmp/out.txt', 'cat ~/.claude/settings.json || echo !x',
+  'cat ~/.claude/settings.json 2>&1 | grep x', 'cat ~/.claude/settings.json >&2', 'cat ~/.claude/settings.json 1>&-',
+  String.raw`Push-Location $HOME\.claude; Get-Content settings.json`,
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
@@ -416,6 +429,67 @@ test('role rules read a quoted string as a command only after a shell runner', (
   assert.equal(check('grep -rn "git reset --hard" docs'), 'git reset --hard');
   assert.equal(shell('grep -rn "git push origin development" docs', { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'development' }).reason,
     'Blocked dangerous command: git push to protected branch development: push your own branch and open a PR; the lead merges it');
+});
+
+// #4638 (PR 99 review): spellings that commit, move refs, push or merge past the commit, push and gh pr merge rules
+test('role rules: aliases, write plumbing and gh api writes do not get past the commit, push and merge rules (#4638)', () => {
+  // an alias set for one call, or written to git config, renames a subcommand: every role (it hides a push to main too)
+  const aliases = ['git -c alias.c=commit c -m x', 'git -c Alias.C=commit c -m x', 'git --config-env=alias.c=CMD c -m x',
+    'git --config-env alias.c=CMD c -m x', 'git -C wt -c alias.p=push p origin main', "git -c alias.x='!git push origin main' x",
+    'git -c include.path=/tmp/a.cfg p origin main', 'git -c includeIf.onbranch:x.path=/tmp/a.cfg p origin main',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p origin main',
+    `GIT_CONFIG_PARAMETERS="'alias.p=push'" git p origin main`, 'GIT_CONFIG_GLOBAL=/tmp/a.cfg git p origin main',
+    'git config alias.p push', 'git config --global alias.p push', 'git config set alias.p push', 'git config --add alias.p push',
+    'bash -c "git -c alias.p=push p origin main"',
+    // push plumbing has no branch rules
+    'git send-pack origin main', 'git http-push https://h.example/r.git main'];
+  for (const role of ROLES) blocksByRole(role, aliases);
+  // read-only roles: no commit or ref writes by any spelling, and git only by its own subcommand names (an alias from a
+  // config file the guard cannot see, or a subcommand the shell fills in, blocks)
+  const readOnlyWrites = ['git commit-tree HEAD^{tree} -p HEAD -m x', 'git update-ref refs/heads/x HEAD', 'git -C wt update-ref -d refs/heads/x',
+    'echo x | git hash-object -w --stdin', 'git hash-object -w a.txt', 'git mktree < t.txt', 'git mktag < t.txt', 'git write-tree',
+    'git fast-import < s.txt', 'git ci -m x', 'sudo git ci -m x', 'GIT_PAGER=cat git ci -m x', 'git $SUB -m x', 'x=$(git ci -m x)',
+    'cd wt && git ci -m x'];
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, readOnlyWrites);
+    passes(role, ['git log --grep update-ref', 'git -c user.name=x log', 'git -c core.pager=cat log -1', 'git hash-object a.txt',
+      'git cat-file -p HEAD', 'git merge-tree origin/main HEAD', 'git config --get alias.c', 'git config --get-regexp alias',
+      'git config --list', 'git config alias.c', 'git fetch origin', 'git worktree add ../x origin/main', 'git --version', 'git',
+      'grep -rn git src', 'echo git ci', 'which git', 'rg -n "git ci" docs', 'git rev-parse --short HEAD', 'git stash push -u',
+      'GIT_CONFIG_GLOBAL=/dev/null git log -1', 'GIT_CONFIG_NOSYSTEM=1 git status']);
+  }
+  // the roles that may commit still do, plainly
+  for (const role of ['builder', 'architect', 'owner', 'lead']) {
+    passes(role, ['git commit-tree HEAD^{tree} -p HEAD -m x', 'git hash-object -w a.txt', 'git -c user.name=x commit -m y']);
+  }
+
+  // gh api that writes (a method other than GET/HEAD, or a body, which makes gh POST): every role but the lead
+  const ghWrites = ['gh api -X PUT repos/o/r/pulls/5/merge', 'gh api -XPUT repos/o/r/pulls/5/merge', 'gh api --method=PUT repos/o/r/pulls/5/merge',
+    'gh api --method put /repos/o/r/pulls/5/merge', 'gh api repos/{owner}/{repo}/pulls/5/merge -X PUT',
+    'gh api https://api.github.com/repos/o/r/pulls/5/merge -X PUT', 'gh api repos/o/r/merges -f base=main -f head=feat/x',
+    'gh api repos/o/r/git/refs/heads/main -X PATCH -f sha=abc', 'gh api -X DELETE repos/o/r/git/refs/heads/x',
+    'gh api repos/o/r/contents/a.md -X PUT -f message=x -f content=eA==', 'gh api repos/o/r/git/refs -F ref=refs/heads/x -F sha=abc',
+    'gh api repos/o/r/pulls/5/update-branch --input body.json', 'gh api -X $M repos/o/r/pulls/5/merge', 'gh api -fbase=main repos/o/r/merges',
+    `gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }'`,
+    'gh api graphql -F query=@m.graphql', 'gh api graphql --input q.json', 'gh api graphql -f query="$Q"',
+    'gh api -f base=main -q graphql repos/o/r/merges', 'bash -c "gh api -X PUT repos/o/r/pulls/5/merge"',
+    'gh alias set m "pr merge"', 'gh alias import aliases.yml',
+    // pflag bundles short flags; ${VAR} braces end a segment like gh's placeholders; an unknown option fails closed
+    'gh api -iX PUT repos/o/r/pulls/5/merge', 'gh api -iXPUT repos/o/r/pulls/5/merge', 'gh api -X=PUT repos/o/r/pulls/5/merge',
+    'gh api -if base=main repos/o/r/merges', 'gh api repos/${OWNER}/${REPO}/pulls/5/merge -X PUT', 'gh api --foo x -X PUT repos/o/r/pulls/5/merge',
+    'gh api graphql -f owner=o'];
+  for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ghWrites);
+  passes('lead', ['gh api -X PUT repos/o/r/pulls/5/merge', 'gh api -X DELETE repos/o/r/git/refs/heads/feat/x']);
+  for (const role of ROLES) {
+    passes(role, ['gh api repos/o/r/pulls/5', 'gh api repos/o/r/pulls/5/merge', 'gh api -X GET repos/o/r/pulls -f state=open',
+      'gh api --method get repos/o/r/pulls -F per_page=100', `gh api graphql -f query='query { viewer { login } }'`,
+      `gh api repos/o/r/pulls --paginate -q '.[].number'`, 'gh api repos/o/r/contents/a.md -H "Accept: application/vnd.github.raw"',
+      'rg "gh api -X PUT"', 'gh pr view 5', 'gh pr diff 5', 'gh pr list', 'gh pr review 5 --comment --body "x"',
+      'cb log 4638 "gh api -X PUT repos/o/r/pulls/5/merge is blocked"', 'gh alias list',
+      'gh api -i repos/o/r/pulls/5', 'gh api repos/${OWNER}/${REPO}/pulls/5', "gh api graphql -f query='{viewer{login}}'",
+      'gh api -H "Accept: application/json" -i repos/o/r/pulls', 'git config --get alias.c 2>/dev/null']);
+  }
+  assert.match(shell('gh api -X PUT repos/o/r/pulls/5/merge', { CB_ROLE: 'builder' }).reason!, /gh pr comment/);
 });
 
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {

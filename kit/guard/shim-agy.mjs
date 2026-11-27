@@ -14,7 +14,7 @@
 // agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
 // every path arg, as given and as resolved (a link named notes.txt can lead to .env).
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 let core = null;
@@ -138,6 +138,16 @@ function secretTarget(call, input, mode) {
   return null;
 }
 
+// #4652: an edit's targets in every spelling core judges (as given, resolved against the cwd, through real paths), so
+// core's fence and secret rule run on agy's edits as on Codex's and OpenCode's. Before, evaluate got no paths and only
+// this shim's own segments were denied: a repo's .claude/settings.json, opencode.json or .codex config stayed writable.
+const FS = { resolve, dirname, basename, join, realpathSync };
+export function editPaths(call, input) {
+  const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd
+    : Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' ? input.workspacePaths[0] : '.';
+  return [...new Set(core.editTargets(isObject(call.args) ? call.args : {}).flatMap((t) => core.editPathForms(t, cwd, FS)))];
+}
+
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
   try {
@@ -154,7 +164,8 @@ export function runAgyShim(raw, env = process.env) {
       return why ? deny(`Blocked: ${why}`) : { decision: 'allow' };
     }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
+    const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1',
+      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined });
     if (v?.allow === true) {
       if (p.tool === 'edit') {
         const why = checkEditPath(p.call, p.input) ?? secretTarget(p.call, p.input, 'edit');

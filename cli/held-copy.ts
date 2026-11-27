@@ -4,10 +4,15 @@
 // same name it is pushed, under another it is dropped. #4630: it outlives the relay, in the seat's held file, since the
 // usual restart order (the old agent dies, its relay leaves about 4 s later, the new agent starts after that) put it out
 // of reach. Pure, but for the file helpers.
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { HOLD_MS } from './notice-hold.ts';
 
 export type HeldCopy = { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[]; memory: any[]; at: number };
+
+/** When a copy's hold started (review 106 N2-a): the read's hold age back from now, as the board counts it (hold_at), never
+ *  the last held read, which the 30 s poll renews. The first held read starts the hold: no hold yet, so now. */
+export const copyAt = (now: number, hold: { age_ms?: unknown } | null | undefined) => now - Math.max(0, Number(hold?.age_ms) || 0);
 
 export const copyCount = (cs: (HeldCopy | undefined)[]) => cs.reduce((n, c) => n + (c ? c.messages.length + c.broadcasts.length + c.memory.length : 0), 0);
 
@@ -33,8 +38,8 @@ const isCopy = (c: any): c is HeldCopy => c && typeof c.actor === 'string' && (c
 /** Leaves the copies for the next relay in the pane (owner only: they are the seat's notices). None: no file. */
 export function writeCopies(file: string, copies: HeldCopy[]) {
   if (!copies.length) { rmSync(file, { force: true }); return; }
-  rmSync(file, { force: true }); // a new file, so the mode applies
-  writeFileSync(file, JSON.stringify(copies), { mode: 0o600 });
+  rmSync(file, { force: true }); // a new file, so the mode applies; wx: never through a link planted meanwhile (review 106 L3)
+  writeFileSync(file, JSON.stringify(copies), { mode: 0o600, flag: 'wx' });
 }
 
 /** The copies the last relay left, once (the file goes), without the ones past the hold window. A bad file is none. */
@@ -43,4 +48,15 @@ export function readCopies(file: string, now: number): HeldCopy[] {
   try { raw = JSON.parse(readFileSync(file, 'utf8')); } catch { raw = []; }
   rmSync(file, { force: true });
   return Array.isArray(raw) ? raw.filter(isCopy).filter((c) => now - c.at <= HOLD_MS) : [];
+}
+
+/** Review 106 L2: removes the held files in dir older than the hold window. herdr never reuses a pane id, so a seat
+ *  restarted in a new pane leaves its file unread; nothing in one that old would be pushed anyway. */
+export function sweepHeld(dir: string, now: number) {
+  let names: string[] = [];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    if (!/^cb-relay-.+\.held$/.test(n)) continue;
+    try { if (now - statSync(join(dir, n)).mtimeMs > HOLD_MS) rmSync(join(dir, n), { force: true }); } catch {}
+  }
 }

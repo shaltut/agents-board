@@ -7,6 +7,7 @@
 //   node seat-prestart.ts check <agent> <machine> <pane> <nonce>   prints cb-seat-ready:<nonce>, or
 //                                    cb-seat-refused:<nonce>: <why>. squad up waits for that line (the nonce: never an older
 //                                    line in the pane's scrollback) and closes the pane on anything else.
+//                                    On ready it also starts the seat's relay (#4610; CB_SEAT_RELAY=off skips it).
 // check refuses (fails closed) when the env still holds a Claude-only name, or the agent's guard would not run. The guard
 // files are parsed, never substring-matched (review 70-I3): a PreToolUse entry whose matcher covers every tool the shim
 // judges, and a command that is exactly node plus a shim that, with the core.mjs it loads, is byte for byte this board's
@@ -15,6 +16,7 @@
 // off (70-M4); agy needs the seat folder trusted,
 // since agy loads workspace hooks only after trust. Codex's hook trust is not checked: its launch passes
 // --dangerously-bypass-hook-trust, so the installed hook always runs. Names only ever appear in a reason, never a value.
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -214,8 +216,20 @@ export function seatRefusal(agent: string, machine: string, pane: string, env: N
   return `no prestart rule for agent "${agent}"`;
 }
 
+/** #4610: start the seat's relay (cli/relay.ts beside this folder, by the path this helper was started with, so a release
+ *  flip restarts it into the new code as the Claude hook's does). Launcher mode: it re-launches itself detached and exits;
+ *  the child waits for the agent herdr starts next (relay-seat.ts) and leaves at once when another relay holds the seat.
+ *  It inherits this shell's env: the Claude-only names are gone, CB_ROLE, CB_AGENT and CB_MCP_GATE_OK are there. */
+function startRelay(agent: string, pane: string) {
+  if (process.env.CB_SEAT_RELAY === 'off') return; // tests that run the real scripts: no relay against any board
+  const here = process.argv[1] ? dirname(resolve(process.argv[1])) : import.meta.dirname;
+  spawn(process.execPath, [join(here, '..', 'relay.ts'), '--pane', pane, '--agent', agent], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+}
+
 const WORD = /^[A-Za-z0-9._:-]{1,64}$/;
-export function main(argv: string[], out: (s: string) => void = (s) => process.stdout.write(s)): number {
+// deps: for tests, the refusal check and the relay start
+export function main(argv: string[], out: (s: string) => void = (s) => process.stdout.write(s),
+  deps: { refusal?: typeof seatRefusal; startRelay?: (agent: string, pane: string) => void } = {}): number {
   const [cmd, a, b, c, d] = argv;
   if (cmd === 'secret') {
     const port = Number(c);
@@ -227,7 +241,10 @@ export function main(argv: string[], out: (s: string) => void = (s) => process.s
   }
   if (cmd === 'check') {
     if (![a, b, c, d].every((x) => WORD.test(x ?? ''))) { out(`cb-seat-refused:${WORD.test(d ?? '') ? d : 'none'}: bad arguments\n`); return 2; }
-    const why = seatRefusal(a!, b!, c!);
+    const why = (deps.refusal ?? seatRefusal)(a!, b!, c!);
+    // the relay brings the board's answers, messages and card changes to this seat (#4610); one that cannot start never
+    // refuses the seat (the relay log says why; cb relay in the pane starts it by hand)
+    if (!why) try { (deps.startRelay ?? startRelay)(a!, c!); } catch {}
     out(why ? `cb-seat-refused:${d}: ${why}\n` : `cb-seat-ready:${d}\n`);
     return why ? 1 : 0;
   }

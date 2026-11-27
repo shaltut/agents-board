@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readCopies, sortOrphans, writeCopies, type HeldCopy } from '../cli/held-copy.ts';
+import { copyAt, readCopies, sortOrphans, sweepHeld, writeCopies, type HeldCopy } from '../cli/held-copy.ts';
 import { HOLD_MS } from '../cli/notice-hold.ts';
 
 const SEAT = 'w1:p3@pc';
@@ -50,4 +50,28 @@ test('writeCopies and readCopies: the next relay finds the copies once, without 
     fs.writeFileSync(f, JSON.stringify([{ actor: 7 }]));
     assert.deepEqual(readCopies(f, 0), [], 'a copy of the wrong shape is skipped');
   } finally { fs.rmSync(f, { force: true }); }
+});
+
+// PR 106 review N2-a: a copy's age counts from the hold's start (the board's hold_at, the inbox's hold.age_ms), never
+// from the last held read, which the 30 s poll keeps renewing.
+test('copyAt: the hold start, from the read\'s hold age; the first held read (no hold yet) is now', () => {
+  assert.equal(copyAt(1_000_000, null), 1_000_000);
+  assert.equal(copyAt(1_000_000, { age_ms: 570_000 }), 430_000);
+  assert.equal(copyAt(1_000_000, { age_ms: -5 }), 1_000_000);
+  assert.equal(copyAt(1_000_000, { age_ms: 'x' }), 1_000_000);
+  // held at 0, the copy made by a held read at 9.5 min, a new session binds the same name at 19 min: too old to push
+  const at = copyAt(9.5 * 60_000, { age_ms: 9.5 * 60_000 });
+  assert.deepEqual(sortOrphans([copy({ at })], { actor: 'W1@pc' }, 'S2', SEAT, 19 * 60_000), { push: [], keep: [], dropped: 0, expired: 1 });
+});
+
+// PR 106 review L2: a pane that never gets another relay (herdr never reuses a pane id) leaves its held file behind
+test('sweepHeld: removes held files older than the hold window, keeps fresh ones and other files', () => {
+  const dir = fs.mkdtempSync(join(tmpdir(), 'cb-sweep-'));
+  try {
+    for (const f of ['cb-relay-old.held', 'cb-relay-new.held', 'cb-relay-old.log']) fs.writeFileSync(join(dir, f), '[]');
+    const old = new Date(Date.now() - HOLD_MS - 60_000);
+    for (const f of ['cb-relay-old.held', 'cb-relay-old.log']) fs.utimesSync(join(dir, f), old, old);
+    sweepHeld(dir, Date.now());
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['cb-relay-new.held', 'cb-relay-old.log']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
