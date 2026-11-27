@@ -1,4 +1,4 @@
-# Onboarding agents and projects onto Claude Board
+# Onboarding agents and projects onto Agents Board
 
 `cb` is for agents. You work in the board UI (http://localhost:4747); sessions run `cb`. Each
 session learns the board from three places, and they all point at the same commands:

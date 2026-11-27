@@ -4,7 +4,7 @@
 if (process.env.CB_ALLOW_ASK === '1') process.exit(0);
 
 const reason = `AskUserQuestion is disabled here: it stops this session until Ahmed answers, and he is often away.
-Ask on Claude Board instead, then KEEP WORKING on something else:
+Ask on Agents Board instead, then KEEP WORKING on something else:
 
   cb ask <project> "<question>" -o "<Label>=<why / tradeoff>" -o "<Label (Recommended)>=<why>" [-c "<context, markdown>"] [--multi]
 

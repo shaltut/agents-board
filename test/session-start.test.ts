@@ -49,7 +49,7 @@ test('after a compaction or a resume, a bound pane gets what cb resume and cb ro
   const start = await hook(bound, 'startup');
   assert.equal(start.status, 0, start.stderr);
   const hint = contextOf(start);
-  assert.match(hint, /^Claude Board: .*run `cb start`/);
+  assert.match(hint, /^Agents Board: .*run `cb start`/);
   assert.doesNotMatch(hint, /cb resume/);
 
   const resume = cb(bound, ['resume']), role = cb(bound, ['role', 'builder']);
@@ -60,14 +60,14 @@ test('after a compaction or a resume, a bound pane gets what cb resume and cb ro
     const r = await hook(bound, source);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, '');
-    assert.equal(contextOf(r), `${hint}\n\nClaude Board, after this ${source}: what \`cb resume\` and \`cb role builder\` print now.\n\n${resume}\n\n${role}`);
+    assert.equal(contextOf(r), `${hint}\n\nAgents Board, after this ${source}: what \`cb resume\` and \`cb role builder\` print now.\n\n${resume}\n\n${role}`);
     assert.ok(r.ms < 3000, `took ${r.ms} ms`);
     console.log(`# hook wall time, ${source}, bound pane, board up: ${r.ms} ms`);
   }
   // bound with no role (an orchestrator's cb iam names none): cb resume alone
   const plain = paneOf('plain');
   await sql`select cb.iam(${M}, ${plain}, 'W8@testbox', 'demo')`;
-  assert.equal(contextOf(await hook(plain, 'compact')), `${hint}\n\nClaude Board, after this compact: what \`cb resume\` prints now.\n\n${cb(plain, ['resume'])}`);
+  assert.equal(contextOf(await hook(plain, 'compact')), `${hint}\n\nAgents Board, after this compact: what \`cb resume\` prints now.\n\n${cb(plain, ['resume'])}`);
   // clear, no source, or not JSON: today's hint only
   for (const source of ['clear', null]) assert.equal(contextOf(await hook(bound, source)), hint);
   // a pane the relay knows but cb iam never bound, and a pane with no row at all
@@ -93,7 +93,7 @@ test('with the seat\'s relay running, the hook asks the board through it, not on
     const r = await hook(pane, 'compact');
     assert.equal(r.status, 0, r.stderr);
     const resume = cb(pane, ['resume']), role = cb(pane, ['role', 'reviewer']); // these go through the relay too
-    assert.equal(contextOf(r), `${hint}\n\nClaude Board, after this compact: what \`cb resume\` and \`cb role reviewer\` print now.\n\n${resume}\n\n${role}`);
+    assert.equal(contextOf(r), `${hint}\n\nAgents Board, after this compact: what \`cb resume\` and \`cb role reviewer\` print now.\n\n${resume}\n\n${role}`);
     assert.match(served[0] ?? '', /cb\.resume\(s\.actor\)/);
     assert.match(served[1] ?? '', /cb\.role_text\(/);
   } finally {
@@ -130,7 +130,7 @@ test('a stdin left open after its JSON does not hold a plain start (#4351)', { t
   const ms = Date.now() - t0;
   c.stdin.destroy();
   assert.equal(status, 0);
-  assert.match(contextOf({ stdout }), /^Claude Board: /);
+  assert.match(contextOf({ stdout }), /^Agents Board: /);
   assert.ok(ms < ended + 500, `took ${ms} ms, ${ended} ms with stdin ended`); // not the 1 s stdin wait
 });
 

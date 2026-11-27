@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { freshDb } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
 
 const { app, loginFails } = await import('../server/main.ts');
@@ -208,4 +209,21 @@ test('the sign-in cookie is Secure when the tunnel says https', async () => {
   assert.match(login.headers.get('set-cookie') ?? '', /;\s*Secure/i);
   assert.match((await remote(`/?u=${token}`, { headers: https })).headers.get('set-cookie') ?? '', /;\s*Secure/i);
   assert.doesNotMatch((await remote(`/?u=${token}`)).headers.get('set-cookie') ?? '', /Secure/i, 'plain http (local dev) stays usable');
+});
+
+test('#4531: the board project shows as Agents Board, its slug stays claude-board; a name set by hand is kept', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('claude-board'), cb.ensure_project('zed-two')`;
+  const name = async (slug: string) => (await sql`select name from cb.projects where slug = ${slug}`)[0]!.name;
+  assert.equal(await name('claude-board'), 'Agents Board', 'a new board names its own project Agents Board');
+  assert.equal(await name('zed-two'), 'Zed Two', 'any other project keeps the name from its slug');
+  // the statement db/setup.ts re-applies on every deploy (db/schema.sql), run as it is there
+  const step = /^update cb\.projects set name = 'Agents Board' where .*;$/m.exec(readFileSync('db/schema.sql', 'utf8'))?.[0];
+  assert.ok(step, 'db/schema.sql renames the board project');
+  await sql`update cb.projects set name = 'Claude Board' where slug = 'claude-board'`; // a board from before the rename
+  for (let i = 0; i < 2; i++) await sql.unsafe(step);
+  assert.equal(await name('claude-board'), 'Agents Board');
+  await sql`update cb.projects set name = 'Our board' where slug = 'claude-board'`;
+  assert.equal((await sql.unsafe(step)).count, 0, 'a name set by hand is kept');
+  assert.equal(await name('claude-board'), 'Our board');
 });

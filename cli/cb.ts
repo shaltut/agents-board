@@ -1,4 +1,4 @@
-// cb — Claude Board CLI. Talks to Postgres directly (works without the web server).
+// cb — Agents Board CLI. Talks to Postgres directly (works without the web server).
 import { parseArgs } from 'node:util';
 import { hostname, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';

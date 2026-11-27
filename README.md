@@ -244,7 +244,9 @@ and copying one file alone breaks the hook. Squad seats get `CB_ROLE` (role rule
 ## Naming note
 
 The repository is now **agents-board**, but the code keeps its earlier names for now: the CLI is still `cb`, local state
-lives in `~/.claude-board`, the database is `claude_board`, the schema is `cb`, and the variables are `CB_*`.
+lives in `~/.claude-board`, the database is `claude_board`, the schema is `cb`, and the variables are `CB_*`. What
+people and agents read says Agents Board (#4531): the web UI, the help and hook text, and the `[Agents Board]` tag on
+relayed messages. The board's own project keeps its short name `claude-board`.
 
 ## Contributing
 

@@ -1,4 +1,4 @@
-# Claude Board: what it is and how it fits together
+# Agents Board: what it is and how it fits together
 
 The knowledge base for whoever runs the board: Ahmed, and the Claude agent that maintains it on the VPS.
 

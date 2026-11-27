@@ -742,7 +742,7 @@ export function checkRole(command, role) {
 }
 
 const ASK = `interactive ask-user tools (AskUserQuestion and the like) are disabled here: they stop this session until Ahmed answers, and he is often away.
-Ask on Claude Board instead, then KEEP WORKING on something else:
+Ask on Agents Board instead, then KEEP WORKING on something else:
 
   cb ask <project> "<question>" -o "<Label>=<why / tradeoff>" -o "<Label (Recommended)>=<why>" [-c "<context, markdown>"] [--multi]
 

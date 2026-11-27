@@ -45,7 +45,7 @@ export function History({ route }: { route: Route }) {
   return (
     <div className="mx-auto max-w-3xl">
       <h1 className="text-[28px] leading-tight font-semibold tracking-[-0.015em]">History</h1>
-      <p className="mt-1 text-sm text-muted-foreground">Everything Claude and you changed, newest first.</p>
+      <p className="mt-1 text-sm text-muted-foreground">Everything the agents and you changed, newest first.</p>
 
       <div className="mt-5 flex flex-col gap-2 sm:flex-row">
         <div className="relative flex-1">

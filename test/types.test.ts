@@ -74,7 +74,7 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   const [t] = await sql`select project, type, status, priority, assignee, created_by from cb.tasks where id = 3`;
   assert.deepEqual({ ...t }, { project: 'iris', type: 'bug', status: 'next', priority: 'P2', assignee: null, created_by: 'W7@macbook' });
 
-  // a bug against Claude Board itself, from an iris session: no orchestrator there, so its bound sessions hear it
+  // a bug against Agents Board itself, from an iris session: no orchestrator there, so its bound sessions hear it
   const b = cb(['bug', 'claude-board', 'cb brief hangs', '-b', 'cb brief took 30s', '-p', 'P1'], env);
   assert.equal(b.code, 0, b.err);
   assert.equal(b.out, '#4 bug filed in claude-board; told board-dev@shaltoot (no orchestrator there)');
