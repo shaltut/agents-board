@@ -554,6 +554,68 @@ test('startOne: any other start error is not retried', () => {
   assert.match(r.line, /model_missing/);
 });
 
+// #4576: a seat CLI that exits at start (codex 0.160 dropped --full-auto: 'unexpected argument', then exit) left herdr
+// waiting out its whole timeout, and squad up said only "timed out waiting for agent startup". The pane is read before
+// it is closed, and the CLI's own last lines go in the failure, with values cut.
+const TIMEOUT = { status: 1, stderr: '{"error":{"code":"agent_start_timeout","message":"timed out waiting for agent startup"}}' };
+const paneText = (text: string) => ({ status: 0, stdout: text, stderr: '' });
+const CODEX_EXIT = "PS C:\\w\\sq-board> codex --no-daemon --full-auto\nerror: unexpected argument '--full-auto' found\n\n  tip: to pass '--full-auto' as a value, use '-- --full-auto'\n\nUsage: codex [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.\nPS C:\\w\\sq-board> \n";
+
+test('startOne: a CLI that exits at start: the failure carries its own last lines, read before the pane closes (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[0] === 'pane' && c.args[1] === 'read') return paneText(CODEX_EXIT);
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /timed out waiting for agent startup/);
+  assert.match(r.line, /the pane showed: .*unexpected argument '--full-auto' found/);
+  assert.match(r.line, /For more information, try '--help'\./);
+  const i = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'read');
+  const j = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'close');
+  assert.ok(i >= 0 && j > i, 'read, then close');
+  assert.deepEqual(f.calls[i].args.slice(0, 3), ['pane', 'read', 'w5:p1']);
+  assert.deepEqual(f.calls[j].args, ['pane', 'close', 'w5:p1']);
+});
+
+test('startOne: the pane lines in a failure carry no values: KEY=value and long tokens are cut (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText('OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 codex\nauth failed for token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345\n\u001b[31mexit 1\u001b[0m\n');
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /OPENAI_API_KEY=… codex/);
+  assert.match(r.line, /auth failed for token …/);
+  assert.match(r.line, /exit 1/);
+  assert.doesNotMatch(r.line, /sk-proj|ghp_|abcdefghij|\u001b/);
+});
+
+test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
+  const unreadable = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return { status: 1, stderr: 'pane gone' };
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), unreadable.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /^failed orch@shaltoot: .*timed out waiting for agent startup/);
+  assert.doesNotMatch(r.line, /the pane showed/);
+  assert.ok(has(unreadable.calls, 'pane', 'close', 'w5:p1'));
+
+  const long = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(Array.from({ length: 40 }, (_, k) => `line ${k} ${'x'.repeat(300)}`).join('\n'));
+  });
+  const l = startOne(wsLaunch('orch@shaltoot'), long.run, {}, () => {}).line;
+  assert.match(l, /line 39 /);
+  assert.doesNotMatch(l, /line 30 /);
+  assert.ok(l.length < 1200, `short enough to read: ${l.length}`);
+});
+
 test('startOne: busy, then a startup dialog: the split is kept as blocked and counts toward its tab', () => {
   let starts = 0;
   const f = fake((c) => {

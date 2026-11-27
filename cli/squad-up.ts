@@ -191,6 +191,21 @@ export function herdrJson(run: Runner, m: string | null, args: string[], timeout
   try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
 }
 
+/** #4576: the last lines a pane shows, as one short line for a failure: a seat CLI that exits at start (an unknown flag
+ *  after a CLI update) only makes herdr time out, and its own words say why. Terminal codes go, and no value is
+ *  repeated: KEY=value keeps the key, and any run of 24+ token characters is cut. '' when the pane cannot be read. */
+const PANE_LINES = 8, PANE_LINE_MAX = 120;
+export function paneTail(run: Runner, m: string | null, pane: string): string {
+  let r: Res;
+  try { r = run(m, ['pane', 'read', pane, '--source', 'recent', '--lines', '40', '--format', 'text'], 10_000); } catch { return ''; }
+  if (r.status !== 0 || !r.stdout) return '';
+  return String(r.stdout).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '')
+    .split('\n').map((s) => s.trim()).filter(Boolean)
+    .map((s) => s.replace(/\b([A-Za-z_][A-Za-z0-9_]*)=\S+/g, '$1=…').replace(/[A-Za-z0-9_-]{24,}/g, '…'))
+    .map((s) => (s.length > PANE_LINE_MAX ? `${s.slice(0, PANE_LINE_MAX)}…` : s))
+    .slice(-PANE_LINES).join(' | ');
+}
+
 // A pane herdr just made refuses agent start (agent_pane_busy) until its shell prompt is up: about 10 s of retries.
 const BUSY_TRIES = 6, BUSY_WAIT_MS = 2000;
 const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
@@ -253,7 +268,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   // the seat's agent adapter, before any pane (#4002): an agent without one fails here, never started as Claude instead
   let adapter: AgentAdapter, spec: LaunchSpec;
   try { ({ adapter, spec } = launchSpec(l, gate)); } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
-  let pane: string | undefined, started = false;
+  let pane: string | undefined, started = false, starting = false;
   // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
   const env = Object.entries(spec.env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   try {
@@ -271,6 +286,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (!pane) throw new Error('herdr returned no pane id');
     if (spec.prestart) prestartPane(l, pane, spec.prestart.args, run, pause);
     let blocked = false;
+    starting = true; // from here a failure is the agent's: its pane is read before it is closed (#4576)
     try {
       for (let i = 1; ; i++) {
         try {
@@ -295,8 +311,9 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     return { ok: true, pane, line: `started ${l.name}` };
   } catch (e) {
     if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
+    const shown = pane && starting ? paneTail(run, l.herdr, pane) : '';
     if (pane) try { herdr(l.herdr, ['pane', 'close', pane]); } catch {}
-    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` };
+    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}${shown ? `; the pane showed: ${shown}` : ''}` };
   }
 }
 
