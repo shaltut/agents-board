@@ -38,11 +38,17 @@ const log = (m: string) => { try { appendFileSync(LOG, `${new Date().toISOString
 
 const AGENT = flag('--agent') || process.env.CB_AGENT || 'claude';
 // an agent this relay cannot serve (no adapter, not installed, its MCP gate shut here): never served as Claude. #4429: the
-// seat's project hears it on the board once (relay-refusal.ts), and the relay exits 1 for whoever waits on it (cb relay).
-// At most 8 s: a launcher waits on this process (a hook start never does: it is detached).
+// seat's project hears it on the board once (relay-refusal.ts), from a detached --child: the installed SessionStart hook
+// runs this file itself as the launcher, and a hook never waits on the board or fails its session. So the launcher
+// returns at once: exit 0 when no --agent was given (the hook), 1 for an explicit --agent (cb relay waits on it).
 const MEMO = join(tmpdir(), `cb-relay-${key}.refused`);
 const refused = refusalWords(AGENT);
-if (refused) {
+if (refused && !process.argv.includes('--child')) {
+  spawn(process.execPath, [import.meta.filename, '--child', '--pane', PANE, '--agent', AGENT],
+    { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
+  process.exit(flag('--agent') ? 1 : 0);
+}
+if (refused) { // the detached child: at most about 9.5 s, waited on by nobody
   // the local log keeps the adapter's own text too (the MCP gate's names what to check); the board never gets it
   log(`not started: ${refused}${(() => { try { getAdapter(AGENT); return ''; } catch (e: any) { return ` (${e?.message})`; } })()}`);
   const db = connect(undefined, { app: 'cb-relay/refused', max: 1 });
@@ -52,7 +58,6 @@ if (refused) {
   await Promise.race([db.end({ timeout: 1 }).catch(() => {}), new Promise((r) => setTimeout(r, 1500).unref())]);
   process.exit(1);
 }
-clearRefusal(MEMO);
 const adapter = getAdapter(AGENT);
 const claude = adapter.kind === 'claude';
 const seat: SeatHandle = { machine: M, pane: PANE, agent: adapter.kind };
@@ -99,6 +104,7 @@ if (!process.argv.includes('--child')) {
 if (claude && SOCKET && TOKEN && !(await aliveNow()) && (await envInboxAnswers()) && handOver()) log('endpoint handed over from env');
 { const held = seatLockHolder(LOCK); if (held && held !== process.pid) process.exit(0); } // one relay per seat
 writeFileSync(LOCK, String(process.pid));
+clearRefusal(MEMO); // a real start (this relay holds the seat): the seat's next refusal is news again
 const keepFresh = setInterval(touch, 2000); // from the start: setting up can outlast 15 s while the board is unreachable
 
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
