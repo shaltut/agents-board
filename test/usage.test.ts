@@ -2,10 +2,13 @@
 // synthetic transcript (never a real one) incrementally, and cb.usage_report keeps one cumulative row per session.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect } from '../server/db.ts';
+import { serveBridge, seatKey } from '../cli/bridge.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { BYTES_PER_RUN, loadState, scanSession, statuslineCost, turn } from '../hooks/usage-stop.mjs';
 
@@ -26,7 +29,7 @@ function transcript(turns: number, { from = 0, blocks = 3, pad = 200, model = 'c
     const usage = { input_tokens: 2 + (i % 5), output_tokens: 100 + i, cache_read_input_tokens: 1000 + 10 * i, cache_creation_input_tokens: 50 + (i % 7) };
     want[0] += usage.input_tokens; want[1] += usage.output_tokens; want[2] += usage.cache_read_input_tokens; want[3] += usage.cache_creation_input_tokens;
     for (let b = 0; b < blocks; b++) {
-      lines.push(JSON.stringify({ type: 'assistant', requestId: `req_${i}`, message: { id: `msg_syn_${i}`, model, role: 'assistant',
+      lines.push(JSON.stringify({ type: 'assistant', parentUuid: `u_${i}`, requestId: `req_${i}`, message: { id: `msg_syn_${i}`, model, role: 'assistant',
         content: [{ type: 'text', text: `${MARK} block ${b}` }], usage } }));
       if (b === 0) lines.push(JSON.stringify({ type: 'system', content: 'between blocks' }));
     }
@@ -39,7 +42,7 @@ const add = (a: number[], b: number[]) => a.map((x, i) => x + b[i]!);
 
 test('turn: an assistant line with usage counts; other lines, bad JSON and synthetic turns do not', () => {
   assert.deepEqual(turn(JSON.stringify({ type: 'assistant', message: { id: 'm1', model: 'x', usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 } } })),
-    { id: 'm1', model: 'x', counts: [1, 2, 3, 4] });
+    { id: 'm1', model: 'x', copied: false, counts: [1, 2, 3, 4] });
   assert.equal(turn(JSON.stringify({ type: 'user', message: { content: 'assistant' } })), null);
   assert.equal(turn('{"type":"assistant", broken'), null);
   assert.equal(turn(JSON.stringify({ type: 'assistant', message: { model: '<synthetic>', usage: { output_tokens: 5 } } })), null);
@@ -91,6 +94,12 @@ test('scanSession: a line still being written counts at the next Stop; appended 
   scanSession(f, s);
   assert.deepEqual(s.totals, add(add(one.want, two.want), sub.want));
   assert.equal(s.model, 'claude-test-1', 'the model is the main transcript\'s');
+  // a fork's transcript opens with the parent's last message (no parent of its own), already counted in the main one
+  const copied = two.text.split('\n').find((l) => l.includes('msg_syn_9'))!.replace('"parentUuid":"u_9"', '"parentUuid":null');
+  const fork = transcript(3, { from: 200 });
+  writeFileSync(join(d, 'sess', 'subagents', 'agent-f1.jsonl'), `${JSON.stringify({ type: 'fork-context-ref' })}\n${copied}\n${fork.text}`);
+  scanSession(f, s);
+  assert.deepEqual(s.totals, add(add(add(one.want, two.want), sub.want), fork.want));
   // nothing new: nothing changes
   const before = JSON.stringify(s);
   scanSession(f, s);
@@ -98,7 +107,7 @@ test('scanSession: a line still being written counts at the next Stop; appended 
   // a transcript that shrank was rewritten: counted again from the start
   writeFileSync(f, two.text);
   scanSession(f, s);
-  assert.deepEqual(s.totals, add(two.want, sub.want));
+  assert.deepEqual(s.totals, add(add(two.want, sub.want), fork.want));
 });
 
 test('statuslineCost: the status line\'s cost for this session when written in the last 10 minutes, else none', () => {
@@ -184,6 +193,16 @@ const hook = (stdin: unknown, env: Record<string, string>) => {
     encoding: 'utf8', timeout: 30_000, env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', CLAUDE_CONFIG_DIR: temp('cb-usage-nocfg-'), ...env } });
   return { code: r.status, out: r.stdout, err: r.stderr, ms: Date.now() - t };
 };
+// the same, without blocking this process: a board or relay served from here must keep answering while the hook runs
+const hookAsync = (stdin: unknown, env: Record<string, string>) => new Promise<{ code: number | null; out: string; err: string; ms: number }>((resolve) => {
+  const t = Date.now();
+  const c = spawn(process.execPath, ['hooks/usage-stop.mjs'], { env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', CLAUDE_CONFIG_DIR: temp('cb-usage-nocfg-'), ...env } });
+  let out = '', err = '';
+  c.stdout.on('data', (b) => { out += b; });
+  c.stderr.on('data', (b) => { err += b; });
+  c.on('close', (code) => resolve({ code, out, err, ms: Date.now() - t }));
+  c.stdin.end(JSON.stringify(stdin));
+});
 
 test('the Stop hook: sends numbers only, prints nothing, exits 0; no herdr pane or a dead board costs nothing', async () => {
   const sql = await freshDb(); clients.push(sql);
@@ -226,10 +245,38 @@ test('the Stop hook: sends numbers only, prints nothing, exits 0; no herdr pane 
     const b = hook(bad, { ...env, CB_USAGE_STATE_DIR: d2 });
     assert.deepEqual([b.code, b.out, b.err], [0, '', '']);
   }
-  // a board that does not answer: exit 0 within the deadline (DEADLINE_MS 1.9 s; slack for a loaded machine)
+  // a board that refuses: exit 0 at once, silent
   const dead = hook({ ...stdin, session_id: 'syn-session-3' }, { ...env, CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board' });
   assert.deepEqual([dead.code, dead.out, dead.err], [0, '', '']);
-  assert.ok(dead.ms < 10_000, `${dead.ms} ms`);
+  // a board that takes the connection and never answers: the deadline (DEADLINE_MS 1.9 s) ends the hook, exit 0, silent
+  const hung = net.createServer((s) => { s.on('error', () => {}); });
+  await new Promise<void>((r) => hung.listen(0, '127.0.0.1', () => r()));
+  try {
+    const port = (hung.address() as net.AddressInfo).port;
+    const h = await hookAsync({ ...stdin, session_id: 'syn-session-4' }, { ...env, CB_DATABASE_URL: `postgres://cb@127.0.0.1:${port}/claude_board` });
+    assert.deepEqual([h.code, h.out, h.err], [0, '', '']);
+    assert.ok(h.ms > 1000 && h.ms < 10_000, `${h.ms} ms: the deadline, not an early exit, ended it (slack for a loaded machine)`);
+  } finally { hung.close(); }
+});
+
+// every live seat has a relay, so this is the path the hook takes in production: it rides the relay's connection
+test('the Stop hook reports through its seat\'s relay bridge when one is up', { timeout: 60_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  const pane = `p-usage-bridge-${process.pid}`;
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  const served: string[] = [];
+  const stop = await serveBridge(relaySql, seatKey('testbox', pane), TEST_URL, undefined, { served: (t: string) => served.push(t) });
+  try {
+    const d = temp('cb-usage-bridge-');
+    const f = join(d, 'sess.jsonl');
+    const { text, want } = transcript(8);
+    writeFileSync(f, text);
+    const h = await hookAsync({ hook_event_name: 'Stop', session_id: 'syn-bridge', transcript_path: f }, { HERDR_PANE_ID: pane, CB_USAGE_STATE_DIR: d });
+    assert.deepEqual([h.code, h.out, h.err], [0, '', '']);
+    assert.ok(served.some((t) => /cb\.usage_report\(/.test(t)), `served: ${served.join(' | ')}`);
+    const [row] = await sql`select * from cb.session_usage where session_id = 'syn-bridge'`;
+    assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens].map(Number), want);
+  } finally { await stop(); }
 });
 
 test('the Stop hook on a large transcript reads at most BYTES_PER_RUN a Stop and catches up over the next ones', async () => {

@@ -1,6 +1,6 @@
 // cb usage (#4349): the session token ledger, read-only. The numbers come from each session's Stop hook
 // (hooks/usage-stop.mjs → cb.usage_report); this only reads cb.usage_summary. Logic here, cb.ts only dispatches.
-import { callFn } from '../server/rpc.ts';
+// Not in the web's RPC list: nothing on the web reads it, and with no project it covers every project.
 
 const UNITS: Record<string, string> = { m: 'minutes', h: 'hours', d: 'days', w: 'weeks' };
 
@@ -15,8 +15,8 @@ const n = (v: number) => (v >= 1e9 ? `${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `${
 const usd = (v: unknown) => (v == null ? '' : `$${Number(v).toFixed(2)}`);
 const tokens = (r: any) => `in ${n(r.input_tokens)} · out ${n(r.output_tokens)} · cache read ${n(r.cache_read_tokens)} · cache write ${n(r.cache_write_tokens)}`;
 
-export async function usageCmd(project: string | null, since: string | undefined): Promise<{ out: string; json: unknown }> {
-  const s: any = await callFn('usage_summary', { project, since: sinceInterval(since) });
+export async function usageCmd(sql: any, project: string | null, since: string | undefined): Promise<{ out: string; json: unknown }> {
+  const [{ s }]: any = await sql`select cb.usage_summary(${project}, ${sinceInterval(since)}::interval) as s`;
   const t = s.totals;
   const where = s.project ? `in ${s.project}` : 'on every project';
   const head = `${t.sessions} session${t.sessions === 1 ? '' : 's'} ${where} active in the last ${since ?? '24h'} (each row is that session's total so far, not only the window)`;

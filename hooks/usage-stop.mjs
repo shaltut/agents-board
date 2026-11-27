@@ -38,8 +38,10 @@ export function sessionFiles(transcript) {
 
 /** Reads one file from f.offset, at most `budget.bytes` bytes and until `budget.until` (ms clock), adding each new
  *  assistant message's usage to `totals` once. Returns the model of the last message read, if any. Only whole lines
- *  count: a line still being written is read at the next Stop. */
-export function scanFile(path, f, totals, budget) {
+ *  count: a line still being written is read at the next Stop. sub: a subagent's transcript, where a turn with no
+ *  parent is one copied from the parent session (a fork's transcript opens with the parent's last message, which the
+ *  main transcript already counted). */
+export function scanFile(path, f, totals, budget, sub = false) {
   let fd;
   try { fd = openSync(path, 'r'); } catch { return null; }
   let model = null;
@@ -58,7 +60,7 @@ export function scanFile(path, f, totals, budget) {
       // a newline byte never occurs inside a UTF-8 sequence, so the text up to it decodes whole
       for (const line of data.toString('utf8', 0, nl).split('\n')) {
         const m = turn(line);
-        if (!m) continue;
+        if (!m || (sub && m.copied)) continue;
         model = m.model ?? model;
         const prev = m.id ? recent.get(m.id) : undefined;
         for (let i = 0; i < 4; i++) totals[i] += Math.max(0, m.counts[i] - (prev?.[i] ?? 0));
@@ -86,7 +88,7 @@ export function turn(line) {
   const m = j?.type === 'assistant' ? j.message : null;
   const u = m?.usage;
   if (!u || typeof u !== 'object' || m.model === '<synthetic>') return null;
-  return { id: typeof m.id === 'string' ? m.id : null, model: typeof m.model === 'string' ? m.model : null,
+  return { id: typeof m.id === 'string' ? m.id : null, model: typeof m.model === 'string' ? m.model : null, copied: j.parentUuid === null,
     counts: FIELDS.map((k) => count(u[k])) };
 }
 
@@ -101,7 +103,7 @@ export function scanSession(transcript, state, { bytes = BYTES_PER_RUN, until = 
     // a file that shrank was rewritten: start the session over (the board keeps the larger numbers meanwhile)
     if (st.size < f.offset) { Object.assign(state, { files: {}, totals: zero(), model: null }); return scanSession(transcript, state, { bytes, until, now }); }
     if (st.size > f.offset && budget.bytes > 0 && Date.now() < budget.until) {
-      const model = scanFile(path, f, state.totals, budget);
+      const model = scanFile(path, f, state.totals, budget, key !== 'main');
       if (key === 'main' && model) state.model = model;
     }
     if (f.offset >= st.size && now - st.mtimeMs > SETTLED_MS) delete f.recent;
