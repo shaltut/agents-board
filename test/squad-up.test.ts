@@ -561,7 +561,7 @@ const TIMEOUT = { status: 1, stderr: '{"error":{"code":"agent_start_timeout","me
 const paneText = (text: string) => ({ status: 0, stdout: text, stderr: '' });
 const CODEX_EXIT = "PS C:\\w\\sq-board> codex --no-daemon --full-auto\nerror: unexpected argument '--full-auto' found\n\n  tip: to pass '--full-auto' as a value, use '-- --full-auto'\n\nUsage: codex [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.\nPS C:\\w\\sq-board> \n";
 
-test('startOne: a CLI that exits at start: the failure carries its own last lines, read before the pane closes (#4576)', () => {
+test('startOne: a CLI that exits at start: the failure carries its error lines, read before the pane closes (#4576)', () => {
   const f = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('w5:p1');
     if (c.args[1] === 'start') return TIMEOUT;
@@ -570,8 +570,10 @@ test('startOne: a CLI that exits at start: the failure carries its own last line
   const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
   assert.ok(!r.ok);
   assert.match(r.line, /timed out waiting for agent startup/);
-  assert.match(r.line, /the pane showed: .*unexpected argument '--full-auto' found/);
-  assert.match(r.line, /For more information, try '--help'\./);
+  assert.match(r.line, /the CLI said: error: unexpected argument '--full-auto' found/);
+  assert.match(r.line, /Usage: codex \[OPTIONS\] \[PROMPT\]/);
+  // only lines that look like a CLI error: the prompt line with the folder, the tip and the blank lines are dropped
+  assert.doesNotMatch(r.line, /sq-board|PS C:|tip:/);
   const i = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'read');
   const j = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'close');
   assert.ok(i >= 0 && j > i, 'read, then close');
@@ -579,18 +581,49 @@ test('startOne: a CLI that exits at start: the failure carries its own last line
   assert.deepEqual(f.calls[j].args, ['pane', 'close', 'w5:p1']);
 });
 
-test('startOne: the pane lines in a failure carry no values: KEY=value and long tokens are cut (#4576)', () => {
+// PR 93 review M2: the flag name is the point, however long
+test('startOne: a flag name in an error line is kept whole, a flag\'s value is not (#4576)', () => {
   const f = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('w5:p1');
     if (c.args[1] === 'start') return TIMEOUT;
-    if (c.args[1] === 'read') return paneText('OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 codex\nauth failed for token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345\n\u001b[31mexit 1\u001b[0m\n');
+    if (c.args[1] === 'read') return paneText("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: invalid value for --config=sandbox_workspace_write.network_access=true\n");
   });
   const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
-  assert.ok(!r.ok);
-  assert.match(r.line, /OPENAI_API_KEY=… codex/);
-  assert.match(r.line, /auth failed for token …/);
-  assert.match(r.line, /exit 1/);
-  assert.doesNotMatch(r.line, /sk-proj|ghp_|abcdefghij|\u001b/);
+  assert.match(r.line, /'--dangerously-bypass-hook-trust'/);
+  assert.match(r.line, /invalid value for --config=…/);
+  assert.doesNotMatch(r.line, /sandbox_workspace_write|network_access/);
+});
+
+// PR 93 review M1: the line goes to squad up's output and the supervisor log, so nothing that may be a value survives
+test('startOne: no value survives in the pane lines: env sets, tokens, passwords, user:pass@host, keys, e-mails, paths (#4576)', () => {
+  const SECRETS = [
+    "error: $env:OPENAI_API_KEY = 'sk-live-abc'", 'error: OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789',
+    'error: auth failed: Authorization: Bearer abc123', 'error: unauthorized, Bearer qwertyuiop',
+    'error: bad config {"password": "hunter2"}', 'error: invalid --token hunter2', 'error: invalid --api-key=hunter3',
+    'error: cannot reach https://alice:s3cret@git.example.com/repo', 'error: bad key dGhpcyBpcyBh/c2VjcmV0+dG9rZW4=',
+    'error: AWS key AKIAIOSFODNN7EXAMPLE rejected', 'error: account someone@example.com is not allowed',
+    'error: no such file C:\\Users\\jdoe\\ClientCo\\notes.txt', 'error: no such file /Users/jdoe/ClientCo/notes.txt',
+    'error: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345', 'error: password hunter4 is wrong', 'error: secret: hunter5',
+  ];
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(0, 8).join('\n') + '\n\u001b[31merror: exit 1\u001b[0m\n');
+  });
+  const g = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(8).join('\n'));
+  });
+  const line = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line + ' ' + startOne(wsLaunch('orch@shaltoot'), g.run, {}, () => {}).line;
+  for (const v of ['sk-live', 'sk-proj', 'abc123', 'qwertyuiop', 'hunter2', 'hunter3', 'hunter4', 'hunter5', 'alice', 's3cret', 'git.example.com', 'dGhpcyBp', 'c2VjcmV0',
+    'AKIAIOSFODNN7EXAMPLE', 'someone', 'example.com', 'jdoe', 'ClientCo', 'notes.txt', 'ghp_', '\u001b']) {
+    assert.ok(!line.includes(v), `"${v}" leaked: ${line}`);
+  }
+  // the words that say what went wrong stay
+  assert.match(line, /error: auth failed/);
+  assert.match(line, /--token …/);
+  assert.match(line, /error: no such file …/);
 });
 
 test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
@@ -602,17 +635,17 @@ test('startOne: an unreadable pane still fails with herdr\'s reason; long output
   const r = startOne(wsLaunch('orch@shaltoot'), unreadable.run, {}, () => {});
   assert.ok(!r.ok);
   assert.match(r.line, /^failed orch@shaltoot: .*timed out waiting for agent startup/);
-  assert.doesNotMatch(r.line, /the pane showed/);
+  assert.doesNotMatch(r.line, /the CLI said/);
   assert.ok(has(unreadable.calls, 'pane', 'close', 'w5:p1'));
 
   const long = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('w5:p1');
     if (c.args[1] === 'start') return TIMEOUT;
-    if (c.args[1] === 'read') return paneText(Array.from({ length: 40 }, (_, k) => `line ${k} ${'x'.repeat(300)}`).join('\n'));
+    if (c.args[1] === 'read') return paneText(Array.from({ length: 40 }, (_, k) => `error: line ${k} ${'word '.repeat(60)}`).join('\n'));
   });
   const l = startOne(wsLaunch('orch@shaltoot'), long.run, {}, () => {}).line;
-  assert.match(l, /line 39 /);
-  assert.doesNotMatch(l, /line 30 /);
+  assert.match(l, /error: line …/);
+  assert.equal(l.split(' | ').length, 8, 'the last 8 error lines');
   assert.ok(l.length < 1200, `short enough to read: ${l.length}`);
 });
 

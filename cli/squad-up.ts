@@ -191,19 +191,44 @@ export function herdrJson(run: Runner, m: string | null, args: string[], timeout
   try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
 }
 
-/** #4576: the last lines a pane shows, as one short line for a failure: a seat CLI that exits at start (an unknown flag
- *  after a CLI update) only makes herdr time out, and its own words say why. Terminal codes go, and no value is
- *  repeated: KEY=value keeps the key, and any run of 24+ token characters is cut. '' when the pane cannot be read. */
+/** #4576: what a seat CLI that exits at start said, as one short line for the failure (an unknown flag after a CLI
+ *  update only makes herdr time out). The line goes to squad up's output and the supervisor log, so it is an allowlist
+ *  (PR 93 review M1, M2): only lines that read as a CLI error, and in them only plain words and flag names, each kept
+ *  whole however long (the flag is the point). Anything else, a number, a path, an address, a key, a quoted value, a
+ *  flag's =value and the word after a token, key, secret or password word or flag, becomes '…'. '' when the pane cannot
+ *  be read or shows no error line. */
 const PANE_LINES = 8, PANE_LINE_MAX = 120;
+const ERROR_LINE = /\b(?:error|usage|unknown|unexpected|unrecognized|invalid|not found|no such|panic|fatal|failed|denied|unauthorized|refused)\b/i;
+const WORD = /^[A-Za-z]{1,24}(?:'[A-Za-z]{1,3})?$/;
+const FLAG = /^--?[A-Za-z][\w-]*$/;
+const FLAG_VALUE = /^(--?[A-Za-z][\w-]*)=/;
+const VALUE_NEXT = /^(?:bearer|basic|token|password|passwd|pwd|secret|apikey|key)$|^--?[\w-]*(?:token|key|secret|pass|auth|cred)[\w-]*$/i;
+function cleanToken(tok: string, prev: string): string {
+  const lead = /^[\[({'"`]*/.exec(tok)![0], rest = tok.slice(lead.length);
+  const trail = /[\])}'"`,.:;!?]*$/.exec(rest)![0], core = rest.slice(0, rest.length - trail.length);
+  if (VALUE_NEXT.test(prev)) return '…';
+  const fv = FLAG_VALUE.exec(core);
+  if (fv) return `${lead}${fv[1]}=…`;
+  return core && (FLAG.test(core) || WORD.test(core)) ? lead + core + trail : '…';
+}
+function cleanLine(line: string): string {
+  let prev = '';
+  const out: string[] = [];
+  for (const tok of line.split(/\s+/).filter(Boolean)) {
+    const t = cleanToken(tok, prev);
+    prev = tok.replace(/^[\[({'"`]*|[\])}'"`,.:;!?]*$/g, '');
+    if (!(t === '…' && out[out.length - 1] === '…')) out.push(t);
+  }
+  const l = out.join(' ');
+  return l.length > PANE_LINE_MAX ? `${l.slice(0, PANE_LINE_MAX)}…` : l;
+}
 export function paneTail(run: Runner, m: string | null, pane: string): string {
   let r: Res;
   try { r = run(m, ['pane', 'read', pane, '--source', 'recent', '--lines', '40', '--format', 'text'], 10_000); } catch { return ''; }
   if (r.status !== 0 || !r.stdout) return '';
   return String(r.stdout).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '')
-    .split('\n').map((s) => s.trim()).filter(Boolean)
-    .map((s) => s.replace(/\b([A-Za-z_][A-Za-z0-9_]*)=\S+/g, '$1=…').replace(/[A-Za-z0-9_-]{24,}/g, '…'))
-    .map((s) => (s.length > PANE_LINE_MAX ? `${s.slice(0, PANE_LINE_MAX)}…` : s))
-    .slice(-PANE_LINES).join(' | ');
+    .split('\n').map((s) => s.trim()).filter((s) => s && ERROR_LINE.test(s))
+    .map(cleanLine).slice(-PANE_LINES).join(' | ');
 }
 
 // A pane herdr just made refuses agent start (agent_pane_busy) until its shell prompt is up: about 10 s of retries.
@@ -313,7 +338,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
     const shown = pane && starting ? paneTail(run, l.herdr, pane) : '';
     if (pane) try { herdr(l.herdr, ['pane', 'close', pane]); } catch {}
-    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}${shown ? `; the pane showed: ${shown}` : ''}` };
+    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}${shown ? `; the CLI said: ${shown}` : ''}` };
   }
 }
 
