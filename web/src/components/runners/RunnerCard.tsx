@@ -12,8 +12,8 @@ const TONE = { ok: 'text-st-done', warn: 'text-lamp-ink', bad: 'text-destructive
 /** One runner machine: whether it takes jobs, its slots and database lanes, and (Ahmed only) pause, drain and limits. */
 export function RunnerCard({ r, q, owner, now }: { r: Runner; q: Queue; owner: boolean; now: number }) {
   const mode = modeWords(r)
-  const slots = capacity(r.busy, r.slots, r.slots_set, 'slot')
-  const lanes = capacity(r.busy_db, r.db_lanes, r.lanes_set, 'lane')
+  const slots = capacity(r.busy, r.slots, r.slots_set, 'slot', r.setting_refused)
+  const lanes = capacity(r.busy_db, r.db_lanes, r.lanes_set, 'lane', r.setting_refused)
   const dbWaiting = q.waiting.filter((w) => w.why?.reason === 'lane').length
   const { act, busy } = useAct()
   return (
@@ -72,7 +72,9 @@ function Limits({ r }: { r: Runner }) {
   )
   const n = (v: string) => (v.trim() === '' ? null : Number(v))
   const bad = [n(slots), n(lanes)].some((v) => v !== null && !Number.isInteger(v))
-  const save = (s: number | null, l: number | null) => act('runner_limits_set', { runner: r.name, slots: s, db_lanes: l }, 'Saved').then(() => setOpen(false))
+  // an empty field goes back to the runner's own file for that number (clear_*); a number replaces it
+  const save = (s: number | null, l: number | null) =>
+    act('runner_limits_set', { runner: r.name, slots: s, db_lanes: l, clear_slots: s === null, clear_lanes: l === null }, 'Saved').then(() => setOpen(false))
   return (
     <form className="flex w-full flex-wrap items-end gap-2 rounded-md bg-raised p-2 text-sm sm:w-auto"
       onSubmit={(e) => { e.preventDefault(); if (!bad) void save(n(slots), n(lanes)) }}>

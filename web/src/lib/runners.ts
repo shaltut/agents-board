@@ -20,6 +20,7 @@ export interface Runner {
   mode: 'on' | 'paused' | 'draining'; mode_by: string | null; mode_at: string | null
   slots: number | null; db_lanes: number | null // reported by the runner at start; null = not reported yet
   slots_set: number | null; lanes_set: number | null; set_by: string | null; set_at: string | null // Ahmed's setting
+  setting_refused?: boolean // the runner could not use that setting at its last start and kept its own file's counts
   busy: number; busy_db: number; cap: number | null; lanes: number | null
 }
 export interface Queue {
@@ -101,12 +102,15 @@ export function modeWords(r: Runner, at: (iso: string) => string = clockOf): { t
   return { text: 'Taking jobs', tone: 'ok' }
 }
 
-/** "7 of 10 in use", and what Ahmed's setting changes: a lower one applies now, a higher one when the runner restarts. */
-export function capacity(busy: number, reported: number | null, set: number | null, noun: 'slot' | 'lane') {
+/** "7 of 10 in use", and what Ahmed's setting changes: a lower one applies now, a higher one when the runner restarts.
+ *  refused: the runner started after the setting and could not use it (its file cannot take it), so a restart will not
+ *  help either: the page says so instead of promising one. */
+export function capacity(busy: number, reported: number | null, set: number | null, noun: 'slot' | 'lane', refused = false) {
   const of = reported == null ? set : set == null ? reported : Math.min(reported, set)
   const used = of == null ? `${busy} in use (the runner has not reported how many it has)` : `${busy} of ${of} in use`
   let plan: string | null = null
-  if (set != null && reported != null && set > reported) plan = `Set to ${set}: takes effect when the runner restarts`
+  if (refused && set != null && reported != null && set > reported) plan = `Set to ${set}, but the runner could not use this setting and kept ${reported} from its own file. Its log on the PC says why`
+  else if (set != null && reported != null && set > reported) plan = `Set to ${set}: takes effect when the runner restarts`
   else if (set != null && reported != null && set < reported) plan = `Set to ${set} on the board (the runner has ${reported})`
   else if (set != null && reported == null) plan = `Set to ${set} on the board`
   if (of != null && busy > of) plan = `${plan ? plan + '. ' : ''}No new ${noun === 'slot' ? 'jobs start' : 'database jobs start'} until ${busy - of} ${busy - of === 1 ? 'finishes' : 'finish'}`
@@ -124,10 +128,22 @@ export function duration(ms: number): string {
 /** The log stays on the PC (Q2981): the page offers the command, only for a job that started (no log before). */
 export const logCommand = (j: Pick<Job, 'id' | 'started_at'>) => j.started_at ? `cb job log ${j.id} --tail 80` : null
 
-/** "files: a.test.ts, b.test.ts" for a job's parameters; long lists cut. */
+/** A recipe parameter's name in words (runner.json names them; files, ws and app are the usual ones). */
+const PARAM_WORDS: Record<string, string> = {
+  files: 'Files', file: 'File', ws: 'Workspaces', workspace: 'Workspace', workspaces: 'Workspaces', app: 'App', apps: 'Apps',
+  pkg: 'Package', package: 'Package', dir: 'Folder', grep: 'Tests named', filter: 'Only', project: 'Project', args: 'Options',
+}
+export function paramWord(k: string): string {
+  const known = PARAM_WORDS[k.toLowerCase()]
+  if (known) return known
+  const words = k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toLowerCase()
+  return words ? words[0]!.toUpperCase() + words.slice(1) : 'Other'
+}
+
+/** "Files: a.test.ts, b.test.ts" for a job's parameters; long lists cut. */
 export function paramsLine(params: Record<string, string[]> | null | undefined, max = 3): string {
   return Object.entries(params ?? {}).filter(([, v]) => Array.isArray(v) && v.length)
-    .map(([k, v]) => `${k}: ${v.slice(0, max).join(', ')}${v.length > max ? ` and ${v.length - max} more` : ''}`).join(' · ')
+    .map(([k, v]) => `${paramWord(k)}: ${v.slice(0, max).join(', ')}${v.length > max ? ` and ${v.length - max} more` : ''}`).join(' · ')
 }
 
 /** The finished list's filter. */

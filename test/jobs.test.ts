@@ -131,10 +131,8 @@ test('cancel: the lead of another project cannot', async () => {
   const { id } = await add('B1@mac');
   await assert.rejects(session`select cb.job_cancel(${id}, 'orch2@pc')`, /only the requester/);
   assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'queued');
-  // #4527 (Q2982): the lead by its session's role only; an orch session with no role set is not the lead any more
+  // an orch session bound to the job's project with no role set is its lead, as cb._role has it
   await sql`insert into cb.sessions (machine, pane, actor, project) values ('pc','p6','orch@pc6','demo')`;
-  await assert.rejects(session`select cb.job_cancel(${id}, 'orch@pc6')`, /only the requester/);
-  await sql`update cb.sessions set role = 'lead' where actor = 'orch@pc6'`;
   await session`select cb.job_cancel(${id}, 'orch@pc6')`;
   assert.equal((await sql`select state from cb.jobs where id = ${id}`)[0].state, 'cancelled');
 });

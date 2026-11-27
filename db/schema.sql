@@ -5458,6 +5458,14 @@ alter table cb.runners add column if not exists set_by text;
 alter table cb.runners add column if not exists set_at timestamptz;
 alter table cb.runners drop constraint if exists runners_mode_check;
 alter table cb.runners add constraint runners_mode_check check (mode in ('on', 'paused', 'draining'));
+-- the setting's range on the row itself, whatever writes it (the runner builds a slot list of this size; a lane is one
+-- digit in its stack's ports). setting_refused: why the runner could not run the board's setting at its last start
+-- (null = it ran it, or there is none); the page says so in words.
+alter table cb.runners drop constraint if exists runners_slots_set_check;
+alter table cb.runners add constraint runners_slots_set_check check (slots_set between 1 and 64);
+alter table cb.runners drop constraint if exists runners_lanes_set_check;
+alter table cb.runners add constraint runners_lanes_set_check check (lanes_set between 1 and 9);
+alter table cb.runners add column if not exists setting_refused text;
 -- A project's lead (or Ahmed) holds that project's waiting jobs; the shared runner keeps serving every other project.
 create table if not exists cb.job_holds (
   project text primary key references cb.projects(slug) on update cascade on delete cascade,
@@ -5598,10 +5606,9 @@ declare a text := cb.set_actor(actor); j cb.jobs;
 begin
   select * into j from cb.jobs x where x.id = id for update;
   if not found then raise exception 'no job #%', id; end if;
-  -- #4527 (Q2982): from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this
-  -- function); the lead of the job's project by its session's role, not by the name orch (cb._lead_by_role, below)
+  -- #4527: from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this function)
   if not (cb._is_dashboard() and a = 'ahmed') and j.requester <> a
-     and not cb._lead_by_role(a, j.project) then
+     and not cb._is_lead(a, j.project) then  -- the lead of the job's project
     raise exception 'only the requester, the project''s lead or Ahmed can cancel job #%', id;
   end if;
   if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;
@@ -5612,17 +5619,20 @@ begin
 end $$;
 
 -- slots, db_lanes (#4527): what this runner runs at once, as it started (the board setting, else runner.json); a runner
--- from before passes neither and the page says "not reported yet". A restart ends a drain; a pause stays (Q2983).
-create function cb.runner_hello(runner text, log_url text, recipes jsonb, slots int default null, db_lanes int default null)
+-- from before passes neither and the page says "not reported yet". setting_refused: why it could not run the board's
+-- setting (null: it ran it). A restart ends a drain; a pause stays (Q2983).
+create function cb.runner_hello(runner text, log_url text, recipes jsonb, slots int default null, db_lanes int default null,
+                                setting_refused text default null)
 returns int language plpgsql as $$
 #variable_conflict use_variable
 declare j cb.jobs; n int := 0; r jsonb;
 begin
   perform cb._runner_only();
   if jsonb_typeof(coalesce(recipes, '[]'::jsonb)) is distinct from 'array' then raise exception 'recipes must be a list'; end if;
-  insert into cb.runners (name, log_url, started_at, last_seen, slots, db_lanes) values (runner, log_url, now(), now(), slots, db_lanes)
+  insert into cb.runners (name, log_url, started_at, last_seen, slots, db_lanes, setting_refused)
+  values (runner, log_url, now(), now(), slots, db_lanes, left(setting_refused, 300))
   on conflict (name) do update set log_url = excluded.log_url, started_at = now(), last_seen = now(),
-    slots = excluded.slots, db_lanes = excluded.db_lanes,
+    slots = excluded.slots, db_lanes = excluded.db_lanes, setting_refused = excluded.setting_refused,
     mode = case when cb.runners.mode = 'draining' then 'on' else cb.runners.mode end,
     mode_by = case when cb.runners.mode = 'draining' then null else cb.runners.mode_by end,
     mode_at = case when cb.runners.mode = 'draining' then now() else cb.runners.mode_at end;
@@ -5705,16 +5715,13 @@ begin
 end $$;
 
 -- The runner queue page (#4527). Who manages the queue (Q2982): Ahmed, from his dashboard, and each project's lead for
--- that project's jobs only, by its session's role (never by the name orch: cb._is_lead's fallback is not used here).
--- Runner-wide state (pause, drain, slots) is Ahmed's alone: the runner serves every project. Deterrents like the rest.
-create function cb._lead_by_role(a text, proj text) returns boolean language sql stable as $$
-  select exists (select 1 from (select s.project, s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1) s
-                  where s.project = proj and s.role = 'lead')
-$$;
+-- that project's jobs only, by the board's one rule for a lead (cb._is_lead: the lead role, or a role-less orch session
+-- bound to the project, as job_cancel always had it). Runner-wide state (pause, drain, slots) is Ahmed's alone: the
+-- runner serves every project. Deterrents like the rest.
 -- exactly ahmed from the dashboard: not cb.ahmed_like, which takes any name holding the word
 create function cb._is_owner(a text) returns boolean language sql stable as $$ select cb._is_dashboard() and a = 'ahmed' $$;
 create function cb._queue_manager(a text, proj text) returns boolean language sql stable as $$
-  select cb._is_owner(a) or cb._lead_by_role(a, proj)
+  select cb._is_owner(a) or cb._is_lead(a, proj)
 $$;
 -- The supervisor holds the session advisory lock hashtext('cb-supervisor') while it runs (cli/supervise.ts); pg_locks
 -- shows it to every role. A bigint key is split into classid (high 32 bits) and objid (low 32 bits), objsubid 1.
@@ -5741,6 +5748,7 @@ begin
       where x.state = 'running' group by x.runner
     ), rs as (
       select r.name, r.last_seen, r.started_at, r.mode, r.mode_by, r.mode_at, r.slots, r.db_lanes, r.slots_set, r.lanes_set, r.set_by, r.set_at,
+        coalesce(r.setting_refused is not null and r.started_at >= r.set_at, false) as setting_refused,
         r.last_seen > now() - interval '3 minutes' as alive, coalesce(run.busy, 0) as busy, coalesce(run.busy_db, 0) as busy_db,
         least(r.slots, r.slots_set) as cap, least(r.db_lanes, r.lanes_set) as lanes
       from cb.runners r left join run on run.runner = r.name
@@ -5821,7 +5829,7 @@ begin
   select * into j from cb.jobs x where x.id = id;
   if not found then raise exception 'no job #%', id; end if;
   own := cb._is_owner(a);
-  if not own and not cb._lead_by_role(a, j.project) then
+  if not own and not cb._is_lead(a, j.project) then
     raise exception 'only Ahmed or the lead of % can move its jobs in the queue', j.project;
   end if;
   if j.state <> 'queued' then raise exception 'job #% is not waiting any more: it started or ended', id; end if;
@@ -5871,10 +5879,12 @@ begin
 end $$;
 
 -- How many jobs a runner runs at once, and how many of them may be DB jobs (#4527, Q2984): Ahmed's alone, any number up
--- or down, beyond the old code cap. Null = the runner's runner.json. The runner reads it at start (cli/runner.ts): a
--- lower number applies at the next claim (cb.job_claim), a higher one when the runner restarts and reports it. A lane
--- is one digit in its test stack's ports (docs/ops/maintain.md), so 1-9 lanes, never more than the slots.
-create function cb.runner_limits_set(runner text, slots int default null, db_lanes int default null, actor text default null)
+-- or down, beyond the old code cap of 10 (1-64). The runner reads it at start (cli/runner.ts): a lower number applies at
+-- the next claim (cb.job_claim), a higher one when the runner restarts and reports it. A lane is one digit in its test
+-- stack's ports (docs/ops/maintain.md), so 1-9 lanes, never more than the slots. A value left out (null) keeps what is
+-- set; clear_slots / clear_lanes go back to the runner's runner.json.
+create function cb.runner_limits_set(runner text, slots int default null, db_lanes int default null, actor text default null,
+                                     clear_slots boolean default false, clear_lanes boolean default false)
 returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); r cb.runners;
@@ -5884,6 +5894,8 @@ begin
   if db_lanes is not null and (db_lanes < 1 or db_lanes > 9) then raise exception 'database lanes must be 1 to 9'; end if;
   select * into r from cb.runners x where x.name = runner for update;
   if not found then raise exception 'no runner %: see cb jobs', runner; end if;
+  slots := case when clear_slots then null else coalesce(slots, r.slots_set) end;
+  db_lanes := case when clear_lanes then null else coalesce(db_lanes, r.lanes_set) end;
   if db_lanes is not null and db_lanes > coalesce(slots, r.slots, db_lanes) then
     raise exception 'database lanes (%) cannot be more than slots (%)', db_lanes, coalesce(slots, r.slots);
   end if;
@@ -5901,7 +5913,7 @@ begin
 end $$;
 create or replace trigger jobs_queue_notify after insert or update or delete on cb.jobs
   for each statement execute function cb.queue_notify();
-create or replace trigger runners_queue_notify after insert or delete or update of mode, slots, db_lanes, slots_set, lanes_set on cb.runners
+create or replace trigger runners_queue_notify after insert or delete or update of mode, slots, db_lanes, slots_set, lanes_set, setting_refused on cb.runners
   for each statement execute function cb.queue_notify();
 create or replace trigger job_holds_queue_notify after insert or update or delete on cb.job_holds
   for each statement execute function cb.queue_notify();

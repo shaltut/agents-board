@@ -103,13 +103,21 @@ test('slots: in use of the lower count; a higher setting is planned until the ru
   assert.equal(capacity(7, 10, 5, 'slot').plan, 'Set to 5 on the board (the runner has 10). No new jobs start until 2 finish');
   assert.match(capacity(2, null, null, 'slot').used, /has not reported/);
   assert.equal(capacity(1, null, 3, 'lane').used, '1 of 3 in use');
+  // review M3: the runner started after the setting and could not use it: no promise of a restart
+  const refused = capacity(3, 10, 14, 'slot', true).plan!;
+  assert.equal(refused, 'Set to 14, but the runner could not use this setting and kept 10 from its own file. Its log on the PC says why');
+  assert.doesNotMatch(refused, /restarts/);
+  assert.equal(capacity(7, 10, 5, 'slot', true).plan, 'Set to 5 on the board (the runner has 10). No new jobs start until 2 finish', 'a lower one still applies');
 });
 
 test('times, the log command, parameters and names', () => {
   assert.deepEqual([duration(48_000), duration(252_000), duration(240_000), duration(3_780_000)], ['48 s', '4 min 12 s', '4 min', '1 h 3 min']);
   assert.equal(logCommand({ id: 58123, started_at: '2026-01-01T10:00:00Z' }), 'cb job log 58123 --tail 80');
   assert.equal(logCommand({ id: 1, started_at: null }), null, 'no log before it started');
-  assert.equal(paramsLine({ files: ['a', 'b', 'c', 'd', 'e'], app: [] }), 'files: a, b, c and 2 more');
+  assert.equal(paramsLine({ files: ['a', 'b', 'c', 'd', 'e'], app: [] }), 'Files: a, b, c and 2 more');
+  // review minor 2: parameter names in words, never ws: as typed
+  assert.equal(paramsLine({ ws: ['web'], app: ['api'] }), 'Workspaces: web · App: api');
+  assert.equal(paramsLine({ test_name: ['x'], onlyThis: ['y'] }), 'Test name: x · Only this: y');
   assert.deepEqual([who('ahmed'), who('runner'), who('B1@mac'), who(null)], ['Ahmed', 'the runner', 'B1@mac', 'someone']);
   assert.deepEqual(recipeLabel('itest'), { text: 'Database tests', command: false });
   assert.deepEqual(recipeLabel('kbx'), { text: 'cb run kbx', command: true }, 'an unknown recipe shows as the word sessions type');

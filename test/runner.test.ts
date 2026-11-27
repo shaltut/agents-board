@@ -570,7 +570,20 @@ test('the runner reports its slots, and at start runs Ahmed\'s board setting ove
   assert.match(runner.out, /12 slots and 1 DB lane\(s\) \(the board's setting\)/);
   const j = await ended(await add('ok'));
   assert.equal(j.state, 'passed', j.summary);
-  await sql`select cb.runner_limits_set(${NAME}, null, null, 'ahmed')`;
+  // review M3: a setting runner.json cannot take (3 lanes on a file with no laneEnv) keeps the file's counts, and the
+  // board learns why, so the page can say so
+  await sql`select cb.runner_limits_set(${NAME}, null, 3, 'ahmed')`;
+  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
+  else runner.child.kill('SIGKILL');
+  await runner.exited;
+  runner = startRunner();
+  await up(runner);
+  assert.deepEqual(await row(), { slots: 2, db_lanes: 1 });
+  assert.match(runner.out, /the board's slot setting does not fit runner\.json/);
+  assert.match((await sql`select setting_refused from cb.runners where name = ${NAME}`)[0]!.setting_refused, /does not fit runner\.json/);
+  const q = (await sql`select cb.runner_queue() as q`)[0]!.q;
+  assert.equal(q.runners.find((r: any) => r.name === NAME).setting_refused, true);
+  await sql`select cb.runner_limits_set(${NAME}, null, null, 'ahmed', true, true)`;
 });
 
 // runJob in this process, with its own home and slot folders: no board, no daemon

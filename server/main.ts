@@ -217,7 +217,7 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
 const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
 // The Runners page (#4527) is for every admin to read (Q2978); managing the queue is Ahmed's and each project's lead's
 // (Q2982), and a lead is a session (cb job ...), never a signed-in admin. The SQL checks the same (cb._is_owner: exactly
-// ahmed on the dashboard; cb._lead_by_role); this refuses another admin before the database is asked.
+// ahmed on the dashboard; cb._is_lead); this refuses another admin before the database is asked.
 const QUEUE_OWNER = new Set(['job_cancel', 'job_retry', 'job_move', 'job_hold', 'runner_set', 'runner_limits_set']);
 const ownerRule = (admin: Who, fn: string) => admin.name === 'ahmed' ? null
   : OWNER_ONLY.has(fn) ? 'Only Ahmed changes project settings.'

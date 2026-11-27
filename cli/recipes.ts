@@ -115,11 +115,12 @@ function loadRepo(p: Record<string, unknown>, pp: string, dbLanes: number, laneE
   };
 }
 
-/** Ahmed's slot setting on the board (#4527, Q2984: cb.runners slots_set and lanes_set; null keeps runner.json's). The
- *  board is the one source: no code cap on slots here (cb.runner_limits_set checks its range). Lanes stay 1-9, as a lane
- *  is one digit in its stack's ports, and never above the slots; with only slots set, the lanes follow runner.json's,
- *  cut to the slots. */
+/** Ahmed's slot setting on the board (#4527, Q2984: cb.runners slots_set and lanes_set; null keeps runner.json's). It
+ *  goes beyond runner.json's old cap of 10, up to the same 64 the board's columns hold (runners_slots_set_check): the
+ *  runner builds a slot list of that size. Lanes stay 1-9, as a lane is one digit in its stack's ports, and never above
+ *  the slots; with only slots set, the lanes follow runner.json's, cut to the slots. */
 export type BoardLimits = { slots?: number | null; dbLanes?: number | null };
+export const BOARD_MAX_SLOTS = 64;
 
 /** runner.json with the board's setting, checked as runner.json is ({lane} in every DB recipe once there are more lanes
  *  than one). A setting the file cannot take is logged and runner.json's own counts are kept: never a runner that does
@@ -140,7 +141,7 @@ export function loadConfig(text: string, board: BoardLimits = {}): RunnerConfig 
   if (!isObj(raw.log)) fail('log', 'is required: { host, port, peers }');
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
-  const slots = board.slots != null ? int(board.slots, "the board's slots", 1, Number.MAX_SAFE_INTEGER) : int(raw.slots, 'slots', 1, 10, 2);
+  const slots = board.slots != null ? int(board.slots, "the board's slots", 1, BOARD_MAX_SLOTS) : int(raw.slots, 'slots', 1, 10, 2);
   // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "2544{lane}")
   const fileLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
   const dbLanes = board.dbLanes != null ? int(board.dbLanes, "the board's DB lanes", 1, 9) : board.slots != null ? Math.min(fileLanes, slots) : fileLanes;

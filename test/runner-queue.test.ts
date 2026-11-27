@@ -19,7 +19,7 @@ async function setup() {
   const sql = await freshDb(); clients.push(sql); // cb-web: the dashboard
   await sql`select cb.ensure_project('demo')`;
   await sql`select cb.ensure_project('other')`;
-  // L1 leads demo by role (any name); orch@x is bound to demo with no role (cb._is_lead's name fallback must not count)
+  // L1 leads demo by role (any name); orch@x is bound to demo with no role: the board's lead too (cb._is_lead), as for cancel
   await sql`insert into cb.sessions (machine, pane, actor, project, role) values
     ('mac','p2','B1@mac','demo','builder'), ('pc','p4','L1@pc','demo','lead'), ('pc','p5','L2@pc','other','lead'), ('mac','p6','B2@mac','other','builder')`;
   await sql`insert into cb.sessions (machine, pane, actor, project) values ('pc','p7','orch@x','demo')`;
@@ -75,7 +75,9 @@ test('a lead moves only its own project\'s jobs, and only among them: other proj
   assert.deepEqual(await order(), [d2.id, o1.id, d1.id], 'd2 takes d1\'s place; the other project\'s job stays second');
   await assert.rejects(session`select cb.job_move(${o1.id}, 'next', 'L1@pc')`, /only Ahmed or the lead of other/);
   await assert.rejects(session`select cb.job_move(${d1.id}, 'next', 'L2@pc')`, /only Ahmed or the lead of demo/);
-  await assert.rejects(session`select cb.job_move(${d1.id}, 'next', 'orch@x')`, /only Ahmed or the lead/, 'the name orch is no role');
+  // review I1: a role-less orch session bound to the project is its lead (cb._is_lead), as job_cancel has it
+  await session`select cb.job_move(${d1.id}, 'next', 'orch@x')`;
+  assert.deepEqual(await order(), [d1.id, o1.id, d2.id], 'orch@x swapped its project\'s two jobs; the other project\'s stays second');
   await assert.rejects(session`select cb.job_move(${d1.id}, 'next', 'B1@mac')`, /only Ahmed or the lead/, 'the asker is not a manager');
   await assert.rejects(session`select cb.job_move(${d1.id}, 'next', 'ahmed')`, /only Ahmed's dashboard/);
   await assert.rejects(sql`select cb.job_move(${d1.id}, 'next', 'cai')`, /only Ahmed or the lead/, 'another admin on the dashboard');
@@ -199,8 +201,16 @@ test('slot and lane settings: Ahmed only, a range, a lower number applies at the
   await assert.rejects(sql`select cb.runner_limits_set('pc', 2, 3, 'ahmed')`, /cannot be more than slots/);
   await sql`select cb.runner_limits_set('pc', 20, 6, 'ahmed')`; // beyond the old code cap of 10
   assert.deepEqual({ ...(await sql`select slots_set, lanes_set, set_by from cb.runners`)[0] }, { slots_set: 20, lanes_set: 6, set_by: 'ahmed' });
-  await sql`select cb.runner_limits_set('pc', null, null, 'ahmed')`;
+  await sql`select cb.runner_limits_set('pc', 24, null, 'ahmed')`; // review minor 1: slots alone keep the lane setting
+  assert.deepEqual({ ...(await sql`select slots_set, lanes_set from cb.runners`)[0] }, { slots_set: 24, lanes_set: 6 });
+  await sql`select cb.runner_limits_set('pc', null, null, 'ahmed', clear_lanes => true)`;
+  assert.deepEqual({ ...(await sql`select slots_set, lanes_set from cb.runners`)[0] }, { slots_set: 24, lanes_set: null });
+  await sql`select cb.runner_limits_set('pc', null, null, 'ahmed', true, true)`;
   assert.deepEqual({ ...(await sql`select slots_set, lanes_set from cb.runners`)[0] }, { slots_set: null, lanes_set: null });
+  // review M1: the range holds on the row itself, whatever writes it
+  await assert.rejects(sql`update cb.runners set slots_set = 1000`, /runners_slots_set_check/);
+  await assert.rejects(sql`update cb.runners set lanes_set = 0`, /runners_lanes_set_check/);
+  await assert.rejects(sql`select cb.runner_limits_set('pc', 65, null, 'ahmed')`, /slots must be 1 to 64/);
   await assert.rejects(session`select cb.runner_limits_set('pc', 2, 1, 'L1@pc')`, /only Ahmed/);
   await assert.rejects(sql`select cb.runner_limits_set('pc', 2, 1, 'cai')`, /only Ahmed/);
 });
@@ -214,7 +224,10 @@ test('a lead holds its own project\'s jobs (never another\'s); the runner keeps 
   assert.equal(await claim(), null);
   assert.equal((await queue()).holds[0].held_by, 'L1@pc');
   await assert.rejects(session`select cb.job_hold('demo', false, 'L2@pc')`, /only Ahmed or the lead of demo/);
-  await assert.rejects(session`select cb.job_hold('demo', false, 'orch@x')`, /only Ahmed or the lead of demo/);
+  await assert.rejects(session`select cb.job_hold('other', true, 'orch@x')`, /only Ahmed or the lead of other/);
+  await session`select cb.job_hold('demo', false, 'orch@x')`; // a role-less orch session is its project's lead
+  assert.equal((await queue()).holds.length, 0);
+  await session`select cb.job_hold('demo', true, 'orch@x')`;
   await sql`select cb.job_hold('demo', false, 'ahmed')`;
   assert.equal(Number((await claim()).id), d.id);
 });
@@ -226,7 +239,6 @@ test('run again: a new job linked to the old one, for its requester; refused whi
   const j = await claim();
   await runner`select cb.job_finish(${j.id}, 'pc', 'failed', 1, 'x')`;
   await assert.rejects(session`select cb.job_retry(${a.id}, 'B2@mac')`, /only the requester, the lead of demo or Ahmed/);
-  await assert.rejects(session`select cb.job_retry(${a.id}, 'orch@x')`, /only the requester/);
   await assert.rejects(sql`select cb.job_retry(${a.id}, 'cai')`, /only the requester/);
   const r = (await session`select cb.job_retry(${a.id}, 'L1@pc') as r`)[0].r;
   const row = (await sql`select * from cb.jobs where id = ${r.id}`)[0];
