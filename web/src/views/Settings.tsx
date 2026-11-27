@@ -7,7 +7,7 @@ import { go, type Route } from '@/lib/route'
 import { Button } from '@/components/ui/button'
 import { ProjectDot } from '@/components/Chips'
 import {
-  ROLES, checkSquad, diffSquads, isMulti, plural, saveError, seatCount, toDocument, type Squad, type SquadOptions, type SquadPage,
+  ROLES, checkSquad, diffSquads, isMulti, plural, saveError, seatCount, setSupervise, toDocument, type Squad, type SquadOptions, type SquadPage,
 } from '@/lib/squad'
 import { Notice, Section } from '@/components/settings/bits'
 import { RoleCard } from '@/components/settings/RoleCard'
@@ -230,12 +230,12 @@ function Switches({ project, page, squad, edit }: { project: string; page: Squad
         </label>
         <label className="flex items-start gap-3 rounded-lg border bg-card p-3">
           <input type="checkbox" className="mt-0.5 size-4" checked={!!squad?.supervise} disabled={!squad}
-            onChange={(e) => edit((s) => ({ ...s, supervise: e.target.checked }))} />
+            onChange={(e) => { const on = e.target.checked; edit((s) => setSupervise(s, on, page.squad)) }} />
           <span className="text-sm">
             <span className="font-medium">Supervisor</span> <span className="rounded-full bg-lamp-soft px-2 py-0.5 text-xs text-lamp-ink">Only Ahmed changes this</span>
             <span className="block text-muted-foreground">
               Starts seats for waiting cards, closes idle ones and restarts idle seats on an old setting. It acts only while the pipeline is on.
-              {squad?.supervise !== page.supervise && ' Changed here: press Save the squad above to keep it.'}
+              {squad && !!squad.supervise !== page.supervise && ' Changed here: press Save the squad above to keep it.'}
               {!squad && ' This project has no squad yet.'}
             </span>
           </span>
