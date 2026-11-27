@@ -390,3 +390,46 @@ test('a question already on Telegram when its project is disabled loses its butt
   press(msg, `o:${id}:0`);
   await until(async () => (await status(sql, id)).status === 'answered', 'answered once enabled');
 });
+
+// #4591: a send that failed once (27 Nov 14:30Z, "telegram sendMessage: 0 network error") waited for the next board
+// change to be tried again; on a quiet board that never came and Ahmed saw no question.
+test('a question whose send fails once is sent again on its own, once, with no other change on the board (#4591)', async () => {
+  const sql = await paired();
+  const logged: string[] = [], orig = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(' ')); };
+  try {
+    // every send drops until the board is quiet (asking fires more than one change, each a pass), then the API is back
+    // and nothing on the board changes again: only the poller's own retry can send it now
+    fake.drop.dropped.length = 0;
+    fake.drop.next = 99;
+    const id = await ask(sql, 'Ship it?', { options: ['Yes', 'No'] });
+    await until(() => fake.drop.dropped.length >= 1, 'the first send dropped');
+    await new Promise((r) => setTimeout(r, 400));
+    fake.drop.next = 0;
+    await until(() => sentFor(id).length, 'sent again with nothing else changing', 6000);
+    assert.ok(logged.some((l) => new RegExp(`telegram: sending Q${id}: telegram sendMessage: 0 network error`).test(l)), 'the drop is logged');
+    assert.ok(logged.some((l) => /telegram: \d+ question\(s\) not sent; trying again in \d+s/.test(l)), 'the retry is logged');
+    await new Promise((r) => setTimeout(r, 2500)); // past the next retry gap: a sent question is not sent twice
+    assert.equal(sentFor(id).length, 1);
+    assert.ok(logged.every((l) => !l.includes('123:test')), 'the token never reaches a log line');
+  } finally { console.error = orig; fake.drop.next = 0; }
+});
+
+test('an API that keeps failing a send is tried again with growing gaps, not hammered (#4591)', async () => {
+  const sql = await paired();
+  fake.drop.dropped.length = 0;
+  fake.drop.next = 99;
+  try {
+    const id = await ask(sql, 'Again?', { options: ['Yes', 'No'] });
+    // asking fires more than one change, each an immediate pass: judge only the tries after the board goes quiet
+    await until(() => fake.drop.dropped.length >= 1, 'the first send dropped');
+    await new Promise((r) => setTimeout(r, 400));
+    const quiet = fake.drop.dropped.length;
+    await until(() => fake.drop.dropped.length >= quiet + 2, 'two retries on its own', 8000);
+    const [a, b, c] = fake.drop.dropped.slice(quiet - 1);
+    assert.ok(b - a >= 800, `a gap before the first retry: ${b - a} ms`);
+    assert.ok(c - b >= 1.5 * (b - a) - 200, `the gap grows: ${b - a} ms then ${c - b} ms`);
+    fake.drop.next = 0; // the API is back: the next try sends it
+    await until(() => sentFor(id).length, 'sent once the API is back', 8000);
+  } finally { fake.drop.next = 0; }
+});

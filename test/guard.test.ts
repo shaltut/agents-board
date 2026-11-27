@@ -252,6 +252,9 @@ const fenceWrites = [
   String.raw`Set-Location -LiteralPath $HOME\.claude -ErrorAction Stop; Set-Content settings.json x`,
   String.raw`Set-Location -Path:$HOME\.claude; Set-Content settings.json x`, String.raw`Set-Location -ErrorAction 0 $HOME\.claude; Set-Content settings.json x`,
   'cd "/Users/my name/.claude" -P; echo x > settings.json', 'pushd ~/.claude-board -n; echo x > runner.json',
+  // #4594: >| (bash's noclobber override) is a redirect, not a pipe: the target was cut off into its own segment
+  'echo x >| ~/.claude/settings.json', 'echo x 2>| ~/.claude/settings.json', 'echo x 1>| ~/.claude/settings.json',
+  'echo x >|~/.claude-board/runner.json', 'cd ~/.claude && echo x >| settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -279,6 +282,8 @@ const fenceReads = [
   // #4595: an option after a cd into the fence that only reads, and options after a cd elsewhere
   String.raw`Set-Location $HOME\.claude -PassThru; Get-Content settings.json`, 'cd /tmp -P; echo x > settings.json',
   'sl ~/work -ea 0; echo x > notes.txt', 'cd ~/.claude -- && cat settings.json',
+  // #4594: a >| to an ordinary file, and a real pipe after a read
+  'echo x >| /tmp/out.txt', 'cat ~/.claude/settings.json | grep hooks',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
