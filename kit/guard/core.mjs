@@ -264,13 +264,13 @@ const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until'])
 const stopArgs = (rest) => { const cut = rest.findIndex((x) => /^\d*[<>&]/.test(x)); return cut >= 0 ? rest.slice(0, cut) : rest; };
 const dryRun = (rest) => rest.some((x) => /^-whatif(?::\$true)?$/i.test(x));
 // a stop's options that name the image: Stop-Process -Name, kill -n node (PowerShell's kill is Stop-Process; bash's kill
-// -n takes a signal number), taskkill /IM or a filter other than PID eq; kill -9 -1, kill -- -1: every process you own
-// (kill -1 1234 is SIGHUP to 1234)
+// -n takes a signal number), taskkill /IM or a filter other than PID eq <number>, $name or ${name}; kill -9 -1,
+// kill -- -1: every process you own (kill -1 1234 is SIGHUP to 1234)
 function namesImage(n, rest) {
   if ((n === 'stop-process' || n === 'spps') && rest.some((x) => /^-(?:n|processn)[a-z]*(?::|$)/i.test(x))) return true;
   if (n === 'kill' && rest.some((x, k) => /^-(?:name|processname)(?::|$)/i.test(x) || (/^-n[a-z]*$/i.test(x) && !/^\d+$/.test(rest[k + 1] ?? '')))) return true;
   if (n === 'taskkill' && rest.some((x, k) => /^(?:\/\/?|-)im$/i.test(x)
-    || (/^(?:\/\/?|-)fi$/i.test(x) && !/^\s*pid\s+eq\s+(?:\d+|\$\w+)\s*$/i.test(rest[k + 1] ?? '')))) return true;
+    || (/^(?:\/\/?|-)fi$/i.test(x) && !/^\s*pid\s+eq\s+(?:\d+|\$\w+|\$\{\w+\})\s*$/i.test(rest[k + 1] ?? '')))) return true;
   return n === 'kill' && rest.some((x, k) => k > 0 && x === '-1' && !/^-[sn]$/.test(rest[k - 1]));
 }
 
