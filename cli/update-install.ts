@@ -49,17 +49,27 @@ function readState(L: Layout): { current: string; previous: string | null } | nu
   try { const s = JSON.parse(readFileSync(L.state, 'utf8')); return typeof s?.current === 'string' ? s : null; } catch { return null; }
 }
 
-/** Refuses what cb update must not change: a git checkout, a folder that is no cb copy, a link it did not make. */
-function preflight(L: Layout) {
+/** Refuses what cb update must not change: a git checkout, a folder that is no cb copy, a link it did not make.
+ *  Finishes an update cut off while the copy's path was missing (between adopt's rename and its link, or a Windows
+ *  flip's unlink and rename): the path is linked again to what state.json says is in use, else the original copy.
+ *  Returns what it did. */
+function preflight(L: Layout): string[] {
+  if (!isLink(L.live) && !existsSync(L.live) && existsSync(join(L.home, 'cli', 'cb.ts'))) {
+    const st = readState(L);
+    const to = st && existsSync(targetOf(L, st.current)) ? targetOf(L, st.current) : L.home;
+    symlinkSync(to, L.live, 'junction');
+    return [`repaired: ${L.live} was missing (an earlier cb update was cut off); it links to ${to} again`];
+  }
   if (!isLink(L.live)) {
     if (!existsSync(L.live)) throw new Error(`no cb copy at ${L.live}: pass --root <the copy's folder>`);
     if (existsSync(join(L.live, '.git'))) throw new Error(`${L.live} is a git checkout: update it with git pull --ff-only (cb update installs releases on copies, such as the Mac's)`);
     if (!existsSync(join(L.live, 'cli', 'cb.ts'))) throw new Error(`${L.live} is not a cb copy (no cli/cb.ts)`);
     if (basename(dirname(L.live)) === 'versions') throw new Error(`${L.live} is an installed version: run cb update on the copy's own folder`);
     if (existsSync(L.home)) throw new Error(`${L.home} exists but ${L.live} is not a link to it: something was moved by hand; put it back by hand first`);
-    return;
+    return [];
   }
   if (currentId(L) === null) throw new Error(`${L.live} is a link, but not to ${L.home} or one of its versions: leave it alone and ask the lead`);
+  return [];
 }
 
 export type Proc = { pid: number; cmd: string };
@@ -97,12 +107,42 @@ function takeLock(L: Layout) {
   for (let i = 0; i < 2; i++) {
     try { const fd = openSync(L.lock, 'wx'); writeSync(fd, String(process.pid)); closeSync(fd); return; } catch (e: any) {
       if (e?.code !== 'EEXIST') throw e;
-      const pid = Number(readFileSync(L.lock, 'utf8')) || 0;
+      let held = '';
+      try { held = readFileSync(L.lock, 'utf8'); } catch { continue; } // released meanwhile: try again
+      const pid = Number(held) || 0;
       if (pid && alive(pid)) throw new Error(`another cb update is running on this copy (pid ${pid}); if it is not, delete ${L.lock}`);
-      unlinkSync(L.lock);
+      // a dead pid's lock: moved aside atomically, so of two takers only one gets it; one that moved a lock taken
+      // meanwhile by a live update puts it back and stops
+      const aside = `${L.lock}.stale-${process.pid}`;
+      try { renameSync(L.lock, aside); } catch { continue; }
+      const moved = readFileSync(aside, 'utf8');
+      if (moved !== held) {
+        try { if (!existsSync(L.lock)) renameSync(aside, L.lock); } catch {}
+        throw new Error(`another cb update took ${L.lock} just now (pid ${Number(moved) || '?'})`);
+      }
+      unlinkSync(aside);
     }
   }
   throw new Error(`cannot take ${L.lock}`);
+}
+
+/** What a cut-off earlier run left: its staging folder and (Windows) its spare link. Only a dead pid's. */
+function cleanLeftovers(L: Layout): string[] {
+  const out: string[] = [];
+  const pidOf = (name: string) => Number(/-(\d+)$/.exec(name)?.[1]) || 0;
+  try {
+    for (const d of readdirSync(L.versions)) {
+      const pid = pidOf(d);
+      if (d.startsWith('.staging-') && pid && pid !== process.pid && !alive(pid)) { rmSync(join(L.versions, d), { recursive: true, force: true }); out.push(d); }
+    }
+  } catch {}
+  try {
+    for (const d of readdirSync(dirname(L.live))) {
+      const pid = pidOf(d), f = join(dirname(L.live), d);
+      if (d.startsWith(`${basename(L.live)}.flip-`) && pid && pid !== process.pid && !alive(pid) && isLink(f)) { unlinkSync(f); out.push(d); }
+    }
+  } catch {}
+  return out.length ? [`cleaned: ${out.join(', ')} (left by a cut-off run)`] : [];
 }
 const dropLock = (L: Layout) => { try { if (Number(readFileSync(L.lock, 'utf8')) === process.pid) unlinkSync(L.lock); } catch {} };
 
@@ -157,6 +197,9 @@ function flip(L: Layout, to: string) {
   }
 }
 
+const PROBES = [['cli/cb.ts', 'help'], ['cli/cb.ts', 'sessions'], ['cli/relay.ts']];
+const probeName = (p: string[]) => (p[0] === 'cli/cb.ts' ? `cb ${p.slice(1).join(' ')}` : `node ${p.join(' ')}`);
+
 /** Writes the release into a staging folder, verifies it file by file, and runs the probes from it. */
 function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.ProcessEnv) {
   const dir = join(L.versions, `.staging-${short(m.sha)}-${process.pid}`);
@@ -167,11 +210,13 @@ function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.P
     const d = compareManifest(dir, m);
     const off = [...d.missing, ...d.changed, ...d.extra, ...d.outside];
     if (off.length) throw new Error(`the staged files do not match the release: ${off.slice(0, 5).join(', ')}`);
-    // the new code loads (every module cb.ts imports) and reads the live board (its schema answers the new code)
-    for (const args of [['help'], ['sessions']]) {
-      const r = spawnSync(process.execPath, [join(dir, 'cli', 'cb.ts'), ...args], { cwd: dir, encoding: 'utf8', timeout: 60_000, windowsHide: true,
-        env: { ...env, HERDR_PANE_ID: '', CB_ACTOR: env.CB_ACTOR || 'cb-update@probe', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
-      if (r.status !== 0) throw new Error(`the new code failed its probe cb ${args.join(' ')} (exit ${r.status}): ${String(r.stderr || r.error?.message || '').trim().slice(0, 300)}`);
+    // the new code loads (every module cb.ts imports) and reads the live board (its schema answers the new code); the
+    // relay loads every module it imports and exits before connecting (no pane): a relay that cannot load would die at
+    // import on every seat once the flip restarts them
+    for (const [file, ...args] of PROBES) {
+      const r = spawnSync(process.execPath, [join(dir, file!), ...args], { cwd: dir, encoding: 'utf8', timeout: 60_000, windowsHide: true,
+        env: { ...env, HERDR_PANE_ID: '', CB_ACTOR: env.CB_ACTOR || 'cb-update@probe', CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '' } });
+      if (r.status !== 0) throw new Error(`the new code failed its probe ${probeName([file!, ...args])} (exit ${r.status}): ${String(r.stderr || r.error?.message || '').trim().slice(0, 300)}`);
     }
     return dir;
   } catch (e) {
@@ -182,14 +227,24 @@ function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.P
 
 export async function install(o: { root: string; from: string; force?: boolean; procs?: () => Proc[]; env?: NodeJS.ProcessEnv; timeoutMs?: number }) {
   const L = layout(o.root);
-  preflight(L);
+  const repaired = preflight(L);
   const base = boardBase(needAddress(o.from));
   const f = await fetchRelease(base, o.timeoutMs);
   const m = f.manifest;
   if (f.archiveProblem || !f.files) throw new Error(`the release ${short(m.sha)} from ${base} is not usable: ${f.archiveProblem}. Tell the lead (cb tell)`);
-  const lines = [`release: ${short(m.sha)} from ${base} (${Object.keys(m.files).length} files; archive verified)`];
+  const lines = [...repaired, `release: ${short(m.sha)} from ${base} (${Object.keys(m.files).length} files; archive verified)`];
   const was = currentId(L) ?? 'original';
-  if (was === m.sha) return { ok: true, lines: [...lines, `update: already on ${short(m.sha)}`], json: { ok: true, release: m.sha, current: m.sha, changed: false } };
+  if (was === m.sha) {
+    // a run cut off between its flip and its note leaves state.json behind the link: settle it, so --rollback works
+    const st = readState(L);
+    if (st?.current !== m.sha) {
+      const previous = st && st.current !== m.sha && existsSync(targetOf(L, st.current)) ? st.current : 'original';
+      takeLock(L);
+      try { writeFileSync(L.state, JSON.stringify({ current: m.sha, previous }, null, 2) + '\n'); } finally { dropLock(L); }
+      lines.push(`settled: ${L.state} now says ${short(m.sha)} is in use (back: ${previous === 'original' ? 'the original copy' : short(previous)})`);
+    }
+    return { ok: true, lines: [...lines, `update: already on ${short(m.sha)}`], json: { ok: true, release: m.sha, current: m.sha, changed: false } };
+  }
 
   // packages: reused from the copy when the lockfile is the same; never installed or touched here
   const want = f.served?.deps?.[LOCKFILE];
@@ -209,6 +264,7 @@ export async function install(o: { root: string; from: string; force?: boolean; 
   refuseDaemons(run, !!o.force);
   takeLock(L);
   try {
+    lines.push(...cleanLeftovers(L));
     const adopted = !isLink(L.live);
     if (adopted) { adopt(L); lines.push(`adopted: ${L.live} is now a link to ${L.home}, the copy as it was (nothing in it changed)`); }
     lines.push(`packages: ${L.home}/node_modules reused (${LOCKFILE} unchanged, ${short(want)})`);
@@ -216,7 +272,7 @@ export async function install(o: { root: string; from: string; force?: boolean; 
     const to = join(L.versions, m.sha);
     if (existsSync(to)) renameSync(to, `${to}.replaced-${Date.now()}`); // an earlier install of the same release: kept aside, never deleted
     renameSync(dir, to);
-    lines.push(`staged: ${to} (${Object.keys(m.files).length} files verified, bin/cb executable); probes passed: cb help, cb sessions`);
+    lines.push(`staged: ${to} (${Object.keys(m.files).length} files verified, bin/cb executable); probes passed: ${PROBES.map(probeName).join(', ')}`);
     flip(L, to);
     writeFileSync(L.state, JSON.stringify({ current: m.sha, previous: was }, null, 2) + '\n');
     lines.push(`flipped: ${L.live} -> ${to} (was ${was === 'original' ? 'the original copy' : short(was)}). Back: cb update --rollback`);
@@ -236,8 +292,8 @@ function after(run: ReturnType<typeof runningFrom>) {
 
 export function rollback(o: { root: string; force?: boolean; procs?: () => Proc[] }) {
   const L = layout(o.root);
+  const repaired = preflight(L);
   if (!isLink(L.live)) throw new Error(`nothing to roll back: ${L.live} is not a link (cb update has not installed a release here)`);
-  preflight(L);
   const st = readState(L);
   const now = currentId(L)!;
   if (!st?.previous) throw new Error(`no previous version recorded in ${L.state}`);
@@ -252,7 +308,10 @@ export function rollback(o: { root: string; force?: boolean; procs?: () => Proc[
     flip(L, to);
     writeFileSync(L.state, JSON.stringify({ current: st.previous, previous: now }, null, 2) + '\n');
     const name = (id: string) => (id === 'original' ? 'the original copy' : short(id));
-    const lines = [`rolled back: ${L.live} -> ${to} (${name(st.previous)}; was ${name(now)}). Again: cb update --rollback`, ...after(run)];
+    const lines = [...repaired, `rolled back: ${L.live} -> ${to} (${name(st.previous)}; was ${name(now)}). Again: cb update --rollback`, ...after(run)];
+    // the original copy's relay.ts predates started-as.ts: relays that restart into it watch its real folder, so the
+    // next flip does not restart them
+    if (st.previous === 'original') lines.push('relays: the original copy\'s relays do not follow later flips: after the next cb update, run cb relay --restart in each pane');
     return { ok: true, lines, json: { ok: true, current: st.previous, previous: now, relays: run.relays.map((p) => p.pid), daemons: run.daemons.map((p) => p.pid) } };
   } finally { dropLock(L); }
 }

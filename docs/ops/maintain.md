@@ -54,8 +54,8 @@ Then the workers, right away, because their `cb` must match the schema:
 
   ```bash
   tar czf /tmp/cb.tgz bin cli db prompts server hooks kit && sum=$(md5sum /tmp/cb.tgz | cut -d' ' -f1)
-  scp /tmp/cb.tgz macbook:Work/claude-board/cb.tgz
-  ssh macbook "cd ~/Work/claude-board && [ \"\$(md5 -q cb.tgz)\" = $sum ] && tar xzf cb.tgz && rm cb.tgz && zsh -lc 'node cli/cb.ts sessions' | head -3"
+  ssh macbook '[ ! -L Work/claude-board ]' && scp /tmp/cb.tgz macbook:Work/claude-board/cb.tgz
+  ssh macbook "[ -L ~/Work/claude-board ] && { echo \"this copy is updated with cb update\"; exit 1; }; cd ~/Work/claude-board && [ \"\$(md5 -q cb.tgz)\" = $sum ] && tar xzf cb.tgz && rm cb.tgz && zsh -lc 'node cli/cb.ts sessions' | head -3"
   ```
 
   Extract only when the checksums match: a Tailscale hiccup once delivered half an archive, and a partial extract
@@ -85,13 +85,17 @@ Then the workers, right away, because their `cb` must match the schema:
     (`pnpm install --frozen-lockfile`), then `cb update` again. Absolute links into the copy (pnpm on Windows) are
     refused before anything moves (`--config.node-linker=hoisted` avoids them).
   - The safe point: a running process keeps the modules it loaded, and no version is ever deleted, so nothing breaks
-    mid-flip. Relays notice their code path now points at new files and restart into it (once each on the first
-    rollout of this change). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
+    mid-flip. Relays notice their code path now points at new files and restart into it: each flip, update or
+    rollback, restarts every relay running from the copy within ~3 s (no message is lost; at worst one duplicate push). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
     pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
     Nothing is stopped by `cb update`.
   - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
-    run it again to go forward. `<copy>.home/versions/state.json` holds `{current, previous}`. One update at a time
+    run it again to go forward. Back on the original copy, relays run its older relay.ts, which does not follow a flip:
+    after the next `cb update`, run `cb relay --restart` in each pane (rollback prints this). `<copy>.home/versions/state.json` holds `{current, previous}`. One update at a time
     per copy (`<copy>.update.lock`, taken over when its pid is gone). Old versions stay until removed by hand.
+  - The probes are `cb help`, `cb sessions` and `node cli/relay.ts` (no pane: it loads every relay module, then exits
+    before connecting). A run cut off midway is finished by the next one: a missing copy path is linked again, a
+    `state.json` behind the link is settled, and a dead run's staging folder or spare link is removed.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac

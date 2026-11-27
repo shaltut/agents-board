@@ -84,7 +84,7 @@ test('cb update: the first install moves the copy to .home, stages and probes th
   assert.match(r.out, new RegExp(`^release: ${B.slice(0, 7)} from `, 'm'));
   assert.match(r.out, /^adopted: .* is now a link to .*claude-board\.home, the copy as it was/m);
   assert.match(r.out, /^packages: .*node_modules reused \(pnpm-lock\.yaml unchanged, [0-9a-f]{7}\)$/m);
-  assert.match(r.out, /^staged: .*versions.* files verified, bin\/cb executable\); probes passed: cb help, cb sessions$/m);
+  assert.match(r.out, /^staged: .*versions.* files verified, bin\/cb executable\); probes passed: cb help, cb sessions, node cli\/relay\.ts$/m);
   assert.match(r.out, new RegExp(`^flipped: .* \\(was the original copy\\)\\. Back: cb update --rollback$`, 'm'));
   assert.ok(lstatSync(live).isSymbolicLink());
   assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B)));
@@ -108,6 +108,7 @@ test('cb update --rollback flips back to the version before, and again to the ne
   const r = await cb(['update', '--rollback', '--root', live]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, new RegExp(`^rolled back: .* \\(the original copy; was ${B.slice(0, 7)}\\)\\. Again: cb update --rollback$`, 'm'));
+  assert.match(r.out, /^relays: the original copy's relays do not follow later flips: after the next cb update, run cb relay --restart in each pane$/m);
   assert.equal(realpathSync(live), realpathSync(home));
   assert.deepEqual(state(), { current: 'original', previous: B });
   const back = await cb(['update', '--rollback', '--root', live, '--json']);
@@ -122,7 +123,39 @@ test('cb update --rollback flips back to the version before, and again to the ne
     assert.equal(off.code, 1);
     assert.match(off.err, /says original is in use, but .* points at [0-9a-f]{40} \(an update stopped between its flip and its note\)/);
     assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B)));
+    // review I1: cb update, as the refusal says, settles the note; then rollback works
+    const settle = await cb(['update', '--from', base, '--root', live]);
+    assert.equal(settle.code, 0, settle.err);
+    assert.match(settle.out, new RegExp(`^settled: .*state\\.json now says ${B.slice(0, 7)} is in use \\(back: the original copy\\)$`, 'm'));
+    assert.match(settle.out, /^update: already on /m);
+    assert.deepEqual(state(), { current: B, previous: 'original' });
+    const ok = await cb(['update', '--rollback', '--root', live]);
+    assert.equal(ok.code, 0, ok.err);
+    assert.equal(realpathSync(live), realpathSync(home));
+    const fwd = await cb(['update', '--rollback', '--root', live]);
+    assert.equal(fwd.code, 0, fwd.err);
+    assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B)));
+    // no state.json at all (cut off after the first flip): settled the same way
+    unlinkSync(join(home, 'versions', 'state.json'));
+    const none = await cb(['update', '--from', base, '--root', live]);
+    assert.match(none.out, /^settled: /m);
+    assert.deepEqual(state(), { current: B, previous: 'original' });
   } finally { writeFileSync(join(home, 'versions', 'state.json'), note); }
+});
+
+test('review M3: a copy path left missing by a cut-off update (adopt or a Windows flip) is linked again on the next run', { timeout: 120_000 }, async () => {
+  unlinkSync(live); // the link only: .home and its versions stay
+  const r = await cb(['update', '--from', base, '--root', live]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^repaired: .* was missing \(an earlier cb update was cut off\); it links to .* again$/m);
+  assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B))); // what state.json says is in use
+  unlinkSync(live);
+  const rb = await cb(['update', '--rollback', '--root', live]);
+  assert.equal(rb.code, 0, rb.err);
+  assert.match(rb.out, /^repaired: /m);
+  assert.equal(realpathSync(live), realpathSync(home));
+  const fwd = await cb(['update', '--rollback', '--root', live]);
+  assert.equal(fwd.code, 0, fwd.err);
 });
 
 test('cb update refuses: a git checkout, a runner running from the copy, a second update, other packages; nothing changes', { timeout: 300_000 }, async () => {
@@ -178,6 +211,10 @@ test('cb update refuses to move a copy whose packages link to it by absolute pat
 
 test('cb update: a release whose code fails its probe is never flipped to, and leaves nothing staged', { timeout: 300_000 }, async () => {
   const before = realpathSync(live);
+  // a dead run's leftovers: removed by the next run
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid!;
+  mkdirSync(join(home, 'versions', `.staging-0000000-${dead}`, 'cli'), { recursive: true });
+  symlinkSync(home, `${live}.flip-${dead}`, 'junction');
   edit('cli/cb.ts', '\nthis is not code(\n');
   const bad = commit('broken');
   const r = await cb(['update', '--from', base, '--root', live]);
@@ -185,6 +222,17 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   assert.match(r.err, /the new code failed its probe cb help \(exit 1\)/);
   assert.equal(realpathSync(live), before);
   assert.ok(!readdirSync(join(home, 'versions')).some((d) => d.startsWith('.staging') || d === bad));
+  assert.ok(!existsSync(`${live}.flip-${dead}`) && !lstatSync(home).isSymbolicLink());
+  git('reset', '-q', '--hard', 'HEAD~1');
+
+  // review I2: a module only the relay loads (settle.ts) is broken: cb help and cb sessions pass, the relay probe does not
+  edit('cli/settle.ts', '\nthis is not code(\n');
+  const relayBad = commit('broken relay module');
+  const q = await cb(['update', '--from', base, '--root', live]);
+  assert.equal(q.code, 1, q.out);
+  assert.match(q.err, /the new code failed its probe node cli\/relay\.ts \(exit 1\)/);
+  assert.equal(realpathSync(live), before);
+  assert.ok(!readdirSync(join(home, 'versions')).some((d) => d.startsWith('.staging') || d === relayBad));
   git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
 });
 
