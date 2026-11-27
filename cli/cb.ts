@@ -611,11 +611,14 @@ async function run(): Promise<unknown> {
       // "relay down", as in the digest; but if it wrote lately, say so rather than "it may be gone" (#4421)
       const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
         exists (select 1 from cb.sessions where actor = ${args[0]}) as has_row, cb._board_active(${args[0]}) as mins`;
-      const how = s.live ? 'relay live: delivered within seconds'
-        : s.mins !== null && !s.has_row ? `no relay session on the board under this name, but it last wrote to the board ${s.mins}m ago: the message waits up to 24h for a relay under this name`
-        : s.mins !== null && s.has_row ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
-        : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
-      return { out: `message #${id} to ${args[0]} (${how})`, json: id };
+      // one word for --json (#4453), the text below says the same in words
+      const delivery = s.live ? 'live' : s.mins === null ? 'not_seen' : s.has_row ? 'relay_down' : 'no_session';
+      const how = { live: 'relay live: delivered within seconds',
+        no_session: `no relay session on the board under this name, but it last wrote to the board ${s.mins}m ago: the message waits up to 24h for a relay under this name`,
+        relay_down: `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`,
+        not_seen: 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start' }[delivery];
+      return { out: `message #${id} to ${args[0]} (${how})`,
+        json: { id, to: args[0], delivery, last_wrote_mins: s.mins, waits_hours: delivery === 'live' ? null : 24 } };
     }
     case 'sessions': {
       const rows: any = await callFn('sessions_overview', { project: args[0] ?? sessionProject ?? null });
@@ -939,21 +942,24 @@ ${body}`, json: pg };
       const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}`
         .catch(() => [{ parent_id: String(o.after).trim().replace(/^[qQ#]+/, ''), if_answer: o.if ?? null }]) : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
+      let relay_live: boolean | null = null; // --json (#4453): null = not checked (--reply-to given, or the read failed)
       if (!o['reply-to']) try {
         // same 90s as cb.sessions_overview. Written out twice, not as a shared sql`` fragment: a fragment is a Promise
         // and the relay bridge cannot carry one ("#<Promise> could not be cloned", broke every ask with a live relay).
         const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and last_seen > now() - interval '90 seconds') as live,
           (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and last_seen > now() - interval '90 seconds') as mine`;
+        relay_live = r.live;
         if (!r.live) console.error(`warning: no relay listens on ${actor}, so the answer will wait in cb pending --as ${actor}` +
           (r.mine && r.mine !== actor ? `. This pane's relay is ${r.mine}: ask without --as, or add --reply-to` : ''));
       } catch { /* only a warning: the question is posted either way */ }
+      const json = { id, duplicate: again, parent: f ? Number(f.parent_id) : null, if_answer: f?.if_answer ?? null, relay_live };
       if (again) return { out: `Q${id} is already on the board: you asked the same question and it is still open, so it was not posted again` +
-        ' — keep working; its answer arrives like any other', json: id };
+        ' — keep working; its answer arrives like any other', json };
       return { out: (f ? `Q${id} posted as a follow-up to Q${f.parent_id}: ` +
           (f.if_answer ? `it opens only if Q${f.parent_id} is answered "${f.if_answer}", else it is skipped` : `it opens once Q${f.parent_id} is answered`) +
           ' — keep working; its answer arrives like any other'
         : `Q${id} posted${pics.length ? ` with ${pics.length} picture${pics.length > 1 ? 's' : ''}` : ''} — keep working; the answer arrives in this session by itself once \`cb relay\` is on, else via \`cb pending\``) +
-        (o.free ? `\nPosted with --free: Ahmed must type the answer. If he could pick instead (yes/no, approve?, A or B, who does it), run cb withdraw Q${id} and ask again with -o options (cb help ask).` : ''), json: id };
+        (o.free ? `\nPosted with --free: Ahmed must type the answer. If he could pick instead (yes/no, approve?, A or B, who does it), run cb withdraw Q${id} and ask again with -o options (cb help ask).` : ''), json };
     }
     case 'pending': {
       const rows: any = await callFn('answers_pending', { project: args[0] ?? sessionProject });

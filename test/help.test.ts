@@ -61,6 +61,9 @@ test('cb help <topic> and cb help <command> print the detailed page; -h on a com
   assert.match(done.out, /^cb done <id> "<summary>"/); // (output is trimmed)
   assert.match(done.out, /More: cb help work/);
   assert.equal(cb(['ask', '-h']).out, ask.out);
+  // the --json fields (#4453)
+  assert.match(ask.out, /^--json .*"duplicate".*"relay_live"/m);
+  assert.match(cb(['help', 'tell']).out, /delivery is one of: live .*relay_down .*no_session .*not_seen /);
   assert.match(cb(['help', 'project']).out, /cb iam orch@<machine> <slug>/);
 });
 

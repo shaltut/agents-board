@@ -343,6 +343,10 @@ test('cb ask --after/--if round-trip; --if without --after is refused', async ()
   assert.match(r.out, /^Q2 posted as a follow-up to Q1: it opens only if Q1 is answered "Yes", else it is skipped/);
   const n = cb(['ask', 'demo', 'Anything else?', '--free', '--after', '1']);
   assert.match(n.out, /^Q3 posted as a follow-up to Q1: it opens once Q1 is answered — keep working/);
+  // --json (#4453): a new post, its parent and the label it waits for
+  const j = cb(['ask', 'demo', 'And the date?', '--free', '--after', 'Q1', '--if', 'no', '--json']);
+  assert.equal(j.code, 0, j.err);
+  assert.deepEqual(JSON.parse(j.out), { id: 4, duplicate: false, parent: 1, if_answer: 'No', relay_live: false });
   const row = await q(sql, 2);
   assert.deepEqual([row.status, Number(row.parent_id), row.if_answer], ['dormant', 1, 'Yes']);
   const bad = cb(['ask', 'demo', 'x?', '-o', 'a', '-o', 'b', '--if', 'Yes']);

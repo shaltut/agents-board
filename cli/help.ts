@@ -139,9 +139,10 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       more: 'Record real requests (a status, a check, a decision he wants back), not chat. It is addressed to you only and never pushed back to you; reply as with any ask.' },
   }],
   ['TALK TO SESSIONS', {
-    tell: { use: 'cb tell <session> "<message>"', topic: 'huddle',
+    tell: { use: 'cb tell <session> "<message>" [--json]', topic: 'huddle',
       does: 'One message to one session in your project; it arrives there by itself. Names: cb sessions.',
-      eg: 'cb tell W2@macbook "take #19 next; #18 is blocked on Q12"' },
+      eg: 'cb tell W2@macbook "take #19 next; #18 is blocked on Q12"',
+      more: '--json gives {id, to, delivery, last_wrote_mins, waits_hours}. delivery is one of: live (its relay is up: delivered within seconds), relay_down (its relay is down but it wrote to the board lately), no_session (no relay session under that name, but it wrote lately), not_seen (no relay and nothing from it in 30 minutes: it may be gone). last_wrote_mins: minutes since it last wrote to the board, null if not in 30 minutes. waits_hours: how long an undelivered message waits for a relay (24), null when live.' },
     huddle: { use: 'cb huddle open "<topic>" <session>... [-t <task id>]\ncb huddle say <id> "<message>"\ncb huddle add <id> <session>...\ncb huddle show <id>\ncb huddle close <id> "<what was decided>"', topic: 'huddle',
       does: 'A group thread with sessions in your project; every line reaches every member. Close it with the outcome.',
       eg: 'cb huddle open "Date parsing" W3@macbook W4@macbook -t 59' },
@@ -381,6 +382,12 @@ Markdown
   e.g.  cb ask iris "Ship #2796 today?" -o "Yes" -o "No"                          → Q12
         cb ask iris "Which env first?" -o "STG" -o "VAL" --after Q12 --if "Yes"
         cb ask iris "What blocks it?" --free --after Q12 --if "No"
+
+--json   {"id": 12, "duplicate": false, "parent": null, "if_answer": null, "relay_live": true}
+  duplicate: true when the same question was still open, so nothing new was posted (id is that question).
+  parent, if_answer: a follow-up's Q<id> (a number) and label, else null.
+  relay_live: false = no relay listens on your name, the answer waits in cb pending; null = not checked
+  (--reply-to given, or the board did not answer the check).
 
 ask vs tell vs huddle
   ask     a decision only Ahmed (or a user) can make
