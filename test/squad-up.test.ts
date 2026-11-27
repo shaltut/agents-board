@@ -410,8 +410,8 @@ test('startOne: a Claude seat starts with exactly today\'s herdr argv', () => {
   const start = f.calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'start');
   assert.deepEqual(start.map((c) => [c.m, ...c.args]), [['macbook', 'agent', 'start', 'ihop-b1-macbook', '--kind', 'claude', '--pane', 'w2:p5',
     '--timeout', '120000', '--', '--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings',
-    '/Users/ahmedshaltoot/Work/claude-board/kit/permissions/builder.json',
-    '--strict-mcp-config', '--mcp-config', '/Users/ahmedshaltoot/Work/claude-board/kit/mcp/none.json']]);
+    `${IHOP.machines.macbook.board}/kit/permissions/builder.json`,
+    '--strict-mcp-config', '--mcp-config', `${IHOP.machines.macbook.board}/kit/mcp/none.json`]]);
 });
 
 test('the ihop squad with orch@shaltoot live in ihop: the lead is skipped, nothing renamed (#3746)', () => {

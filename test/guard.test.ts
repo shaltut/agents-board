@@ -404,7 +404,25 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
+// #4402: the budget is this machine's. A fixed piece of plain JS work (no guard code: a guard regression must not raise
+// its own budget) sets the pace: 25 times its best of 5, never under 1 s. A machine that runs it in under 40 ms (the PC)
+// keeps the 1 s budget; the VPS's slower cores (about 70 ms) get about 1.7 s. The margin is thin: with review #5's
+// unbounded open( scan put back, its case took 1.9 s on the PC against the 1 s budget (the review of #4402). So the
+// multiplier must not be raised: a slower machine gets more time only through the reference.
+function machineBudget() {
+  const s = 'a line of notes\n'.repeat(37500);
+  let best = Infinity, n = 0;
+  for (let i = 0; i < 6; i++) {
+    const t = performance.now();
+    for (let k = 0; k < 5; k++) n += s.split('\n').map((l) => l.trim()).join(' ').replace(/\s+/g, ' ').length + (s.match(/notes/g)?.length ?? 0);
+    if (i > 0) best = Math.min(best, performance.now() - t); // the first round warms up
+  }
+  assert.ok(n > 0);
+  return Math.max(1000, Math.round(best * 25));
+}
+
 test('long commands stay fast', () => {
+  const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
   const heredocThen600KB = "cat > notes.txt <<'EOF'\n" + 'a line of notes\n'.repeat(37500); // no end line
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
@@ -464,7 +482,7 @@ test('long commands stay fast', () => {
     const t = performance.now();
     run();
     const ms = performance.now() - t;
-    assert.ok(ms < 1000, `${name} took ${Math.round(ms)} ms`);
+    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms (this machine's budget: ${budget} ms)`);
   }
   // reading every git/gh/az word's arguments to the segment's end is (count x length): past 16 in one segment, block
   passes('builder', ['echo ' + 'git '.repeat(16)]);
@@ -536,9 +554,13 @@ test('checkWiring: the hook entry runs the installed shim, with an absolute node
     assert.equal(hookPath('${HOME}/x', false, '/home/u'), '/home/u/x');
     assert.equal(hookPath('~/x', false, '/home/u'), '/home/u/x');
     assert.equal(hookPath('/c/x', false, '/home/u'), '/c/x', 'only Windows maps a drive');
+    // #4403: on Windows a $HOME or ~ form expands to a backslash home followed by forward slashes; it is the same path
+    for (const form of ['$HOME/guard/shim-claude.mjs', '~/guard/shim-claude.mjs', '${HOME}\\guard\\shim-claude.mjs'])
+      assert.equal(hookPath(form, true, 'C:\\Users\\Me\\AppData\\Local\\Temp\\cb-x'), hookPath('C:\\Users\\Me\\AppData\\Local\\Temp\\cb-x\\guard\\shim-claude.mjs', true), form);
     const rel = target.slice(tmp.length + 1);
     for (const form of [`"$HOME/${rel}/shim-claude.mjs"`, `~/${rel}/shim-claude.mjs`]) {
-      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: 'linux', probes: false, home: tmp });
+      // this machine's platform: on Windows the paths here have backslashes, and only the Windows rules fold them (#4403)
+      const w = checkWiring(settings(`"${process.execPath}" ${form}`), target, { platform: process.platform, probes: false, home: tmp });
       assert.deepEqual(w.problems, [], form);
     }
 

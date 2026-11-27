@@ -82,7 +82,9 @@ test('a waiting build card starts a builder', async () => {
   assert.equal(start.m, 'macbook');
   assert.equal(start.args[2], 'sv-b1-macbook');
   const native = start.args.slice(start.args.indexOf('--') + 1);
-  assert.deepEqual(native, ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json']);
+  // #4346: no MCP server is loaded in a seat (--strict-mcp-config with an empty config)
+  assert.deepEqual(native, ['--model', 'sonnet', '--permission-mode', 'bypassPermissions', '--settings', '/Users/me/board/kit/permissions/builder.json',
+    '--strict-mcp-config', '--mcp-config', '/Users/me/board/kit/mcp/none.json']);
   assert.ok(h.calls.some((c) => c.args[1] === 'prompt' && c.args[2] === 'sv-b1-macbook' && c.args[3]!.startsWith('cb iam sv-B1@macbook sv --role builder')));
   assert.ok(!h.calls.some((c) => c.args[1] === 'start' && c.args[2] === 'sv-b2-macbook')); // one card, one builder
   const ev = await events(sql, 'start');
