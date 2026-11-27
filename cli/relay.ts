@@ -22,6 +22,7 @@ import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
+import { HOLD_MS, holdStep } from './notice-hold.ts';
 import { startedAs } from './started-as.ts';
 
 // the path this relay was started with: a release flip (cb update) changes what it points at (started-as.ts)
@@ -115,7 +116,7 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
-  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts')];
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'notice-hold.ts')]; // #3221: HOLD_MS lives there
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
@@ -144,6 +145,8 @@ const SETTLE_MS = 8_000;
 const pendingWork = new Map<number, { t: Work; at: number }>();
 let settleTimer: ReturnType<typeof setTimeout> | undefined;
 const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
+// #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
+let holdTimer: ReturnType<typeof setTimeout> | undefined;
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -287,6 +290,9 @@ async function check() {
         : await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
+      // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
+      // history): read again from the hold's cursor, so the held card events come back, once, before anything goes out
+      if (i.hold && after !== Number(i.hold.from)) { after = Number(i.hold.from); again = true; continue; }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
       // Ahmed typing from the dashboard (cb.type_to): his exact text as its own prompt, in order, no wrapper.
@@ -301,6 +307,20 @@ async function check() {
       i.next_work = settled.work;
       clearTimeout(settleTimer);
       if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
+      // #3221: only routine notices in this read, inside their window: push nothing and move no mark (broadcast_seen,
+      // after), so the next read, or a restarted relay's, has them again; the timer reads again when the window ends.
+      // Anything important, or the window's end, delivers all of it below, in one push.
+      const step = holdStep(i, typed);
+      clearTimeout(holdTimer);
+      if (step.action === 'hold') {
+        if (!i.hold) {
+          if (after === Number.MAX_SAFE_INTEGER) after = Number(i.last_event); // a first read has no card events to hold
+          await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
+          log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
+        }
+        holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
+        continue;
+      }
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
@@ -314,8 +334,9 @@ async function check() {
         for (const a of i.answers) await sql`select cb.answer_delivered(${String(a.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${null}, ${a.answered_at ?? null})`;
         // only the send-back pushed: one rewritten (or sent back again) since stays as it is
         for (const s of i.sent_back ?? []) await sql`select cb.answer_delivered(${String(s.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${s.at})`;
-        log(`pushed ${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
+        log(`pushed ${i.hold ? `(held ${step.low}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
+      if (i.hold) await sql`select cb.relay_hold(${M}, ${PANE}, ${null})`; // delivered (or gone): the hold ends
       after = Number(i.last_event);
     } while (again);
   } catch (e: any) {

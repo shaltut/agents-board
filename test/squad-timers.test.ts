@@ -196,6 +196,8 @@ test('digests go every 15 minutes, at once on a P0, and never empty', async () =
   assert.equal(await due(), 0, 'again at once: nothing');
   await sql`select cb.task_add(project => 'demo', title => 'on fire', priority => 'P0', actor => 'github')`;
   assert.equal(await due(), 1, 'a new P0 goes out at once');
+  // #3221: the lead's relay may hold a routine digest up to 10 minutes; one with a new P0 is marked urgent, never held
+  assert.deepEqual((await sql`select data ->> 'urgent' as u from cb.events where data ? 'digest' order by id`).map((r: any) => r.u), [null, 'true']);
   // quiet: clear every reason to speak, age the last digest 16 minutes
   await sql`update cb.tasks set status = 'cancelled'`;
   await sql`delete from cb.sessions where actor in ('W9@mac', 'B2@mac')`;
@@ -270,6 +272,12 @@ test('an identical digest is not repeated, a changed one is', async () => {
   assert.equal(await due(), 1);
   await age();
   assert.equal(await due(), 0, 'same body 16 minutes later: nothing');
+  // #3221: a session the supervisor could not keep up makes the digest urgent (the lead's relay never holds it)
+  await age();
+  await sql`insert into cb.events (actor, project, kind, summary, data) values ('supervisor', 'demo', 'supervisor', 'down again', ${sql.json({ what: 'down_again', session: 'B7@mac' })})`;
+  assert.equal(await due(), 1);
+  assert.equal((await sql`select data ->> 'urgent' as u from cb.events where data ? 'digest' order by id desc limit 1`)[0].u, 'true');
+  assert.equal((await sql`select data ->> 'urgent' as u from cb.events where data ? 'digest' order by id limit 1`)[0].u, null, 'a routine digest is not');
   await age();
   await sql`select cb.task_add(project => 'demo', title => 'another', status => 'next', actor => 'github')`;
   assert.equal(await due(), 1, 'a changed body goes out');
