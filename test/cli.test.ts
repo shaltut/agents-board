@@ -198,7 +198,13 @@ test('cb tell sends to one session and says whether it is live', async () => {
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
   const v = cb(['tell', 'V1@vps', 'ping']);
   assert.equal(v.code, 0, v.err);
-  assert.match(v.out, /\(no session on the board under this name, but it last wrote to the board 3m ago \(a session with no relay, or its pane now runs another name\): the message waits up to 24h for a relay under this name\)/);
+  assert.match(v.out, /\(no relay session on the board under this name, but it last wrote to the board 3m ago: the message waits up to 24h for a relay under this name\)/);
+  // a session name with no '@' and no row (a session that runs cb with --as, no relay) gets the same, never "its relay is down"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('ops-bot', 'demo', 'note', 'working', now() - interval '2 minutes')`;
+  const o = cb(['tell', 'ops-bot', 'ping']);
+  assert.equal(o.code, 0, o.err);
+  assert.match(o.out, /\(no relay session on the board under this name, but it last wrote to the board 2m ago/);
+  assert.doesNotMatch(o.out, /its relay is down/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {
