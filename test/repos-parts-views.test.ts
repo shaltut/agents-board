@@ -343,9 +343,9 @@ test('a part holder sees its part in cb start, cb mine and cb sessions', async (
   const id = await approved(sql);
   await claim(sql, D);
   assert.deepEqual((await sql`select * from cb.mine(${D})`).map((r: any) => [Number(r.id), r.status, r.stage, r.assignee]), [[id, 'in_progress', 'build', D]]);
-  assert.equal(cb(['mine'], D).out, `#${id} [part dashboard: in_progress] P2 feature: c (${D}) · zed`);
+  assert.equal(cb(['mine'], D).out, `#${id} [part dashboard: in_progress] P2 feature: c (${D}) · zed · Building`); // #4512: the part's stage in words
   const s = cb(['start'], D);
-  assert.ok(s.out.includes(`  #${id} [part dashboard: in_progress] P2 feature: c (${D}) · zed`), s.out);
+  assert.ok(s.out.includes(`  #${id} [part dashboard: in_progress] P2 feature: c (${D}) · zed · Building`), s.out);
   assert.ok(s.out.includes(`  continue #${id} c: cb log ${id} "<finding>" as you go, cb pass ${id} "<summary>" --pr <url> --repo dashboard, when finished`), s.out);
   const ss = cb(['sessions', 'zed'], 'orch@pc');
   assert.ok(ss.out.includes(`  #${id} c [part dashboard: in_progress]`), ss.out);
