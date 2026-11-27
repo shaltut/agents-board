@@ -29,11 +29,11 @@ test('registry: agy is registered and is the adapter this file builds', () => {
   assert.equal(defaultModelFor('agy', 'builder'), null); // cb._role_model returns null for a non-Claude agent
 });
 
-test('buildLaunch: --mode auto, this session only settings, the model; never --dangerously-skip-permissions', () => {
+test('buildLaunch (Q3023): no sandbox and no asking like a Claude seat, this session only settings, the model', () => {
   const l = agyAdapter.buildLaunch(input());
-  assert.deepEqual(l.args, ['--mode', 'auto', '--settings', 'C:/w/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh']);
+  assert.deepEqual(l.args, ['--dangerously-skip-permissions', '--settings', 'C:/w/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh']);
   assert.equal(l.kind, 'agy');
-  assert.ok(!l.args.includes('--dangerously-skip-permissions'));
+  assert.ok(!l.args.includes('--sandbox') && !l.args.includes('--mode'));
   assert.deepEqual(l.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
 });
 

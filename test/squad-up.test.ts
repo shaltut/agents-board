@@ -745,8 +745,8 @@ const FOUR: any = {
     '2': { agent: 'codex', model: 'gpt-6.1-sol' }, '3': { agent: 'agy', model: 'gemini-4-neon-xhigh' }, '4': { agent: 'opencode', model: 'anthropic/claude-opus-5-5' } } } },
   areas: [],
 };
-const CODEX_BUILDER_SANDBOX = 'workspace-write';
-const AGY_ARGS = ['--mode', 'auto', '--settings', 'C:/work/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh'];
+const CODEX_BUILDER_SANDBOX = 'danger-full-access'; // Q3023
+const AGY_ARGS = ['--dangerously-skip-permissions', '--settings', 'C:/work/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh'];
 test('squad up --dry-run (#4585): four builders, one per agent, plan four launches; without CB_MCP_GATE_OK the three others say would fail', async () => {
   const up = () => squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? FOUR : []), fake((c) => (c.args[1] === 'get' ? GONE : undefined)).run);
   const starts = ['start demo-B1@pc (builder, sonnet) on pc', 'start demo-B2@pc (builder, codex/gpt-6.1-sol) on pc',
