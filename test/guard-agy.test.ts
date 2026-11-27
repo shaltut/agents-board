@@ -161,8 +161,25 @@ test('edit confinement: .git, .agents, .gemini and kit/guard are denied, at any 
   for (const t of ['.git/hooks/pre-commit', join(ws, '.git', 'config'), '.agents/hooks.json', '.gemini/config/hooks.json', 'src/.git/x', 'kit/guard/core.mjs', join(ws, 'kit', 'guard', 'shim-agy.mjs'), 'src/../.agents/hooks.json']) {
     const r = edit({ TargetFile: t });
     assert.equal(r.decision, 'deny', t);
-    assert.match(r.reason ?? '', /not allowed|outside/);
+    assert.match(r.reason ?? '', /not allowed|outside|fence/); // .agents/hooks.json: core's fence (#4652) says it first
   }
+});
+
+// #4652: core's fence (editFence) runs on agy's edit targets too, as on Codex apply_patch and OpenCode write. Before, only
+// the shim's own segments were denied, so a repo's Claude settings, opencode.json or .codex config were writable.
+test('edit fence (#4652): the repo-level fence paths are denied for every edit tool and path form; ordinary .claude work passes', () => {
+  for (const t of ['.claude/settings.json', '.claude/settings.local.json', 'opencode.json', '.codex/hooks.json', '.codex/config.toml',
+    '.opencode/plugins/x.js', join(ws, '.claude', 'settings.json'), 'src/../.claude/settings.json', '.CLAUDE/Settings.json', '.claude./settings.json']) {
+    for (const name of EDIT_TOOLS) {
+      const r = edit({ TargetFile: t }, undefined, name);
+      assert.equal(r.decision, 'deny', `${name} ${t}`);
+      assert.match(r.reason ?? '', /fence/, `${name} ${t}`);
+    }
+  }
+  for (const k of PATH_ARGS) assert.equal(edit({ [k]: '.claude/settings.json' }).decision, 'deny', k);
+  // a repo's own .claude skills and agents are ordinary work, as in the shell fence
+  assert.deepEqual(edit({ TargetFile: '.claude/skills/a.md' }), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: '.claude/agents/foo.md' }), { decision: 'allow' });
 });
 
 test('edit confinement: a missing, non-string or empty path denies; so does an unlisted arg name or a missing cwd', () => {

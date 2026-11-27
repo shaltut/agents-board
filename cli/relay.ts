@@ -24,6 +24,7 @@ import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
+import { HOLD_MS, holdStep } from './notice-hold.ts';
 import { startedAs } from './started-as.ts';
 import { codeSha } from './release.ts';
 
@@ -129,7 +130,8 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
-  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts')]; // review 98 L4
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts'),
+  join(HERE, 'notice-hold.ts')]; // review 98 L4; #3221: HOLD_MS lives there
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
@@ -192,6 +194,23 @@ const SETTLE_MS = 8_000;
 const pendingWork = new Map<number, { t: Work; at: number }>();
 let settleTimer: ReturnType<typeof setTimeout> | undefined;
 const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
+// #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
+let holdTimer: ReturnType<typeof setTimeout> | undefined;
+// the messages, broadcasts and memory changes of the read last held, and whose they were (review I1: a bind to another
+// name or project, below); orphan: such a copy when another agent process took the pane, kept until that one binds
+type HeldCopy = { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[]; memory: any[] };
+let heldFor: HeldCopy | undefined, orphan: HeldCopy | undefined;
+const SEAT = `${PANE.trim()}@${M.trim().toLowerCase()}`; // the row's name before a bind (cb._seat_name)
+/** Pushes what a copy has that the board no longer returns in this read (that rest the read itself delivers). */
+async function pushCopy(was: HeldCopy, i: any) {
+  const has = (l: any[] | undefined) => new Set((l ?? []).map((x: any) => Number(x.id)));
+  const ms = has(i.messages), bs = has(i.broadcasts), xs = has(i.memory);
+  const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
+  const memory = was.memory.filter((x) => !xs.has(Number(x.id)));
+  if (!messages.length && !broadcasts.length && !memory.length) return;
+  await adapter.deliver(seat, format({ broadcasts, messages, memory, answers: [], events: [], next_work: [] }));
+  log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts, ${memory.length} memory held before a bind`);
+}
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -335,6 +354,29 @@ async function check() {
         : await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
+      // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
+      // history): read again from the hold's cursor, so the held memory changes come back, once, before anything goes out
+      if (i.hold && after !== Number(i.hold.from)) { after = Number(i.hold.from); again = true; continue; }
+      // #3221 review I1: the pane was bound to another name or project (cb.iam) while this relay held notices. The board
+      // returns messages only to that name, broadcasts and memory only for that project, and messages and broadcasts
+      // only from its mark, which a takeover by another name resets (and the hold with it); so they go now from this
+      // relay's copy, all but what the board still returns. Round 2 M2: another agent process in the pane (a new session
+      // id: the board starts the row again) gets the copy only once it binds under the same name; under another name
+      // it is dropped, and the log says how many (never what).
+      if (heldFor && (heldFor.actor !== i.actor || heldFor.project !== i.project || heldFor.sid !== sid)) {
+        if (heldFor.sid !== sid) orphan = heldFor;
+        else await pushCopy(heldFor, i);
+        heldFor = undefined;
+      }
+      if (orphan && orphan.sid === sid) orphan = undefined; // a read with no id between two of the same: the board kept the row
+      if (orphan) {
+        const was = orphan;
+        if (i.actor === was.actor) { orphan = undefined; await pushCopy(was, i); }
+        else if (i.actor !== SEAT && !/^session-[0-9a-f]{8}$/.test(String(i.actor))) {
+          orphan = undefined;
+          log(`dropped ${was.messages.length + was.broadcasts.length + was.memory.length} held notices: the new session bound under another name`);
+        }
+      }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
       // Ahmed typing from the dashboard (cb.type_to): his exact text as its own prompt, in order, no wrapper.
@@ -349,20 +391,43 @@ async function check() {
       i.next_work = settled.work;
       clearTimeout(settleTimer);
       if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
+      // #3221: only routine notices in this read, inside their window: push nothing and move no mark (broadcast_seen,
+      // after), so the next read, or a restarted relay's, has them again; the timer reads again when the window ends.
+      // Anything important, or the window's end, delivers all of it below, in one push.
+      const step = holdStep(i, typed);
+      clearTimeout(holdTimer);
+      if (step.action === 'hold') {
+        if (!i.hold) {
+          if (after === Number.MAX_SAFE_INTEGER) after = Number(i.last_event); // a first read has no card events to hold
+          await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
+          log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
+        }
+        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [] };
+        holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
+        await sendCode(); // a held read still reports the code it runs (#4352)
+        continue;
+      }
+      heldFor = undefined;
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
-      if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
+      const push = i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length;
+      if (push) {
         for (const m of typed) await adapter.deliver(seat, String(m.summary), { raw: true });
         // only what is left over gets the board's wrapper (a lone typed line must not add an empty "[Agents Board]")
         if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length > typed.length || i.next_work.length || i.memory?.length)
           await adapter.deliver(seat, format(i));
+      }
+      // #3221 review I2: the hold ends first, on its own, right after the push (or with nothing left to push): a relay
+      // that dies in the bookkeeping below must not leave a hold that makes the next one rewind and push it all again
+      if (i.hold) await sql`select cb.relay_hold(${M}, ${PANE}, ${null})`;
+      if (push) {
         for (const a of i.asks ?? []) await sql`select cb.ask_delivered(${String(a.id)}, ${a.upto}, ${i.actor}, ${a.reminder})`;
         if (read.length) await sql`select cb.broadcast_seen(${M}, ${PANE}, ${Math.max(...read)})`;
         // the answer as pushed (#1346): one changed meanwhile stays answered and goes in the next push
         for (const a of i.answers) await sql`select cb.answer_delivered(${String(a.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${null}, ${a.answered_at ?? null})`;
         // only the send-back pushed: one rewritten (or sent back again) since stays as it is
         for (const s of i.sent_back ?? []) await sql`select cb.answer_delivered(${String(s.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${s.at})`;
-        log(`pushed ${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
+        log(`pushed ${i.hold ? `(held ${step.low}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
       after = Number(i.last_event);
       await sendCode();
@@ -396,6 +461,12 @@ const version = () => CODE.map((f) => { try { return statSync(f).mtimeMs; } catc
 const born = version().join();
 
 const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK, ''); } catch {} };
+// #3221 round 3 R1: the held copy lives only in this relay; a relay that exits drops it (the board keeps what it still
+// returns to the same name, project and session). The log says how many, never what.
+const logCopyDropped = () => {
+  const n = [heldFor, orphan].reduce((k, c) => k + (c ? c.messages.length + c.broadcasts.length + c.memory.length : 0), 0);
+  if (n) log(`leaving: dropped ${n} held notices from this relay's copy`);
+};
 
 /** The agent is gone: clear what it handed over, free the seat, and hand it to a new agent in the same pane if one
  *  wrote its endpoint meanwhile (its hook's relay child may have left on this relay's lock).
@@ -403,6 +474,7 @@ const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK,
  *  and served by that relay, so its endpoint and the lock stay; this relay only closes its own bridge. */
 async function leave(seatTaken = false) {
   log(seatTaken ? 'seat lock taken by another relay; exiting' : 'agent gone; exiting');
+  logCopyDropped();
   try {
     if (seatTaken) { await unbridge(); return; }
     if (claude && lastSocket) clearClaudeEndpoint(M, PANE, lastSocket);
@@ -435,6 +507,7 @@ setInterval(async () => {
     const v = version();
     if (v.join() !== born && Date.now() - Math.max(...v) > 3000) {
       log('relay code changed; restarting');
+      logCopyDropped();
       release(); leaving = true;
       unbridge().finally(() => { relaunch(); process.exit(0); });
       return;

@@ -13,7 +13,7 @@ import { freshDb, TEST_URL } from './helpers.ts';
 import { releaseApp, setRelease } from '../server/release.ts';
 import { releaseAt } from '../cli/release-archive.ts';
 import { startedAs } from '../cli/started-as.ts';
-import { layout, runningFrom } from '../cli/update-install.ts';
+import { layout, lsofCwd, rollback, runningFrom } from '../cli/update-install.ts';
 import { recordSchema, schemaSha } from '../db/schema-applied.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-upd-${process.pid}-`));
@@ -248,6 +248,9 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
 });
 
+const plat = (s: string) => (process.platform === 'win32' ? s.replaceAll('/', '\\') : s);
+const elsewhere = plat(join(tmp, 'elsewhere', 'claude-board'));
+
 test('the runner or supervisor is found by its real command lines: through bin/cb, cb.ts, the spawned child, or a relative path', () => {
   const L = layout(live);
   const p = (cmd: string, pid = 9_000_001) => ({ pid, cmd });
@@ -256,10 +259,55 @@ test('the runner or supervisor is found by its real command lines: through bin/c
     p(`node ${home}/versions/${B}/cli/runner.ts`, 3), p('node cli/cb.ts runner', 4),
     p(`node ${live}/cli/relay.ts --pane w1:p1 --agent claude`, 5), p(`node ${live}/cli/cb.ts sessions`, 6),
     p('node /elsewhere/claude-board/cli/cb.ts runner', 7), p('node /elsewhere/claude-board/cli/relay.ts', 8)]
-    .map((x) => ({ ...x, cmd: process.platform === 'win32' ? x.cmd.replaceAll('/', '\\') : x.cmd })));
+    .map((x) => ({ ...x, cmd: plat(x.cmd) })), (pid) => (pid === 4 ? live : null));
   assert.deepEqual(run.daemons.map((x) => x.pid), [1, 2, 3, 4]);
   assert.deepEqual(run.relays.map((x) => x.pid), [5]);
   assert.deepEqual(run.others.map((x) => x.pid), [6]);
+  assert.deepEqual(run.unsure.map((x) => x.pid), []);
+});
+
+test('#4572: a relative runner counts only when its working folder is the copy; another checkout\'s does not; an unreadable folder is said so', () => {
+  const L = layout(live);
+  const folders: Record<number, string | null> = {
+    1: live, // started in the copy
+    2: plat(join(home, 'versions', '0'.repeat(40))), // started through the link before an earlier flip: the real folder
+    3: elsewhere, // another checkout's runner test on the same machine
+    4: null, // the folder cannot be read (Windows, or another user's process)
+    5: plat(`${live}-other`), // a sibling whose name starts like the copy's
+  };
+  const asked: number[] = [];
+  const run = runningFrom(L, [
+    { pid: 1, cmd: 'node cli/runner.ts' }, { pid: 2, cmd: 'node --conditions=x cli/supervise.ts' },
+    { pid: 3, cmd: 'node cli/runner.ts' }, { pid: 4, cmd: plat('/bin/sh ./bin/cb runner') },
+    { pid: 5, cmd: '"node" "cli/cb.ts" runner' }, { pid: 6, cmd: 'node cli/doctor.ts' }],
+  (pid) => { asked.push(pid); return folders[pid] ?? null; });
+  assert.deepEqual(run.daemons.map((x) => x.pid), [1, 2]);
+  assert.deepEqual(run.unsure.map((x) => x.pid), [4]);
+  assert.deepEqual([...run.relays, ...run.others].map((x) => x.pid), []);
+  assert.deepEqual(asked, [1, 2, 3, 4, 5], 'the folder is read only for a relative runner or supervisor');
+});
+
+test('#4572: a relative runner whose folder cannot be read refuses and says so, never that it runs from this copy; --force goes ahead', () => {
+  const where = realpathSync(live);
+  const procs = () => [{ pid: 999_999_991, cmd: 'node cli/runner.ts' }]; // no such pid: its folder cannot be read on any OS
+  assert.throws(() => rollback({ root: live, procs }), (e: any) => {
+    assert.match(e.message, /^pid 999999991 runs a runner or supervisor by a relative path and its working folder could not be read.*: it may be this copy's or another checkout's\. .*if it is not, pass --force$/);
+    assert.doesNotMatch(e.message, /runs from this copy/);
+    return true;
+  });
+  assert.equal(realpathSync(live), where);
+  const r = rollback({ root: live, procs, force: true });
+  assert.ok(r.lines.some((l) => /^runner\/supervisor: pid 999999991 runs a runner or supervisor by a relative path .*restart it by its pid \(never by name\)$/.test(l)), r.lines.join('\n'));
+  rollback({ root: live, procs: () => [] }); // and back
+  assert.equal(realpathSync(live), where);
+});
+
+test('#4572: the cwd line of lsof -Fn output is read; anything else is no folder', () => {
+  assert.equal(lsofCwd('p4242\nfcwd\nn/Users/x/Work/claude-board.home/versions/abc\n'), '/Users/x/Work/claude-board.home/versions/abc');
+  assert.equal(lsofCwd('p4242\nfcwd\nn/path with spaces/b\n'), '/path with spaces/b');
+  assert.equal(lsofCwd(''), null);
+  assert.equal(lsofCwd('p4242\n'), null);
+  assert.equal(lsofCwd('p4242\nfcwd\nnrelative/x\n'), null);
 });
 
 test('a relay or cb started through the copy path watches and relaunches through it, not the real version folder', () => {
