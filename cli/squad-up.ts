@@ -1,7 +1,7 @@
 // cb squad up: start a project's missing squad sessions through herdr. planSquad is pure (tested);
 // squadUp is the thin herdr runner (proved by the live check, not unit tests).
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 import { homeTrust, type TrustCheck } from './squad-trust.ts';
@@ -122,6 +122,10 @@ export function gateEnv(agent: AgentKind, env: NodeJS.ProcessEnv = process.env):
   return agent !== 'claude' && ok ? { CB_MCP_GATE_OK: ok } : {};
 }
 
+/** #4585: an OpenCode seat's server port on its machine's loopback (the adapter needs CB_OPENCODE_PORT; the prestart writes
+ *  it to the seat's endpoint file). From the seat's name, so a restart gets the same port: 41000-48999. */
+export const opencodePort = (name: string) => 41000 + (parseInt(createHash('sha256').update(name).digest('hex').slice(0, 8), 16) % 8000);
+
 // env: where CB_MCP_GATE_OK is read (gateEnv); squad up and the supervisor pass none, so it is this machine's
 export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next', env: NodeJS.ProcessEnv = process.env): Launch {
   const machine = w.name.split('@')[1], mc = squad.machines[machine], repos = reposOf(squad), { agent, model, fallback } = seatSpec(squad, w);
@@ -132,7 +136,8 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     ...w, agent, model, ...(fallback ? { fallback } : {}), machine, herdr: mc.herdr, board: mc.board, cwd: repos[w.repo]?.paths[machine] ?? '',
     ...(mc.workspace ? { workspace: mc.workspace } : {}),
     // CB_PROTECTED_BRANCHES last: the pane-making call ends with it, as before #4002
-    env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
+    env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(agent === 'opencode' ? { CB_OPENCODE_PORT: String(opencodePort(w.name)) } : {}),
+      ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
     // --agent only for another agent than claude: a Claude seat's cb iam stays the 8-argument call (cli/iam-args.ts)
     prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${model}${squad.repos ? ` --repo ${w.repo}` : ''}${agent !== 'claude' ? ` --agent ${agent}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
@@ -190,6 +195,46 @@ export function herdrJson(run: Runner, m: string | null, args: string[], timeout
   const r = run(m, args, timeout);
   if (r.status !== 0) throw new Error((r.error?.message || r.stderr || r.stdout || 'herdr failed').trim());
   try { return JSON.parse(r.stdout ?? ''); } catch { return null; }
+}
+
+/** #4576: what a seat CLI that exits at start said, as one short line for the failure (an unknown flag after a CLI
+ *  update only makes herdr time out). The line goes to squad up's output and the supervisor log, so it is an allowlist
+ *  (PR 93 review M1, M2): only lines that read as a CLI error, and in them only plain words and flag names, each kept
+ *  whole however long (the flag is the point). Anything else, a number, a path, an address, a key, a quoted value, a
+ *  flag's =value and the word after a token, key, secret or password word or flag, becomes '…'. '' when the pane cannot
+ *  be read or shows no error line. */
+const PANE_LINES = 8, PANE_LINE_MAX = 120;
+const ERROR_LINE = /\b(?:error|usage|unknown|unexpected|unrecognized|invalid|not found|no such|panic|fatal|failed|denied|unauthorized|refused)\b/i;
+const WORD = /^[A-Za-z]{1,24}(?:'[A-Za-z]{1,3})?$/;
+const FLAG = /^--?[A-Za-z][\w-]*$/;
+const FLAG_VALUE = /^(--?[A-Za-z][\w-]*)=/;
+const VALUE_NEXT = /^(?:bearer|basic|token|password|passwd|pwd|secret|apikey|key)$|^--?[\w-]*(?:token|key|secret|pass|auth|cred)[\w-]*$/i;
+function cleanToken(tok: string, prev: string): string {
+  const lead = /^[\[({'"`]*/.exec(tok)![0], rest = tok.slice(lead.length);
+  const trail = /[\])}'"`,.:;!?]*$/.exec(rest)![0], core = rest.slice(0, rest.length - trail.length);
+  if (VALUE_NEXT.test(prev)) return '…';
+  const fv = FLAG_VALUE.exec(core);
+  if (fv) return `${lead}${fv[1]}=…`;
+  return core && (FLAG.test(core) || WORD.test(core)) ? lead + core + trail : '…';
+}
+function cleanLine(line: string): string {
+  let prev = '';
+  const out: string[] = [];
+  for (const tok of line.split(/\s+/).filter(Boolean)) {
+    const t = cleanToken(tok, prev);
+    prev = tok.replace(/^[\[({'"`]*|[\])}'"`,.:;!?]*$/g, '');
+    if (!(t === '…' && out[out.length - 1] === '…')) out.push(t);
+  }
+  const l = out.join(' ');
+  return l.length > PANE_LINE_MAX ? `${l.slice(0, PANE_LINE_MAX)}…` : l;
+}
+export function paneTail(run: Runner, m: string | null, pane: string): string {
+  let r: Res;
+  try { r = run(m, ['pane', 'read', pane, '--source', 'recent', '--lines', '40', '--format', 'text'], 10_000); } catch { return ''; }
+  if (r.status !== 0 || !r.stdout) return '';
+  return String(r.stdout).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '')
+    .split('\n').map((s) => s.trim()).filter((s) => s && ERROR_LINE.test(s))
+    .map(cleanLine).slice(-PANE_LINES).join(' | ');
 }
 
 // A pane herdr just made refuses agent start (agent_pane_busy) until its shell prompt is up: about 10 s of retries.
@@ -254,7 +299,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
   // the seat's agent adapter, before any pane (#4002): an agent without one fails here, never started as Claude instead
   let adapter: AgentAdapter, spec: LaunchSpec;
   try { ({ adapter, spec } = launchSpec(l, gate)); } catch (e) { return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` }; }
-  let pane: string | undefined, started = false;
+  let pane: string | undefined, started = false, starting = false;
   // the launch's env goes on every call that makes its pane: herdr starts the agent there, and the agent inherits it
   const env = Object.entries(spec.env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   try {
@@ -272,6 +317,7 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (!pane) throw new Error('herdr returned no pane id');
     if (spec.prestart) prestartPane(l, pane, spec.prestart.args, run, pause);
     let blocked = false;
+    starting = true; // from here a failure is the agent's: its pane is read before it is closed (#4576)
     try {
       for (let i = 1; ; i++) {
         try {
@@ -296,8 +342,9 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     return { ok: true, pane, line: `started ${l.name}` };
   } catch (e) {
     if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
+    const shown = pane && starting ? paneTail(run, l.herdr, pane) : '';
     if (pane) try { herdr(l.herdr, ['pane', 'close', pane]); } catch {}
-    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}` };
+    return { ok: false, line: `failed ${l.name}: ${(e as Error).message}${shown ? `; the CLI said: ${shown}` : ''}` };
   }
 }
 
@@ -308,6 +355,9 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   const herdr = (m: string | null, args: string[], timeout?: number) => herdrJson(run, m, args, timeout);
   const squad = await callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
+  // #4559: a disabled or archived project starts no seats (its squad can still be edited on Project settings)
+  const st = await callFn('project_state_preview', { project }) as { state?: unknown; words?: string } | null;
+  if (typeof st?.state === 'string' && st.state !== 'enabled') throw new Error(`${st.words}; Ahmed enables it on Projects first, then cb squad up ${project}`);
   const rows = await callFn('sessions_overview', { project: null }) as any[];
   const live = rows.filter((r) => r.live).map((r) => ({ actor: r.actor as string, machine: (r.actor.split('@')[1] ?? r.machine) as string,
     project: (r.project ?? null) as string | null, role: (r.role ?? null) as string | null }));
@@ -353,7 +403,12 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
   for (const l of plan.herdrOnly) lines.push(`skip ${l.name}: running in herdr but not on the board (not bound?)`, `  ${promptCommand(l)}`);
   for (const n of plan.refused) lines.push(`refused ${n}: the Mac already has ${MAC_CAP} live sessions`);
   const untrusted = new Map(toStart.map((l) => [l.name, trust?.(l, project) ?? null]));
-  for (const l of toStart) lines.push(untrusted.get(l.name) ? `failed ${l.name}: ${untrusted.get(l.name)}` : `start ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
+  for (const l of toStart) {
+    if (untrusted.get(l.name)) { lines.push(`failed ${l.name}: ${untrusted.get(l.name)}`); continue; }
+    lines.push(`start ${l.name} (${l.role}, ${runsOn(l)}) on ${l.machine}`);
+    // #4585: a dry run says what startOne would refuse here (MCP gate, model, port), before any pane
+    if (dryRun) try { launchSpec(l); } catch (e) { lines.push(`  would fail: ${(e as Error).message}`); }
+  }
   if (dryRun) return lines.join('\n');
   // Only tabs made in this run are reused: two panes per tab, never an existing pane.
   const tabs: Record<string, { pane: string; panes: number }> = {};

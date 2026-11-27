@@ -11,6 +11,8 @@ export async function fakeTelegram(port = 0) {
   const updates: any[] = [];
   let nextUpdate = 1, nextMessage = 100;
   let wake: (() => void) | null = null;
+  // #4591: the next n sendMessage calls drop the connection (the board sees "0 network error"); dropped counts them
+  const drop = { next: 0, dropped: [] as number[] };
   const reply = (res: any, result: unknown, status = 200) => {
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(status === 200 ? { ok: true, result } : { ok: false, description: result }));
@@ -30,6 +32,7 @@ export async function fakeTelegram(port = 0) {
       wake = null;
       return reply(res, ready());
     }
+    if (method === 'sendMessage' && drop.next > 0) { drop.next--; drop.dropped.push(Date.now()); req.socket.destroy(); return; }
     calls.push({ method, body });
     if (method === 'sendMessage') return reply(res, { message_id: nextMessage++, chat: { id: body.chat_id }, text: body.text });
     return reply(res, true);
@@ -37,7 +40,7 @@ export async function fakeTelegram(port = 0) {
   function push(u: any) { updates.push({ update_id: nextUpdate++, ...u }); wake?.(); }
   await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { url, calls, push, close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
+  return { url, calls, push, drop, close:() => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
 }
 
 if (import.meta.main) {

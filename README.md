@@ -97,12 +97,10 @@ flowchart LR
 
 ## Current state and limits
 
-- **Claude Code is the only adapter.** `cli/agents/index.ts` knows the kinds `claude`, `codex`, `opencode` and `agy`,
-  but only `claude` has an adapter; asking for another throws ("not installed yet") rather than silently starting
-  Claude. Agent-neutral today: the seat relay and its keying, the supervisor's close and status logic, the `agent`
-  field in squad files and sessions, and the guard core. Claude-only today: the launch flags and permission files
-  (`kit/permissions/`), message delivery (Claude Code's messaging socket), the SessionStart and PreToolUse hooks
-  (`hooks/`, `kit/guard/shim-claude.mjs`) and the `AskUserQuestion` block.
+- **Four adapters.** `cli/agents/` has adapters for `claude`, `codex`, `opencode` and `agy`, all installed: any
+  project's seat may run any of them. Codex, OpenCode and agy seats also need `CB_MCP_GATE_OK` naming them where they
+  start, and their guard installed (`docs/ops/maintain.md`). An unknown agent
+  throws rather than silently starting Claude.
 - **Squads need herdr.** `cb squad up` and the supervisor start panes through the `herdr` CLI.
 - **The guard is a fence for agent mistakes, not a security boundary.** It matches command text and fails closed on
   what it cannot read, but a determined agent or person can get around it.

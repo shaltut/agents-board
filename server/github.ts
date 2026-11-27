@@ -330,8 +330,11 @@ async function failed(repo: string, e: any, now: Date, task: number): Promise<Re
  *  most ONE message per cycle, holding every repo's lines (Ahmed: one message per poll). */
 async function poll(o: Opts, only?: string): Promise<Map<string, Result>> {
   const now = o.now ?? new Date(), until = +now - LAG, task = o.logTask ?? WATCH_TASK, results = new Map<string, Result>();
-  const rows = only ? await sql`select key, value from cb.settings where key = ${KEY + only}`
-    : await sql`select key, value from cb.settings where key like ${KEY + '%'} and key not like ${OUTBOX + '%'} order by key`;
+  // #4559 (Q3021): a repo whose cards go in a disabled or archived project is not polled; its checkpoint stays, so an
+  // enable catches up from there (SLICE at a time), as after an outage
+  const live = sql`and cb._live(value ->> 'project')`;
+  const rows = only ? await sql`select key, value from cb.settings where key = ${KEY + only} ${live}`
+    : await sql`select key, value from cb.settings where key like ${KEY + '%'} and key not like ${OUTBOX + '%'} ${live} order by key`;
   const [m] = await sql`select value from cb.settings where key = ${MUTED}`;
   const muted = new Set<string>((m?.value ?? []).map((x: string) => String(x).toLowerCase()));
   for (const r of rows) {

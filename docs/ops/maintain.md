@@ -520,6 +520,20 @@ pane takes the first session. Without `workspace` a session opens in whichever w
 Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
 Card #3719.
 
+## Squad file: Codex, OpenCode and agy seats (#4585)
+
+A role or a seat in any project may give `"agent": "codex"` (or `opencode`, `agy`) with that agent's model (Q3024).
+The save gate's list is `cb._agents_main()` in `db/schema.sql`, the launch gate's `INSTALLED` in `cli/agents/index.ts`
+(`test/settings.test.ts` compares them). Each of the three needs, on every machine that runs its seats and where
+`cb squad up`, the supervisor and the seat's relay run:
+
+- its MCP check done by Ahmed (no MCP server in that CLI's own config), then `CB_MCP_GATE_OK=codex,opencode,agy`
+  (the ones checked) in that environment; without it the launch fails before any pane (`cb squad up --dry-run` prints a
+  `would fail` line under the seat);
+- the guard installed for that CLI (`kit/guard/install.mjs`), which the seat prestart checks before the agent starts.
+
+An OpenCode seat's server port comes from its name (41000-48999, `CB_OPENCODE_PORT`).
+
 ## Squad file: protected branches
 
 A squad may list the branches its sessions must never push to: `"protected": ["development", "staging",

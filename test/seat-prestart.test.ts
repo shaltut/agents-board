@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -313,4 +313,118 @@ test('startOne sends the first prompt through the adapter\'s promptText', { skip
   const w = world(t), p = pane(w.env, w.ws);
   assert.ok(startOne(launch('codex', w.ws, { prompt: 'cb iam x, then use $skill' }), p.run, {}, noPause, GATE).ok);
   assert.deepEqual(p.calls.find((c) => c[0] === 'agent' && c[1] === 'prompt')!.slice(3), ['cb iam x, then use $skill ']);
+});
+
+// #4551: the round-two follow-ups. 70-M2: the shim and the core.mjs it loads must be this board's kit/guard bytes (a
+// lookalike folder, a link to a fake, or a real shim beside a fake core passed on names). 70-M3: a hook file that repeats
+// a key in one object is refused (JSON.parse keeps the last; Codex may not). 70-M4: a selected profile turning hooks off
+// refuses, and a multi-line string's text is never read as keys.
+function seatWorld(t: { after: (fn: () => void) => void }) {
+  const w = world(t), env = { ...w.env };
+  for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
+  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', env as NodeJS.ProcessEnv, w.ws, w.home);
+  return { ...w, env, refusal, codexFile: join(w.home, '.codex', 'hooks.json'), cfg: join(w.home, '.codex', 'config.toml'), agyFile: join(w.ws, '.agents', 'hooks.json') };
+}
+
+test('seatRefusal (70-M2): the shim and the core.mjs it loads must be this board\'s kit/guard bytes', (t) => {
+  const w = seatWorld(t), kit = join(BOARD, 'kit', 'guard');
+  const codexAt = (shim: string) => codexHooks([{ matcher: CODEX_MATCHER, hooks: [{ type: 'command', command: `${NODE} ${shim.replace(/\\/g, '/')}` }] }]);
+  /** a folder holding shim (fake unless real) and core.mjs (fake unless realCore) */
+  const folder = (name: string, shim: string, o: { real?: boolean; realCore?: boolean } = {}) => {
+    const d = join(w.root, name);
+    mkdirSync(d, { recursive: true });
+    if (o.real) copyFileSync(join(kit, shim), join(d, shim)); else writeFileSync(join(d, shim), 'process.stdout.write("{}")\n');
+    if (o.realCore) copyFileSync(join(kit, 'core.mjs'), join(d, 'core.mjs')); else writeFileSync(join(d, 'core.mjs'), 'export const evaluate = () => ({ allow: true });\n');
+    return d;
+  };
+  assert.equal(w.refusal('codex'), null, 'the real shape passes');
+  writeFileSync(w.codexFile, codexAt(join(folder('guаrd', 'shim-codex.mjs'), 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a lookalike folder with a fake shim and core');
+  writeFileSync(w.codexFile, codexAt(join(folder('fakecore', 'shim-codex.mjs', { real: true }), 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'the real shim beside a fake core');
+  writeFileSync(w.codexFile, codexAt(join(folder('copy', 'shim-codex.mjs', { real: true, realCore: true }), 'shim-codex.mjs')));
+  assert.equal(w.refusal('codex'), null, 'a byte-identical copy of the guard is the guard');
+  // links: a junction folder always works on Windows; a file symlink may need a privilege there
+  const fake = folder('fake', 'shim-codex.mjs');
+  symlinkSync(fake, join(w.root, 'jfake'), 'junction');
+  writeFileSync(w.codexFile, codexAt(join(w.root, 'jfake', 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a junction to a fake folder');
+  symlinkSync(kit, join(w.root, 'jreal'), 'junction');
+  writeFileSync(w.codexFile, codexAt(join(w.root, 'jreal', 'shim-codex.mjs')));
+  assert.equal(w.refusal('codex'), null, 'a junction to the real kit/guard');
+  let fileLink = true;
+  mkdirSync(join(w.root, 'flink'));
+  try { symlinkSync(join(fake, 'shim-codex.mjs'), join(w.root, 'flink', 'shim-codex.mjs'), 'file'); } catch { fileLink = false; }
+  if (fileLink) {
+    copyFileSync(join(kit, 'core.mjs'), join(w.root, 'flink', 'core.mjs'));
+    writeFileSync(w.codexFile, codexAt(join(w.root, 'flink', 'shim-codex.mjs')));
+    assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a symlinked shim pointing at a fake, a real core beside the link');
+  }
+  writeFileSync(w.agyFile, JSON.stringify({ 'cb-guard': { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `node ${join(folder('agyfake', 'shim-agy.mjs'), 'shim-agy.mjs').replace(/\\/g, '/')}` }] }] } }));
+  assert.match(w.refusal('agy') ?? 'READY', /no enabled PreToolUse hook/, 'a fake agy shim');
+
+  // OpenCode: the plugin names a fake shim
+  const plugin = join(w.home, '.config', 'opencode', 'plugins', 'cb-guard.js'), pw = 'synthetic-password-for-a-test', tmp = join(w.root, 'tmp');
+  const withTmp = <T>(fn: () => T): T => {
+    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+    Object.assign(process.env, { TMPDIR: tmp, TEMP: tmp, TMP: tmp });
+    try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  };
+  withTmp(() => writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: pw }));
+  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', { ...w.env, OPENCODE_SERVER_PASSWORD: pw } as NodeJS.ProcessEnv, w.ws, w.home));
+  assert.equal(ocRefusal(), null, 'the real plugin passes');
+  writeFileSync(plugin, PLUGIN_GOOD.replace(`${BOARD}/kit/guard`, folder('ocfake', 'shim-opencode.mjs').replace(/\\/g, '/')));
+  assert.match(ocRefusal() ?? 'READY', /does not register tool\.execute\.before/, 'a fake OpenCode shim');
+});
+
+test('seatRefusal (70-M3): a hook file that repeats a key in one object is refused, Codex and agy alike', (t) => {
+  const w = seatWorld(t);
+  // the good value last: JSON.parse keeps it, so the check passed while Codex may read the other or nothing
+  const bad = JSON.stringify({ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo off' }] }), good = JSON.stringify(CODEX_GOOD[0]);
+  for (const [what, text] of [
+    ['"hooks" twice', `{"hooks":{"PreToolUse":[${bad}]},"hooks":{"PreToolUse":[${good}]}}`],
+    ['"PreToolUse" twice', `{"hooks":{"PreToolUse":[${bad}],"PreToolUse":[${good}]}}`],
+    ['an escaped spelling of the same key', `{"hooks":{"PreToolUse":[${bad}],"PreTool\\u0055se":[${good}]}}`],
+  ] as const) {
+    writeFileSync(w.codexFile, text);
+    assert.match(w.refusal('codex') ?? 'READY', /repeats the key/, what);
+  }
+  writeFileSync(w.codexFile, codexHooks(CODEX_GOOD));
+  assert.equal(w.refusal('codex'), null, 'one hooks array per entry is no repeat');
+  writeFileSync(w.agyFile, `{"cb-guard":${JSON.stringify(AGY_GOOD['cb-guard'])},"cb-guard":${JSON.stringify(AGY_GOOD['cb-guard'])}}`);
+  assert.match(w.refusal('agy') ?? 'READY', /repeats the key/, 'agy: a group twice');
+});
+
+test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks off refuses; a multi-line string is text', (t) => {
+  const w = seatWorld(t), on = '[features]\nhooks = true\n';
+  for (const [what, toml] of [
+    ['a selected profile off', `profile = "x"\n${on}[profiles.x.features]\nhooks = false\n`],
+    ['a quoted profile name', `profile = 'x'\n${on}[profiles."x".features]\nhooks = false\n`],
+    ['a dotted key', `profile = "x"\n${on}[profiles.x]\nfeatures.hooks = false\n`],
+    ['an inline table', `profile = "x"\n${on}[profiles.x]\nfeatures = { hooks = false }\n`],
+  ] as const) {
+    writeFileSync(w.cfg, toml);
+    assert.match(w.refusal('codex') ?? 'READY', /profile/, what);
+  }
+  for (const [what, toml] of [
+    ['a profile off that nothing selects', `${on}[profiles.x.features]\nhooks = false\n`],
+    ['profile after a table is that table\'s key', `${on}[tui]\nprofile = "x"\n[profiles.x.features]\nhooks = false\n`],
+    ['hooks = false inside a multi-line string', `${on}[tui]\nnote = """\n[features]\nhooks = false\n"""\n`],
+    ['a one-line triple-quoted string', `[features]\nx = """a"""\nhooks = true\n`],
+    // PR 77 review M2: an array-of-tables header is a header; a triple quote inside a one-line string opens nothing
+    ['an array of tables after [features]', `${on}[[hooks.extra]]\nhooks = false\n`],
+    ['a triple quote inside a one-line string', `[tui]\nmsg = "it'''s"\nother = 'a """ b'\n${on}`],
+  ] as const) {
+    writeFileSync(w.cfg, toml);
+    assert.equal(w.refusal('codex'), null, what);
+  }
+  writeFileSync(w.cfg, `[[hooks.extra]]\nx = 1\n[features]\nhooks = true\n[[profiles.y]]\nhooks = true\n`);
+  assert.equal(w.refusal('codex'), null, 'keys after an array-of-tables header are that table\'s');
+  writeFileSync(w.cfg, `[features]\n[[hooks.extra]]\nhooks = true\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true under [[hooks.extra]] is not [features]');
+  // round 2 minor 3: a\""" is an escaped quote and "", so the string runs on and [features] below is its text
+  writeFileSync(w.cfg, `[tui]\nnote = """\na\\"""\n[features]\nhooks = true\n"""\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'an escaped quote before "" does not close the string');
+  writeFileSync(w.cfg, `[tui]\nnote = '''\n[features]\nhooks = true\n'''\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true only inside a multi-line string');
 });

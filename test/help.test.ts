@@ -82,7 +82,8 @@ test('cb help iam documents --agent; cb help squad documents agent, seats and fa
   assert.match(iam.out, /\$CB_AGENT/);
   const squad = cb(['help', 'squad']).out;
   for (const k of ['"agent"', '"fallback"', '"seats"', 'CB_ROLE', 'CB_AGENT']) assert.ok(squad.includes(k), k);
-  assert.match(squad, /phase 1 starts claude only/);
+  assert.match(squad, /"agent" \(claude, the default; codex, opencode or agy start only where CB_MCP_GATE_OK names them\)/);
+  assert.match(squad, /--dry-run only prints the plan, with a would fail line under a seat this machine could not start/);
 });
 
 test('prompts/claude-md-snippet.md is the snippet cb help project prints', () => {
@@ -178,7 +179,7 @@ test('cb relay needs only a pane; another agent is refused by name; claude needs
   await sql`select cb.ensure_project('iris')`;
   await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   assert.match(cb(['relay'], { HERDR_PANE_ID: '' }).err, /cb relay needs a herdr pane/);
-  assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P }).err, /agent "codex" is not installed yet/);
+  assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P, CB_MCP_GATE_OK: '' }).err, /agent "codex" cannot start a seat with MCP off/);
   assert.match(cb(['relay', '--agent', 'nope'], { HERDR_PANE_ID: P }).err, /unknown agent "nope"/);
   assert.match(cb(['relay'], { HERDR_PANE_ID: P }).err, /no session inbox here/);
 });

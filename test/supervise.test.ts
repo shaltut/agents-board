@@ -9,6 +9,9 @@ import { freshDb, TEST_URL } from './helpers.ts';
 import { lockClient, locked, tick } from '../cli/supervise.ts';
 import type { Runner } from '../cli/squad-up.ts';
 
+// #4585: codex, opencode and agy are installed; their MCP gate is read from this process, unset here
+delete process.env.CB_MCP_GATE_OK;
+
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 const conn = (name: string, max = 10) => { const c = postgres(TEST_URL, { onnotice: () => {}, max, connection: { application_name: name } }); clients.push(c); return c; };
@@ -176,7 +179,7 @@ test('closeOne delegates through Claude adapter and safely skips unregistered ag
     assert.equal(h.calls.find((c) => c.args[3] === '/exit')!.m, 'macbook');
     assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   }
-  { // a seat bound as codex (no adapter in phase 1): never planned for a close, never marked
+  { // a seat bound as codex whose MCP check is not confirmed here (#4585: installed, CB_MCP_GATE_OK unset): never planned for a close, never marked
     const { sql, sup } = await setup();
     await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'codex' });
     const h = fakeHerdr();
@@ -204,7 +207,7 @@ test('closeOne delegates through Claude adapter and safely skips unregistered ag
     const out = await tick(deps(hooked, h.run));
     assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
     assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
-    assert.ok(out.includes('skip closing sv-B1@macbook: agent "codex" is not installed yet (phase 1 supports claude only)'), out.join('\n'));
+    assert.ok(out.some((l) => l.startsWith('skip closing sv-B1@macbook: agent "codex" cannot start a seat with MCP off for one run')), out.join('\n'));
     assert.equal(await closingAt(sql), null, 'the mark is cleared');
     assert.equal((await events(sql, 'close')).length, 0);
   }
@@ -238,7 +241,7 @@ test('an idle seat on an old model is closed and started on the new one, said on
 
 test('a seat whose new agent cannot start here is kept running, refused once on the board, never closed', async () => {
   const { sql, sup } = await setup();
-  // squad_set refuses another agent than claude in phase 1: the stored squad is edited as a later phase would save it
+  // the stored squad is edited as cb.squad_set saves a codex seat (#4585); CB_MCP_GATE_OK is unset here, so codex cannot start
   await sql`update cb.projects set squad = jsonb_set(squad, '{roles,builder,seats}', ${sql.json({ 1: { agent: 'codex', model: 'gpt-6.1-sol' } })}) where slug = 'sv'`;
   await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 6, model: 'sonnet' });
   const h = fakeHerdr();
@@ -247,7 +250,7 @@ test('a seat whose new agent cannot start here is kept running, refused once on 
   const out = await tick(deps(sup, h.run, { memory }));
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
   assert.ok(out.some((l) => l.startsWith('sv-B1@macbook runs an older setting than its seat, but codex/gpt-6.1-sol cannot start here')), out.join('\n'));
-  assert.deepEqual((await events(sql, 'restart')).map((e) => e.summary), ['restart sv-B1@macbook (refused, codex/gpt-6.1-sol cannot start: agent "codex" is not installed yet)']);
+  assert.deepEqual((await events(sql, 'restart')).map((e) => e.summary), ['restart sv-B1@macbook (refused, codex/gpt-6.1-sol cannot start: agent "codex" cannot start a seat with MCP off for one run)']);
   const again = await tick(deps(sup, h.run, { memory }));
   assert.ok(!again.some((l) => l.includes('cannot start here')), again.join('\n'));
   assert.equal((await events(sql, 'restart')).length, 1);

@@ -3,7 +3,8 @@ import type { Ask } from './asks'
 
 export type Status = 'backlog' | 'next' | 'in_progress' | 'blocked' | 'review' | 'done' | 'cancelled'
 
-export interface Project { slug: string; name: string; color: string | null; repo_path: string | null; pipeline: boolean; open_count: number; question_count: number }
+export interface Project { slug: string; name: string; color: string | null; repo_path: string | null; pipeline: boolean; open_count: number; question_count: number
+  state: 'enabled' | 'disabled' | 'archived'; state_by: string | null; state_at: string | null } // #4559
 export type Stage = 'design' | 'approval' | 'build' | 'review' | 'merge' | 'qa'
 export const TASK_TYPES = ['task', 'bug', 'feature', 'change', 'chore', 'research'] as const
 export interface Task {
