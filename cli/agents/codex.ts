@@ -8,6 +8,7 @@ import { READ_ONLY_ROLES } from '../../kit/guard/core.mjs';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
 import { stripClaudeOnly } from './env.ts';
+import { codexPreseed } from './trust.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
 export const CLAUDE_MODEL_NAMES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -147,11 +148,13 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
 
     // Startup dialogs on 0.160+: "Update available" is pre-empted by the -c flag; "Hooks need review" by the launch's
     // --dangerously-bypass-hook-trust (Q3004). A folder not under [projects] still shows the folder trust dialog: the seat
-    // parks as agent_not_ready until a person answers it; the board never does.
-    trustSpec() {
+    // parks as agent_not_ready until a person answers it; the board never does. cb squad trust (#4575), run once by Ahmed,
+    // writes that [projects] entry for the squad's folders (preseed), and squad up stops a seat whose folder lacks it.
+    trustSpec(_paths, platform) {
       return {
         dialogHint: '"Update available" (the launch already turns the update check off); the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml (hook trust is bypassed: the launch runs the installed hooks)',
         preseedPath: '~/.codex/config.toml',
+        preseed: codexPreseed(platform),
         extraArgs: ['-c', 'check_for_update_on_startup=false'],
       };
     },

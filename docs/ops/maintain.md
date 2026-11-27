@@ -506,6 +506,8 @@ It never:
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
   live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
   the first prompt afterwards (the same when a session started but its first prompt was not sent);
+  `cb squad trust <project>`, run once by the owner on each machine (#4575), marks the squad's seat folders trusted for
+  Claude, Codex and agy so that dialog never shows; `cb squad up` stops an untrusted seat before its pane (`cb help squad`);
 - frees a card held by a down session, or runs anything heavy itself.
 
 ## Squad file: herdr workspace

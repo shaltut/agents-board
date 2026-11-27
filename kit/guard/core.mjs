@@ -797,6 +797,18 @@ export function editPathForms(path, cwd, fs) {
   return [...out];
 }
 
+// #4575: cb squad trust writes the agents' own config files (the fence's ~/.claude.json, ~/.codex/config.toml and agy
+// settings) to mark folders trusted: Ahmed's one step, never a seat's, for every role including the lead. Read where a
+// shell runs it (runnerArg), so a message or a grep that names it is text. Kept apart from the fence on purpose.
+const CB_NAMES = new Set(['cb', 'cb.cmd', 'cb.ps1', 'cb.ts', 'cb.mjs', 'cb.js']);
+const SQUAD_TRUST = 'cb squad trust writes the agents\' own config files to mark folders trusted (#4575): Ahmed runs it once in his own terminal, never a squad seat. A folder that needs it: cb ask';
+function squadTrustRun(command) {
+  return scanCommands(command, CB_NAMES, (w, i) => {
+    for (let j = i + 1; j < w.length - 1; j++) if (w[j] === 'squad') return w[j + 1] === 'trust' ? SQUAD_TRUST : null;
+    return null;
+  }, runnerArg);
+}
+
 // The reason a role may not run this shell command, or null. An unset or empty role: no role rules (a hand-started
 // session); a role outside ROLES: blocked (evaluate checks that first). A quoted string is a command here only where a
 // shell runs it (runnerArg), except for main/master: like the protected-branch scan, they read every quoted string, so
@@ -808,6 +820,8 @@ export function checkRole(command, role) {
   if (secret) return secret;
   const fence = fenceWrite(String(command ?? ''));
   if (fence) return fence;
+  const trust = squadTrustRun(command);
+  if (trust) return trust;
   const readOnly = READ_ONLY_ROLES.includes(role);
   const git = scanCommands(command, GIT, (w, i) => {
     const j = gitSub(w, i);
