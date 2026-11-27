@@ -9,7 +9,11 @@ import { join } from 'node:path';
 
 const BUDGET_MS = 2000; // everything after node's own start: stdin, the board, the write
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']; // cb.role_text's list
-const CAP = 6000; // the re-injected block; the hint and the guard line always print whole
+// The re-injected block; the hint and the guard line always print whole. The cards keep at least RESUME_KEEP, so the
+// role gets CAP - RESUME_KEEP: the longest board-wide text plus the longest project addition and ask-first line fits
+// uncut (#4525; test/role-text-size.test.ts reads these two lines). Kept here, not imported: a hook never fails to load.
+const CAP = 7500;
+const RESUME_KEEP = 1500;
 const started = Date.now();
 const left = () => Math.max(0, BUDGET_MS - (Date.now() - started));
 
@@ -49,9 +53,13 @@ async function reinject(pane, source, ms) {
     if (!row?.r) return '';
     const r = row.r;
     const resume = resumeText(r);
-    const role = r.role ? await sql`select cb.role_text(${r.role}) as t`.then(([x]) => String(x?.t ?? ''), () => '') : '';
-    // the role text is the point; the cards keep at least 1500 characters
-    const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, 1500)) : 0;
+    // with the seat's project and name: its addition and who it asks first, as cb role prints them (#4525). If that
+    // fails (a board whose schema predates it, a project gone), the board-wide text alone: the role is never dropped
+    const text = ([x]) => String(x?.t ?? '');
+    const role = r.role ? await sql`select cb.role_text(${r.role}, ${r.project ?? null}, ${r.actor ?? null}) as t`.then(text,
+      () => sql`select cb.role_text(${r.role}) as t`.then(text, () => '')) : '';
+    // the role text is the point; the cards keep at least RESUME_KEEP characters (the size test fits the texts in the rest)
+    const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, RESUME_KEEP)) : 0;
     return [`Agents Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
       cut(resume, CAP - roleN, '`cb resume`'), role && cut(role, roleN, `\`cb role ${r.role}\``)].filter(Boolean).join('\n\n');
   })().catch(() => null);

@@ -13,6 +13,7 @@ import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
 import { releaseApp, loadRelease } from './release.ts';
+import { readRoleSeeds } from '../db/roles.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const DIST = join(ROOT, 'web', 'dist');
@@ -214,7 +215,7 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
 // admin sees the page read-only; the local dashboard (no admin) is Ahmed. The SQL guards stay as they are (squad_set
 // also lets the lead's cb squad set through; the rest are dashboard_only): this narrows only which signed-in admin may
 // call them. The pipeline switch and the reminders keep their guard (any admin, as on Board and Backlog).
-const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
+const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'role_text_import', 'project_role_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
 // The Runners page (#4527) is for every admin to read (Q2978); managing the queue is Ahmed's and each project's lead's
 // (Q2982), and a lead is a session (cb job ...), never a signed-in admin. The SQL checks the same (cb._is_owner: exactly
 // ahmed on the dashboard; cb._is_lead); this refuses another admin before the database is asked.
@@ -249,6 +250,10 @@ app.post('/api/rpc/:fn', async (c) => {
   }
 });
 
+// The role texts this release ships (prompts/roles), for the settings page's "Load the new texts" (#4525): setup never
+// replaces a stored text (Q2969), so the page compares and loads them through cb.role_text_import (owner only, above).
+// Admins and the local dashboard only: guests never reach a path the sign-in rule above does not list.
+app.get('/api/role-text-seeds', (c) => c.json(readRoleSeeds(join(ROOT, 'prompts', 'roles'))));
 app.get('/api/projects', async (c) => c.json(await q.projects()));
 app.get('/api/tasks', async (c) => c.json(await q.tasks(opt(c.req.query('project')), opt(c.req.query('status')))));
 app.get('/api/tasks/:id', async (c) => {
