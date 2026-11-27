@@ -8,16 +8,17 @@
  *  function (epics_list, goals_list, sessions_overview, huddles_list, asks_list, mem_stats). When a read starts using
  *  another table, add its key here. A table missing from this map re-fetches everything. */
 export const TABLE_KEYS: Record<string, string[]> = {
-  tasks: ['tasks', 'task', 'page', 'epics', 'epic', 'goals', 'goal', 'goal-preview', 'today', 'me', 'projects', 'people', 'sessions'],
+  tasks: ['tasks', 'task', 'page', 'epics', 'epic', 'goals', 'goal', 'goal-preview', 'today', 'me', 'projects', 'people', 'sessions', 'squad-page'],
   task_blockers: ['tasks', 'task', 'epic'],
   epics: ['epics', 'epic', 'task'],
   goals: ['goals', 'goal', 'goal-preview', 'tasks'],
   goal_tasks: ['goals', 'goal', 'goal-preview', 'tasks'],
   questions: ['questions', 'task', 'goal', 'me', 'projects', 'people', 'sessions', 'memories'],
   // every write's history line: what shows activity, never the board's lists
-  events: ['events', 'today', 'task', 'page', 'me', 'people', 'sessions', 'asks', 'huddles', 'huddle', 'memories'],
+  // (a squad or role text save writes one too: the settings page re-reads)
+  events: ['events', 'today', 'task', 'page', 'me', 'people', 'sessions', 'asks', 'huddles', 'huddle', 'memories', 'squad-page', 'role-texts'],
   asks: ['asks'],
-  projects: ['projects'],
+  projects: ['projects', 'squad-page'],
   huddles: ['huddles', 'huddle'],
   users: ['users', 'people', 'sessions', 'whoami'],
   user_projects: ['users', 'people'],
