@@ -911,6 +911,36 @@ test('same pane, new Claude session: the relay resets the pane\'s binding within
   }
 });
 
+// #4379 review M1: a relay with a session id against a board older than #4379 (only the 3-argument cb.inbox) is
+// refused with undefined_function once, then asks the old way and still delivers.
+test('a relay with a session id on a board with only the 3-argument cb.inbox falls back to it and delivers', { timeout: 30_000 }, async () => {
+  const sql = await db();
+  const pane = `p-old-${process.pid}`, path = sockPath('old-board'), f = seatFiles(pane);
+  rmSeat(pane);
+  const inbox = fakeInbox(path, 'tok');
+  await inbox.ready;
+  // the board as it was: cb.inbox(machine, pane, after_event), nothing that takes a 4th argument
+  await sql`alter function cb.inbox(text, text, bigint, text) rename to inbox_4379`;
+  await sql.unsafe(`create function cb.inbox(machine text, pane text, after_event bigint default 0) returns jsonb language sql
+                    as $$ select cb.inbox_4379($1, $2, $3, null) $$`);
+  let relay: ReturnType<typeof spawn> | undefined;
+  try {
+    await sql`select cb.ask(project => 'demo', body => 'Old board?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
+    writeClaudeEndpoint(M, pane, { socket: path, token: 'tok', sessionId: 'S1' });
+    relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    await sql`select cb.answer('1', 'still served')`;
+    assert.ok(await until(() => inbox.got.length > 0, 8000), 'the answer reached the session');
+    assert.match(inbox.got[0].message.content, /Q1.*still served/s);
+    assert.match(fs.readFileSync(f.log, 'utf8'), /check failed: .*cb\.inbox/, 'the 4-argument call was refused first');
+  } finally {
+    await sql`drop function if exists cb.inbox(text, text, bigint)`;
+    await sql`alter function cb.inbox_4379(text, text, bigint, text) rename to inbox`;
+    await inbox.close();
+    await stopSeat(pane, relay);
+  }
+});
+
 test('hooks/claude-endpoint.mjs writes the endpoint file, prints nothing and exits 0; it starts no relay over a live one', { timeout: 20_000 }, () => {
   const pane = `p-hook-${process.pid}`, path = sockPath('hook'), f = seatFiles(pane);
   rmSeat(pane);
