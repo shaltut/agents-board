@@ -5835,6 +5835,11 @@ alter table cb.runners add constraint runners_slots_set_check check (slots_set b
 alter table cb.runners drop constraint if exists runners_lanes_set_check;
 alter table cb.runners add constraint runners_lanes_set_check check (lanes_set between 1 and 9);
 alter table cb.runners add column if not exists setting_refused text;
+-- #4710: seconds between two of the runner's DB test stack starts (null: the runner's default, 30), read at its start:
+-- Postgres containers that initialise together miss their health deadline
+alter table cb.runners add column if not exists stack_gap_set int;
+alter table cb.runners drop constraint if exists runners_stack_gap_set_check;
+alter table cb.runners add constraint runners_stack_gap_set_check check (stack_gap_set between 0 and 300);
 -- A project's lead (or Ahmed) holds that project's waiting jobs; the shared runner keeps serving every other project.
 create table if not exists cb.job_holds (
   project text primary key references cb.projects(slug) on update cascade on delete cascade,

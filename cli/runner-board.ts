@@ -9,6 +9,22 @@ const older = (e: unknown) => OLDER.has(String((e as { code?: unknown } | null)?
 
 type Sql = { (s: TemplateStringsArray, ...v: any[]): Promise<any[]>; json: (v: any) => any };
 
+/** #4710: seconds between two of this runner's DB test stack starts, unless the board sets cb.runners.stack_gap_set. */
+export const STACK_GAP_S = 30;
+
+/** The stack gap to run: the board's stack_gap_set (0-300) when set, else STACK_GAP_S. Asked on its own: on a board
+ *  without the column, reading it with slots_set would drop the slot setting too. Any failure keeps the default. */
+export async function boardStackGap(sql: Sql, name: string, say: (m: string) => void): Promise<number> {
+  try {
+    const [r] = await sql`select stack_gap_set from cb.runners where name = ${name}`;
+    const v = r?.stack_gap_set;
+    return Number.isInteger(v) && v >= 0 && v <= 300 ? v : STACK_GAP_S;
+  } catch (e) {
+    if (!older(e)) say(`could not read the board's stack gap (${(e as Error)?.message ?? e}): using ${STACK_GAP_S} s`);
+    return STACK_GAP_S;
+  }
+}
+
 /** Reads the board's setting, fits it to runner.json (a setting the file cannot take keeps the file's counts, and the
  *  reason goes back to the board for the page, review M3), then says hello with the counts it runs. Returns the config
  *  to run, how many jobs the last run left running (now ended), and whether the board's setting is in use. */

@@ -468,6 +468,13 @@ Set up, once, on the PC:
    - With `dbLanes` above 1, `laneEnv` names those env values. Every DB recipe must set each of them with `{lane}`,
      and all DB recipes must write each one the same way, so lane n is one stack whichever recipe runs in it. The
      runner refuses to start otherwise.
+   - A DB recipe's first step brings its test stack up (#4710). The runner starts its stacks 30 s apart (the board's
+     `cb.runners.stack_gap_set`, 0-300 s, read at the runner's start; no page control yet), because Postgres containers
+     that initialise together miss compose's health deadline (27 Nov: 9 lanes claimed at once after a restart all died
+     `container ... is unhealthy`). The wait comes before the job's timeout starts. When that first step still fails on
+     `container <name> is unhealthy`, the runner runs the recipe's `finally` steps (the stack's `down`), waits its turn
+     and runs the step once more; the job's summary then starts with "The test stack was slow to start and was retried
+     once." Any other failure is never run again.
    - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
      then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
    - A `guards` recipe can also run the repo's script tests on every job with the pre-push hook's own command

@@ -188,8 +188,50 @@ const isLists = (v: unknown): v is Record<string, string[]> =>
 type Draft = { state: Result['state']; exit_code: number | null; text: string } | null; // null: cancelled
 const err = (text: string): Draft => ({ state: 'error', exit_code: null, text });
 
+/** #4710: a DB recipe's first step brings its test stack up (claims-integration.mjs up: compose up --wait, then
+ *  provisioning). Postgres containers that initialise together miss compose's health deadline (9 lanes claimed at
+ *  once after a restart: all 9 died unhealthy before any test ran), so one runner's stack starts are spaced gapMs
+ *  apart: each caller takes the next free start time and waits for it. A gap, not "one stack-up at a time": the step
+ *  ends only after provisioning, minutes later, and Postgres's own start is not visible to the runner. Resolves with
+ *  the ms waited; a stop ends the wait at once. */
+export type StackTurn = (stop: AbortSignal) => Promise<number>;
+export function stackGate(gapMs: number, now: () => number = Date.now,
+  wait: (ms: number, stop: AbortSignal) => Promise<void> = pause): StackTurn {
+  let next = 0;
+  return async (stop) => {
+    const t = now(), at = Math.max(t, next);
+    next = at + gapMs;
+    if (at > t) await wait(at - t, stop);
+    return at - t;
+  };
+}
+const pause = (ms: number, stop: AbortSignal) => new Promise<void>((ok) => {
+  const done = () => { clearTimeout(timer); stop.removeEventListener('abort', done); ok(); };
+  const timer = setTimeout(done, ms);
+  stop.addEventListener('abort', done, { once: true });
+});
+
+/** A stack-up step that failed only because a container stayed unhealthy (the stack, not the tests). */
+export const STACK_UNHEALTHY = /container \S+ is unhealthy/;
+export const STACK_RETRIED = 'The test stack was slow to start and was retried once.';
+type Step = { code: number | null; stopped: boolean; timedOut: boolean; startFailed: boolean };
+
+/** Runs the stack-up step; when it fails with an unhealthy container, takes the stack down (the recipe's finally
+ *  steps), waits for a stack turn and runs the step once more. Anything else (a stop, a timeout, a provisioning or test
+ *  failure) is never run again. up returns the step's result and its own output. */
+export async function stackUp<R extends Step>(up: () => Promise<{ r: R; out: string }>, down: () => Promise<void>,
+  turn: () => Promise<unknown>, stopped: () => boolean): Promise<{ r: R; retried: boolean }> {
+  const first = await up();
+  const { r } = first;
+  if (r.code === 0 || r.code === null || r.stopped || r.timedOut || r.startFailed || !STACK_UNHEALTHY.test(first.out)) return { r, retried: false };
+  await down();
+  if (!stopped()) await turn();
+  if (stopped()) return { r: { ...r, stopped: true }, retried: true };
+  return { r: (await up()).r, retried: true };
+}
+
 /** Runs one claimed job. Returns its result, or null when it was cancelled (the board already holds its end). */
-export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal }): Promise<Result | null> {
+export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal; stackTurn?: StackTurn }): Promise<Result | null> {
   const log = join(o.home, 'logs', `${j.id}.log`);
   const io: Io = { fd: -1, pids: join(o.home, 'state', `slot-${o.slot}.pids`), nostart: join(o.home, 'state', `slot-${o.slot}.nostart`), live: new Map(), headers: new Set() };
   try {
@@ -209,7 +251,7 @@ export async function runJob(j: JobRow, o: { cfg: RunnerConfig; home: string; sl
   }
 }
 
-async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal }, io: Io, log: string): Promise<Draft> {
+async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: number; lane?: number; stop: AbortSignal; stackTurn?: StackTurn }, io: Io, log: string): Promise<Draft> {
   const { cfg, home, slot, stop } = o;
   // 1. trust nothing in the row: sha shape, project, repo and recipe from this PC's own config, params a map of string
   // lists. A row without a repo (a board before #3703) is main.
@@ -386,14 +428,33 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
 
   // 5. steps under one deadline; 6. finally steps always run once steps have started, even after a throw
   const cwd = jobCwd(dir, recipe, params);
+  // #4710: a DB job brings its stack up in its turn, before its deadline starts (the last of 9 lanes waits minutes)
+  if (recipe.db && o.stackTurn) {
+    const waited = await o.stackTurn(stop);
+    if (stop.aborted) return null;
+    if (waited) writeSync(io.fd, `runner: waited ${Math.ceil(waited / 1000)} s so this runner's test stacks do not start together\n`);
+  }
+  const down = async () => {
+    for (const argv of recipe.finally) {
+      try { await run(expand(argv, params), { cwd, env, io, ms: FINALLY_MS }); } catch {}
+    }
+  };
   const from = fstatSync(io.fd).size;
   const deadline = Date.now() + recipe.timeout * 1000;
-  let out: Draft | undefined;
+  let out: Draft | undefined, retried = false;
   try {
     for (const [i, argv] of recipe.steps.entries()) {
       const a = expand(argv, params);
-      const at = fstatSync(io.fd).size; // where this step's own output starts
-      const r = await run(a, { cwd, env, io, ms: Math.max(0, deadline - Date.now()), stop });
+      let at = fstatSync(io.fd).size; // where this step's own output starts
+      const step = () => run(a, { cwd, env, io, ms: Math.max(0, deadline - Date.now()), stop });
+      let r: Ran;
+      if (i === 0 && recipe.db) { // the stack-up step: one more try when only a container's health check ran out
+        const s = await stackUp(async () => { at = fstatSync(io.fd).size; const x = await step(); return { r: x, out: tail(at) }; },
+          async () => { writeSync(io.fd, '\nrunner: the test stack was slow to start (a container stayed unhealthy): taking it down and starting it once more\n'); await down(); },
+          () => o.stackTurn?.(stop) ?? Promise.resolve(), () => stop.aborted);
+        r = s.r;
+        retried = s.retried;
+      } else r = await step();
       if (r.stopped) { out = null; break; }
       if (r.startFailed) { out = err(`error: could not start ${a[0]}`); break; }
       if (r.timedOut) { out = err(`error: timed out after ${Math.ceil(recipe.timeout / 60)} min`); break; }
@@ -415,10 +476,9 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
       out = s.ran === 0 ? { state: 'failed', exit_code: 0, text: `no tests ran: ${s.text}` } : { state: 'passed', exit_code: 0, text: s.text };
     }
   } finally {
-    for (const argv of recipe.finally) {
-      try { await run(expand(argv, params), { cwd, env, io, ms: FINALLY_MS }); } catch {}
-    }
+    await down();
   }
+  if (retried && out) out = { ...out, text: `${STACK_RETRIED} ${out.text}` }; // first: the board's 1000-char cut keeps it
   return stop.aborted ? null : out;
 }
 

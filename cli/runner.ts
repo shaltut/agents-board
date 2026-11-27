@@ -8,9 +8,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { freeLane, loadConfig, type RunnerConfig } from './recipes.ts';
-import { boardHello } from './runner-board.ts';
+import { boardHello, boardStackGap } from './runner-board.ts';
 import { logTail } from './summary.ts';
-import { finish, reap, runJob } from './runner-job.ts';
+import { finish, reap, runJob, stackGate } from './runner-job.ts';
 import { isNetworkError, survive } from './survive.ts';
 
 const say = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
@@ -85,6 +85,9 @@ const hello = await boardHello(sql, NAME, `http://${cfg.log.host}:${cfg.log.port
 cfg = hello.cfg;
 const fromBoard = hello.fromBoard;
 if (hello.ended) say(`${hello.ended} job(s) left running by the last run ended as runner restarted`);
+// #4710: this runner's DB test stacks start at least this many seconds apart (the board's stack_gap_set, else 30)
+const stackGap = await boardStackGap(sql, NAME, say);
+const stackTurn = stackGate(stackGap * 1000);
 
 const prune = () => {
   try {
@@ -103,7 +106,7 @@ function start(slot: number, j: any, lane: number | undefined) {
   const stop = new AbortController();
   slots.set(slot, { id: Number(j.id), lane, stop });
   say(`job #${j.id} started in slot ${slot}${lane === undefined ? '' : `, DB lane ${lane}`}`);
-  runJob(j, { cfg, home: HOME, slot, lane, stop: stop.signal })
+  runJob(j, { cfg, home: HOME, slot, lane, stop: stop.signal, stackTurn })
     .then(async (r) => {
       if (!r) return say(`job #${j.id} cancelled`);
       const done = await finish(sql, NAME, Number(j.id), r, say);
@@ -163,5 +166,5 @@ setInterval(() => {
   sql`select cb.runner_beat(${NAME})`.catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
   tick();
 }, 30_000);
-say(`runner ${NAME} up (cb-runner/${VERSION}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, logs on http://${cfg.log.host}:${cfg.log.port}`);
+say(`runner ${NAME} up (cb-runner/${VERSION}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, test stacks ${stackGap} s apart, logs on http://${cfg.log.host}:${cfg.log.port}`);
 survival.ready();
