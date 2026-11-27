@@ -318,6 +318,13 @@ const killBlocked = [
   // harmless, but blocked (fails closed): bash nests ${a:-${b}}, PowerShell ends the name at the first }, and the guard
   // cannot tell the shells apart, so the second } reads as a block's close
   'kill $pid; echo ${a:-${b}} $(pgrep -c node)',
+  // #4436: a stop's arguments run on through an unquoted ${name} and past it, as they do past $name or "${name}"
+  'kill -9 ${MAIN_PID} $(pgrep -f relay)',
+  'kill ${PID} $(pgrep node)',
+  'Stop-Process -Id ${pid}, (Get-Process node).Id',
+  'kill ${A} ${B} $(pgrep node)',
+  'kill ${PID} 2>/dev/null $(pgrep node)',
+  'kill ${x:-$(pgrep node)}',
   // #3883 n2: options between the shell and -Command / -c / /c, values included
   'powershell -NoProfile -Command "Stop-Process" -Name node',
   'pwsh -NoProfile -c "Stop-Process" -Name node',
@@ -431,6 +438,14 @@ const killPassed = [
   'kill $pid; echo "stopped ${pid}, remaining $(pgrep -c node)"',
   'kill $pid; echo "${name} left: $(pgrep -fl node)"',
   'kill "$SERVER_PID"; printf "%s\\n" ${PORT} $(pgrep -f vite)',
+  // #4436: a ${name} in a stop's arguments carries them only to the end of that command
+  'kill ${PID}',
+  'kill -9 ${MAIN_PID}; pgrep -fl relay',
+  'kill ${PID} && pgrep -fl node',
+  'kill "${arr[@]}"',
+  'kill ${PID} ${OTHER:-none}',
+  'Stop-Process -Id ${env:MOCK_PID} -ErrorAction SilentlyContinue',
+  'Stop-Process -Id ${pid}; Write-Host "${env:TEMP}: $(Get-Process node | Measure-Object | % Count)"',
   // #3883 n3: = 'Terminate' under another key is not a MethodName
   `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
   // #3883 n3: a splat or a Terminate that names one process, then a by-name listing

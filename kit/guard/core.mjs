@@ -264,8 +264,9 @@ const BRANCH = new Set(['else', 'elseif', 'catch', 'finally', 'while', 'until'])
 // hashtable (@{ MethodName = 'Terminate'; Query = ... }), whose query can come after it; inArgs: this text is inside a
 // stop's arguments
 function scanKills(text, seen, inArgs) {
-  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments (it carries past the ${...})
-  let dollarClose = -1, dollarAfter = false, lastAfter = false;
+  // the } that closes a ${...}, and whether the text before that ${ was a block's arguments or a stop's (both carry
+  // past the ${...})
+  let dollarClose = -1, dollarAfter = false, lastAfter = false, dollarArgs = false, lastArgs = false;
   for (const m of text.matchAll(KILL_SEGMENT)) {
     const raw = m[0].match(WORD) ?? [];
     const w = raw.map(unquote);
@@ -284,19 +285,25 @@ function scanKills(text, seen, inArgs) {
     // Invoke-Command { ... } -ArgumentList (...), ForEach-Object { ... } -InputObject (...). The } of a parameter
     // expansion is no block (echo "stopped ${pid}, left: $(pgrep -c node)"): after it, the text before its ${ decides
     // (& { Stop-Process -Id $ids } ${x} (Get-Process node).Id; & { Stop-Process -Id $ids; ${x}} (Get-Process node).Id)
-    const afterBlock = text[m.index - 1] === '}' && m.index - 1 === dollarClose ? dollarAfter
-      : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
-    if (text[m.index - 1] === '{' && text[m.index - 2] === '$') { // this segment is the inside of ${...}
+    const afterDollar = text[m.index - 1] === '}' && m.index - 1 === dollarClose;
+    const afterBlock = afterDollar ? dollarAfter : text[m.index - 1] === '}' && !BRANCH.has(name[0]);
+    const inDollar = text[m.index - 1] === '{' && text[m.index - 2] === '$'; // this segment is the inside of ${...}
+    if (inDollar) {
       dollarClose = text[m.index + m[0].length] === '}' ? m.index + m[0].length : -1;
       dollarAfter = lastAfter;
+      dollarArgs = lastArgs;
     }
     lastAfter = afterBlock;
+    // a stop's arguments run on through a ${...} and past it (#4436): kill -9 ${MAIN_PID} $(pgrep -f relay),
+    // Stop-Process -Id ${pid}, (Get-Process node).Id, kill ${x:-$(pgrep node)}. Only the single-segment ${name} counts
+    // as closed (above); bash and PowerShell end a nested one differently, so any other } stays a block's close.
+    const segArgs = inArgs || ((inDollar || afterDollar) && dollarArgs);
     let fed = false; // an earlier word feeds stdin: < <(...), done < ..., done <<< ... (a here-string, glued or not)
     let shell = false; // an earlier word of the segment is a shell: powershell -NoProfile -ExecutionPolicy Bypass -Command
     for (let i = 0; i < w.length; i++) {
       if (i > 0 && (((w[i - 1] === '<' || w[i - 1] === '<<<') && (w[i - 2] === '<' || name[i - 2] === 'done'))
         || (name[i - 1] === 'done' && w[i].startsWith('<<<')))) fed = true;
-      const args = inArgs || i <= argsEnd;
+      const args = segArgs || i <= argsEnd;
       // a quoted here-string of a lookup is fed to the loop's earlier stop: done <<< "$(pgrep node)"
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args || (fed && seen.stop))) return true;
       const n = name[i], prev = name[i - 1];
@@ -356,6 +363,7 @@ function scanKills(text, seen, inArgs) {
         argsEnd = Math.max(argsEnd, n === 'pkill' ? w.length : Math.min(w.length - 1, i + ARGS));
       }
     }
+    lastArgs = segArgs || (argsEnd >= 0 && argsEnd >= w.length - 1); // the segment ends inside a stop's arguments
   }
   return false;
 }
