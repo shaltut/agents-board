@@ -205,9 +205,10 @@ function packText(p: any): string {
     ...(p.entries.some((e: any) => e.authority !== 'ahmed') ? ["team = a teammate's note, not Ahmed's approval"] : [])].join('\n');
 }
 
-/** A note on one short line (#4454): every line break and run of spaces is one space, cut at 100 characters. */
+/** A note on one short line (#4454): every line break, control character (ESC, BEL, DEL, C1) and run of spaces is one
+ *  space, cut at 100 characters. */
 const clip = (s: unknown, n = 100) => {
-  const c = [...String(s ?? '').replace(/[\s\u0085]+/g, ' ').trim()];
+  const c = [...String(s ?? '').replace(/[\s\p{Cc}]+/gu, ' ').trim()];
   return c.length > n ? `${c.slice(0, n - 1).join('').trimEnd()}…` : c.join('');
 };
 
