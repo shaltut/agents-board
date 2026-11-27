@@ -1,7 +1,8 @@
 // Runner recipes: load and validate runner.json, check job parameters, build argv/cwd/env. Pure: no DB, no spawn.
 import { resolve, sep } from 'node:path';
 
-export type Param = { pattern: string; min: number; max: number };
+// paths: each value names a file or folder in the job's folder at the sha, checked before the steps run (#4338)
+export type Param = { pattern: string; min: number; max: number; paths: boolean };
 export type Recipe = { steps: string[][]; finally: string[][]; cwd: string; env: Record<string, string>; timeout: number; db: boolean; params: Record<string, Param> };
 export type Repo = { git: string; lockfile: string; install: string[]; installTimeout: number; recipes: Record<string, Recipe> };
 // a flat project in runner.json (git, lockfile, ... at its top) is one repo, main (#3703)
@@ -63,13 +64,16 @@ function loadRecipe(raw: unknown, path: string, dbLanes: number, laneEnv: string
     const pp = `${path}.params.${n}`;
     if (!NAME.test(n)) fail(`${path}.params`, `name "${n}" must match ${NAME}`);
     if (!isObj(pr)) fail(pp, 'must be an object');
-    only(pr, pp, ['pattern', 'min', 'max']);
+    only(pr, pp, ['pattern', 'min', 'max', 'paths']);
     const pattern = str(pr.pattern, `${pp}.pattern`);
     try { new RegExp(pattern); } catch { fail(`${pp}.pattern`, 'does not compile'); }
     const min = int(pr.min, `${pp}.min`, 0, MAX_VALUES, 1);
     const max = int(pr.max, `${pp}.max`, 1, MAX_VALUES, 1);
     if (min > max) fail(pp, 'min is above max');
-    params[n] = { pattern, min, max };
+    // a parameter named files is a list of paths unless the recipe says paths: false (#4338: a test tool drops a name it
+    // cannot find and passes on the rest, so the runner checks them)
+    if (pr.paths !== undefined && typeof pr.paths !== 'boolean') fail(`${pp}.paths`, 'must be true or false');
+    params[n] = { pattern, min, max, paths: typeof pr.paths === 'boolean' ? pr.paths : n === 'files' };
   }
   const cwd = raw.cwd === undefined ? '.' : str(raw.cwd, `${path}.cwd`);
   for (const n of slotsOf(cwd)) {
@@ -120,7 +124,7 @@ export function loadConfig(text: string): RunnerConfig {
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
   const slots = int(raw.slots, 'slots', 1, 10, 2);
-  // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "5544{lane}")
+  // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "2544{lane}")
   const dbLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
   if (dbLanes > slots) fail('dbLanes', `is above slots (${slots})`);
   // the env values that set one lane's test stack apart from another's (its compose name and ports)
@@ -187,6 +191,51 @@ export function checkParams(recipe: Recipe, params: Record<string, string[]>): s
   }
   for (const n of Object.keys(params)) if (!Object.hasOwn(recipe.params, n)) return bad(n, 'unknown');
   return null;
+}
+
+// The recipe's folder with its parameters filled in, relative to the repo root ('' for the root), or null when a
+// parameter it needs is missing (checkParams names that).
+function cwdRel(recipe: Recipe, params: Record<string, string[]>): string | null {
+  let missing = false;
+  const rel = recipe.cwd.replace(SLOT, (_, n: string) => {
+    const v = Object.hasOwn(params, n) ? params[n]![0] : undefined;
+    if (typeof v !== 'string' || !VALUE.test(v)) { missing = true; return ''; } // unchecked rows: checkParams names it (review M3)
+    return v;
+  });
+  return missing ? null : rel.replace(/\\/g, '/').replace(/^(?:\.\/)+|\/+$/g, '').replace(/^\.$/, '');
+}
+
+/** #4338: a path value given from the repo root (apps/claims-api/tests/a.test.ts) is taken as the same path from the
+ *  recipe's folder (tests/a.test.ts). Other values, and other parameters, are left as they are. */
+export function relPaths(recipe: Recipe, params: Record<string, string[]>): Record<string, string[]> {
+  const rel = cwdRel(recipe, params);
+  if (!rel) return params;
+  const prefix = `${rel}/`;
+  return Object.fromEntries(Object.entries(params).map(([n, vals]) => [n,
+    Object.hasOwn(recipe.params, n) && recipe.params[n]!.paths && Array.isArray(vals)
+      ? vals.map((v) => (typeof v === 'string' && v.startsWith(prefix) && v.length > prefix.length ? v.slice(prefix.length) : v)) : vals]));
+}
+
+/** #4338: the path values that name nothing tracked in the job's folder at the sha. tracked is git's file list there,
+ *  relative to that folder (the working tree would pass node_modules and, on Windows, a wrong-case name). A value counts
+ *  when it is a tracked file or folder from the job's folder, or from a package folder under it (one with a tracked
+ *  package.json: where pnpm --filter ... exec runs a tool, which then takes names relative to it; #16 review C1). Not a
+ *  tail of any deeper path (review 2, I1): node --test drops a name that matches nothing whenever another name matches,
+ *  so e2e/tests/x.test.ts must not let tests/x.test.ts pass. Checked after checkParams: each value is a plain path. */
+export function missingPaths(tracked: string[], recipe: Recipe, params: Record<string, string[]>): string[] {
+  const have = new Set<string>();
+  for (const f of tracked) for (let k = f.indexOf('/'); ; k = f.indexOf('/', k + 1)) { have.add(k < 0 ? f : f.slice(0, k)); if (k < 0) break; }
+  const bases = ['', ...tracked.filter((f) => f.endsWith('/package.json')).map((f) => f.slice(0, -'package.json'.length))];
+  return Object.entries(recipe.params).filter(([, spec]) => spec.paths)
+    .flatMap(([n]) => (Object.hasOwn(params, n) ? params[n]! : []).filter((v) => {
+      const name = v.replace(/^(?:\.\/)+|\/+$/g, '');
+      return !name || !bases.some((b) => have.has(b + name));
+    }));
+}
+
+/** The recipe's folder as the requester wrote it ('.' for the repo root), for an error message. */
+export function recipeFolder(recipe: Recipe, params: Record<string, string[]>): string {
+  return cwdRel(recipe, params) || '.';
 }
 
 export function expand(argv: string[], params: Record<string, string[]>): string[] {

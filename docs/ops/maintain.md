@@ -1,7 +1,7 @@
 # Running the board on the VPS
 
 Everything here runs in `/opt/claude-board/deploy` on the VPS (vps2) unless it says otherwise. `dc` below is
-`docker compose`. The https side is Nginx Proxy Manager's proxy host `board.shaltoot.cloud` ([deploy.md](deploy.md#5-https-in-front)).
+`docker compose`. The https side is Nginx Proxy Manager's proxy host `board.example.com` ([deploy.md](deploy.md#5-https-in-front)).
 
 ## Is it up?
 
@@ -48,7 +48,7 @@ If vps2's public ssh port times out, use the Tailscale route:
 
 Then the workers, right away, because their `cb` must match the schema:
 
-- **PC:** `git -C F:\Work\claude-board pull --ff-only`
+- **PC:** `git -C C:\work\claude-board pull --ff-only`
 - **MacBook:** `~/Work/claude-board` is a copy, not a clone. From the PC (Git Bash, in the updated checkout):
 
   ```bash
@@ -188,7 +188,7 @@ From the VPS shell, when the board itself can't be used (no admin can sign in):
 ```bash
 dc exec board cb users                                                          # who, which role
 read -rs PW && printf %s "$PW" | dc exec -T -e PGAPPNAME=cb-web board cb user password ahmed; unset PW   # reset a password
-dc exec -e PGAPPNAME=cb-web board cb user role omar admin                       # or member
+dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       # or member
 ```
 
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
@@ -285,8 +285,8 @@ Set up, once, on the PC:
    every `cb run` is refused.
 6. Switching a project from flat to `repos`:
    - runner.json and the squad file switch together; until both list the same repos, `cb run` is refused.
-   - Slot clones are named `<project>-<slot>` for `main` and `<project>-<repo>-<slot>` for any other repo (`ihop-1`
-     becomes `ihop-<repo>-1`). The old `<project>-<slot>` folders under `base` and their files in
+   - Slot clones are named `<project>-<slot>` for `main` and `<project>-<repo>-<slot>` for any other repo (`iris-1`
+     becomes `iris-<repo>-1`). The old `<project>-<slot>` folders under `base` and their files in
      `~/.claude-board/runner/state` are orphaned: delete them by hand. The first job in each slot clones and installs again.
    - Jobs still queued as `main` at the switch are never claimed by the new runner: cancel them (`cb job cancel <id>`)
      and queue them again.
@@ -302,6 +302,7 @@ What each result means:
 | `error: runner restarted` | the runner stopped mid-job | queue again |
 | `error: could not start <cmd>` | the program is missing or is a `.cmd` file | fix `runner.json` or the PC's PATH |
 | `error: bad parameter <name>: <value>` | the runner's own check refused a value | fix the value; if it looks right, the recipe's pattern is too tight |
+| `error: not in the repo at <sha>: <paths>` | a path parameter (`files`, or one with `"paths": true`) is no file or folder tracked at that commit, read from the recipe's folder or from a package folder under it (one with a tracked `package.json`, where `pnpm --filter … exec` runs the tool), never as the tail of a deeper path (#4338) | fix the name; a path from the repo root that starts with the recipe's folder is taken too. It proves the names are real. A `node --test` recipe is fully covered when its names are paths from its folder: one whose folder holds packages could pass a package-relative name that `node --test` then drops, so give it its own `cwd`. vitest filters by substring, so it may run more. `"paths": false` on a parameter turns the check off |
 | `error: could not fetch from origin` | no network, or no access to the repo | check git credentials on the PC |
 | `error: bad job row` | the job row is malformed | `cb job show <id>`; report it |
 | `error: runner fault: see cb job log <id>` | the runner itself failed | read the log, then the runner's pane |
@@ -352,7 +353,7 @@ It never:
 ## Squad file: herdr workspace
 
 A machine may name the herdr workspace its squad sessions open in: `"macbook": {"herdr": "macbook", "board": "...",
-"workspace": "iHop Squad"}` (the workspace's label, 1 to 64 characters). `cb squad up` and the supervisor then open each
+"workspace": "Iris Squad"}` (the workspace's label, 1 to 64 characters). `cb squad up` and the supervisor then open each
 new session as a tab there (two per tab, as before), and make the workspace when herdr has none by that label; its first
 pane takes the first session. Without `workspace` a session opens in whichever workspace is focused on that machine.
 Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
@@ -392,13 +393,13 @@ denied by the role permission files. Card #3746.
 
 ## Squad file: several repos
 
-One board project can hold several git repos. QHS is four: `api`, `dashboard`, `app`, `bot`. Add a `repos` key to the
+One board project can hold several git repos. ZED is four: `api`, `dashboard`, `app`, `bot`. Add a `repos` key to the
 squad file (`cb squad set <project> -f <file>`):
 
 ```json
 "repos": {
-  "api":       { "home": true, "paths": { "shaltoot": "F:/Work/QHS/api", "macbook": "/Users/ahmedshaltoot/Work/QHS/api" } },
-  "dashboard": { "paths": { "shaltoot": "F:/Work/QHS/dashboard", "macbook": "/Users/ahmedshaltoot/Work/QHS/dashboard" } }
+  "api":       { "home": true, "paths": { "shaltoot": "C:/work/ZED/api", "macbook": "/Users/me/work/ZED/api" } },
+  "dashboard": { "paths": { "shaltoot": "C:/work/ZED/dashboard", "macbook": "/Users/me/work/ZED/dashboard" } }
 }
 ```
 

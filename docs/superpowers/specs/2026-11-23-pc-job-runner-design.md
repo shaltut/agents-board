@@ -17,7 +17,7 @@ answer comes back by itself.
   exit code and a short summary pushed to it like any board message.
 - Only named recipes with checked parameters. Never free shell.
 - Full logs stay on the PC; the board stores only the summary.
-- Works for any project that has recipes on the PC; iHop is the first.
+- Works for any project that has recipes on the PC; Iris is the first.
 
 ## Non-goals
 
@@ -47,7 +47,7 @@ answer comes back by itself.
   never starting with `-` (no flag injection), at most 20 values per list parameter.
 - The runner publishes **only names and parameter names** to the board (`cb.runner_recipes`) when it starts, so
   `cb run` can refuse an unknown recipe and `cb help run` can list them. The commands never leave the PC.
-- First iHop recipes (all read-only checks; exact argv in the file, from CLAUDE.md and today's `run:` requests):
+- First Iris recipes (all read-only checks; exact argv in the file, from CLAUDE.md and today's `run:` requests):
 
 | Recipe | Params | What it runs |
 |---|---|---|
@@ -95,11 +95,11 @@ Recipes fence the command, but `install`, `test`, `build` and the rest run whate
   One runner per machine; a second one refuses to start.
 - Connects to the board like the relay (same `connect`, its own application name), `LISTEN`s for new jobs, claims
   with `FOR UPDATE SKIP LOCKED`, heartbeats every 30 s; a 30 s poll is the safety net.
-- Pre-auth integration tests are **not** in this piece: iHop's test-stack script provisions platform, claims and
-  knowledge-base only. They need a pre-auth target in that script first (an iHop card, not this one). My call.
+- Pre-auth integration tests are **not** in this piece: Iris's test-stack script provisions platform, claims and
+  knowledge-base only. They need a pre-auth target in that script first (an Iris card, not this one). My call.
 - **Slots: 2 jobs at once; DB-backed jobs (`itest`, `kbtest`) one at a time**, each with its own test-stack project name and
   ports so two never share a database. Slots and ports are in `runner.json`.
-- **Worktrees:** one per slot per project at a short path (`C:/r/<project>-<slot>`, MAX_PATH). Per job: fetch the
+- **Worktrees:** one per slot per project at a short path (`C:/runs/<project>-<slot>`, MAX_PATH). Per job: fetch the
   sha, `git checkout --detach <sha>`, `git clean -fdx` except `node_modules`, and `pnpm install --frozen-lockfile`
   when the lockfile changed since that slot's last install (an `install` step counts in the job's time).
 - **Timeouts:** per recipe; a job over its timeout is killed (whole process tree) and ends `error: timed out`.
@@ -145,11 +145,11 @@ Recipes fence the command, but `install`, `test`, `build` and the rest run whate
   cancel rules; the end message reaches the requester; restart marks the runner's own running jobs.
 - Runner (pure parts): argv building from a recipe and params; every parameter check (`..`, absolute, leading
   `-`, pattern, count); summary parsing for node:test and vitest output; slot and DB-slot scheduling.
-- One live check before release: a Mac session runs `cb run check`, `cb run test` and `cb run itest` on iHop at a
+- One live check before release: a Mac session runs `cb run check`, `cb run test` and `cb run itest` on Iris at a
   pushed sha; `cb run test --files ../x` and `--files -r` are refused; the result arrives by itself; `cb job log`
   reads the log from the Mac.
 
 ## Left to the builder
 
-The exact argv per iHop recipe (from CLAUDE.md and `docs/database-workflow.md`), the summary parsers, the log
+The exact argv per Iris recipe (from CLAUDE.md and `docs/database-workflow.md`), the summary parsers, the log
 server's port, the `runner.json` schema details.

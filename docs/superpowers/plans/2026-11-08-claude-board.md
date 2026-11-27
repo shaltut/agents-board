@@ -232,7 +232,7 @@ test('setup twice keeps rows', async () => {
   - `ask captures pane` — env `HERDR_PANE_ID=p7` → `reply_to->>'pane'='p7'`.
   - `bad status exits 1 with message` → exit code 1, stderr contains `use one of`.
 - [ ] **Step 2:** Run → FAIL. **Step 3:** Implement. **Step 4:** Run → PASS.
-- [ ] **Step 5:** Manual: new terminal, `cb help` works from `F:\Work` (PATH from Task 1).
+- [ ] **Step 5:** Manual: new terminal, `cb help` works from `C:\work` (PATH from Task 1).
 - [ ] **Step 6:** Commit `feat: cb cli`.
 
 ---
@@ -333,7 +333,7 @@ test('setup twice keeps rows', async () => {
   - `claude-md-snippet.md`: 6–8 lines to paste into a project's CLAUDE.md.
   - `README.md`: `pnpm i && pnpm run setup && pnpm start`, URL, CLI table, psql examples, HTTP example, troubleshooting (PATH restart, port in use).
 - [ ] **Step 1:** Write the files.
-- [ ] **Step 2:** Dry run: in a fresh terminal from `F:\Work`, follow `session.md` literally against seed data (add, next, ask, done) → all commands succeed and show on the board live.
+- [ ] **Step 2:** Dry run: in a fresh terminal from `C:\work`, follow `session.md` literally against seed data (add, next, ask, done) → all commands succeed and show on the board live.
 - [ ] **Step 3:** `pnpm test` all PASS; `pnpm build` passes.
 - [ ] **Step 4:** Commit `docs: prompts and readme`.
 

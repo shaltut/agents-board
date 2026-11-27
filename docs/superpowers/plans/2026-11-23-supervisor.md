@@ -20,7 +20,7 @@
 - Never answer a startup dialog: report it to the lead once per name.
 - Board text (events, tells) names sessions, roles and counts only: no card titles, no client text.
 - Exact texts: `another supervisor is running`; `only the supervisor can do this`; `supervise must be true or false`.
-- Tests touch only `claude_board_test*` databases. Run from `C:/w/sup`:
+- Tests touch only `claude_board_test*` databases. Run from `C:/work/sup`:
   `CB_TEST_DB=claude_board_test_sup NODE_OPTIONS=--max-old-space-size=4096 node --test --test-concurrency=1 --test-force-exit test/<file>.test.ts`; take `cb lock take db2` before, `cb lock release db2` after (even on failure).
 - Commits: conventional, ending `(#3601)`, never bypass hooks, never push.
 

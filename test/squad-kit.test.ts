@@ -98,7 +98,7 @@ test('cb resume ends with the role line in a pipeline project', async () => {
 });
 
 const SQUAD = {
-  machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' }, shaltoot: { herdr: null, repo: 'F:/Work/x', board: 'F:/Work/claude-board' } },
+  machines: { macbook: { herdr: 'macbook', repo: '/Users/me/Work/x', board: '/Users/me/Work/claude-board' }, shaltoot: { herdr: null, repo: 'C:/work/x', board: 'C:/work/claude-board' } },
   roles: { lead: { count: 1, model: 'opus', machine: 'shaltoot' }, builder: { count: 3, model: 'sonnet', machine: 'macbook' }, owner: { model: 'opus', machine: 'macbook' } },
   areas: ['claims', 'preauth'],
 };
@@ -150,7 +150,7 @@ test('squad_set refuses each invalid squad with the field named', async () => {
     [mod((s) => { s.machines.macbook.workspace = 'x'.repeat(65); }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = 'a\nb'; }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = '   '; }), /machine macbook workspace must be a herdr workspace label/],
-    [mod((s) => { s.machines.macbook.workspace = 'iHop Squad '; }), /machine macbook workspace must be a herdr workspace label/],
+    [mod((s) => { s.machines.macbook.workspace = 'Iris Squad '; }), /machine macbook workspace must be a herdr workspace label/],
     [mod((s) => { s.machines.macbook.workspace = '--focus'; }), /machine macbook workspace must be a herdr workspace label/],
     // the Mac cap counts by the herdr label, whatever the machine key
     [mod((s) => { s.machines.mac = { ...s.machines.macbook }; s.roles.builder.machine = 'mac'; s.roles.builder.count = 7; s.roles.owner.machine = 'mac'; }), /macbook would run 9 sessions/],
@@ -164,9 +164,9 @@ test('squad_set refuses each invalid squad with the field named', async () => {
 test('squad_set keeps a machine workspace label (#3719)', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  const s = mod((x) => { x.machines.macbook.workspace = 'iHop Squad'; });
+  const s = mod((x) => { x.machines.macbook.workspace = 'Iris Squad'; });
   await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
-  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'iHop Squad');
+  assert.equal((await sql`select cb.squad_get('demo') as s`)[0].s.machines.macbook.workspace, 'Iris Squad');
 });
 
 test('squad_set keeps protected branches; a squad without them saves no protected key (#3746)', async () => {
@@ -225,7 +225,7 @@ test('squad_set refuses a protected entry the push hook can never match: refs/, 
 test('squad_set accepts absolute paths on both OS shapes', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
-  const s = mod((x) => { x.machines.shaltoot.repo = 'C:/Work/x'; x.machines.shaltoot.board = 'F:/Work/claude-board'; });
+  const s = mod((x) => { x.machines.shaltoot.repo = 'C:/Work/x'; x.machines.shaltoot.board = 'C:/work/claude-board'; });
   await sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`;
 });
 
@@ -466,6 +466,95 @@ test('stage_stalls_due: no nudge to the holder of a card waiting on a person (Q2
   await sql`update cb.questions set status = 'dormant' where id = ${q}`;
   await sql`update cb.events set at = now() - ${m}::interval where task_id = 1 and not (data ? 'nudge')`; // the flip wrote an event
   assert.equal(await due(), 1, 'a dormant question does not hold it');
+});
+
+// #4335: a builder working on its PR went quiet, so the sweep freed the card. Its reviews: keyed on links.pr alone, that
+// kept every reviewer and QA holder (links.pr is on every card past build) and held a merged PR's card forever; keyed on
+// the poller's open list, it almost never fired (the poller lists only PRs with its card). Kept now while a builder
+// holds the card (or part) at build with a PR linked, for a quiet spell under 24 h; then the usual nudge, then free.
+test('stage_stalls_due: a builder at build with a PR linked keeps a quiet card for up to 24 h, then the usual rules (#4335)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p2','B1@mac','demo','builder'),
+    ('mac','p3','R1@mac','demo','reviewer'), ('mac','p5','B2@mac','demo','builder'), ('pc','p4','orch@pc','demo',null)`;
+  const PR = (n: number) => `https://github.com/o/r/pull/${n}`;
+  // each freed case differs from the kept one in one thing only (the second review, M4)
+  const cases: [string, string, string, string | null][] = [ // title, holder, stage, pr
+    ['builder at build, PR linked', 'B1@mac', 'build', PR(5947)],
+    ['no PR', 'B1@mac', 'build', null],
+    ['the lead at build', 'orch@pc', 'build', PR(5947)],
+    ['a reviewer at build', 'R1@mac', 'build', PR(5947)],
+    ['builder at review', 'B1@mac', 'review', PR(5947)],
+    ['quiet 25 h', 'B2@mac', 'build', PR(5948)], // quiet counts the holder's work anywhere: its own builder
+  ];
+  for (const [title, who, stage, pr] of cases) {
+    const [{ id }] = await sql`select cb.task_add(project => 'demo', title => ${title}, type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`;
+    await sql`update cb.tasks set status = 'in_progress', assignee = ${who}, stage = ${stage}, links = ${pr ? sql.json({ pr }) : sql.json({})} where id = ${id}`;
+  }
+  const quiet = async (m: string, ids: number[]) => {
+    await sql`update cb.tasks set updated_at = now() - ${m}::interval where id = any(${ids})`;
+    await sql`update cb.events set at = now() - ${m}::interval where task_id = any(${ids}) and not (data ? 'nudge')`;
+  };
+  const idle = async (m: string, who: string[]) => {
+    await sql`update cb.sessions set started_at = now() - ${m}::interval where actor = any(${who})`;
+    await sql`update cb.events set at = least(at, now() - ${m}::interval) where actor = any(${who}) and not (data ? 'nudge')`;
+  };
+  const nudge = async (id: number) => (await sql`select summary from cb.events where task_id = ${id} and data ? 'nudge' order by id desc limit 1`)[0]?.summary;
+  const holder = async (id: number) => (await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee;
+  const sweep = () => sql`select cb.stage_stalls_due()`;
+  const ALL = [1, 2, 3, 4, 5];
+  await idle('40 minutes', ['B1@mac', 'R1@mac', 'orch@pc']); await quiet('40 minutes', ALL);
+  await idle('25 hours', ['B2@mac']); await quiet('25 hours', [6]);
+  await sweep();
+  assert.match(await nudge(1), /^#1 "builder at build, PR linked" has PR #5947 linked, with no update for 0h 40m at .*cb log 1 /);
+  assert.doesNotMatch(await nudge(1), /back to the queue/);
+  for (const id of [2, 3, 4, 5, 6]) assert.match(await nudge(id), /goes back to the queue in an hour/, `card ${id}`);
+  // 110 minutes quiet, the nudges 70 minutes old: only card 1 keeps its holder
+  await sql`update cb.stage_nudges set nudged_at = now() - interval '70 minutes'`;
+  await idle('110 minutes', ['B1@mac', 'R1@mac', 'orch@pc']); await quiet('110 minutes', ALL);
+  await idle('26 hours', ['B2@mac']); await quiet('26 hours', [6]);
+  await sweep();
+  const held = await sql`select id, assignee from cb.tasks order by id`;
+  assert.deepEqual(held.map((r: any) => [Number(r.id), r.assignee]), [[1, 'B1@mac'], [2, null], [3, null], [4, null], [5, null], [6, null]]);
+  // a Next hold: kept the same way
+  await sql`update cb.tasks set status = 'next' where id = 1`;
+  await quiet('110 minutes', [1]);
+  await sweep();
+  assert.equal(await holder(1), 'B1@mac', 'a Next hold with a PR linked is kept');
+  // past 24 h: the PR nudge was no warning (the second review, M1), so first the usual nudge, and free an hour later
+  await sql`update cb.tasks set status = 'in_progress' where id = 1`;
+  await idle('25 hours', ['B1@mac']); await quiet('25 hours', [1]);
+  await sql`update cb.stage_nudges set nudged_at = now() - interval '24 hours 30 minutes' where task_id = 1`;
+  await sweep();
+  assert.equal(await holder(1), 'B1@mac', 'not freed on the strength of the PR nudge');
+  assert.match(await nudge(1), /^#1 .*has had no update for 25h 0m.*goes back to the queue in an hour/);
+  await idle('26 hours', ['B1@mac']); await quiet('26 hours', [1]);
+  await sql`update cb.stage_nudges set nudged_at = now() - interval '70 minutes' where task_id = 1`;
+  await sweep();
+  assert.equal(await holder(1), null, 'freed an hour after the usual nudge');
+
+  // parts: the same rule on the part's own holder and stage
+  const [{ id: pid }] = await sql`select cb.task_add(project => 'demo', title => 'Parts', type => 'bug', stage => 'build', why => 'small', actor => 'orch@pc') as id`;
+  await sql`update cb.tasks set status = 'in_progress', stage = 'build' where id = ${pid}`;
+  const part = (repo: string, stage: string, who: string, pr: string | null = PR(6001)) => sql`insert into cb.task_parts (task_id, repo, stage, status, assignee, pr, since, nudged_at)
+    values (${pid}, ${repo}, ${stage}, 'in_progress', ${who}, ${pr}, now() - interval '110 minutes', now() - interval '70 minutes')`;
+  // the r3 review's M1: a builder part at build with no PR pins the part loop's PR clause
+  await part('api', 'build', 'B1@mac'); await part('db', 'build', 'R1@mac'); await part('ui', 'review', 'B1@mac'); await part('cli', 'build', 'B1@mac', null);
+  await idle('110 minutes', ['B1@mac', 'R1@mac']); await quiet('110 minutes', [Number(pid)]);
+  await sweep();
+  const parts = await sql`select repo, assignee from cb.task_parts where task_id = ${pid} order by repo`;
+  assert.deepEqual(parts.map((r: any) => [r.repo, r.assignee]), [['api', 'B1@mac'], ['cli', null], ['db', null], ['ui', null]],
+    'only the builder part at build is kept');
+  await sql`update cb.task_parts set since = now() - interval '25 hours', nudged_at = now() - interval '24 hours 30 minutes' where task_id = ${pid} and repo = 'api'`;
+  await idle('25 hours', ['B1@mac']); await quiet('25 hours', [Number(pid)]);
+  await sweep();
+  assert.equal((await sql`select assignee from cb.task_parts where task_id = ${pid} and repo = 'api'`)[0].assignee, 'B1@mac', 'part: the usual nudge first');
+  assert.match(await nudge(Number(pid)), /\(part api\) has had no update .*goes back to the queue/);
+  await sql`update cb.task_parts set since = now() - interval '26 hours', nudged_at = now() - interval '70 minutes' where task_id = ${pid} and repo = 'api'`;
+  await idle('26 hours', ['B1@mac']); await quiet('26 hours', [Number(pid)]);
+  await sweep();
+  assert.equal((await sql`select assignee from cb.task_parts where task_id = ${pid} and repo = 'api'`)[0].assignee, null, 'part: freed an hour later');
 });
 
 test('role texts name the repo rules', () => {

@@ -17,8 +17,9 @@ function shape(counts: { passed: number; failed: number; skipped: number; cancel
     const more = unique.length > MAX_NAMES ? `; and ${unique.length - MAX_NAMES} more` : '';
     text += ` Failing: ${shown}${more}`;
   }
-  // failed: what did not pass (failed or cancelled), for a step that exits non-zero with none (#4417)
-  return { text: cut(text), ran: counts.passed + counts.failed, failed: counts.failed + (counts.cancelled ?? 0) };
+  // failed: what did not pass (failed or cancelled) in the last count block; named: the failing names in the whole
+  // output (counts are last-wins, names add up: an earlier block's failure shows only here). Both 0 = no test failed (#4417)
+  return { text: cut(text), ran: counts.passed + counts.failed, failed: counts.failed + (counts.cancelled ?? 0), named: unique.length };
 }
 
 // each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
@@ -41,15 +42,17 @@ function lastLines(lines: string[]): string {
 const CLOSING = /^\s*(?:\S{1,4}\s+)?(?:tests|suites|duration_ms)\s+[\d.]+\s*$|^\s*(?:Test Files|Tests|Duration)\s/;
 
 /** Why a command that printed test counts still exited non-zero (#4417): its lines after the last count line
- *  (lefthook's `exit status 1` and the command it failed, a crash after the run), else its last lines; '' for none. */
+ *  (lefthook's `exit status 1` and the command it failed, a crash after the run), else its last lines that are not
+ *  count lines (the counts follow in the summary anyway); '' for none. */
 export function afterCounts(output: string): string {
   const lines = split(output);
-  const end = lines.findLastIndex((l) => COUNT.test(l) || CLOSING.test(l));
-  return lastLines(lines.slice(end + 1)) || lastLines(lines);
+  const isCount = (l: string) => COUNT.test(l) || CLOSING.test(l);
+  const end = lines.findLastIndex(isCount);
+  return lastLines(lines.slice(end + 1)) || lastLines(lines.filter((l) => !isCount(l)));
 }
 
 /** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 5 lines that are not code frames or pnpm trailer lines. */
-export function summarize(output: string): { text: string; ran: number | null; failed: number | null } {
+export function summarize(output: string): { text: string; ran: number | null; failed: number | null; named: number | null } {
   const lines = split(output);
 
   const vt = lines.map((l) => /^\s*Tests\s+(\d+ (?:failed|passed|skipped|todo)\b.*|no tests)\s*$/.exec(l)?.[1]).filter((v): v is string => v !== undefined).at(-1);
@@ -71,7 +74,7 @@ export function summarize(output: string): { text: string; ran: number | null; f
     return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0, cancelled: c.cancelled, todo: c.todo }, names);
   }
 
-  return { text: cut(lastLines(lines) || '(no output)'), ran: null, failed: null }; // never an empty summary
+  return { text: cut(lastLines(lines) || '(no output)'), ran: null, failed: null, named: null }; // never an empty summary
 }
 
 const MASK = '[masked]';

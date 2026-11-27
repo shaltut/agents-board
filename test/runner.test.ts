@@ -5,7 +5,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { runJob } from '../cli/runner-job.ts';
@@ -44,7 +44,7 @@ writeFileSync(join(TMP, 'gitconfig'), '');
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: join(TMP, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (...args: string[]) => execFileSync('git', args, { cwd: WORK, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (msg: string, files: Record<string, string> = {}) => {
-  for (const [f, body] of Object.entries(files)) writeFileSync(join(WORK, f), body);
+  for (const [f, body] of Object.entries(files)) { mkdirSync(dirname(join(WORK, f)), { recursive: true }); writeFileSync(join(WORK, f), body); }
   git('add', '-A'); git('commit', '-q', '--allow-empty', '-m', msg);
   return git('rev-parse', 'HEAD');
 };
@@ -59,6 +59,10 @@ const MAIN = commit('main', {
   // 3 MB, no newline; masking lengthens each address, so only a cut applied last keeps the summary short
   'big.mjs': "process.stdout.write('a@b.co '.repeat(450000)); process.exitCode = 1;\n",
   'lock.txt': 'v1\n',
+  'sub/ok.mjs': "console.log('ok in sub');\n",
+  'sub/pkg/t.mjs': '\n',
+  'sub/pkg/package.json': '{}\n',
+  'sub/deep/t2.mjs': '\n',
 });
 git('push', '-q', 'origin', 'main');
 const PR_ONLY = commit('pr'); git('push', '-q', 'origin', 'HEAD:refs/pull/1/head');
@@ -80,6 +84,8 @@ const recipes = {
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
+  named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
+  insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 4 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
   multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
@@ -88,6 +94,8 @@ const recipes = {
   // #4417: counts with nothing failing, then a non-zero exit (lefthook's program-script-tests: 542 passed, 0 failed, exit 1)
   quiet: { steps: [node('ok.mjs'), node('-e', "console.log('ℹ pass 3'); console.log('ℹ fail 0'); console.error('worker crashed after the run'); process.exit(1)")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
+  swap: { steps: [node('swap.mjs')], timeout: 60 },
+  nmswap: { steps: [node('nmswap.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
   headless: { steps: [node('-e', "require('fs').writeFileSync('.git/HEAD', '')")], timeout: 60 },
@@ -281,6 +289,25 @@ test('bad parameters end the job before any git work', async () => {
   assert.doesNotMatch(logOf(id), /git/);
 });
 
+// #4338: a made-up name in --files used to be dropped by the test tool, and the job passed on the other tests
+test('a file named in a path parameter that is not there at the sha fails the job, naming it', async () => {
+  const id = await add('named', MAIN, { files: ['ok.mjs', 'made-up.mjs'] });
+  const j = await ended(id);
+  assert.equal(j.state, 'error');
+  assert.match(j.summary, new RegExp(`^error: not in the repo at ${MAIN.slice(0, 12)}: made-up\\.mjs \\(paths are relative to the recipe's folder, \\.\\)$`));
+  assert.equal((await ended(await add('named', MAIN, { files: ['ok.mjs'] }))).state, 'passed');
+});
+
+// #4338 review: in a recipe whose folder is sub, a name is read from sub (sub/x from the repo root is taken too) or from a
+// package folder under it (sub/pkg has a package.json, as pnpm --filter ... exec runs there); a tail of a deeper path
+// is not the file (node --test drops it when another name matches, and the job would pass), nor is a file outside sub
+test('a path parameter is checked in the recipe folder at the sha: from the folder, from the root, or from a package folder', async () => {
+  for (const files of [['sub/ok.mjs'], ['ok.mjs'], ['pkg/t.mjs', 't.mjs'], ['deep/t2.mjs']])
+    assert.equal((await ended(await add('insub', MAIN, { files }))).state, 'passed', files.join(' '));
+  const j = await ended(await add('insub', MAIN, { files: ['sub/nope.mjs', 'fail.mjs', 't2.mjs', 'ok.mjs'] }));
+  assert.equal(j.summary, `error: not in the repo at ${MAIN.slice(0, 12)}: nope.mjs, fail.mjs, t2.mjs (paths are relative to the recipe's folder, sub)`);
+});
+
 test('a row written around job_add is refused', async () => {
   // forged recipe rows, so this runner claims them: the fence under test is its own config check
   await sql`insert into cb.runner_recipes (runner, project, recipe) values (${NAME}, 'demo', 'ghost'), (${NAME}, 'demo', 'constructor')`;
@@ -444,6 +471,59 @@ test('hooks, config and git locks a job plants in the slot clone never run or st
   assert.ok(existsSync(join(inside, 'keep')) && existsSync(join(outside, 'y.lock')), 'the lock clearing went through a link');
 });
 
+// #3776: a link a job leaves where a tracked folder was survived checkout --force (a junction, on Windows), and the
+// clean then deleted untracked files inside its target, outside the clone. The runner drops every link before checkout.
+test('a link a job leaves over a tracked folder is removed before the checkout: nothing outside the slot is deleted', async () => {
+  const outside = join(TMP, 'swap-target').replaceAll('\\', '/');
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, 'package.json'), '{}\n'); // the same as the tracked one, as in the report
+  writeFileSync(join(outside, 'victim.txt'), 'outside the slot');
+  const swap = [
+    "import { rmSync, symlinkSync } from 'node:fs';",
+    `rmSync('pkg', { recursive: true, force: true }); symlinkSync('${outside}', 'pkg', 'junction');`,
+    "console.log('planted');",
+  ].join('\n');
+  git('checkout', '-q', '-b', 'swap', 'main');
+  mkdirSync(join(WORK, 'pkg'), { recursive: true });
+  const P = commit('swap', { 'swap.mjs': swap, 'pkg/package.json': '{}\n' });
+  git('push', '-q', 'origin', 'swap');
+  git('checkout', '-q', 'main');
+  const jp = await ended(await add('swap', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const qid = await add('ok', P);
+  const jq = await ended(qid);
+  assert.equal(jq.state, 'passed', jq.summary);
+  assert.ok(existsSync(join(outside, 'victim.txt')), 'the clean deleted a file outside the slot, through the link');
+  assert.ok(existsSync(join(outside, 'package.json')));
+  assert.match(logOf(qid), /removed 1 link\(s\) a job left in the slot: pkg/);
+});
+
+// review I1 of #3776: a link the runner drops may be the install itself (node_modules swapped for a link). The install
+// record still matched the lockfile, so every later job on the slot ran with no install: dropping a link forces one.
+test('a node_modules a job swaps for a link is removed and the next job installs again', async () => {
+  const outside = join(TMP, 'nm-target').replaceAll('\\', '/');
+  mkdirSync(outside, { recursive: true });
+  const plant = [
+    "import { rmSync, symlinkSync } from 'node:fs';",
+    `rmSync('node_modules', { recursive: true, force: true }); symlinkSync('${outside}', 'node_modules', 'junction');`,
+    "console.log('planted');",
+  ].join('\n');
+  git('checkout', '-q', '-b', 'nmswap', 'main');
+  const P = commit('nm swap', { 'nmswap.mjs': plant });
+  git('push', '-q', 'origin', 'nmswap');
+  git('checkout', '-q', 'main');
+  assert.equal((await ended(await add('ok', P))).state, 'passed'); // installed for this lockfile, or already was
+  const jp = await ended(await add('nmswap', P));
+  assert.equal(jp.state, 'passed', jp.summary);
+  const qid = await add('ok', P);
+  assert.equal((await ended(qid)).state, 'passed');
+  assert.match(logOf(qid), /removed 1 link\(s\) a job left in the slot: node_modules/);
+  assert.match(logOf(qid), /^installed$/m, 'the install record outlived the install');
+  const rid = await add('ok', P);
+  assert.equal((await ended(rid)).state, 'passed');
+  assert.doesNotMatch(logOf(rid), /installed/, 'one reinstall, not one per job');
+});
+
 test('a NUL folder a job plants in the slot does not break the next job', { skip: !WIN && 'Windows only' }, async () => {
   git('checkout', '-q', '-b', 'folder', 'main');
   const P = commit('nul', { 'folder.mjs': String.raw`import { mkdirSync, writeFileSync } from 'node:fs'; import { resolve } from 'node:path'; const d = '\\\\?\\' + resolve('NUL'); mkdirSync(d, { recursive: true }); writeFileSync(d + '\\x', '1'); console.log('planted');` });
@@ -525,50 +605,50 @@ const repoOf = (gitUrl: string, rs: object = { ok: recipes.ok }) => { const { ba
 test('loadConfig: a project\'s repos', async () => {
   const { published } = await import('../cli/recipes.ts');
   const cfg = loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: {
-    qhs: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN, { ok: recipes.ok, fail: recipes.fail }) } },
+    zed: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN, { ok: recipes.ok, fail: recipes.fail }) } },
     demo: project(ORIGIN, { ok: recipes.ok }),
   } }));
-  assert.deepEqual(Object.keys(cfg.projects.qhs!.repos), ['api', 'dashboard']);
-  assert.equal(cfg.projects.qhs!.base, join(TMP, 'direct'));
-  assert.equal(cfg.projects.qhs!.repos.dashboard!.git, ORIGIN);
-  assert.deepEqual(Object.keys(cfg.projects.qhs!.repos.dashboard!.recipes), ['ok', 'fail']);
+  assert.deepEqual(Object.keys(cfg.projects.zed!.repos), ['api', 'dashboard']);
+  assert.equal(cfg.projects.zed!.base, join(TMP, 'direct'));
+  assert.equal(cfg.projects.zed!.repos.dashboard!.git, ORIGIN);
+  assert.deepEqual(Object.keys(cfg.projects.zed!.repos.dashboard!.recipes), ['ok', 'fail']);
   // a flat project is one repo, main, with the same fields
   assert.deepEqual(Object.keys(cfg.projects.demo!.repos), ['main']);
   assert.equal(cfg.projects.demo!.repos.main!.lockfile, 'lock.txt');
   assert.equal(cfg.projects.demo!.repos.main!.installTimeout, 60);
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, git: ORIGIN, repos: { api: repoOf(ORIGIN) } } } })),
-    /projects\.qhs: unknown key "git"/);
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: { ...repoOf(ORIGIN), base: TMP } } } } })),
-    /projects\.qhs\.repos\.api: unknown key "base"/);
-  // a flat qhs-api and qhs's repo api would share slot clones and install records: refused
-  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { qhs: { base: TMP, repos: { api: repoOf(ORIGIN) } }, 'qhs-api': project(ORIGIN, { ok: recipes.ok }) } })),
-    /projects: qhs-api and qhs repo api would share the slot clones qhs-api-<slot>/);
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, git: ORIGIN, repos: { api: repoOf(ORIGIN) } } } })),
+    /projects\.zed: unknown key "git"/);
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, repos: { api: { ...repoOf(ORIGIN), base: TMP } } } } })),
+    /projects\.zed\.repos\.api: unknown key "base"/);
+  // a flat zed-api and zed's repo api would share slot clones and install records: refused
+  assert.throws(() => loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: { zed: { base: TMP, repos: { api: repoOf(ORIGIN) } }, 'zed-api': project(ORIGIN, { ok: recipes.ok }) } })),
+    /projects: zed-api and zed repo api would share the slot clones zed-api-<slot>/);
   const pub = published(cfg);
   assert.ok(pub.every((r) => typeof r.repo === 'string'));
-  assert.deepEqual(pub.map((r) => `${r.project}/${r.repo}/${r.recipe}`), ['qhs/api/ok', 'qhs/dashboard/ok', 'qhs/dashboard/fail', 'demo/main/ok']);
+  assert.deepEqual(pub.map((r) => `${r.project}/${r.repo}/${r.recipe}`), ['zed/api/ok', 'zed/dashboard/ok', 'zed/dashboard/fail', 'demo/main/ok']);
 });
 
 test('slot clones per repo', async () => {
   const cfg = loadConfig(JSON.stringify({ slots: 1, log: LOG, projects: {
-    qhs: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN) } },
+    zed: { base: join(TMP, 'direct'), repos: { api: repoOf(ORIGIN), dashboard: repoOf(ORIGIN) } },
     flat: { ...project(ORIGIN, { ok: recipes.ok }), base: join(TMP, 'direct') },
   } }));
   const one = (id: number, project: string, repo?: string) =>
     runJob({ id, project, ...(repo ? { repo } : {}), recipe: 'ok', sha: MAIN, params: {} }, { cfg, home: DHOME, slot: 1, stop: new AbortController().signal });
-  const d = await one(900010, 'qhs', 'dashboard');
+  const d = await one(900010, 'zed', 'dashboard');
   assert.equal(d?.state, 'passed', d?.summary);
-  assert.ok(existsSync(join(TMP, 'direct', 'qhs-dashboard-1', '.git')));
-  assert.ok(existsSync(join(DHOME, 'state', 'qhs-dashboard-1.lock')));
-  assert.ok(existsSync(join(DHOME, 'state', 'qhs-dashboard-1.gitconfig')));
-  assert.ok(!existsSync(join(TMP, 'direct', 'qhs-1')));
+  assert.ok(existsSync(join(TMP, 'direct', 'zed-dashboard-1', '.git')));
+  assert.ok(existsSync(join(DHOME, 'state', 'zed-dashboard-1.lock')));
+  assert.ok(existsSync(join(DHOME, 'state', 'zed-dashboard-1.gitconfig')));
+  assert.ok(!existsSync(join(TMP, 'direct', 'zed-1')));
   const f = await one(900011, 'flat', 'main');
   assert.equal(f?.state, 'passed', f?.summary);
   assert.ok(existsSync(join(TMP, 'direct', 'flat-1', '.git')));
   assert.ok(existsSync(join(DHOME, 'state', 'flat-1.lock')));
   // a row without a repo (an older board) is main; a repo this PC does not have is refused, naming it
   assert.equal((await one(900012, 'flat'))?.state, 'passed');
-  assert.equal((await one(900013, 'qhs', 'bot'))?.summary, 'error: bad job row: no repo bot for qhs on this PC');
-  assert.equal((await one(900014, 'qhs'))?.summary, 'error: bad job row: no repo main for qhs on this PC');
+  assert.equal((await one(900013, 'zed', 'bot'))?.summary, 'error: bad job row: no repo bot for zed on this PC');
+  assert.equal((await one(900014, 'zed'))?.summary, 'error: bad job row: no repo main for zed on this PC');
 });
 
 // #3763: git clean keeps node_modules (the install) and so every build cache inside it. tsc's tsbuildinfo there
@@ -603,5 +683,11 @@ test('a slot reset drops each package\'s node_modules/.cache, keeps the install'
   assert.ok(!existsSync(join(slot, 'node_modules', '.cache')), 'the root cache is gone');
   assert.ok(!existsSync(join(slot, 'pkg', 'a', 'node_modules', '.cache')), 'a package cache is gone');
   assert.ok(existsSync(join(slot, 'node_modules', 'keep.txt')) && existsSync(join(slot, 'pkg', 'a', 'node_modules', 'dep', 'index.js')), 'the install stays');
-  assert.doesNotMatch(dlog(900031), /^installed$/m, 'no reinstall');
+  // the two links were dropped before the checkout (#3776), and a dropped link forces one install (its review, I1)
+  assert.match(dlog(900031), /^installed$/m, 'dropped links force one install');
+  // a cache drop alone never reinstalls
+  for (const f of ['node_modules/.cache/tsbuildinfo', 'pkg/a/node_modules/.cache/tsbuildinfo']) plant(f);
+  assert.equal((await direct('caches', ORIGIN, 900032, C))?.state, 'passed');
+  assert.ok(!existsSync(join(slot, 'node_modules', '.cache')), 'the root cache is gone');
+  assert.doesNotMatch(dlog(900032), /^installed$/m, 'no reinstall');
 });

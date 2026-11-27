@@ -26,7 +26,7 @@ against the test Postgres at 127.0.0.1:5434.
 - Stages, exactly: `design`, `approval`, `build`, `review`, `merge`, `qa`. Roles, exactly: `lead`, `architect`,
   `owner`, `builder`, `reviewer`, `qa`, `investigator`.
 - Investigation cards (type `research`) never get a stage: they belong to the investigator role, are never freed by
-  the stall rules (they often wait on Ahmed running steps on air-gapped UAT/production), and their page is the
+  the stall rules (they often wait on Ahmed running steps on air-gapped staging/production), and their page is the
   investigation log (spec: Investigations).
 - Timings, exactly: nudge after **30 min** quiet; free the card after **90 min** quiet with the nudge unanswered, **only while its session is live**; a
   session that is down keeps its cards (Q2324: Ahmed restores it) and the digest names it; design waits **15 min** for an area owner; lead
@@ -35,7 +35,7 @@ against the test Postgres at 127.0.0.1:5434.
 - Pages follow the card-text rule: `cb._sensitive` refuses tokens, credentials, ID numbers, emails, phone numbers.
 - UI text is plain words, never stage codes: "Design", "Waiting for your approval", "Building", "In review",
   "Merging to dev", "Checking on dev against the design".
-- Board repo rules (`CLAUDE.md`): work in a worktree branch, never on `main` in `F:\Work\claude-board`; never run tests
+- Board repo rules (`CLAUDE.md`): work in a worktree branch, never on `main` in `C:\work\claude-board`; never run tests
   against the live board; on the PC take `cb lock take db2` before test runs and give each run
   `NODE_OPTIONS=--max-old-space-size=4096` and a timeout; merge only with Ahmed's go; schema before code on deploy.
 
@@ -164,7 +164,7 @@ await assert.rejects(() => sql`update cb.tasks set stage = 'coding'`, /stage/);
     null, model text default null) returns text`. A given role must be one of the seven (error lists them); null keeps
     the current value; `area` is stored through `cb.norm_tag`.
   - `sessions_overview` rows gain `role`, `area`, `model`.
-  - CLI: `cb iam W1@macbook ihop --role builder --area claims --model sonnet`; the confirmation line adds
+  - CLI: `cb iam W1@macbook iris --role builder --area claims --model sonnet`; the confirmation line adds
     `as builder (area claims)`; `cb sessions` lines show the role. New options: `role`, `model` (strings).
 
 - [ ] **Step 1: Write the failing test** `iam: stores role, area and model; rejects an unknown role; keeps them on a plain re-bind`

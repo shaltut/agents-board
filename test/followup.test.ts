@@ -36,7 +36,7 @@ const yesNo = (sql: any, extra: Partial<Ask> = {}) => ask(sql, { body: 'Ship tod
 test('a follow-up waits dormant: not open, not waiting on Ahmed, not pending, no asked event', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const f = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: 'Q' + p, if: 'yes' });
+  const f = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: 'Q' + p, if: 'yes' });
   const row = await q(sql, f);
   assert.equal(row.status, 'dormant');
   assert.equal(Number(row.parent_id), p);
@@ -47,13 +47,13 @@ test('a follow-up waits dormant: not open, not waiting on Ahmed, not pending, no
   assert.equal((await sql`select * from cb.events where kind = 'asked' and question_id = ${f}`).length, 0);
   const [{ n }] = await sql`select count(*)::int n from cb.questions where status = 'open'`;
   assert.equal(n, 1);
-  await assert.rejects(answer(sql, f, 'SIT'), /Q2 waits on Q1/, 'a dormant follow-up cannot be answered');
+  await assert.rejects(answer(sql, f, 'STG'), /Q2 waits on Q1/, 'a dormant follow-up cannot be answered');
 });
 
 test('the Yes branch opens fresh with an asked event; the No branch waits until delivery, then is skipped', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const yes = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes' });
+  const yes = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes' });
   const no = await ask(sql, { body: 'What blocks it?', parent: String(p), if: 'NO' });
   const before = (await q(sql, yes)).created_at;
   await new Promise((r) => setTimeout(r, 20));
@@ -75,7 +75,7 @@ test('the Yes branch opens fresh with an asked event; the No branch waits until 
 test('changing the answer before delivery re-routes: Yes then No puts A back to wait and opens B; delivery skips A', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const a = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes' });
+  const a = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes' });
   const b = await ask(sql, { body: 'What blocks it?', parent: String(p), if: 'No' });
   const any = await ask(sql, { body: 'Anything else?', parent: String(p) });
   await answer(sql, p, 'Yes');
@@ -96,9 +96,9 @@ test('changing the answer before delivery re-routes: Yes then No puts A back to 
 test('a changed answer that would close an answered follow-up is refused', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const a = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes' });
+  const a = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes' });
   await answer(sql, p, 'Yes');
-  await answer(sql, a, 'SIT');
+  await answer(sql, a, 'STG');
   await assert.rejects(answer(sql, p, 'No'), /Q2 \(the "Yes \(Recommended\)" follow-up\) is already answered; withdraw it first \(cb withdraw Q2\)/);
   assert.equal((await q(sql, p)).answer, 'Yes', 'nothing changed');
   await answer(sql, p, 'Yes — after lunch'); // the same branch: fine
@@ -113,7 +113,7 @@ test('re-routing undoes the task hold a blocking follow-up took, exactly', async
   // 1. the parent held the task: back to the parent's hold, and its delivery then releases the task
   await sql`select cb.task_add(project => 'demo', title => 'Deploy', status => 'in_progress', assignee => 'W1', actor => 'W1')`;
   const p = await yesNo(sql, { task: '1', blocking: true });
-  const a = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes', blocking: true });
+  const a = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes', blocking: true });
   await answer(sql, p, 'Yes');
   assert.deepEqual(await task(1), ['blocked', a]);
   await answer(sql, p, 'No');
@@ -185,7 +185,7 @@ test('a free-text answer opens only the follow-ups without --if; --if on a --fre
 test('withdrawing a parent withdraws its dormant follow-ups, down the chain; a dormant follow-up can be withdrawn', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const f = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes' });
+  const f = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes' });
   const g = await ask(sql, { body: 'Who deploys?', parent: String(f) });
   const other = await ask(sql, { body: 'unrelated', options: ['a', 'b'] });
   const h = await ask(sql, { body: 'h?', parent: String(other) });
@@ -210,15 +210,15 @@ test('ask refuses a bad follow-up: unknown parent, other project, closed parent,
 test('a chain of two: each answer fires the next; a skipped link skips the rest', async () => {
   const sql = await db();
   const p = await yesNo(sql);
-  const f = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes' });
-  const g = await ask(sql, { body: 'Smoke test first?', options: ['Yes', 'No'], parent: String(f), if: 'UAT' });
+  const f = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes' });
+  const g = await ask(sql, { body: 'Smoke test first?', options: ['Yes', 'No'], parent: String(f), if: 'VAL' });
   await answer(sql, p, 'Yes');
   assert.deepEqual(await status(sql, f, g), ['open', 'dormant']);
-  await answer(sql, f, 'UAT');
+  await answer(sql, f, 'VAL');
   assert.deepEqual(await status(sql, g), ['open']);
 
   const p2 = await yesNo(sql);
-  const f2 = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p2), if: 'Yes' });
+  const f2 = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p2), if: 'Yes' });
   const g2 = await ask(sql, { body: 'Who deploys?', parent: String(f2) });
   await answer(sql, p2, 'No');
   assert.deepEqual(await status(sql, f2, g2), ['dormant', 'dormant']);
@@ -230,12 +230,12 @@ test('a chain of two: each answer fires the next; a skipped link skips the rest'
 
 test('a follow-up inherits task, reply_to and recipient; --blocking takes the task only when it opens', async () => {
   const sql = await db();
-  await sql`select cb.user_add('omar', 'Omar'), cb.ensure_project('demo'), cb.user_project_add('omar', 'demo', 'ahmed')`;
+  await sql`select cb.user_add('cai', 'Cai'), cb.ensure_project('demo'), cb.user_project_add('cai', 'demo', 'ahmed')`;
   await sql`select cb.task_add(project => 'demo', title => 'Deploy', status => 'in_progress', actor => 'W1')`;
-  const p = await yesNo(sql, { task: '1', reply_to: { machine: 'mac', pane: 'p3' }, to: 'omar' });
-  const f = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes', blocking: true });
+  const p = await yesNo(sql, { task: '1', reply_to: { machine: 'mac', pane: 'p3' }, to: 'cai' });
+  const f = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes', blocking: true });
   const row = await q(sql, f);
-  assert.deepEqual([Number(row.task_id), row.reply_to, row.assigned_to], [1, { machine: 'mac', pane: 'p3' }, 'omar']);
+  assert.deepEqual([Number(row.task_id), row.reply_to, row.assigned_to], [1, { machine: 'mac', pane: 'p3' }, 'cai']);
   let [t] = await sql`select status, blocked_on from cb.tasks where id = 1`;
   assert.deepEqual([t.status, t.blocked_on], ['in_progress', null], 'a dormant follow-up holds nothing');
   await answer(sql, p, 'Yes');
@@ -244,7 +244,7 @@ test('a follow-up inherits task, reply_to and recipient; --blocking takes the ta
   await sql`select cb.answer_delivered(${String(p)}, 'W1')`;
   [t] = await sql`select status from cb.tasks where id = 1`;
   assert.equal(t.status, 'blocked', 'the parent\'s delivery does not release the follow-up\'s hold');
-  await answer(sql, f, 'SIT');
+  await answer(sql, f, 'STG');
   await sql`select cb.answer_delivered(${String(f)}, 'W1')`;
   [t] = await sql`select status from cb.tasks where id = 1`;
   assert.equal(t.status, 'in_progress');
@@ -252,10 +252,10 @@ test('a follow-up inherits task, reply_to and recipient; --blocking takes the ta
 
 test('removing a person hands back their dormant follow-ups too, counting only the open ones', async () => {
   const sql = await db();
-  await sql`select cb.user_add('omar', 'Omar'), cb.ensure_project('demo'), cb.user_project_add('omar', 'demo', 'ahmed')`;
-  const p = await yesNo(sql, { to: 'omar' });
+  await sql`select cb.user_add('cai', 'Cai'), cb.ensure_project('demo'), cb.user_project_add('cai', 'demo', 'ahmed')`;
+  const p = await yesNo(sql, { to: 'cai' });
   const f = await ask(sql, { body: 'Which env?', parent: String(p) });
-  const [{ r }] = await sql`select cb.user_remove('omar', 'ahmed') as r`;
+  const [{ r }] = await sql`select cb.user_remove('cai', 'ahmed') as r`;
   assert.equal(r.questions, 1);
   assert.deepEqual([(await q(sql, f)).assigned_to, (await q(sql, f)).status], [null, 'dormant']);
 });
@@ -264,7 +264,7 @@ test('a blocking parent hands its task to a blocking follow-up', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'Deploy', status => 'in_progress', actor => 'W1')`;
   const p = await yesNo(sql, { task: '1', blocking: true });
-  const f = await ask(sql, { body: 'Which env?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes', blocking: true });
+  const f = await ask(sql, { body: 'Which env?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes', blocking: true });
   await answer(sql, p, 'Yes');
   await sql`select cb.answer_delivered(${String(p)}, 'W1')`;
   const [t] = await sql`select status, blocked_on from cb.tasks where id = 1`;
@@ -275,16 +275,16 @@ test('the follow-up\'s answer is its own delivery, quoting the parent question a
   const sql = await db();
   await sql`select cb.iam('mac', 'p3', 'W1')`;
   const p = await yesNo(sql, { reply_to: { machine: 'mac', pane: 'p3' } });
-  const f = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes', reply_to: { machine: 'mac', pane: 'p3' } });
+  const f = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes', reply_to: { machine: 'mac', pane: 'p3' } });
   await answer(sql, p, 'Yes');
   await sql`select cb.answer_delivered(${String(p)}, 'W1')`;
-  await answer(sql, f, 'UAT');
+  await answer(sql, f, 'VAL');
   const [{ i }] = await sql`select cb.inbox('mac', 'p3', 0) as i`;
   assert.deepEqual(i.answers.map((a: any) => [Number(a.id), a.answer, Number(a.parent_id), a.parent_body, a.parent_answer, a.parent_answered_by]),
-    [[f, 'UAT', p, 'Ship today?', 'Yes', 'ahmed']]);
+    [[f, 'VAL', p, 'Ship today?', 'Yes', 'ahmed']]);
   const r = cb(['pending', 'demo']);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /Q2 → W1[\s\S]*follow-up to Q1 \(answered Yes\): Ship today\?[\s\S]*asked: Which env first\?[\s\S]*answer: UAT/);
+  assert.match(r.out, /Q2 → W1[\s\S]*follow-up to Q1 \(answered Yes\): Ship today\?[\s\S]*asked: Which env first\?[\s\S]*answer: VAL/);
 });
 
 // A stand-in for Claude Code's inbox (same as relay.test.ts).
@@ -309,7 +309,7 @@ test('the relay pushes a follow-up\'s answer with the parent quoted', { timeout:
   const pane = `p-followup-${process.pid}`, key = seatKey('testbox', pane);
   const to = { machine: 'testbox', pane };
   const p = await yesNo(sql, { reply_to: to, actor: 'W9' });
-  const f = await ask(sql, { body: 'Which env first?', options: ['SIT', 'UAT'], parent: String(p), if: 'Yes', reply_to: to, actor: 'W9' });
+  const f = await ask(sql, { body: 'Which env first?', options: ['STG', 'VAL'], parent: String(p), if: 'Yes', reply_to: to, actor: 'W9' });
   await answer(sql, p, 'Yes');
   await sql`select cb.answer_delivered(${String(p)}, 'W9')`;
   const inbox = fakeInbox(path, 'tok'); // after the setup: a listening server left open would keep the run alive
@@ -322,10 +322,10 @@ test('the relay pushes a follow-up\'s answer with the parent quoted', { timeout:
   const exited = new Promise((r) => relay.on('exit', r));
   try {
     await new Promise((r) => setTimeout(r, 1500));
-    await answer(sql, f, 'UAT');
+    await answer(sql, f, 'VAL');
     for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(inbox.got.length, 1);
-    assert.match(inbox.got[0].message.content, /answered Q2: UAT\n  Follow-up to Q1 \(Ahmed answered Yes\): Ship today\?\n  You asked: Which env first\?/);
+    assert.match(inbox.got[0].message.content, /answered Q2: VAL\n  Follow-up to Q1 \(Ahmed answered Yes\): Ship today\?\n  You asked: Which env first\?/);
   } finally {
     relay.kill();
     await exited;
@@ -338,7 +338,7 @@ test('cb ask --after/--if round-trip; --if without --after is refused', async ()
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
   assert.equal(cb(['ask', 'demo', 'Ship today?', '-o', 'Yes', '-o', 'No']).code, 0);
-  const r = cb(['ask', 'demo', 'Which env first?', '-o', 'SIT', '-o', 'UAT', '--after', 'Q1', '--if', 'yes']);
+  const r = cb(['ask', 'demo', 'Which env first?', '-o', 'STG', '-o', 'VAL', '--after', 'Q1', '--if', 'yes']);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /^Q2 posted as a follow-up to Q1: it opens only if Q1 is answered "Yes", else it is skipped/);
   const n = cb(['ask', 'demo', 'Anything else?', '--free', '--after', '1']);

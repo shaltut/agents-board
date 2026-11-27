@@ -121,9 +121,9 @@ const remote = (path: string, cookie?: string) =>
 
 test('a guest sees the pictures of a question handed to them, and no other', async () => {
   const sql = await db();
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await onProject(sql, 'omar', 'demo');
-  const [{ q: mine }] = await sql`select cb.ask(project => 'demo', body => 'Yours', to_user => 'omar', actor => 'W1') as q`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await onProject(sql, 'cai', 'demo');
+  const [{ q: mine }] = await sql`select cb.ask(project => 'demo', body => 'Yours', to_user => 'cai', actor => 'W1') as q`;
   const [{ q: theirs }] = await sql`select cb.ask(project => 'demo', body => 'Ahmed''s', actor => 'W1') as q`;
   const [{ i: a }] = await add(sql, String(mine), PNG);
   const [{ i: b }] = await add(sql, String(theirs), PNG);

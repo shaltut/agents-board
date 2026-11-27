@@ -19,12 +19,12 @@ const remote = (path: string, init: RequestInit & { cookie?: string } = {}) =>
 const post = (path: string, body: object, cookie?: string) =>
   remote(path, { method: 'POST', cookie, body: JSON.stringify(body), headers: { 'content-type': 'application/json' } });
 
-/** omar on ihop; projects ihop and qhs exist. */
+/** cai on iris; projects iris and zed exist. */
 async function setup() {
   const sql = await db();
-  await sql`select cb.task_add(project => 'ihop', title => 'seed ihop'), cb.task_add(project => 'qhs', title => 'seed qhs')`;
-  const [{ token }] = await sql`select cb.user_add('omar', 'Omar') as token`;
-  await sql`select cb.user_project_add('omar', 'ihop', 'ahmed')`;
+  await sql`select cb.task_add(project => 'iris', title => 'seed iris'), cb.task_add(project => 'zed', title => 'seed zed')`;
+  const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
+  await sql`select cb.user_project_add('cai', 'iris', 'ahmed')`;
   return { sql, token };
 }
 
@@ -40,29 +40,29 @@ async function legacy(sql: any, f: () => Promise<unknown>) {
 
 test('projects: a question or task goes only to a person on its project', async () => {
   const { sql } = await setup();
-  const refused = /omar is not on project qhs/;
-  await assert.rejects(sql`select cb.ask(project => 'qhs', body => 'x', to_user => 'omar', actor => 'orch@pc')`, refused);
-  await sql`select cb.ask(project => 'ihop', body => 'fine', to_user => 'omar', actor => 'orch@pc')`;
-  const [{ q }] = await sql`select cb.ask(project => 'qhs', body => 'for Ahmed', actor => 'orch@pc') as q`;
-  await assert.rejects(sql`select cb.question_assign(${String(q)}, 'omar', 'orch@pc')`, refused);
-  await assert.rejects(sql`select cb.task_add(project => 'qhs', title => 'x', assignee => 'omar')`, refused);
-  await sql`select cb.task_add(project => 'ihop', title => 'fine', assignee => 'omar')`;
-  await assert.rejects(sql`select cb.task_update('2', ${sql.json({ assignee: 'omar' })}::jsonb, 'orch@pc')`, refused, 'task #2 is on qhs');
-  await sql`select cb.task_add(project => 'qhs', title => 'sessions are not people', assignee => 'W1@pc')`;
+  const refused = /cai is not on project zed/;
+  await assert.rejects(sql`select cb.ask(project => 'zed', body => 'x', to_user => 'cai', actor => 'orch@pc')`, refused);
+  await sql`select cb.ask(project => 'iris', body => 'fine', to_user => 'cai', actor => 'orch@pc')`;
+  const [{ q }] = await sql`select cb.ask(project => 'zed', body => 'for Ahmed', actor => 'orch@pc') as q`;
+  await assert.rejects(sql`select cb.question_assign(${String(q)}, 'cai', 'orch@pc')`, refused);
+  await assert.rejects(sql`select cb.task_add(project => 'zed', title => 'x', assignee => 'cai')`, refused);
+  await sql`select cb.task_add(project => 'iris', title => 'fine', assignee => 'cai')`;
+  await assert.rejects(sql`select cb.task_update('2', ${sql.json({ assignee: 'cai' })}::jsonb, 'orch@pc')`, refused, 'task #2 is on zed');
+  await sql`select cb.task_add(project => 'zed', title => 'sessions are not people', assignee => 'W1@pc')`;
 
-  // the live board's omar and iman start with no projects: their old items still move, nothing new reaches them
-  await sql`select cb.user_add('iman', 'Iman')`;
-  await legacy(sql, () => sql`select cb.task_add(project => 'qhs', title => 'old', assignee => 'iman')`);
+  // the live board's cai and ana start with no projects: their old items still move, nothing new reaches them
+  await sql`select cb.user_add('ana', 'Ana')`;
+  await legacy(sql, () => sql`select cb.task_add(project => 'zed', title => 'old', assignee => 'ana')`);
   const [{ id }] = await sql`select id::text from cb.tasks where title = 'old'`;
   await sql`select cb.task_move(${id}, 'done', null, 'orch@pc')`;
-  await assert.rejects(sql`select cb.task_add(project => 'ihop', title => 'x', assignee => 'iman')`, /iman is not on project ihop/);
+  await assert.rejects(sql`select cb.task_add(project => 'iris', title => 'x', assignee => 'ana')`, /ana is not on project iris/);
 });
 
 test('projects: taking a person off a project hands their open work there back', async () => {
   const { sql } = await setup();
-  await sql`select cb.ask(project => 'ihop', body => 'q', to_user => 'omar', actor => 'orch@pc')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'doing', assignee => 'omar', status => 'in_progress')`;
-  const res = await rpc('user_project_remove', { name: 'omar', project: 'ihop', actor: 'ahmed' });
+  await sql`select cb.ask(project => 'iris', body => 'q', to_user => 'cai', actor => 'orch@pc')`;
+  await sql`select cb.task_add(project => 'iris', title => 'doing', assignee => 'cai', status => 'in_progress')`;
+  const res = await rpc('user_project_remove', { name: 'cai', project: 'iris', actor: 'ahmed' });
   assert.equal(res.status, 200);
   assert.deepEqual((await res.json()).result, { questions: 1, tasks: 1 });
   const [t] = await sql`select assignee, status from cb.tasks where title = 'doing'`;
@@ -74,11 +74,11 @@ test('projects: taking a person off a project hands their open work there back',
 
 test('projects: a guest sees and answers only what is assigned to them on their projects', async () => {
   const { sql, token } = await setup();
-  await sql`select cb.ask(project => 'ihop', body => 'mine', to_user => 'omar', actor => 'orch@pc')`;
-  await sql`select cb.task_add(project => 'ihop', title => 'my task', assignee => 'omar')`;
+  await sql`select cb.ask(project => 'iris', body => 'mine', to_user => 'cai', actor => 'orch@pc')`;
+  await sql`select cb.task_add(project => 'iris', title => 'my task', assignee => 'cai')`;
   await legacy(sql, async () => {
-    await sql`select cb.ask(project => 'qhs', body => 'not my project', to_user => 'omar', actor => 'orch@pc')`;
-    await sql`select cb.task_add(project => 'qhs', title => 'not my project either', assignee => 'omar')`;
+    await sql`select cb.ask(project => 'zed', body => 'not my project', to_user => 'cai', actor => 'orch@pc')`;
+    await sql`select cb.task_add(project => 'zed', title => 'not my project either', assignee => 'cai')`;
   });
   const me = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(me.questions.map((q: any) => q.body), ['mine']);
@@ -93,18 +93,18 @@ test('projects: a guest sees and answers only what is assigned to them on their 
 
 test('login: name and password set the same cookie as the link; a wrong one waits and says nothing more', async () => {
   const { sql, token } = await setup();
-  await sql`select cb.user_add('iman', 'Iman')`; // no password
-  await sql`select cb.user_password('omar', 'correct horse', 'ahmed')`;
-  const [{ password }] = await sql`select password from cb.users where name = 'omar'`;
+  await sql`select cb.user_add('ana', 'Ana')`; // no password
+  await sql`select cb.user_password('cai', 'correct horse', 'ahmed')`;
+  const [{ password }] = await sql`select password from cb.users where name = 'cai'`;
   assert.match(password, /^\$2[abxy]\$10\$/, 'bcrypt at cost 10, never the plain text');
-  await assert.rejects(sql`select cb.user_password('omar', 'short', 'ahmed')`, /at least 8/);
+  await assert.rejects(sql`select cb.user_password('cai', 'short', 'ahmed')`, /at least 8/);
 
-  const ok = await post('/api/login', { name: ' Omar ', password: 'correct horse' });
+  const ok = await post('/api/login', { name: ' Cai ', password: 'correct horse' });
   assert.equal(ok.status, 200);
   assert.match(ok.headers.get('set-cookie') ?? '', new RegExp(`cb_user=${token};.*HttpOnly`, 'i'));
-  assert.deepEqual(await (await remote('/api/whoami', { cookie: token })).json(), { role: 'guest', user: { name: 'omar', display: 'Omar' } });
+  assert.deepEqual(await (await remote('/api/whoami', { cookie: token })).json(), { role: 'guest', user: { name: 'cai', display: 'Cai' } });
 
-  for (const [name, pw] of [['omar', 'wrong horse'], ['nobody', 'correct horse'], ['iman', ''], ['iman', 'anything at all']]) {
+  for (const [name, pw] of [['cai', 'wrong horse'], ['nobody', 'correct horse'], ['ana', ''], ['ana', 'anything at all']]) {
     const t0 = Date.now();
     const bad = await post('/api/login', { name, password: pw });
     assert.equal(bad.status, 401, `${name}/${pw}`);
@@ -122,8 +122,8 @@ test('login: name and password set the same cookie as the link; a wrong one wait
 
 test('a session cannot set passwords or projects', async () => {
   const { sql } = await setup();
-  for (const [fn, args] of [['user_password', { name: 'omar', password: 'correct horse' }], ['user_project_add', { name: 'omar', project: 'qhs' }],
-    ['user_project_remove', { name: 'omar', project: 'ihop' }]] as const) {
+  for (const [fn, args] of [['user_password', { name: 'cai', password: 'correct horse' }], ['user_project_add', { name: 'cai', project: 'zed' }],
+    ['user_project_remove', { name: 'cai', project: 'iris' }]] as const) {
     const r = await rpc(fn, args, SESSION);
     assert.equal(r.status, 400, fn);
     assert.match((await r.json()).error, /only Ahmed can do this/);
@@ -137,20 +137,20 @@ test('a session cannot set passwords or projects', async () => {
 test('projects: an alias merge or a slug rename keeps a guest on their work', async () => {
   const { sql, token } = await setup();
   await sql`select cb.task_add(project => 'acme', title => 'seed acme')`;
-  await sql`select cb.user_project_add('omar', 'acme', 'ahmed')`;
-  await sql`select cb.ask(project => 'acme', body => 'merged one', to_user => 'omar', actor => 'orch@pc')`;
-  await sql`select cb.project_alias('acme', 'qhs')`; // omar was not on qhs
+  await sql`select cb.user_project_add('cai', 'acme', 'ahmed')`;
+  await sql`select cb.ask(project => 'acme', body => 'merged one', to_user => 'cai', actor => 'orch@pc')`;
+  await sql`select cb.project_alias('acme', 'zed')`; // cai was not on zed
   const me = await (await remote('/api/me', { cookie: token })).json();
   assert.deepEqual(me.questions.map((q: any) => q.body), ['merged one']);
   const [{ q }] = await sql`select id::text as q from cb.questions where body = 'merged one'`;
   assert.equal((await post('/api/rpc/answer', { id: q, answer: 'yes' }, token)).status, 200);
-  assert.deepEqual((await sql`select project from cb.user_projects order by 1`).map((r: any) => r.project), ['ihop', 'qhs']);
+  assert.deepEqual((await sql`select project from cb.user_projects order by 1`).map((r: any) => r.project), ['iris', 'zed']);
 
-  await sql`select cb.ask(project => 'ihop', body => 'renamed one', to_user => 'omar', actor => 'orch@pc')`;
-  await sql`update cb.projects set slug = 'ihop2' where slug = 'ihop'`;
+  await sql`select cb.ask(project => 'iris', body => 'renamed one', to_user => 'cai', actor => 'orch@pc')`;
+  await sql`update cb.projects set slug = 'iris2' where slug = 'iris'`;
   const me2 = await (await remote('/api/me', { cookie: token })).json();
-  assert.ok(me2.questions.some((q: any) => q.body === 'renamed one'), 'still on the guest page after ihop became ihop2');
-  assert.deepEqual((await sql`select project from cb.user_projects order by 1`).map((r: any) => r.project), ['ihop2', 'qhs']);
+  assert.ok(me2.questions.some((q: any) => q.body === 'renamed one'), 'still on the guest page after iris became iris2');
+  assert.deepEqual((await sql`select project from cb.user_projects order by 1`).map((r: any) => r.project), ['iris2', 'zed']);
 });
 
 test('projects: an alias merge moves the asks and bound sessions, not nulls them', async () => {
@@ -158,39 +158,39 @@ test('projects: an alias merge moves the asks and bound sessions, not nulls them
   await sql`select cb.task_add(project => 'acme', title => 'seed acme')`;
   await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc', 'p9', 'B9@pc', 'acme', 'builder')`;
   await sql`insert into cb.asks (project, to_actor, body) values ('acme', 'B9@pc', 'merged ask')`;
-  await sql`select cb.project_alias('acme', 'qhs')`;
-  assert.equal((await sql`select project from cb.asks where body = 'merged ask'`)[0].project, 'qhs');
-  assert.equal((await sql`select project from cb.sessions where actor = 'B9@pc'`)[0].project, 'qhs');
+  await sql`select cb.project_alias('acme', 'zed')`;
+  assert.equal((await sql`select project from cb.asks where body = 'merged ask'`)[0].project, 'zed');
+  assert.equal((await sql`select project from cb.sessions where actor = 'B9@pc'`)[0].project, 'zed');
 });
 
 test('projects: an alias merge moves the memories (their foreign key would refuse the delete)', async () => {
   const { sql } = await setup();
   await sql`select cb.task_add(project => 'acme', title => 'seed acme')`;
   await sql`insert into cb.memories (project, kind, title, created_by) values ('acme', 'fact', 'merged memory', 'B9@pc')`;
-  await sql`select cb.project_alias('acme', 'qhs')`;
-  assert.equal((await sql`select project from cb.memories where title = 'merged memory'`)[0].project, 'qhs');
+  await sql`select cb.project_alias('acme', 'zed')`;
+  assert.equal((await sql`select project from cb.memories where title = 'merged memory'`)[0].project, 'zed');
 });
 
 test('login: five wrong tries lock the name for two minutes; a success resets the count', async () => {
   const { sql } = await setup();
   loginFails.clear();
-  await sql`select cb.user_add('iman', 'Iman')`;
-  await sql`select cb.user_password('omar', 'correct horse', 'ahmed'), cb.user_password('iman', 'battery staple', 'ahmed')`;
+  await sql`select cb.user_add('ana', 'Ana')`;
+  await sql`select cb.user_password('cai', 'correct horse', 'ahmed'), cb.user_password('ana', 'battery staple', 'ahmed')`;
   const msg = { ok: false, error: "That name and password don't match." };
 
-  const five = await Promise.all(Array.from({ length: 5 }, () => post('/api/login', { name: 'omar', password: 'wrong' })));
+  const five = await Promise.all(Array.from({ length: 5 }, () => post('/api/login', { name: 'cai', password: 'wrong' })));
   assert.deepEqual(five.map((r) => r.status), [401, 401, 401, 401, 401], 'in parallel too');
-  const locked = await post('/api/login', { name: 'omar', password: 'correct horse' });
+  const locked = await post('/api/login', { name: 'cai', password: 'correct horse' });
   assert.equal(locked.status, 429, 'the right password waits out the lock');
   assert.deepEqual(await locked.json(), msg);
   assert.equal(locked.headers.get('set-cookie'), null);
-  loginFails.get('omar|1.2.3.4')!.until = Date.now() - 1; // two minutes later (counts are per name and address)
-  assert.equal((await post('/api/login', { name: 'omar', password: 'correct horse' })).status, 200);
+  loginFails.get('cai|1.2.3.4')!.until = Date.now() - 1; // two minutes later (counts are per name and address)
+  assert.equal((await post('/api/login', { name: 'cai', password: 'correct horse' })).status, 200);
 
   for (let round = 0; round < 2; round++) {
-    const four = await Promise.all(Array.from({ length: 4 }, () => post('/api/login', { name: 'iman', password: 'wrong' })));
+    const four = await Promise.all(Array.from({ length: 4 }, () => post('/api/login', { name: 'ana', password: 'wrong' })));
     assert.deepEqual(four.map((r) => r.status), [401, 401, 401, 401]);
-    assert.equal((await post('/api/login', { name: 'iman', password: 'battery staple' })).status, 200, `round ${round}`);
+    assert.equal((await post('/api/login', { name: 'ana', password: 'battery staple' })).status, 200, `round ${round}`);
   }
 
   // at most 20 failures wait at once; past that the answer comes at once
@@ -202,9 +202,9 @@ test('login: five wrong tries lock the name for two minutes; a success resets th
 
 test('the sign-in cookie is Secure when the tunnel says https', async () => {
   const { sql, token } = await setup();
-  await sql`select cb.user_password('omar', 'correct horse', 'ahmed')`;
+  await sql`select cb.user_password('cai', 'correct horse', 'ahmed')`;
   const https = { 'content-type': 'application/json', 'x-forwarded-proto': 'https' };
-  const login = await remote('/api/login', { method: 'POST', body: JSON.stringify({ name: 'omar', password: 'correct horse' }), headers: https });
+  const login = await remote('/api/login', { method: 'POST', body: JSON.stringify({ name: 'cai', password: 'correct horse' }), headers: https });
   assert.match(login.headers.get('set-cookie') ?? '', /;\s*Secure/i);
   assert.match((await remote(`/?u=${token}`, { headers: https })).headers.get('set-cookie') ?? '', /;\s*Secure/i);
   assert.doesNotMatch((await remote(`/?u=${token}`)).headers.get('set-cookie') ?? '', /Secure/i, 'plain http (local dev) stays usable');

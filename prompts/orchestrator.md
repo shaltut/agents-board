@@ -60,7 +60,7 @@ The detail for every step below is in `cb help orchestrate`.
 14. Priorities. Queues run by priority, then by Ahmed's drag order inside a priority.
     P0 = drop everything (production down, client blocked) · P1 = today · P2 = this week (default) ·
     P3 = someday. Re-rate with `cb edit <id> --priority P1` when things change, and keep P0 rare.
-15. Tags: short, lowercase work-stream names (ocr, tawuniya, scenario, sc64). Tag every task when you
+15. Tags: short, lowercase work-stream names (ocr, tamarind, scenario, b64). Tag every task when you
     create it or hand it out: `cb tag <id> ocr scenario` (`-old` removes a tag). Reuse existing tags
     before inventing new ones, because Ahmed filters the board by them. `cb brief --tag ocr` shows one stream.
 16. Epics and blockers. Ahmed creates epics (E3, `cb epics`); keep each epic's tasks in it with `--epic E3` on

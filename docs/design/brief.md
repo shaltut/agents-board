@@ -69,7 +69,7 @@ First drafts (three stacked strips with a lamp) read as a hamburger icon at 16px
 
 ## Guests and task types (merged from main: #165, #182)
 - **The lamp follows the viewer.** Amber means "waiting on whoever is looking". On Ahmed's Today a
-  question handed to Omar shows a dark, hollow lamp under "Waiting on others"; on Omar's page the
+  question handed to Cai shows a dark, hollow lamp under "Waiting on others"; on Cai's page the
   same question is amber, and his tab carries the count.
 - **Guest page: Tower without the engineering.** One 42rem column. No callsigns, task numbers or
   P-codes: the project, the time, "work is paused until you answer", and "Needed: today" in words.
