@@ -54,11 +54,22 @@ function readState(L: Layout): { current: string; previous: string | null } | nu
  *  flip's unlink and rename): the path is linked again to what state.json says is in use, else the original copy.
  *  Returns what it did. */
 function preflight(L: Layout): string[] {
+  // a copy's .home (cb started as <copy>.home/cli/cb.ts, the way back when the copy's path is gone) is never a root:
+  // adopting it would move the copy's real folder and leave its path pointing nowhere
+  if (!isLink(L.live) && (basename(L.live).endsWith('.home') || existsSync(join(L.live, 'versions')))) {
+    const copy = L.live.endsWith('.home') ? L.live.slice(0, -'.home'.length) : `${L.live} (the copy's own path)`;
+    throw new Error(`${L.live} holds a copy's installed releases, it is not a copy: run cb update --root ${copy}`);
+  }
   if (!isLink(L.live) && !existsSync(L.live) && existsSync(join(L.home, 'cli', 'cb.ts'))) {
-    const st = readState(L);
-    const to = st && existsSync(targetOf(L, st.current)) ? targetOf(L, st.current) : L.home;
-    symlinkSync(to, L.live, 'junction');
-    return [`repaired: ${L.live} was missing (an earlier cb update was cut off); it links to ${to} again`];
+    takeLock(L);
+    try {
+      if (isLink(L.live) || existsSync(L.live)) return []; // another run repaired it meanwhile
+      const st = readState(L);
+      const to = st && existsSync(targetOf(L, st.current)) ? targetOf(L, st.current) : L.home;
+      symlinkSync(to, L.live, 'junction');
+      return [`repaired: ${L.live} was missing (an earlier cb update was cut off); it links to ${to} again. `
+        + `When the path is gone, cb cannot start from it: node ${join(L.home, 'cli', 'cb.ts')} update --root ${L.live}`];
+    } finally { dropLock(L); }
   }
   if (!isLink(L.live)) {
     if (!existsSync(L.live)) throw new Error(`no cb copy at ${L.live}: pass --root <the copy's folder>`);
@@ -140,6 +151,7 @@ function cleanLeftovers(L: Layout): string[] {
     for (const d of readdirSync(dirname(L.live))) {
       const pid = pidOf(d), f = join(dirname(L.live), d);
       if (d.startsWith(`${basename(L.live)}.flip-`) && pid && pid !== process.pid && !alive(pid) && isLink(f)) { unlinkSync(f); out.push(d); }
+      if (d.startsWith(`${basename(L.lock)}.stale-`) && pid && pid !== process.pid && !alive(pid) && !isLink(f)) { unlinkSync(f); out.push(d); }
     }
   } catch {}
   return out.length ? [`cleaned: ${out.join(', ')} (left by a cut-off run)`] : [];

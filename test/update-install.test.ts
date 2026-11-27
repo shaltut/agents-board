@@ -145,9 +145,18 @@ test('cb update --rollback flips back to the version before, and again to the ne
 
 test('review M3: a copy path left missing by a cut-off update (adopt or a Windows flip) is linked again on the next run', { timeout: 120_000 }, async () => {
   unlinkSync(live); // the link only: .home and its versions stay
+  // review I3: the way back is cb from .home; without --root its root is .home, never a copy: refused, nothing moves
+  const fromHome = spawnSync(process.execPath, [join(home, 'cli', 'cb.ts'), 'update', '--from', base], { encoding: 'utf8', timeout: 120_000,
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, HERDR_PANE_ID: '', CB_PUBLIC_URL: '', CLAUDE_CODE_MESSAGING_SOCKET: '' } });
+  assert.equal(fromHome.status, 1, fromHome.stdout);
+  assert.match(fromHome.stderr, /claude-board\.home holds a copy's installed releases, it is not a copy: run cb update --root .*claude-board$/m);
+  assert.ok(!existsSync(`${home}.home`) && !existsSync(live) && !lstatSync(home).isSymbolicLink());
+  const rb0 = spawnSync(process.execPath, [join(home, 'cli', 'cb.ts'), 'update', '--rollback'], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, HERDR_PANE_ID: '' } });
+  assert.equal(rb0.status, 1);
+  assert.match(rb0.stderr, /it is not a copy: run cb update --root /);
   const r = await cb(['update', '--from', base, '--root', live]);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /^repaired: .* was missing \(an earlier cb update was cut off\); it links to .* again$/m);
+  assert.match(r.out, /^repaired: .* was missing \(an earlier cb update was cut off\); it links to .* again\. When the path is gone, cb cannot start from it: node .*claude-board\.home.cli.cb\.ts update --root .*claude-board$/m);
   assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B))); // what state.json says is in use
   unlinkSync(live);
   const rb = await cb(['update', '--rollback', '--root', live]);
@@ -215,6 +224,7 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   const dead = spawnSync(process.execPath, ['-e', '0']).pid!;
   mkdirSync(join(home, 'versions', `.staging-0000000-${dead}`, 'cli'), { recursive: true });
   symlinkSync(home, `${live}.flip-${dead}`, 'junction');
+  writeFileSync(`${live}.update.lock.stale-${dead}`, String(dead)); // a lock a dead run moved aside
   edit('cli/cb.ts', '\nthis is not code(\n');
   const bad = commit('broken');
   const r = await cb(['update', '--from', base, '--root', live]);
@@ -223,6 +233,7 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   assert.equal(realpathSync(live), before);
   assert.ok(!readdirSync(join(home, 'versions')).some((d) => d.startsWith('.staging') || d === bad));
   assert.ok(!existsSync(`${live}.flip-${dead}`) && !lstatSync(home).isSymbolicLink());
+  assert.ok(!existsSync(`${live}.update.lock.stale-${dead}`));
   git('reset', '-q', '--hard', 'HEAD~1');
 
   // review I2: a module only the relay loads (settle.ts) is broken: cb help and cb sessions pass, the relay probe does not

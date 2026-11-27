@@ -96,6 +96,9 @@ Then the workers, right away, because their `cb` must match the schema:
   - The probes are `cb help`, `cb sessions` and `node cli/relay.ts` (no pane: it loads every relay module, then exits
     before connecting). A run cut off midway is finished by the next one: a missing copy path is linked again, a
     `state.json` behind the link is settled, and a dead run's staging folder or spare link is removed.
+    With the copy's path gone, `cb` cannot start from it: run `node <copy>.home/cli/cb.ts update --root <copy>`
+    (on the Mac: `node ~/Work/claude-board.home/cli/cb.ts update --root ~/Work/claude-board`). Without `--root` it
+    refuses, since `<copy>.home` is never a copy.
 - **Mac gate (HARD), before the first real squad restarts on the Mac:** start one throwaway Claude on haiku in its
   own herdr tab, in a scratch folder (no client data), and leave it with a relay on the new code for 5+ minutes.
   Confirm its screen is unchanged, its cost reads 0.0000 and no turn started. If any of those fails, stop the Mac
