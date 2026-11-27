@@ -722,9 +722,6 @@ function gitCallWrites(w, atCommand, runsEnv) {
 // program, judged as git (fail closed: $GIT checkout -- opencode.json blocks, $GIT log -- opencode.json reads). So is an
 // expansion after one of these launchers (sudo $GIT checkout ...), with the argument-position rule. A PowerShell
 // assignment ($x = ...) is not a command word.
-// programs that never run an argument as a program: a filled word in their arguments is printed or read, not run
-// (echo $HOME add opencode.json, cmp $A $B opencode.json). A nested $( or backtick group starts its own command.
-const NO_EXEC = new Set(['echo', 'printf', 'cat', 'ls', 'stat', 'cmp', 'diff', 'head', 'tail', 'wc', 'grep', 'jq']);
 const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'timeout', 'gtimeout', 'time', 'stdbuf',
   'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
   'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
@@ -790,7 +787,7 @@ function filledWrites(raw, k, judge) {
 }
 const gitWrites = (seg, inQuote = false) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
-  let start = true, runsEnv = false, launched = false, noExec = false, ticks = 0;
+  let start = true, runsEnv = false, launched = false, ticks = 0;
   const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
   // round 4, I5: each git call reads the rest of the segment, so a segment judges at most MAX_COMMANDS_PER_SEGMENT of them
   // and blocks past that (a scan that runs past the hook's timeout lets the command through), as scanCommands does
@@ -801,7 +798,7 @@ const gitWrites = (seg, inQuote = false) => {
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
       if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
-      if (t === '`' && ticks++ % 2 === 0 && !noExec && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
+      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
       continue;
     }
@@ -830,11 +827,10 @@ const gitWrites = (seg, inQuote = false) => {
     else if ((isGit || filled) && judge(words, start && isGit)) return true;
     // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
     // behind), judged by the word after it (GIT_COMMANDS)
-    if (isFilled(u) && !noExec && filledWrites(raw, k, judge)) return true;
+    if (isFilled(u) && filledWrites(raw, k, judge)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
-      noExec = NO_EXEC.has(cmdName(t)) && !launched;
     }
   }
   return false;
