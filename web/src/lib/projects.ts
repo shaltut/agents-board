@@ -97,6 +97,14 @@ export function bannerText(p: Pick<Project, 'name' | 'state' | 'state_by' | 'sta
   return null
 }
 
+/** The Sessions page with no project chosen: seats of a disabled or archived project are left out (a seat with no
+ *  project, or one not yet listed, stays). The endpoint keeps every seat: the ask box and the lead names read it too, and
+ *  Ahmed's asks still reach a disabled project's seats. */
+export function liveSeats<S extends { project: string | null }>(rows: readonly S[], ps: readonly Pick<Project, 'slug' | 'state'>[]): S[] {
+  const off = new Set(ps.filter((p) => p.state !== 'enabled').map((p) => p.slug))
+  return rows.filter((s) => !s.project || !off.has(s.project))
+}
+
 /** Enabled first, then disabled, by name; archived ones come apart, folded. */
 export function groups<P extends Pick<Project, 'state' | 'name'>>(ps: readonly P[]): { shown: P[]; archived: P[] } {
   const order = (p: P) => (p.state === 'enabled' ? 0 : 1)

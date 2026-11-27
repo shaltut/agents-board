@@ -134,10 +134,9 @@ export async function lastSeen() {
 }
 
 export async function sessions(project?: string) {
-  if (project) return (await sql`select cb.sessions_overview(${project}) as o`)[0].o;
-  // all projects: a seat whose project is disabled or archived is left out (#4559); one with no session row stays
-  const [{ o }] = await sql`select coalesce(jsonb_agg(x.r order by x.n), '[]') as o
-    from jsonb_array_elements(cb.sessions_overview(null)) with ordinality x(r, n) where cb._live(x.r ->> 'project')`;
+  // every seat, whatever its project's state: the ask box and the lead names read this list too, and Ahmed's asks still
+  // reach a disabled project's seats (#4559). The Sessions page's All projects list leaves them out itself.
+  const [{ o }] = await sql`select cb.sessions_overview(${project ?? null}) as o`;
   return o;
 }
 

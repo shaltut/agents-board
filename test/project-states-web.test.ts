@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { freshDb } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
-import { STATE_LABEL, actions, bannerText, confirmText, countsLine, groups, stateLine, type Preview } from '../web/src/lib/projects.ts';
+import { STATE_LABEL, actions, bannerText, confirmText, countsLine, groups, liveSeats, stateLine, type Preview } from '../web/src/lib/projects.ts';
 import { liveOnly, NO_ACTOR } from '../web/src/lib/api.ts';
 import { PAGES } from '../web/src/lib/route.ts';
 
@@ -86,6 +86,12 @@ test('the list: enabled first, then disabled, by name; archived ones apart, fold
   assert.deepEqual(g.shown.map((p) => p.name), ['Atlas', 'Beacon', 'Cedar']);
   assert.deepEqual(g.archived.map((p) => p.name), ['Old Pilot']);
   assert.deepEqual(liveOnly(ps).map((p) => p.name), ['Beacon', 'Atlas']);
+  const seats = [{ actor: 'W1', project: 'cedar' }, { actor: 'A1', project: 'atlas' }, { actor: 'X1', project: null }, { actor: 'N1', project: 'new' }];
+  const states = [{ slug: 'cedar', state: 'disabled' as const }, { slug: 'atlas', state: 'enabled' as const }];
+  assert.deepEqual(liveSeats(seats, states).map((s) => s.actor), ['A1', 'X1', 'N1'], 'no project, or one not listed yet, stays');
+  const sessions = src('views', 'Sessions.tsx');
+  assert.match(sessions, /const data = route\.project \? rows : liveSeats\(rows, projects \?\? \[\]\)/, 'only the All projects list');
+  assert.match(sessions, /row=\{rows\.find\(/, 'a seat\'s own page still opens');
 });
 
 test('the header and every picker list enabled projects only; the Settings menu entry is Projects; the page is the list', () => {
@@ -128,7 +134,11 @@ test('All projects reads (Board, Backlog, Today, Sessions) leave a disabled or a
   assert.deepEqual([today.counts.active, today.counts.blocked], [1, 0], 'Today\'s counts: atlas only');
   assert.ok(today.events.length > 0 && today.events.every((e: any) => e.project === null || e.project === 'atlas'), 'Today\'s events: atlas only');
   assert.equal((await get('/api/today?project=cedar')).counts.active, 1);
-  assert.deepEqual((await get('/api/sessions')).map((s: any) => s.actor), ['A1@pc'], 'Sessions, all projects');
+  // the endpoint keeps every seat (the ask box and the lead names read it; asks still reach a disabled project's seats);
+  // the Sessions page's All projects list leaves them out (liveSeats)
+  const seats = await get('/api/sessions');
+  assert.deepEqual(seats.map((s: any) => s.actor).sort(), ['A1@pc', 'O1@pc', 'W1@pc']);
+  assert.deepEqual(liveSeats(seats, await get('/api/projects')).map((s: any) => s.actor), ['A1@pc'], 'Sessions, all projects');
   assert.deepEqual((await get('/api/sessions?project=cedar')).map((s: any) => s.actor), ['W1@pc']);
   assert.deepEqual((await get('/api/projects')).map((p: any) => [p.slug, p.state]),
     [['atlas', 'enabled'], ['cedar', 'disabled'], ['oldpilot', 'archived']], 'the Projects page still gets every project');
