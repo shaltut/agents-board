@@ -5,8 +5,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { neverSent, ranWords, withConnectRetry, checkFirst } from '../cli/connect-retry.ts';
-import { namesCommand } from '../cli/help.ts';
+import { neverSent, ranWords, withConnectRetry, checkFirst, onlyReads } from '../cli/connect-retry.ts';
+import { namesCommand, COMMANDS } from '../cli/help.ts';
 import { serveBridge, openBridge } from '../cli/bridge.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
@@ -122,6 +122,26 @@ test('checkFirst names the command that shows whether this one landed, and every
   for (const m of ['Run: cb help done', 'check the id: cb mine lists yours', 'use `cb ask`', 'cb mem find "x"']) assert.ok(namesCommand(m), m);
 });
 
+// #4515: READS listed show, search, session, sessions and digest only, so cb brief, mine and resume (run after a
+// compaction) were told they may have saved a change. The mark lives on the command table in cli/help.ts.
+test('onlyReads: every command that only reads, and only the read forms of a command that also writes', () => {
+  for (const [cmd, args] of [['brief', []], ['mine', []], ['resume', []], ['tick', ['demo']], ['goals', []], ['epics', []],
+    ['pending', []], ['role', ['builder']], ['users', []], ['huddles', []], ['jobs', []], ['show', ['42']], ['search', ['x']],
+    ['session', ['W1']], ['sessions', []], ['digest', ['demo']], ['start', []], ['help', []], ['mem', ['find', 'x']], ['mem', ['list']],
+    ['mem', ['show', 'M3']], ['page', ['show', '42']], ['squad', ['show', 'demo']], ['huddle', ['show', '3']], ['lock', ['queue']],
+    ['job', ['show', '7']], ['job', ['log', '7']], ['job', ['7']], ['asks', []], ['github', []]] as const) {
+    assert.equal(onlyReads(cmd, [...args]), true, `${cmd} ${args.join(' ')}`);
+    assert.equal(checkFirst(cmd, [...args], 'W1@test'), 'it only reads, so running it again is safe', cmd);
+  }
+  for (const [cmd, args] of [['next', []], ['iam', ['W1']], ['run', ['test']], ['relay', []], ['runner', []], ['supervise', []],
+    ['mem', ['add', 'x']], ['page', ['set', '42']], ['squad', ['set', 'demo']], ['squad', ['up', 'demo']], ['huddle', ['say', '3']],
+    ['lock', ['take', 'db']], ['job', ['cancel', '7']], ['asks', ['add', 'x']], ['github', ['add', 'o/r']], ['user', ['add', 'x']],
+    ['log', ['42', 'x']], ['delivered', ['12']], ['nope', []], [undefined, []]] as const)
+    assert.equal(onlyReads(cmd, [...args]), false, `${cmd} ${args.join(' ')}`);
+  // a command its help calls read-only carries the mark, so a new one is not missed
+  for (const [name, c] of Object.entries(COMMANDS)) if (/Read-only/.test(c.does)) assert.equal(c.reads, true, `cb ${name} says Read-only: mark it reads: true`);
+});
+
 test('withConnectRetry: answered counts what the board answered, so a later unreachable read never reads as "did not run"', async () => {
   const { db } = fake([[{ id: 7 }], ...Array.from({ length: 20 }, () => err('ECONNREFUSED', 'connect'))]);
   const sql = withConnectRetry(db, clock());
@@ -228,6 +248,22 @@ test('cb never resends a write whose connection dropped after it was sent', { sk
     const w = /cb search demo "([^"]+)"/.exec(checkFirst('add', ['demo', path], 'W1@test'))![1]!;
     const [{ g }] = await sql`select cb.task_find(${w}, 'demo') as g`;
     assert.equal(g.total, 1, w);
+  } finally { server.close(); }
+});
+
+// #4515: cb brief (run after a compaction) only reads: a connection lost after its statement was sent must say running
+// it again is safe and exit 3, not "may have run: check with cb mine" and exit 1 as a write would.
+test('a read whose connection dropped after it was sent says running it again is safe, and exits 3', { skip: noAlias }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  const port = await freePort();
+  let seen = false;
+  const server = await proxy(port, (d) => { if (seen) return true; seen = d.includes('cb.brief'); return false; });
+  try {
+    const r = await cbAsync(['brief', 'demo'], port);
+    assert.equal(r.code, 3, r.err);
+    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): .*it only reads, so running it again is safe\. Keep working meanwhile\.$/);
+    assert.doesNotMatch(r.err, /check with cb mine|saved your change/);
   } finally { server.close(); }
 });
 
