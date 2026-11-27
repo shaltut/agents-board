@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { GUARD_FILES, installGuard, checkWiring } from '../kit/guard/install.mjs';
-import { compareManifest, headSha, readManifest } from './release.ts';
+import { compareManifest, headSha, readManifest, type Manifest } from './release.ts';
 
 export type DoctorOptions = {
   root: string; // the checkout to check
@@ -22,6 +22,22 @@ const AHMED = "the fix is Ahmed's (ask him with cb ask; never install the guard 
 
 function names(kind: string, list: string[]) {
   return list.slice(0, LIST).map((p) => `  ${kind}: ${p}`).concat(list.length > LIST ? [`  ... and ${list.length - LIST} more ${kind}`] : []);
+}
+
+/** The files under root against a release: one summary line, then each missing, changed, extra or outside file.
+ *  Shared by cb doctor and cb update --check. Reads only. */
+export function filesReport(root: string, m: Manifest, here: string | null) {
+  const r = compareManifest(root, m);
+  const bad = r.missing.length + r.changed.length + r.extra.length + r.outside.length;
+  if (!bad) return { ok: true, files: r, lines: [`files: all ${r.total} match release ${short(m.sha)}`] };
+  const at = here === m.sha ? `this checkout is at that commit, so files were changed by hand` : `this checkout is at ${short(here)}`;
+  const kinds = [['missing', r.missing], ['changed', r.changed], ['extra', r.extra], ['outside', r.outside]] as const;
+  const counts = kinds.filter(([, l]) => l.length).map(([k, l]) => `${l.length} ${k}`).join(', ');
+  const lines = [`files: ${bad} differ from release ${short(m.sha)} (of ${r.total}; ${counts}); ${at}. Update this machine to the release`
+    + (r.extra.length ? '. Extra = not in the release (a tar extract never deletes): remove it' : '')
+    + (r.outside.length ? '. Outside = a link that leaves this checkout: replace it with the file' : '')];
+  for (const [k, l] of kinds) lines.push(...names(k, l));
+  return { ok: false, files: r, lines };
 }
 
 export function doctor(o: DoctorOptions) {
@@ -40,22 +56,11 @@ export function doctor(o: DoctorOptions) {
   } else {
     try {
       const m = readManifest(manifestFile);
-      const r = compareManifest(root, m);
+      const f = filesReport(root, m, here);
       json.release = m.sha;
-      json.files = r;
-      const bad = r.missing.length + r.changed.length + r.extra.length + r.outside.length;
-      if (!bad) {
-        lines.push(`files: all ${r.total} match release ${short(m.sha)}`);
-      } else {
-        problems++;
-        const at = here === m.sha ? `this checkout is at that commit, so files were changed by hand` : `this checkout is at ${short(here)}`;
-        const kinds = [['missing', r.missing], ['changed', r.changed], ['extra', r.extra], ['outside', r.outside]] as const;
-        const counts = kinds.filter(([, l]) => l.length).map(([k, l]) => `${l.length} ${k}`).join(', ');
-        lines.push(`files: ${bad} differ from release ${short(m.sha)} (of ${r.total}; ${counts}); ${at}. Update this machine to the release`
-          + (r.extra.length ? '. Extra = not in the release (a tar extract never deletes): remove it' : '')
-          + (r.outside.length ? '. Outside = a link that leaves this checkout: replace it with the file' : ''));
-        for (const [k, l] of kinds) lines.push(...names(k, l));
-      }
+      json.files = f.files;
+      if (!f.ok) problems++;
+      lines.push(...f.lines);
     } catch (e: any) {
       problems++;
       json.files = null;
