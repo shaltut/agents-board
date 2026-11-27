@@ -23,6 +23,24 @@ test('ran is null without counts and 0 when nothing ran', () => {
   assert.equal(summarize(fx('node-test-fail.txt')).ran, 2);
 });
 
+test('failed counts what did not pass, null without counts (#4417)', () => {
+  assert.equal(summarize('just some text').failed, null);
+  assert.equal(summarize('ℹ pass 542\nℹ fail 0\nℹ skipped 4').failed, 0);
+  assert.equal(summarize(fx('node-test-fail.txt')).failed, 1);
+  assert.equal(summarize('ℹ pass 12\nℹ fail 0\nℹ cancelled 3').failed, 3);
+  assert.equal(summarize(fx('vitest-fail.txt')).failed, 1);
+});
+
+test('afterCounts: the lines after the closing counts, else the last lines (#4417)', () => {
+  // job 11551's tail: lefthook's program-script-tests, all passed, exit 1
+  const lefthook = ['✔ last test (0.17ms)', 'ℹ tests 546', 'ℹ suites 25', 'ℹ pass 542', 'ℹ fail 0', 'ℹ cancelled 0', 'ℹ skipped 4', 'ℹ todo 0', 'ℹ duration_ms 116017.6063', '',
+    'exit status 1                                      ', '  ────────────────────────────────────', 'summary: (done in 118.92 seconds)     ', '✗ program-script-tests (118.92 seconds)'].join('\n');
+  assert.equal(summary.afterCounts(lefthook), 'exit status 1                                      \nsummary: (done in 118.92 seconds)     \n✗ program-script-tests (118.92 seconds)');
+  assert.equal(summary.afterCounts('a\nb\nℹ pass 3\nℹ fail 0'), 'a\nb\nℹ pass 3\nℹ fail 0'); // nothing after: the last lines
+  assert.equal(summary.afterCounts('boom\n  12 │ code'), 'boom');
+  assert.equal(summary.afterCounts(''), '');
+});
+
 test('node:test cancelled and todo counts are kept, and the cancelled tests named', () => {
   const out = ['✖ hangs (3.2ms)', "  'test did not finish before its parent and was cancelled'", 'ℹ tests 15', 'ℹ pass 12', 'ℹ fail 0', 'ℹ cancelled 3', 'ℹ skipped 0', 'ℹ todo 1'].join('\n');
   assert.equal(summarize(out).text, '12 passed, 0 failed, 3 cancelled, 0 skipped, 1 todo. Failing: hangs');

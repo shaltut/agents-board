@@ -112,6 +112,17 @@ test('prototype names are not parameters', () => {
 const laneEnv = ['TEST_STACK_PROJECT', 'TEST_STACK_PG_PORT'];
 const dbEnv = { TEST_STACK_PROJECT: 'cb-runner-it-{lane}', TEST_STACK_PG_PORT: '5544{lane}', DB_SSL_DISABLE: 'true' };
 const lanes = (dbLanes: number, extra: object = {}) => ({ dbLanes, laneEnv, ...extra });
+test('the example keeps every lane port, lanes 1-9, below 32768: out of the range the Docker VM hands to outgoing connections (#4417)', () => {
+  const cfg = example();
+  const recipes = Object.values(cfg.projects.ihop!.repos.main!.recipes).filter((r) => r.db);
+  assert.equal(recipes.length, 2);
+  for (const r of recipes) for (let lane = 1; lane <= 9; lane++) {
+    const env = jobEnv({}, cfg, r, lane);
+    const ports = cfg.laneEnv.filter((n) => /PORT/.test(n)).map((n) => Number(env[n]));
+    assert.equal(ports.length, 3);
+    for (const p of ports) assert.ok(Number.isInteger(p) && p >= 1024 && p < 32768, `lane ${lane}: port ${p}`);
+  }
+});
 test('dbLanes: 1 by default, 1-9, never above slots', () => {
   assert.equal(loadConfig(cfgWith({ steps: [['a']] })).dbLanes, 1);
   assert.equal(example().dbLanes, 2);

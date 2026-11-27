@@ -85,6 +85,8 @@ const recipes = {
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
   wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
+  // #4417: counts with nothing failing, then a non-zero exit (lefthook's program-script-tests: 542 passed, 0 failed, exit 1)
+  quiet: { steps: [node('ok.mjs'), node('-e', "console.log('ℹ pass 3'); console.log('ℹ fail 0'); console.error('worker crashed after the run'); process.exit(1)")], timeout: 60 },
   plant: { steps: [node('plant.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
@@ -160,6 +162,13 @@ test('a failing job ends failed with its exit code', async () => {
   const j = await ended(await add('fail'));
   assert.equal(j.state, 'failed');
   assert.equal(j.exit_code, 3);
+});
+
+test('a step that exits non-zero while no test failed names the step and its own last lines (#4417)', async () => {
+  const j = await ended(await add('quiet'));
+  assert.equal(j.state, 'failed');
+  assert.equal(j.exit_code, 1);
+  assert.equal(j.summary, 'step 2 of 2 (node) exited 1, but no test failed. Its last lines:\nworker crashed after the run\n3 passed, 0 failed, 0 skipped.');
 });
 
 test('the job env is clean', async () => {

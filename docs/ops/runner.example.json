@@ -43,9 +43,9 @@
             "DB_SSL_DISABLE": "true",
             "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "TEST_STACK_PROJECT": "cb-runner-it-{lane}",
-            "TEST_STACK_PG_PORT": "5544{lane}",
-            "TEST_STACK_REDIS_PORT": "5638{lane}",
-            "TEST_STACK_S3_PORT": "5901{lane}"
+            "TEST_STACK_PG_PORT": "2544{lane}",
+            "TEST_STACK_REDIS_PORT": "2638{lane}",
+            "TEST_STACK_S3_PORT": "2901{lane}"
           },
           "timeout": 2400,
           "db": true
@@ -63,9 +63,9 @@
             "DB_SSL_DISABLE": "true",
             "SSO_CONFIG_ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "TEST_STACK_PROJECT": "cb-runner-it-{lane}",
-            "TEST_STACK_PG_PORT": "5544{lane}",
-            "TEST_STACK_REDIS_PORT": "5638{lane}",
-            "TEST_STACK_S3_PORT": "5901{lane}"
+            "TEST_STACK_PG_PORT": "2544{lane}",
+            "TEST_STACK_REDIS_PORT": "2638{lane}",
+            "TEST_STACK_S3_PORT": "2901{lane}"
           },
           "timeout": 2400,
           "db": true

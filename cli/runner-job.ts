@@ -7,7 +7,7 @@ import {
 import { uptime } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
-import { cut, logTail, mask, summarize } from './summary.ts';
+import { afterCounts, cut, logTail, mask, summarize } from './summary.ts';
 
 const WIN = process.platform === 'win32';
 const SHA = /^[0-9a-f]{7,40}$/;
@@ -355,13 +355,24 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   const deadline = Date.now() + recipe.timeout * 1000;
   let out: Draft | undefined;
   try {
-    for (const argv of recipe.steps) {
+    for (const [i, argv] of recipe.steps.entries()) {
       const a = expand(argv, params);
+      const at = fstatSync(io.fd).size; // where this step's own output starts
       const r = await run(a, { cwd, env, io, ms: Math.max(0, deadline - Date.now()), stop });
       if (r.stopped) { out = null; break; }
       if (r.startFailed) { out = err(`error: could not start ${a[0]}`); break; }
       if (r.timedOut) { out = err(`error: timed out after ${Math.ceil(recipe.timeout / 60)} min`); break; }
-      if (r.code !== 0) { out = { state: 'failed', exit_code: r.code, text: summary(from) }; break; }
+      if (r.code !== 0) {
+        // counts that show nothing failing would hide why the step failed (#4417: 542 passed, 0 failed, exit 1): name the
+        // step (its place and program only: the command line stays on the PC) and its own last lines, ahead of the
+        // counts, so the board's 1000-char cut takes the counts first
+        const s = summarize(tail(from));
+        const text = s.failed === 0
+          ? `step ${i + 1} of ${recipe.steps.length} (${a[0]}) exited ${r.code}, but no test failed. Its last lines:\n${afterCounts(tail(at)) || '(no output)'}\n${s.text}`
+          : s.text;
+        out = { state: 'failed', exit_code: r.code, text };
+        break;
+      }
     }
     if (out === undefined) {
       const s = summarize(tail(from));
