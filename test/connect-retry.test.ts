@@ -5,7 +5,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { neverSent, withConnectRetry } from '../cli/connect-retry.ts';
+import { neverSent, ranWords, withConnectRetry } from '../cli/connect-retry.ts';
+import { serveBridge, openBridge } from '../cli/bridge.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
 
@@ -77,6 +78,47 @@ test('withConnectRetry: a transaction is retried only if its body never started'
   assert.deepEqual(b.calls, ['begin']);
 });
 
+test('ranWords: "did not run" only when nothing of the command reached the board; "may have run" after a send', () => {
+  assert.match(ranWords(err('ECONNREFUSED', 'connect'), 0)!, /never reached it, so this command did not run/);
+  // a committed write, then a read that never got through (cb tell, done, bug, run): never "did not run" (#3331)
+  const later = ranWords(err('CONNECT_TIMEOUT'), 1)!;
+  assert.doesNotMatch(later, /did not run/);
+  assert.match(later, /an earlier step of this command did and may have saved your change: check with cb before running it again/);
+  for (const e of [err('ECONNRESET'), err('EPIPE', 'write'), err('ETIMEDOUT', 'read'), err('CONNECTION_CLOSED'), err('CONNECTION_DESTROYED'), err('RELAY_LOST'), err('57P01')])
+    for (const n of [0, 3]) assert.match(ranWords(e, n)!, /may have reached it, so this command may have run: check with cb/, `${e.code} ${n}`);
+  for (const e of [new TypeError('x'), err('23505'), null]) assert.equal(ranWords(e, 0), null);
+});
+
+test('withConnectRetry: answered counts what the board answered, so a later unreachable read never reads as "did not run"', async () => {
+  const { db } = fake([[{ id: 7 }], ...Array.from({ length: 20 }, () => err('ECONNREFUSED', 'connect'))]);
+  const sql = withConnectRetry(db, clock());
+  await sql.unsafe('select cb.tell($1) as result', ['W2']); // the write: answered
+  assert.equal(sql.answered, 1);
+  const e = await sql`select live from cb.sessions`.catch((x: any) => x); // the follow-up read: the board went away
+  assert.equal(e.code, 'ECONNREFUSED');
+  assert.equal(sql.answered, 1);
+  assert.doesNotMatch(ranWords(e, sql.answered)!, /did not run/);
+});
+
+test('the relay bridge forwards syscall: a connect timeout is retried through it, a read timeout is not', async () => {
+  const key = `t4337-${process.pid}`, url = 'postgres://cb@board.invalid:5434/claude_board';
+  const outcomes: any[] = [];
+  const relaySql: any = () => Promise.resolve([]);
+  relaySql.unsafe = () => { const r = outcomes.shift(); return r instanceof Error ? Promise.reject(r) : Promise.resolve(r); };
+  const stop = await serveBridge(relaySql, key, url);
+  try {
+    const db = await openBridge(key, url);
+    assert.ok(db, 'bridge opened');
+    outcomes.push(err('ETIMEDOUT', 'connect'), [{ result: 'ok' }]);
+    assert.deepEqual(await withConnectRetry(db, clock()).unsafe('select 1'), [{ result: 'ok' }]);
+    outcomes.push(err('ETIMEDOUT', 'read'), [{ result: 'twice' }]);
+    const e = await withConnectRetry(db, clock()).unsafe('select 1').catch((x: any) => x);
+    assert.equal(e.code, 'ETIMEDOUT'); assert.equal(e.syscall, 'read');
+    assert.equal(outcomes.length, 1, 'not sent again');
+    await db.end();
+  } finally { await stop(); }
+});
+
 // ---- through a real proxy: cb against a "remote" board (127.0.0.2 is loopback but not in cb's local list) ----
 const target = new URL(TEST_URL);
 const clients: any[] = [];
@@ -123,7 +165,7 @@ test('cb says it tried and that the call never reached a board that stays away',
   const port = await freePort(); // nothing ever listens
   const r = await cbAsync(['add', 'demo', 'Never sent'], port);
   assert.equal(r.code, 1, r.out);
-  assert.match(r.err, /board unreachable at 127\.0\.0\.2 \(ECONNREFUSED, tried \d+ times over \d+ s\): the call that failed never reached it, so it did not run/);
+  assert.match(r.err, /board unreachable at 127\.0\.0\.2 \(ECONNREFUSED, tried \d+ times over \d+ s\): the call that failed never reached it, so this command did not run/);
   assert.match(r.err, /keep working/);
 });
 
@@ -138,6 +180,7 @@ test('cb never resends a write whose connection dropped after it was sent', { sk
     const r = await cbAsync(['add', 'demo', 'Sent once'], port);
     assert.equal(r.code, 1, r.out);
     assert.doesNotMatch(r.err, /tried \d+ times|never reached/);
+    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): the call that failed may have reached it, so this command may have run: check with cb before running it again/);
     // the board ran it (the write reached it before the drop); give it a moment to commit
     let n = 0;
     for (let i = 0; i < 20 && n === 0; i++) { n = (await sql`select count(*)::int as n from cb.tasks`)[0].n; if (!n) await new Promise((x) => setTimeout(x, 100)); }

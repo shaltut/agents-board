@@ -9,7 +9,7 @@ import { callFn, useDb } from '../server/rpc.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
-import { withConnectRetry, neverSent } from './connect-retry.ts';
+import { withConnectRetry, neverSent, ranWords } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
@@ -83,7 +83,9 @@ const boardHost = new URL(databaseUrl()).hostname;
 const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost);
 // #4337: a remote board that is briefly unreachable is retried for ~10 s, one statement at a time and only when it never
 // left this machine (connect-retry.ts). A local board that refuses is started instead (main()), with no wait first.
-if (!localBoard) sql = withConnectRetry(sql);
+// Local is by name only: this machine's own Tailscale name or address counts as remote. cb start answers at once: it is
+// advice that always exits 0.
+if (!localBoard && cmd !== 'start') sql = withConnectRetry(sql);
 useDb(sql);
 
 let sessionProject: string | null = null;
@@ -397,6 +399,7 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 
 async function run(): Promise<unknown> {
   await resolveActor();
+  if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
       return { out: await start() };
@@ -972,13 +975,13 @@ async function main() {
   } catch (e: any) {
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') { console.log(`board unreachable: keep working and register this later. Retry: cb start (${e?.code ?? e?.message ?? e})`); return; }
-    const network = ['ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND'].includes(e?.code);
-    if (!network && !neverSent(e)) throw e;
-    // A remote board (another machine) can't be started from here: say so and let the session carry on. Whether the
-    // failed call ran is said plainly (#4337): a resend of one that may have run can do it twice.
+    // Whether the command ran is said plainly (#4337): a resend of one that may have run does it twice (#3331).
+    const ran = ranWords(e, sql.answered ?? 0);
+    if (!ran) throw e;
     const tried = e.tries ? `, tried ${e.tries} times over ${Math.round(e.triedMs / 1000)} s` : '';
-    const ran = neverSent(e) ? 'the call that failed never reached it, so it did not run'
-      : 'the call that failed may have reached it: check with cb before running it again';
+    // the connection dropped after a statement was sent (reset, closed, the relay lost): the board may have run it
+    if (!neverSent(e)) throw new Error(`lost the board connection at ${boardHost} (${e.code}): ${ran}. Keep working meanwhile.`);
+    // A remote board (another machine) can't be started from here: say so and let the session carry on.
     if (!localBoard) throw new Error(`board unreachable at ${boardHost} (${e.code}${tried}): ${ran}. The board machine may be asleep: keep working and register this later.`);
     if (e.code !== 'ECONNREFUSED') throw e;
     (await import('../db/pg.ts')).ensurePg();

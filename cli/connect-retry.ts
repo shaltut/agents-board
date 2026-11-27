@@ -5,6 +5,8 @@
 // statement was sent (a reset, a read timeout, a closed connection, the relay lost mid-query) is never retried: a
 // write may have landed, and task_add or ask would run twice.
 
+import { isNetworkError } from './survive.ts';
+
 // The connection never opened, whatever the syscall: refused, DNS, postgres.js's own connect timer (it is cancelled at
 // the first ReadyForQuery, before postgres.js executes the query that opened the connection).
 const BEFORE_CONNECT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'CONNECT_TIMEOUT']);
@@ -25,20 +27,33 @@ export function neverSent(e: unknown): boolean {
   return err.code === 'ECONNRESET' && /before secure TLS connection was established/.test(String(err.message));
 }
 
+/** What cb tells the caller about whether its command ran, for a network failure (null: not one). answered: the
+ *  command's statements the board already answered. A failed read after a committed write must never read as "it did
+ *  not run" (#3331): the caller would send the write again. */
+export function ranWords(e: unknown, answered: number): string | null {
+  if (neverSent(e)) return answered
+    ? 'the call that failed never reached it, but an earlier step of this command did and may have saved your change: check with cb before running it again'
+    : 'the call that failed never reached it, so this command did not run';
+  if (isNetworkError(e) || (e as any)?.code === 'RELAY_LOST')
+    return 'the call that failed may have reached it, so this command may have run: check with cb before running it again';
+  return null;
+}
+
 export type RetryOpts = { budgetMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number };
 
 const isTemplate = (s: unknown) => Array.isArray(s) && Array.isArray((s as any).raw);
 
 /** Wraps cb's sql (postgres.js or the relay bridge) so each statement is retried, with a short backoff over about
  *  budgetMs, while it fails with neverSent errors. A transaction (begin) is retried only if its body never started.
- *  The error that ends it carries tries (how many attempts) and triedMs. */
+ *  The error that ends it carries tries (how many attempts) and triedMs. answered counts the statements the board
+ *  answered, so cb never says a command did not run after one of its steps did (ranWords). */
 export function withConnectRetry(db: any, o: RetryOpts = {}): any {
   const budget = o.budgetMs ?? 10_000, now = o.now ?? Date.now;
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   async function attempt<T>(go: () => PromiseLike<T>, safe: () => boolean = () => true): Promise<T> {
     const t0 = now();
     for (let tries = 1, delay = 500; ; tries++, delay *= 2) {
-      try { return await go(); }
+      try { const r = await go(); wrapped.answered++; return r; }
       catch (e: any) {
         if (!neverSent(e) || !safe()) throw e;
         if (now() - t0 + delay > budget) {
@@ -58,5 +73,6 @@ export function withConnectRetry(db: any, o: RetryOpts = {}): any {
   };
   wrapped.end = (...a: any[]) => db.end(...a);
   wrapped.binding = db.binding;
+  wrapped.answered = 0;
   return wrapped;
 }
