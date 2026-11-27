@@ -829,24 +829,52 @@ ${body}`, json: pg };
       if (o.if && !o.after) throw new Error('--if needs --after: name the question whose answer it waits for, e.g. cb ask <project> "<q>" -o ... --after Q12 --if "Yes"');
       const reply_to = replyTo(), pics = images();
       const body = await fromStdin(args.slice(1).join(' '), 'question'), context = await fromStdin(o.context, 'context');
+      const opts = o.option ? options() : null;
       // one transaction: the question never shows on the board without the pictures it was asked with
+      let again = false;
       const id = await sql.begin(async (tx) => {
-        const qid = await callFn('ask', { project: args[0], body, options: o.option ? options() : null,
+        // #3331: a resend of a question that is still open (the first run stored it, then failed or seemed to) returns
+        // that question instead of a second copy. Every field the asker gives must match, with a follow-up's task, reply
+        // pane and recipient taken from its parent and the ids read as cb.ask reads them: a wrong match would drop a
+        // question, a miss only repeats one. With pictures it always posts: new pictures must never be dropped silently.
+        // The lock: a resend while the first run's commit is still in flight waits for it, then sees it.
+        if (!pics.length) await tx`select pg_advisory_xact_lock(hashtext(${actor.trim()} || '|' || trim(${body}::text)))`;
+        const [dup] = pics.length ? [] : await tx`with a as (
+            select case when nullif(trim(${o.after ?? null}::text), '') is null then null
+                        else cb.norm_id(regexp_replace(trim(${o.after ?? null}::text), '^[qQ]', '')) end as par,
+                   case when nullif(trim(${o.task ?? null}::text), '') is null then null else cb.norm_id(${o.task ?? null}::text) end as tid)
+          select q.id from a left join cb.questions p on p.id = a.par cross join cb.questions q
+           where q.asked_by = ${actor.trim()} and q.project = cb.resolve(${args[0]}) and q.body = trim(${body}::text)
+             and q.options is not distinct from cb._options(${opts && JSON.stringify(opts)}::text::jsonb)
+             and q.parent_id is not distinct from a.par
+             and (${o.if ?? null}::text is null and q.if_answer is null or lower(q.if_answer) = lower(trim(${o.if ?? null}::text)))
+             and q.context is not distinct from ${context ?? null}::text and q.multi = ${!!o.multi} and q.blocking = ${!!o.blocking}
+             and q.task_id is not distinct from coalesce(a.tid, p.task_id)
+             and q.reply_to is not distinct from coalesce(${reply_to && JSON.stringify(reply_to)}::text::jsonb, p.reply_to)
+             and q.assigned_to is not distinct from coalesce(${o.to ?? null}::text, p.assigned_to)
+             and q.status in ('open', 'dormant') order by q.id limit 1`;
+        if (dup) { again = true; return dup.id; }
+        const qid = await callFn('ask', { project: args[0], body, options: opts,
           multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: context ?? null, reply_to, actor, to_user: o.to ?? null,
           parent: o.after ?? null, if_answer: o.if ?? null }, tx);
         await addImages(tx, qid, pics, false);
         return qid;
       });
-      const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}` : [];
+      // #3331: the question is stored. Nothing after this may turn that into an error (a retry would ask it twice): the
+      // reads below only shape the message, so a board that drops now costs their detail, never the exit code.
+      const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}`
+        .catch(() => [{ parent_id: String(o.after).trim().replace(/^[qQ#]+/, ''), if_answer: o.if ?? null }]) : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
-      if (!o['reply-to']) {
+      if (!o['reply-to']) try {
         // same 90s as cb.sessions_overview. Written out twice, not as a shared sql`` fragment: a fragment is a Promise
         // and the relay bridge cannot carry one ("#<Promise> could not be cloned", broke every ask with a live relay).
         const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and last_seen > now() - interval '90 seconds') as live,
           (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and last_seen > now() - interval '90 seconds') as mine`;
         if (!r.live) console.error(`warning: no relay listens on ${actor}, so the answer will wait in cb pending --as ${actor}` +
           (r.mine && r.mine !== actor ? `. This pane's relay is ${r.mine}: ask without --as, or add --reply-to` : ''));
-      }
+      } catch { /* only a warning: the question is posted either way */ }
+      if (again) return { out: `Q${id} is already on the board: you asked the same question and it is still open, so it was not posted again` +
+        ' — keep working; its answer arrives like any other', json: id };
       return { out: (f ? `Q${id} posted as a follow-up to Q${f.parent_id}: ` +
           (f.if_answer ? `it opens only if Q${f.parent_id} is answered "${f.if_answer}", else it is skipped` : `it opens once Q${f.parent_id} is answered`) +
           ' — keep working; its answer arrives like any other'
