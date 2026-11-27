@@ -139,9 +139,11 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
 });
 
-// #3770: the squad file's builder count is 2, so B3 and B4 are seats it no longer generates
+// #3770: the squad file's builder count was 4 and is 2 now, so B3 and B4 are seats it no longer generates
 test('seats the squad file dropped: the idle one closes while work waits, the busy one is said once and kept', async () => {
   const { sql, sup } = await setup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 4, model: 'sonnet', machine: 'macbook' } } })}, 'ahmed')`;
+  await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
   await card(sql); // build work waits
   await session(sql, 'sv-B3@macbook', 'builder', { startedMin: 21 });
   await session(sql, 'sv-B4@macbook', 'builder', { startedMin: 21 });

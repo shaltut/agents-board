@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
-import { planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { mayBeLeaving, pastSeatNames, planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
@@ -93,7 +93,11 @@ export async function tick(d: Deps): Promise<string[]> {
     d.signal?.throwIfAborted();
     try {
       const safeToClose = await safeToCloseOf(state, herdrStatus);
-      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose });
+      // #3770: the names earlier saved versions of the squad generated (cb.squad_set's 'squad updated' events, the last
+      // 20), read only when a live or holding session is one the squad does not want now (events has no project index)
+      const pastSeats = mayBeLeaving(state, herdrLive) ? pastSeatNames(state.project, (await sql`select e.data -> 'squad' as squad from cb.events e
+        where e.project = ${state.project} and e.kind = 'updated' and e.summary = 'squad updated' order by e.id desc limit 20`).map((r: any) => r.squad)) : new Set<string>();
+      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length;
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -177,7 +181,8 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
 const LEAVING: Record<Leaving['why'], string> = {
   busy: 'it holds work or is mid-turn; closed once idle, or hand its work over',
   down: 'it is down and holds work; hand its cards over (cb edit <id> --assignee none) or restore it by hand',
-  machine: 'its machine is no longer in the squad file; close it by hand',
+  machine: "its machine is not one of the squad's machines (check the name's case); close it by hand",
+  empty: 'the squad file names no seats besides the lead, so nothing is closed; fix the squad file, or close it by hand',
 };
 
 // A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per block (again only

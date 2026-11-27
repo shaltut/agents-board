@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planTick, type State, type Session, type TickInput } from '../cli/supervise-plan.ts';
-import { seatShaped } from '../cli/squad-up.ts';
+import { pastSeatNames, planTick, type State, type Session, type TickInput } from '../cli/supervise-plan.ts';
 
 const NOW = Date.parse('2026-11-23T12:00:00Z');
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
@@ -213,42 +212,64 @@ test('3 starts per tick and the Mac cap hold across repo groups', () => {
   assert.equal(tick(st, { startsLeft: 5 }).start.length, 5);
 });
 
-// #3770: the lead moved the reviewers from the PC to the Mac in the squad file; the PC seats are leaving
+// #3770: the lead moved the reviewers from the PC to the Mac in the squad file; the PC seats are leaving. Leaving means a
+// name an earlier saved version of the squad generated (pastSeats), never just a seat-like name
+const old = { ...squad, machines: { ...squad.machines, oldbox: mach('oldbox') }, roles: { ...squad.roles, reviewer: { count: 3, model: 'opus', machine: 'shaltoot' }, builder: { count: 3, model: 'sonnet', machine: 'macbook' } } };
+const older = { ...old, roles: { ...old.roles, reviewer: { count: 2, model: 'opus', machine: 'oldbox' } } };
+const past = pastSeatNames('sv', [old, older]);
+const ptick = (st: State, o: Partial<TickInput> = {}) => tick(st, { pastSeats: past, ...o });
+
 test('seats the squad file no longer generates: counted nowhere, closed once idle whatever waits, listed while busy or down', () => {
   const moved = { ...squad, roles: { ...squad.roles, reviewer: { count: 2, model: 'opus', machine: 'macbook' } } };
   const st = (sessions: Session[]): State => ({ ...state({ sessions, waiting: { reviewer: { main: 2 } } }), squad: moved });
   const busy = sess('sv-R1@shaltoot', 'reviewer', { machine: 'shaltoot', holds: 1 });
   const quiet = sess('sv-R2@shaltoot', 'reviewer', { machine: 'shaltoot', last_event: ago(21) });
-  const ready = { herdrStatus: { 'sv-r1-shaltoot': 'idle', 'sv-r2-shaltoot': 'idle' } };
-  const p = tick(st([busy, quiet]), ready);
+  const ready = { herdrStatus: { 'sv-r1-shaltoot': 'idle', 'sv-r2-shaltoot': 'idle', 'sv-r3-shaltoot': 'idle' } };
+  const p = ptick(st([busy, quiet]), ready);
   assert.deepEqual(names(p.start), ['sv-R1@macbook', 'sv-R2@macbook']); // the old seats take none of the new machine's slots
   assert.deepEqual(p.close, ['sv-R2@shaltoot']); // idle and ready: closed though review work waits
   assert.deepEqual(p.leaving, [{ session: 'sv-R1@shaltoot', why: 'busy' }]); // holds a card: never closed, a visible step
+  // no saved version generated them (pastSeats omitted): counted and kept, as before
+  assert.deepEqual([tick(st([busy, quiet]), ready).close, tick(st([busy, quiet]), ready).leaving], [[], []]);
   // idle under 20 minutes, or herdr shows it working: not closed yet, and not listed (nothing for a person to do)
-  assert.deepEqual([tick(st([{ ...quiet, last_event: ago(5) }]), ready).close, tick(st([quiet]), { herdrStatus: { 'sv-r2-shaltoot': 'working' } }).close], [[], []]);
+  assert.deepEqual([ptick(st([{ ...quiet, last_event: ago(5) }]), ready).close, ptick(st([quiet]), { herdrStatus: { 'sv-r2-shaltoot': 'working' } }).close], [[], []]);
+  // at most 2 leaving closes a tick: the third idle one waits for the next tick, unlisted
+  const three = ptick(st([quiet, { ...quiet, actor: 'sv-R1@shaltoot' }, { ...quiet, actor: 'sv-R3@shaltoot' }]), ready);
+  assert.deepEqual([three.close.length, three.leaving], [2, []]);
   // down holding a card: never restored under its old name, listed; a dead row holding nothing: ignored
-  const down = tick(st([{ ...busy, live: false }, { ...quiet, live: false }]), ready);
+  const down = ptick(st([{ ...busy, live: false }, { ...quiet, live: false }]), ready);
   assert.deepEqual([down.restore, down.close, down.leaving], [[], [], [{ session: 'sv-R1@shaltoot', why: 'down' }]]);
   // its machine left the squad file too: its herdr is unknown, so it is listed, never closed
-  const gone = tick(st([{ ...quiet, actor: 'sv-R2@oldbox', machine: 'oldbox' }]), { herdrLive: new Set(['sv-r2-oldbox']), herdrStatus: { 'sv-r2-oldbox': 'idle' } });
+  const gone = ptick(st([{ ...quiet, actor: 'sv-R2@oldbox', machine: 'oldbox' }]), { herdrStatus: { 'sv-r2-oldbox': 'idle' } });
   assert.deepEqual([gone.close, gone.leaving], [[], [{ session: 'sv-R2@oldbox', why: 'machine' }]]);
-  // a lowered count: B3 at count 2 is leaving; it cancels no waiting build work and closes while it waits
+  // a lowered count: B3 at count 2 (3 before) is leaving; it cancels no waiting build work and closes while it waits
   const b3 = sess('sv-B3@macbook', 'builder', { last_event: ago(21) });
-  const low = tick(state({ sessions: [b3], waiting: { builder: { main: 1 } } }), { herdrStatus: { 'sv-b3-macbook': 'idle' } });
+  const low = ptick(state({ sessions: [b3], waiting: { builder: { main: 1 } } }), { herdrStatus: { 'sv-b3-macbook': 'idle' } });
   assert.deepEqual([names(low.start), low.close], [['sv-B1@macbook'], ['sv-B3@macbook']]);
-  // a hand-started name and the lead are never leaving
-  const keep = tick(state({ sessions: [sess('foo@macbook', 'builder', { last_event: ago(30) }), sess('orch@shaltoot', 'lead', { last_event: ago(90) })] }),
-    { herdrStatus: { 'foo-macbook': 'idle', 'orch-shaltoot': 'idle' } });
-  assert.deepEqual([keep.close, keep.leaving], [[], []]);
 });
 
-test('seatShaped: the names wantList gives a role, on any machine, count, area or repo', () => {
-  const yes = [['builder', 'sv-B3@shaltoot'], ['builder', 'sv-dashboard-B1@macbook'], ['reviewer', 'sv-R2@x'], ['owner', 'sv-O-claims@x'],
-    ['architect', 'sv-A1@x'], ['qa', 'sv-Q1@x'], ['investigator', 'sv-I2@x']] as const;
-  const no = [['builder', 'foo@macbook'], ['builder', 'sv-R1@x'], ['architect', 'sv-dash-A1@x'], ['lead', 'orch@x'], ['lead', 'sv-orch@x'],
-    ['builder', 'other-B1@x'], ['builder', 'sv-B1'], ['owner', 'sv-O-@x']] as const;
-  for (const [role, name] of yes) assert.ok(seatShaped('sv', role, name), name);
-  for (const [role, name] of no) assert.ok(!seatShaped('sv', role, name), name);
-  assert.ok(seatShaped('a.b', 'builder', 'a.b-B1@x'));
-  assert.ok(!seatShaped('a.b', 'builder', 'axb-B1@x')); // the project is matched as written
+test('hand-started seats no saved squad generated, and the lead, are never leaving', () => {
+  // sv-B5: beyond any count the squad ever had; sv-hotfix-B1: a word where no repo is; foo: no squad shape at all
+  const hand = ['sv-B5@macbook', 'sv-hotfix-B1@macbook', 'foo@macbook'].map((n) => sess(n, 'builder', { last_event: ago(30) }));
+  const status = { herdrStatus: { 'sv-b5-macbook': 'idle', 'sv-hotfix-b1-macbook': 'idle', 'foo-macbook': 'idle', 'orch-shaltoot': 'idle' } };
+  const idle = ptick(state({ sessions: [...hand, sess('orch@shaltoot', 'lead', { last_event: ago(90) })] }), status);
+  assert.deepEqual([idle.close, idle.leaving], [[], []]);
+  // they still count toward the builders' slots: two waiting cards start nobody past the count of 2
+  assert.deepEqual(names(ptick(state({ sessions: hand.slice(0, 2), waiting: { builder: { main: 2 } } }), status).start), []);
+});
+
+test('a squad with no seats besides the lead (a bad save) closes nothing: every leaving seat is listed', () => {
+  const leadOnly = { ...squad, roles: { lead: squad.roles.lead } };
+  const seats = ['sv-B1@macbook', 'sv-B2@macbook', 'sv-R1@shaltoot'].map((n) => sess(n, n.includes('-R') ? 'reviewer' : 'builder', { last_event: ago(30) }));
+  const status = { herdrStatus: { 'sv-b1-macbook': 'idle', 'sv-b2-macbook': 'idle', 'sv-r1-shaltoot': 'idle' } };
+  for (const sq of [leadOnly, { ...squad, roles: {} }]) {
+    const p = ptick({ ...state({ sessions: seats }), squad: sq }, status);
+    assert.deepEqual([p.close, p.leaving.map((l) => l.why)], [[], ['empty', 'empty', 'empty']]);
+  }
+});
+
+test('pastSeatNames: every non-lead name the saved versions generated; one it cannot read is skipped', () => {
+  const n = pastSeatNames('sv', [{}, old]);
+  assert.ok(n.has('sv-R3@shaltoot') && n.has('sv-B3@macbook') && n.has('sv-O-kb@macbook') && n.has('sv-A1@macbook'));
+  assert.ok(!n.has('orch@shaltoot') && !n.has('sv-B4@macbook'));
 });

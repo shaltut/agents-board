@@ -1,5 +1,5 @@
 // The supervisor's pure planner: from the board's facts and herdr's, decide this tick's restores, starts, closes and notes.
-import { herdrName, launchFor, seatShaped, wantList, type Launch, type Squad } from './squad-up.ts';
+import { herdrName, launchFor, wantList, type Launch, type Squad } from './squad-up.ts';
 
 export type Session = { actor: string; role: string; area: string | null; repo: string; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
@@ -13,16 +13,33 @@ export type State = { project: string; squad: Squad; supervised: boolean;
 // herdrStatus: herdr's agent_status per herdr name (idle, working, blocked, done, unknown); only READY may be closed
 // safeToClose (#4002): per session (actor), its agent adapter's answer, which then decides instead of herdrStatus; a
 // session it does not name is not closed. Omitted: herdrStatus and READY, as before
+// pastSeats (#3770): non-lead names an earlier saved version of this squad generated (pastSeatNames); omitted: none
 export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Record<string, string>; herdrDown: Set<string>; launched: Set<string>; macLive: number; startsLeft: number; failedAt: Map<string, number>; now: number;
-  safeToClose?: Record<string, boolean> };
+  safeToClose?: Record<string, boolean>; pastSeats?: Set<string> };
 // leaving (#3770): seats the squad file no longer generates that stay open for now: busy (live with work), down holding
-// work, or on a machine the squad file no longer names. The supervisor never closes or frees these: a person hands over.
-export type Leaving = { session: string; why: 'busy' | 'down' | 'machine' };
+// work, on a machine that is not one of the squad's, or every seat while the squad names none besides the lead (empty).
+// The supervisor never closes or frees these: a person hands over.
+export type Leaving = { session: string; why: 'busy' | 'down' | 'machine' | 'empty' };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[]; leaving: Leaving[] };
 
 /** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
 export const READY = new Set(['idle', 'done']);
 const MIN = 60_000, CLOSE_AFTER = 20 * MIN, RETRY_AFTER = 10 * MIN, RESTORE_EVERY = 30 * MIN, MAC = 'macbook', MAC_CAP = 8;
+const LEAVING_CLOSES = 2; // a bad squad save cannot drain a squad in one tick
+
+/** The non-lead names any of these saved squad versions generated (#3770); a version wantList cannot read is skipped. */
+export function pastSeatNames(project: string, squads: unknown[]): Set<string> {
+  const names = new Set<string>();
+  for (const sq of squads) {
+    try { for (const w of wantList(project, sq as Squad)) if (w.role !== 'lead') names.add(w.name); } catch {}
+  }
+  return names;
+}
+/** Whether a tick needs pastSeats: a live or holding non-lead session the squad does not want now. */
+export function mayBeLeaving(state: State, herdrLive: Set<string>): boolean {
+  const now = new Set(wantList(state.project, state.squad).map((w) => w.name));
+  return state.sessions.some((s) => s.role !== 'lead' && !now.has(s.actor) && (s.live || s.holds > 0 || herdrLive.has(herdrName(s.actor))));
+}
 
 export function planTick(i: TickInput): TickPlan {
   const { state, herdrLive, herdrDown, now } = i;
@@ -42,11 +59,12 @@ export function planTick(i: TickInput): TickPlan {
   const wanted = wantList(project, squad).filter((w) => w.role !== 'lead');
   const restored = new Set<string>();
   const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.asks && !s.closing;
-  // #3770: a seat-shaped name the squad file no longer generates (its role moved machine, its count went down, its role
-  // or repo left) is leaving: it counts toward no role's slots, cancels no waiting work, and is closed once idle whatever
-  // waits (the work is the new seats'). Busy, or down holding work, it stays and is listed. A dead row holding nothing: ignored
+  // #3770: a name an earlier version of this squad generated but this one does not (its role moved machine, its count
+  // went down, its role or repo left) is leaving: it counts toward no role's slots, cancels no waiting work, and is closed
+  // once idle whatever waits (the work is the new seats'), at most 2 a tick. Busy, or down holding work, it stays and is
+  // listed. A hand-started name no squad version generated is never leaving; a dead row holding nothing: ignored
   const wantedNames = new Set(wanted.map((w) => w.name));
-  const leaving = new Set(state.sessions.filter((s) => s.role !== 'lead' && !wantedNames.has(s.actor) && seatShaped(project, s.role, s.actor)
+  const leaving = new Set(state.sessions.filter((s) => s.role !== 'lead' && !wantedNames.has(s.actor) && !!i.pastSeats?.has(s.actor)
     && (isLive(s.actor) || s.holds > 0)).map((s) => s.actor));
 
   for (const w of wanted) {
@@ -98,12 +116,14 @@ export function planTick(i: TickInput): TickPlan {
         && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(w.name);
     }
   }
+  let closesLeft = LEAVING_CLOSES;
   for (const n of leaving) {
     const s = by.get(n)!;
-    if (!Object.hasOwn(squad.machines, machineOf(n))) plan.leaving.push({ session: n, why: 'machine' }); // its herdr is unknown
+    if (!wanted.length) plan.leaving.push({ session: n, why: 'empty' }); // a squad with no seats besides the lead: likely a bad save
+    else if (!Object.hasOwn(squad.machines, machineOf(n))) plan.leaving.push({ session: n, why: 'machine' }); // its herdr is unknown
     else if (!isLive(n)) plan.leaving.push({ session: n, why: 'down' });
     else if (!idle(s)) { if (!s.closing) plan.leaving.push({ session: n, why: 'busy' }); } // closing: a close is under way
-    else if (!herdrDown.has(machineOf(n)) && safe(n) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) plan.close.push(n);
+    else if (closesLeft > 0 && !herdrDown.has(machineOf(n)) && safe(n) && s.last_event && now - Date.parse(s.last_event) >= CLOSE_AFTER) { plan.close.push(n); closesLeft--; }
   }
   return plan;
 }
