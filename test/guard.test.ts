@@ -467,6 +467,12 @@ test('long commands stay fast', () => {
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
     ['16 az repos pr update (the cap), then 100 KB, as a builder', asBuilder('az repos pr update '.repeat(16) + tail100KB)],
+    // PR 77 round 4 (I5): a filled word judges the words after it; a segment judges at most 16 git calls, then blocks
+    ['fence, 140 KB of echo $A log then a fence path, as a builder', asBuilder('echo ' + '$A log '.repeat(20000) + 'opencode.json')],
+    ['fence, 140 KB of $A log after an unknown program then a fence path', asBuilder('caffeinate ' + '$A log '.repeat(20000) + 'opencode.json')],
+    ['fence, 120 KB of $A -c after an unknown program then a fence path', asBuilder('caffeinate ' + '$A -c '.repeat(20000) + 'opencode.json')],
+    ['fence, 140 KB of $A ./x (paths, never git) then a fence path', asBuilder('caffeinate ' + '$A ./x '.repeat(20000) + 'opencode.json')],
+    ['fence, 200 KB of quoted "$A log" words then a fence path', asBuilder('caffeinate ' + kb200('"$A log" ') + 'opencode.json')],
     ['an unterminated quoted heredoc header, then 600 KB', () => check(heredocThen600KB)],
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],

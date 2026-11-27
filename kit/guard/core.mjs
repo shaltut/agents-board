@@ -388,7 +388,7 @@ function scanKills(text, seen, inArgs) {
 
 // Protected branches (#3746): a squad session's pane carries CB_PROTECTED_BRANCHES (cb squad up), and a git push whose
 // destination is one of them is blocked. Unset or empty: no check at all.
-const GIT_OPT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']); // git -C <path> push
+const GIT_OPT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--attr-source']); // git -C <path> push
 const PUSH_OPT_ARG = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']); // git push -o ci.skip ...
 // a list entry with * is a glob: * is any run of characters, / included; the rest is literal; the whole name must match
 const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -722,6 +722,9 @@ function gitCallWrites(w, atCommand, runsEnv) {
 // program, judged as git (fail closed: $GIT checkout -- opencode.json blocks, $GIT log -- opencode.json reads). So is an
 // expansion after one of these launchers (sudo $GIT checkout ...), with the argument-position rule. A PowerShell
 // assignment ($x = ...) is not a command word.
+// programs that never run an argument as a program: a filled word in their arguments is printed or read, not run
+// (echo $HOME add opencode.json, cmp $A $B opencode.json). A nested $( or backtick group starts its own command.
+const NO_EXEC = new Set(['echo', 'printf', 'cat', 'ls', 'stat', 'cmp', 'diff', 'head', 'tail', 'wc', 'grep', 'jq']);
 const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'timeout', 'gtimeout', 'time', 'stdbuf',
   'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
   'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
@@ -741,7 +744,11 @@ const GIT_COMMANDS = new Set([...GIT_READS, 'add', 'am', 'apply', 'archive', 'bi
   'repack', 'replace', 'replay', 'request-pull', 'rerere', 'reset', 'restore', 'revert', 'rm', 'send-email', 'send-pack', 'show-branch',
   'show-index', 'sparse-checkout', 'stage', 'stash', 'stripspace', 'submodule', 'svn', 'switch', 'symbolic-ref', 'tag', 'unpack-file',
   'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'upload-archive', 'upload-pack', 'var', 'verify-commit',
-  'verify-pack', 'verify-tag', 'worktree', 'write-tree']);
+  'verify-pack', 'verify-tag', 'worktree', 'write-tree', 'backfill', 'checkout--worker', 'credential-cache',
+  'credential-cache--daemon', 'credential-store', 'credential-wincred', 'diff-pairs', 'difftool--helper', 'fsck-objects', 'fsmonitor--daemon',
+  'http-fetch', 'http-push', 'imap-send', 'init-db', 'last-modified', 'merge-octopus', 'merge-ours', 'merge-recursive', 'merge-recursive-ours',
+  'merge-recursive-theirs', 'merge-resolve', 'merge-subtree', 'pickaxe', 'quiltimport', 'remote-ext', 'remote-fd', 'remote-ftp', 'remote-ftps',
+  'remote-http', 'remote-https', 'repo', 'submodule--helper', 'subtree', 'survey', 'update', 'upload-archive--writer', 'web--browse']);
 // the index just past the filled word at raw[k]: past a whole ${...}, $(...) or backtick group
 function filledEnd(raw, k) {
   const open = raw[k] === '`' ? '`' : raw[k] === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? raw[k + 1] : null;
@@ -754,29 +761,47 @@ function filledEnd(raw, k) {
   }
   return raw.length;
 }
-// a filled word at raw[k] (any position): true when it is a git call that writes
-function filledWrites(raw, k, runsEnv) {
+// a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
+const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
+// git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
+const MAX_FILLED_OPTS = 32;
+// a filled word at raw[k] (any position): true when it is a git call that writes. Its options are judged as git's, not
+// skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
+// git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
+// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
+function filledWrites(raw, k, judge) {
   const after = filledEnd(raw, k);
-  for (let j = after; j < raw.length; j++) {
+  for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
     if (/^[(){}]$/.test(x)) continue;
     const v = unquote(x);
-    if (x !== '`' && v.startsWith('-')) { if (GIT_OPT_ARG.has(v)) j++; continue; }
-    if (x !== '`' && !v.startsWith('$') && !GIT_COMMANDS.has(v.toLowerCase())) return false;
-    return gitCallWrites(['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true, runsEnv);
+    if (x !== '`' && v.startsWith('-')) {
+      if (++opts > MAX_FILLED_OPTS) return true;
+      const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
+      if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
+      if (GIT_OPT_ARG.has(v)) j++;
+      continue;
+    }
+    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v);
+    if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
+    return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
   return false;
 }
-const gitWrites = (seg) => {
+const gitWrites = (seg, inQuote = false) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
-  let start = true, runsEnv = false, launched = false, ticks = 0;
+  let start = true, runsEnv = false, launched = false, noExec = false, ticks = 0;
   const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
+  // round 4, I5: each git call reads the rest of the segment, so a segment judges at most MAX_COMMANDS_PER_SEGMENT of them
+  // and blocks past that (a scan that runs past the hook's timeout lets the command through), as scanCommands does
+  let budget = MAX_COMMANDS_PER_SEGMENT;
+  const judge = (words, atCommand) => (--budget < 0 ? true : gitCallWrites(words(), atCommand, runsEnv));
   for (let k = 0; k < raw.length; k++) {
     const t = raw[k];
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
-      if (t === '`' && start && gitCallWrites(['`', ...rest(k + 1)], true, runsEnv)) return true;
-      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, runsEnv)) return true; // anywhere: caffeinate `which git` checkout
+      if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
+      if (t === '`' && ticks++ % 2 === 0 && !noExec && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
       continue;
     }
@@ -788,23 +813,28 @@ const gitWrites = (seg) => {
     // a quoted command line, judged on its own: one layer of quotes off (an unclosed quote dropped, so it always shrinks)
     if (/["']/.test(t) && /[\s;&|]/.test(u)) {
       const inner = u === t ? t.replace(/["']/g, '') : u;
-      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(gitWrites)) return true;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some((x) => gitWrites(x, true))) return true;
     }
     if (ASSIGNMENT.test(u)) { // VAR=x git ..., env VAR=x git ...
       const eq = u.indexOf('=');
       if (GIT_RUNS_ENV.test(u) && !(/pager$/i.test(u.slice(0, eq)) && PAGER_OK.test(u.slice(eq + 1)))) runsEnv = true;
       if (start) continue;
     }
-    const filled = u.startsWith('$') && (start || launched);
+    const filled = isFilled(u) && (start || launched);
     // a filled word takes the argument-position rule ($PAGER opencode.json is no git call; $GIT $SUB still blocks)
     const isGit = cmdName(t) === 'git';
-    if ((isGit || filled) && gitCallWrites(rest(k), start && isGit, runsEnv)) return true;
+    // a $( or ${ group in command position: the subcommand slot is the word after the whole group (round 4, I4); inside
+    // a quoted line ("$(git rev-parse --show-toplevel)/x", "$USER reading x") a filled first word takes the filledWrites test
+    const words = () => (u === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? ['$', ...rest(filledEnd(raw, k))] : rest(k));
+    if (filled && start && inQuote) { if (filledWrites(raw, k, judge)) return true; }
+    else if ((isGit || filled) && judge(words, start && isGit)) return true;
     // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
     // behind), judged by the word after it (GIT_COMMANDS)
-    if (u.startsWith('$') && filledWrites(raw, k, runsEnv)) return true;
+    if (isFilled(u) && !noExec && filledWrites(raw, k, judge)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
+      noExec = NO_EXEC.has(cmdName(t)) && !launched;
     }
   }
   return false;

@@ -306,3 +306,65 @@ test('the fence judges a filled word followed by any git command with the comman
     for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
   }
 });
+
+// PR 77 round 4: after a filled word, only a git command, a bare $VAR / ${VAR} / %VAR% or a ${...} / $(...) / backtick group
+// fills the subcommand slot ($HOME/.codex/... is a path, not git); a quoted string that starts with $ is not a command line;
+// git's options after a filled word are judged, not skipped; the git 2.53 command list; cmd's %VAR% is a filled word; a
+// program that never runs its arguments (echo, cat, cmp ...) runs no filled word.
+test('the fence reads two filled paths, quoted $( ) paths and echo of filled words as reads; judges options after a filled word', () => {
+  const writes = ['caffeinate $GIT -c alias.x=checkout x -- opencode.json', 'caffeinate $GIT --config-env=alias.x=V x -- opencode.json',
+    'caffeinate $GIT --attr-source HEAD checkout -- opencode.json', 'arch -arm64 $GIT -c alias.x=checkout x -- .claude/settings.json',
+    'time -p $GIT --attr-source HEAD restore .codex/config.toml', 'caffeinate $GIT --exec-path=/tmp/x foo opencode.json',
+    'caffeinate $GIT credential-store --file=opencode.json store', 'caffeinate $GIT credential-store --file ~/.codex/config.toml store',
+    'caffeinate $GIT subtree add --prefix=.opencode/plugins ../p main', 'caffeinate $GIT init-db --template=/tmp/t .codex',
+    'caffeinate $G merge-recursive HEAD -- a b opencode.json', '%GIT% checkout -- opencode.json', 'caffeinate %GIT% checkout -- opencode.json',
+    'cmd /c "%GIT% checkout -- opencode.json"', 'caffeinate $GIT $SUB -- opencode.json', 'bash -c "$G checkout -- opencode.json"',
+    'bash -c "$(which git) checkout -- opencode.json"', 'echo $(caffeinate $GIT checkout -- opencode.json)'];
+  const reads = [
+    'ls $HOME/.codex $HOME/.gemini',
+    'diff $HOME/.codex/config.toml $HOME/.codex/config.toml.bak',
+    'cat $HOME/.codex/hooks.json $HOME/.agents/hooks.json',
+    'head -3 $HOME/.claude/settings.json $PWD/.claude/settings.json',
+    'echo $HOME $USER opencode.json',
+    'echo "$HOME" "$USER" opencode.json',
+    'echo $HOME `date` opencode.json',
+    'echo $HOME $(date) opencode.json',
+    'cmp $A $B opencode.json',
+    'grep -n $PATTERN $HOME/.codex/config.toml',
+    'rg $PAT $ROOT/opencode.json',
+    'Get-Content $HOME/.codex/config.toml, $HOME/.gemini/settings.json',
+    'Compare-Object (Get-Content $env:USERPROFILE/.codex/config.toml) (Get-Content $env:TEMP/c.toml)',
+    'jq -s . $HOME/.claude/settings.json $HOME/.claude/settings.local.json',
+    'for f in $HOME/.codex/config.toml $HOME/.gemini/settings.json; do wc -l $f; done',
+    'stat -c %y $HOME/.claude/settings.json ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json',
+    'sha256sum $REPO/opencode.json $BACKUP/opencode.json',
+    'cat "$(git rev-parse --show-toplevel)/.claude/settings.json"',
+    'cat "$(git rev-parse --show-toplevel)/opencode.json"',
+    'cat "$(pwd)/opencode.json"',
+    'cat "$(pwd)"/opencode.json',
+    'head -5 "$(dirname $0)/opencode.json"',
+    'jq . "$(git rev-parse --show-toplevel)/.agents/hooks.json"',
+    'diff opencode.json "$(git rev-parse --show-toplevel)/opencode.json"',
+    'ls "$(git rev-parse --show-toplevel)/.codex"',
+    'cat "$HOME/.codex/config.toml"',
+    'cat "${HOME}/.claude/settings.json"',
+    'cat "$(echo ~)/.codex/config.toml"',
+    '$(git rev-parse --show-toplevel)/scripts/lint.sh opencode.json',
+    'cat `git rev-parse --show-toplevel`/opencode.json',
+    'cat "`git rev-parse --show-toplevel`/opencode.json"',
+    'wc -c "$(git rev-parse --show-toplevel)"/opencode.json',
+    'echo "$(date) checking opencode.json"',
+    'echo "$(git log -1 --format=%h) opencode.json"',
+    'echo "$USER reading .claude/settings.json"',
+    'echo "files: $(ls .codex)"',
+    'Get-Content "$(git rev-parse --show-toplevel)/opencode.json"',
+    'Get-Content "$env:USERPROFILE\\.codex\\config.toml"',
+    'Get-Content (Join-Path $HOME \'.codex/config.toml\')',
+    'node -e "console.log(process.env.HOME)" opencode.json',
+    'caffeinate $GIT -C . diff -- opencode.json', 'caffeinate $GIT ./opencode.json', 'echo $HOME add opencode.json',
+    'echo $RESULT reset opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
