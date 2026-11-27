@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { wordsDrift } from '../kit/fault-line.mjs';
 
 export const RELEASE_DIRS = ['bin', 'cli', 'db', 'prompts', 'server', 'hooks', 'kit'];
 export const FORMAT = 'cb.release.v1';
@@ -138,6 +139,9 @@ if (isMain) {
     const m = buildManifest(root);
     writeFileSync(out, JSON.stringify(m, null, 2) + '\n');
     console.log(`${out}: ${Object.keys(m.files).length} files at ${m.sha.slice(0, 7)}`);
+    // #4535: the fault log's vocabulary; stale only masks more, so a note, never a refusal
+    const d = wordsDrift(root);
+    if (d.missing.length || d.extra.length) console.log(`note: kit/fault-words.json differs from the source (${d.missing.length} missing, ${d.extra.length} extra): run node kit/fault-line.mjs --words on a branch and merge it before the next release`);
   } catch (e: any) {
     console.error(`release manifest not written: ${e?.message ?? e}`);
     process.exit(1);
