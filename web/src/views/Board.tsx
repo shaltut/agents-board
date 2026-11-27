@@ -8,12 +8,12 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { BellRing, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useProjects, useTasks, type Status, type ListTask } from '@/lib/api'
+import { rpc, useTasks, type Status, type ListTask } from '@/lib/api'
 import { STATUS } from '@/lib/format'
 import { bandRank, byQueue, dropIndex } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
-import { StatusDot, STAGE_WORDS } from '@/components/Chips'
+import { StatusDot } from '@/components/Chips'
 import { TaskCard } from '@/components/TaskCard'
 
 const COLUMNS: Status[] = ['backlog', 'next', 'in_progress', 'blocked', 'review', 'done']
@@ -99,21 +99,18 @@ export function Board({ route }: { route: Route }) {
   const { data = [], isLoading } = useTasks(route.project)
   const [optimistic, setOptimistic] = useState<{ id: number; status: Status; rank: number } | null>(null)
   const [active, setActive] = useState<ListTask | null>(null)
-  const [waiting, setWaiting] = useState(false) // only cards waiting for Ahmed's approval
-  const { data: projects = [] } = useProjects()
-  const project = projects.find((p) => p.slug === route.project)
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
 
   const columns = useMemo(() => {
-    const rows = data.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type) && (!waiting || t.stage === 'approval')).map((t) => (optimistic && t.id === optimistic.id ? { ...t, status: optimistic.status, rank: optimistic.rank } : t))
+    const rows = data.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type)).map((t) => (optimistic && t.id === optimistic.id ? { ...t, status: optimistic.status, rank: optimistic.rank } : t))
     const by = Object.fromEntries(COLUMNS.map((s) => [s, [] as ListTask[]])) as Record<Status, ListTask[]>
     for (const t of rows) by[t.status]?.push(t)
     for (const s of COLUMNS) by[s].sort((a, b) => (s === 'done' ? +new Date(b.done_at ?? 0) - +new Date(a.done_at ?? 0) : byQueue(a, b)))
     return by
-  }, [data, optimistic, route.tag, route.type, waiting])
+  }, [data, optimistic, route.tag, route.type])
 
   const onStart = (e: DragStartEvent) => setActive(data.find((t) => t.id === e.active.id) ?? null)
 
@@ -143,23 +140,6 @@ export function Board({ route }: { route: Route }) {
   return (
     <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onStart} onDragEnd={onEnd} onDragCancel={() => setActive(null)}>
       <h1 className="sr-only">Board</h1>
-      <div className="mb-3 flex flex-wrap items-center gap-4 text-sm">
-        <label className="flex cursor-pointer items-center gap-2">
-          <input type="checkbox" checked={waiting} onChange={(e) => setWaiting(e.target.checked)} className="size-4 accent-[var(--lamp)]" />
-          <span className={cn(waiting && 'font-medium text-lamp')}>{STAGE_WORDS.approval}</span>
-        </label>
-        {project && (
-          <label className="flex cursor-pointer items-center gap-2" title="Cards of this project go through design, your approval, build, review and a check on dev">
-            <input type="checkbox" checked={project.pipeline} className="size-4"
-              onChange={async (e) => {
-                try { await rpc('project_pipeline', { project: project.slug, enabled: e.target.checked }) }
-                catch (err: any) { toast.error('Could not change the pipeline', { description: err.message }) }
-                await qc.invalidateQueries()
-              }} />
-            <span>Squad pipeline</span>
-          </label>
-        )}
-      </div>
       <div className="-mx-4 grid auto-cols-[minmax(15.5rem,1fr)] grid-flow-col gap-3 overflow-x-auto px-4 pb-4 snap-x snap-proximity scroll-px-4 xl:snap-none sm:-mx-6 sm:px-6 xl:auto-cols-[minmax(0,1fr)]">
         {COLUMNS.map((s) => <Column key={s} status={s} tasks={columns[s]} showProject={!route.project} />)}
       </div>
