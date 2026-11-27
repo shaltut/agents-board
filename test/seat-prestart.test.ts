@@ -44,7 +44,7 @@ function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean;
   writeFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ trustedWorkspaces: o.agyTrusted === false ? [root] : [join(root, 'elsewhere'), ws] }));
   if (o.plugin !== false) writeFileSync(join(home, '.config', 'opencode', 'plugins', 'cb-guard.js'), PLUGIN_GOOD);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp };
+  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CB_SEAT_RELAY: 'off' }; // #4610: a ready seat starts no relay here
   for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_SERVER_PASSWORD']) delete env[k];
   return { root, home, ws, env };
 }

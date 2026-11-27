@@ -2,7 +2,7 @@
 // seatKey(machine, pane). It watches the board (Postgres LISTEN) and writes into the agent's inbox through the agent's
 // adapter (cli/agents/): answers to the session's questions, and changes other people make to its tasks. An idle
 // session gets a new turn; a busy one reads it between tool calls.
-// Claude Code starts it from its SessionStart hook (this file without --child, or hooks/claude-endpoint.mjs) and hands
+// A non-Claude seat's prestart starts it once the seat checks ready (#4610, kit/seat/prestart.*). Claude Code starts it from its SessionStart hook (this file without --child, or hooks/claude-endpoint.mjs) and hands
 // its inbox ($CLAUDE_CODE_MESSAGING_SOCKET and _TOKEN) over in an endpoint file (cli/agents/claude.ts), so the relay
 // needs no Claude in its env, and a new Claude in the same pane is served by the same relay.
 // It stops when the adapter says the agent is gone: from the first dead reading no heartbeat (cb.inbox) and no
@@ -18,6 +18,8 @@ import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
+import { HERDR_NAMED, herdrNameForPane, namelessDead, watchdogStep, type Watch } from './relay-seat.ts';
+import { realRun } from './squad-up.ts';
 import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
@@ -73,7 +75,18 @@ const lockPid = () => { try { return Number(readFileSync(LOCK, 'utf8')) || 0; } 
 /** Keeps this relay's lock fresh: a lock counts as held only while touched in the last 15 s (bridge.ts seatLockHolder). */
 const touch = () => { if (lockPid() !== process.pid) return; const now = new Date(); try { utimesSync(LOCK, now, now); } catch {} };
 /** The adapter's answer; an unknown one counts as alive (it never stops a relay, never takes a seat). */
-const aliveNow = async () => { try { return await adapter.isAlive(seat); } catch { return true; } };
+// #4610: codex and agy read liveness and deliver through herdr by the seat's agent name, which this relay learns from this
+// machine's herdr by its pane (the relay runs where the seat runs). Until herdr lists an agent in the pane, it stays unset.
+const learnHerdrName = () => {
+  if (!HERDR_NAMED.has(adapter.kind) || seat.herdrName) return;
+  try { const r = realRun(null, ['agent', 'list'], 10_000); if (r.status === 0) seat.herdrName = herdrNameForPane(JSON.parse(r.stdout ?? ''), PANE, adapter.kind) ?? undefined; } catch {}
+  if (seat.herdrName) log(`herdr agent in this pane: ${seat.herdrName}`);
+};
+const aliveNow = async () => {
+  learnHerdrName();
+  if (namelessDead(adapter.kind, seat.herdrName)) return false; // review 98 I1: no name, no agent to reach
+  try { return await adapter.isAlive(seat); } catch { return true; }
+};
 const relaunch = () => spawn(process.execPath, [SELF, '--child', '--pane', PANE, '--agent', adapter.kind],
   { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
 /** The env inbox answers: its socket is there (statSync, never a connect to a Windows pipe) and, on POSIX, accepts a
@@ -117,7 +130,8 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
-  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'notice-hold.ts')]; // #3221: HOLD_MS lives there
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts'),
+  join(HERE, 'notice-hold.ts')]; // review 98 L4; #3221: HOLD_MS lives there
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
@@ -471,21 +485,25 @@ async function leave(seatTaken = false) {
 }
 
 clearInterval(keepFresh); // the watchdog touches the lock from here on
-let leaving = false, ticking = false, dead = 0; // unbridge() is async: one exit, not one per tick
+// #4610: a non-Claude seat's prestart starts this relay before herdr starts the agent: it waits for it (relay-seat.ts).
+// A Claude relay starts from its session's hook, the agent already up: no grace, as before.
+let leaving = false, ticking = false; // unbridge() is async: one exit, not one per tick
+let watch: Watch = { dead: 0, seenAlive: false, startedAt: claude ? -Infinity : Date.now() };
 setInterval(async () => {
   if (leaving || ticking) return;
   ticking = true;
   try {
     if (lockPid() !== process.pid) { leaving = true; await leave(true); return; }
     touch();
-    if (await agentAlive()) {
-      dead = 0;
+    const alive = await agentAlive(), step = watchdogStep(watch, alive, Date.now());
+    if (!alive && step.state.dead === 1 && watch.dead === 0) log('watchdog: agent not alive (leaves if the next reading agrees)');
+    watch = step.state;
+    if (alive) {
       // #4379: another session took the seat (a new Claude in this pane): drop the binding held for the last one at
       // once, so no cb call of the new session is handed it, and let the board reset the row now, not at the next poll
       if (lastSession !== undefined && sessionNow() !== lastSession) { log('a new session in the seat; checking'); forget(); check(); }
     }
-    else if (++dead === 1) log('watchdog: agent not alive (leaves if the next reading agrees)');
-    if (dead >= 2) { leaving = true; await leave(); return; }
+    if (step.leave) { leaving = true; await leave(); return; }
     const v = version();
     if (v.join() !== born && Date.now() - Math.max(...v) > 3000) {
       log('relay code changed; restarting');

@@ -96,6 +96,9 @@ Then the workers, right away, because their `cb` must match the schema:
     mid-flip. Relays notice their code path now points at new files and restart into it: each flip, update or
     rollback, restarts every relay running from the copy within ~3 s (no message is lost; at worst one duplicate push). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
     pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
+    One started by a relative path (`node cli/runner.ts`) counts only when its working folder is the copy (read from
+    `/proc` or `lsof`); another checkout's does not. When the folder cannot be read (always on Windows), `cb update`
+    refuses and says so: `--force` when it is not this copy's.
     Nothing is stopped by `cb update`.
   - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
     run it again to go forward. Back on the original copy, relays run its older relay.ts, which does not follow a flip:
