@@ -18,6 +18,7 @@ import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
+import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
@@ -36,8 +37,23 @@ const LOG = join(tmpdir(), `cb-relay-${key}.log`);
 const log = (m: string) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`); } catch {} };
 
 const AGENT = flag('--agent') || process.env.CB_AGENT || 'claude';
-// an agent with no adapter yet: never served as Claude (and a hook never fails its session)
-const adapter = (() => { try { return getAdapter(AGENT); } catch (e: any) { log(`not started: ${e?.message}`); process.exit(0); } })();
+// an agent this relay cannot serve (no adapter, not installed, its MCP gate shut here): never served as Claude. #4429: the
+// seat's project hears it on the board once (relay-refusal.ts), and the relay exits 1 for whoever waits on it (cb relay).
+// At most 8 s: a launcher waits on this process (a hook start never does: it is detached).
+const MEMO = join(tmpdir(), `cb-relay-${key}.refused`);
+const refused = refusalWords(AGENT);
+if (refused) {
+  // the local log keeps the adapter's own text too (the MCP gate's names what to check); the board never gets it
+  log(`not started: ${refused}${(() => { try { getAdapter(AGENT); return ''; } catch (e: any) { return ` (${e?.message})`; } })()}`);
+  const db = connect(undefined, { app: 'cb-relay/refused', max: 1 });
+  const told = await Promise.race([tellRefusal(db, { machine: M, pane: PANE }, refused, MEMO).catch((e: any) => `nobody told: ${e?.code ?? 'error'}`),
+    new Promise<string>((r) => setTimeout(r, 8000, 'nobody told: the board did not answer in 8 s').unref())]);
+  log(told);
+  await Promise.race([db.end({ timeout: 1 }).catch(() => {}), new Promise((r) => setTimeout(r, 1500).unref())]);
+  process.exit(1);
+}
+clearRefusal(MEMO);
+const adapter = getAdapter(AGENT);
 const claude = adapter.kind === 'claude';
 const seat: SeatHandle = { machine: M, pane: PANE, agent: adapter.kind };
 

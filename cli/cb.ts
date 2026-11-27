@@ -656,7 +656,9 @@ async function run(): Promise<unknown> {
         (await sql`select agent from cb.sessions where machine = ${machine()} and pane = ${pane}`.catch(() => []))[0]?.agent || 'claude';
       getAdapter(agent); // an agent cb cannot serve yet fails here, by name
       if (agent === 'claude' && !claudeInbox()) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
-      spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
+      const r = spawnSync(process.execPath, [join(import.meta.dirname, 'relay.ts'), '--pane', pane, '--agent', agent, ...(o.restart ? ['--restart'] : [])], { stdio: 'ignore' });
+      // #4429: a relay that refused this seat exits 1 (and told the project on the board when it could); never "relay on"
+      if (r.status !== 0) throw new Error(`the relay did not start (exit ${r.status ?? r.signal}); its reason is in the relay log, cb-relay-*.log in this machine's temp folder. Without a relay, run cb mine and cb pending between steps`);
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session` };
     }
     case 'iam': {
