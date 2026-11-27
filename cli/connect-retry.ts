@@ -6,6 +6,7 @@
 // write may have landed, and task_add or ask would run twice.
 
 import { isNetworkError } from './survive.ts';
+import { titleBody } from './title-body.ts';
 
 // The connection never opened, whatever the syscall: refused, DNS, postgres.js's own connect timer (it is cancelled at
 // the first ReadyForQuery, before postgres.js executes the query that opened the connection).
@@ -29,14 +30,47 @@ export function neverSent(e: unknown): boolean {
 
 /** What cb tells the caller about whether its command ran, for a network failure (null: not one). answered: the
  *  command's statements the board already answered. A failed read after a committed write must never read as "it did
- *  not run" (#3331): the caller would send the write again. */
-export function ranWords(e: unknown, answered: number): string | null {
+ *  not run" (#3331): the caller would send the write again. check: what to do before running it again (checkFirst). */
+export function ranWords(e: unknown, answered: number, check: string): string | null {
   if (neverSent(e)) return answered
-    ? 'the call that failed never reached it, but an earlier step of this command did and may have saved your change: check with cb before running it again'
+    ? `the call that failed never reached it, but an earlier step of this command did and may have saved your change: ${check}`
     : 'the call that failed never reached it, so this command did not run';
   if (isNetworkError(e) || (e as any)?.code === 'RELAY_LOST')
-    return 'the call that failed may have reached it, so this command may have run: check with cb before running it again';
+    return `the call that failed may have reached it, so this command may have run: ${check}`;
   return null;
+}
+
+// #4450: "check with cb before running it again" named no command, so a session could not act on it (it passed the
+// every-error-names-a-command check only because "cb before" looked like a command). Name the one that shows whether
+// this command landed. READS call only selects or stable functions, so running one again changes nothing.
+const READS = new Set(['show', 'search', 'session', 'sessions', 'digest']);
+// the first argument is the card they change. cb show <id> prints its status, labels, fields, notes and done summary;
+// a stage move is an 'updated' event it does not print, so the stage is read from --json (a card in parts: its parts line)
+const ON_CARD = new Set(['tag', 'move', 'done', 'edit', 'log', 'block', 'unblock']);
+const STAGED = new Set(['stage', 'pass', 'fail']);
+
+/** What to do before running again a command that may have run: a blind resend of a write runs it twice (#3331).
+ *  me: who this pane acts as. Only a numeric id and the title's first words are echoed back. */
+export function checkFirst(cmd: string | undefined, args: string[], me: string): string {
+  if (cmd && READS.has(cmd)) return 'it only reads, so running it again is safe';
+  // #3331: an unchanged resend of a question still open returns it; one with pictures always posts
+  if (cmd === 'ask') return `send the same cb ask again, unchanged: a question still open is returned, not asked twice (with pictures it posts again: check cb brief ${args[0] ?? '<project>'} first)`;
+  const id = /^#?\d{1,15}$/.test(args[0] ?? '') ? args[0]!.replace('#', '') : null;
+  // the title as cb add/bug read it: bare words joined (cb add p Fix month parse), else the quoted title. A mix only
+  // runs with -b, where all of it is the title.
+  let title = '';
+  if (cmd === 'add' || cmd === 'bug') try { title = titleBody(cmd, args.slice(1), undefined).title; } catch { title = args.slice(1).filter((w) => w.trim()).join(' '); }
+  // cb search reads the words as a web search: a leading - would exclude the word, and a quote wrapping one goes. The
+  // rest becomes a space, never nothing: C:\w\cli must stay three words, as the board's search splits it (review I1)
+  const words = title.replace(/"/g, '').replace(/[`$\\]/g, ' ').replace(/(?<!\S)-+/g, '').trim().split(/\s+/).slice(0, 6).join(' ');
+  const check = id && ON_CARD.has(cmd ?? '') ? `cb show ${id}`
+    : id && STAGED.has(cmd ?? '') ? `cb show ${id} --json (its stage; a card in parts: the parts line of cb show ${id})`
+    : (cmd === 'add' || cmd === 'bug') && args[0] ? `cb search ${args[0]} "${words || '<title words>'}"`
+    // cb.tell and cb.broadcast record the message as an event of its sender; cb session lists a name's recent events
+    : cmd === 'tell' || cmd === 'broadcast' ? `cb session ${me} (the messages you sent are in its RECENT list)`
+    : cmd === 'run' ? 'cb jobs (the queued and running jobs)'
+    : `cb mine (your cards) or cb session ${me} (what the board last recorded from you)`;
+  return `check with ${check} before running it again`;
 }
 
 export type RetryOpts = { budgetMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number };
