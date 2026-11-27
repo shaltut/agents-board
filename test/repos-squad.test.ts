@@ -346,7 +346,8 @@ test('squad_set refuses a session name over herdr\'s 32 characters', async () =>
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('claude-board')`;
   const set = (s: any) => sql`select cb.squad_set('claude-board', ${sql.json(s)}, 'ahmed')`;
-  const msg = (n: string) => new RegExp(`session name ${n} is over herdr's 32 characters: use a shorter repo, area or machine key`);
+  // #3779: the fix named is the one for that name: <p>-orch@<m> has no repo or area in it
+  const msg = (n: string, keys = 'project, repo or machine') => new RegExp(`session name ${n} is over herdr's 32 characters: use a shorter ${keys} key`);
   // claude-board-dashboard-b1-macbook is 33
   await assert.rejects(set(mod((s) => { s.areas[1].name = 'dash'; })), msg('claude-board-dashboard-B1@macbook'));
   // the home repo's names carry no repo; an owner's carries its area; the lead is orch@<machine>
@@ -354,20 +355,20 @@ test('squad_set refuses a session name over herdr\'s 32 characters', async () =>
     s.roles.builder.count = { api: 2, dash: 1 }; s.roles.reviewer.count = { api: 1, dash: 1 }; });
   await set(short); // claude-board-dash-B1@macbook, claude-board-O-dash@shaltoot: 28 each
   const from = (f: (s: any) => void) => { const s = structuredClone(short); f(s); return s; };
-  await assert.rejects(set(from((s) => { s.areas[1].name = 'dashboard'; })), msg('claude-board-O-dashboard@shaltoot'));
+  await assert.rejects(set(from((s) => { s.areas[1].name = 'dashboard'; })), msg('claude-board-O-dashboard@shaltoot', 'project, area or machine'));
   const far = 'a-machine-key-of-31-characters-x';
   await assert.rejects(set(from((s) => { s.machines[far] = s.machines.shaltoot; delete s.machines.shaltoot;
     for (const r of Object.values<any>(s.repos)) { r.paths[far] = r.paths.shaltoot; delete r.paths.shaltoot; }
-    s.roles.lead.machine = far; s.roles.owner.machine = 'macbook'; })), msg(`orch@${far}`));
+    s.roles.lead.machine = far; s.roles.owner.machine = 'macbook'; })), msg(`orch@${far}`, 'machine'));
   // the lead starts as <project>-orch@<machine> when orch@<machine> leads another project (#3746): that name must fit too
   const mid = 'lead-machine-15'; // orch@lead-machine-15 is 20, claude-board-orch@lead-machine-15 is 33
   await assert.rejects(set(from((s) => { s.machines[mid] = s.machines.shaltoot; delete s.machines.shaltoot;
     for (const r of Object.values<any>(s.repos)) { r.paths[mid] = r.paths.shaltoot; delete r.paths.shaltoot; }
-    s.roles.lead.machine = mid; s.roles.owner.machine = 'macbook'; })), msg(`claude-board-orch@${mid}`));
+    s.roles.lead.machine = mid; s.roles.owner.machine = 'macbook'; })), msg(`claude-board-orch@${mid}`, 'project or machine'));
   // no repos: <project>-<letter><count>@<machine>
   const flat = { machines: { macbook: { herdr: 'macbook', repo: '/r', board: '/b' } }, roles: { builder: { count: 1, machine: 'macbook' } } };
   await sql`select cb.ensure_project('a-long-project-name-here')`;
-  await assert.rejects(sql`select cb.squad_set('a-long-project-name-here', ${sql.json(flat)}, 'ahmed')`, msg('a-long-project-name-here-B1@macbook'));
+  await assert.rejects(sql`select cb.squad_set('a-long-project-name-here', ${sql.json(flat)}, 'ahmed')`, msg('a-long-project-name-here-B1@macbook', 'project or machine'));
 });
 
 test('squad_set name check: project-wide roles carry no repo in their name', async () => {
