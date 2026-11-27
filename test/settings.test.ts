@@ -78,6 +78,28 @@ test('squad_set: each real change raises the version once, a no-op writes nothin
   assert.deepEqual(ev[2].squad, SQUAD);
 });
 
+test('a full squad (repos, areas, seats, fallback, protected, workspace) read back and saved unchanged keeps its version', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('zed')`;
+  const full = {
+    machines: { shaltoot: { herdr: null, board: 'C:/work/claude-board' }, macbook: { herdr: 'macbook', board: '/Users/me/Work/claude-board', workspace: 'Zed Squad' } },
+    repos: { api: { home: true, paths: { shaltoot: 'C:/work/zed/api', macbook: '/Users/me/Work/zed/api' } },
+             dashboard: { paths: { shaltoot: 'C:/work/zed/dashboard', macbook: '/Users/me/Work/zed/dashboard' } } },
+    areas: [{ name: 'api', repo: 'api' }, { name: 'dashboard', repo: 'dashboard' }],
+    roles: { lead: { count: 1, machine: 'shaltoot' }, owner: { machine: 'shaltoot' },
+             builder: { count: { api: 2, dashboard: 1 }, machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }], seats: { 'api:2': { model: 'opus' } } },
+             reviewer: { count: { api: 1, dashboard: 1 }, machine: 'macbook' } },
+    supervise: true, protected: ['main', 'releases/*'],
+  };
+  await sql`select cb.squad_set('zed', ${sql.json(full)}, 'ahmed')`;
+  const read = (await sql`select cb.squad_get('zed', with_version => true) as s`)[0].s;
+  const { version: v, ...back } = read;
+  assert.equal(v, 1);
+  await sql`select cb.squad_set('zed', ${sql.json(back)}, 'ahmed', base => ${v})`;
+  assert.equal((await sql`select squad_version as v from cb.projects where slug = 'zed'`)[0].v, 1);
+  assert.equal((await sql`select count(*)::int as n from cb.events where summary = 'squad updated'`)[0].n, 1);
+});
+
 test('cb squad show --json carries the version and cb squad set takes it back as the base', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
