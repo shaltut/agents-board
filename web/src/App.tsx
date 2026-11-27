@@ -22,6 +22,7 @@ import { Epics } from '@/views/Epics'
 import { Memory } from '@/views/Memory'
 import { Goals } from '@/views/Goals'
 import { Settings } from '@/views/Settings'
+import { Runners } from '@/views/Runners'
 import { TagChip, TypeChip } from '@/components/Chips'
 
 
@@ -50,7 +51,7 @@ function GuestLive({ user }: { user: User }) {
  *  address shows Today. */
 const SCREENS: Partial<Record<View, ComponentType<{ route: Route }>>> = {
   today: Today, questions: Today, board: Board, backlog: Backlog, sessions: Sessions, huddles: Huddles, history: History,
-  people: People, epics: Epics, memory: Memory, goals: Goals, settings: Settings,
+  people: People, epics: Epics, memory: Memory, goals: Goals, settings: Settings, runners: Runners,
 }
 
 export default function App() {

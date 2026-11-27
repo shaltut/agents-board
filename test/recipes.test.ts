@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse, resolve } from 'node:path';
-import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, missingPaths, published, relPaths } from '../cli/recipes.ts';
+import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, missingPaths, published, relPaths, withBoard } from '../cli/recipes.ts';
+import { boardHello } from '../cli/runner-board.ts';
 
 const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'utf8'));
 
@@ -165,6 +166,24 @@ test('dbLanes: 1 by default, 1-9, never above slots', () => {
   for (const dbLanes of [0, 10, 1.5, '2']) assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, { slots: 10, dbLanes, laneEnv })), /dbLanes/);
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']] }, lanes(3, { slots: 2 }))), /dbLanes: is above slots/);
 });
+test('the board\'s slot setting (#4527): over runner.json, past the old cap of 10; lanes 1-9; a setting the file cannot take keeps the file\'s', () => {
+  const text = cfgWith({ steps: [['a']], db: true, env: dbEnv }, lanes(2, { slots: 4 }));
+  const file = loadConfig(text), said: string[] = [], say = (m: string) => said.push(m);
+  assert.equal(withBoard(text, file, {}, say), file, 'no setting: runner.json as it is');
+  assert.deepEqual([withBoard(text, file, { slots: 24 }, say).slots, withBoard(text, file, { slots: 24 }, say).dbLanes], [24, 2]);
+  assert.deepEqual([withBoard(text, file, { slots: 1 }, say).slots, withBoard(text, file, { slots: 1 }, say).dbLanes], [1, 1], 'lanes cut to the slots');
+  assert.equal(withBoard(text, file, { slots: 12, dbLanes: 6 }, say).dbLanes, 6);
+  assert.deepEqual(said, []);
+  assert.equal(withBoard(text, file, { slots: 64 }, say).slots, 64);
+  assert.equal(withBoard(text, file, { slots: 65 }, say), file, 'review M1: the board\'s columns cap at 64, and so does the runner');
+  assert.match(said.pop()!, /the board's slots: must be an integer 1-64/);
+  assert.equal(withBoard(text, file, { slots: 4, dbLanes: 10 }, say), file);
+  assert.match(said.pop()!, /DB lanes: must be an integer 1-9.*running 4 slots and 2 DB lane\(s\) from runner\.json/);
+  // more lanes on a file written for one shared stack: two DB jobs would share it, so the file's count is kept
+  const shared = cfgWith({ steps: [['a']], db: true, env: { TEST_STACK_PROJECT: 'it', TEST_STACK_PG_PORT: '55432' } }, { slots: 4 });
+  assert.equal(withBoard(shared, loadConfig(shared), { dbLanes: 2 }, say).dbLanes, 1);
+  assert.match(said.pop()!, /laneEnv: must name/);
+});
 test('dbLanes above 1 needs laneEnv, and each DB recipe holds {lane} in every laneEnv value', () => {
   assert.throws(() => loadConfig(cfgWith({ steps: [['a']], db: true, env: dbEnv }, { dbLanes: 2 })), /^Error: laneEnv: must name/);
   // review I2: the ports set apart but the stack name shared: lane 2's up would take down lane 1's stack
@@ -202,4 +221,48 @@ test('freeLane: the lowest lane no running job holds, none when all are taken', 
   assert.equal(freeLane([2, 1, 3, 4], 4), undefined);
   assert.equal(freeLane([], 1), 1);
   assert.equal(freeLane([1], 1), undefined);
+});
+
+// review M2/M3 (#4527): the runner's start against the board, with a stand-in for the database (no board needed)
+test('boardHello: a board older than the runner keeps runner.json and the 3-argument hello; a refused setting goes back to the board', async () => {
+  const text = cfgWith({ steps: [['a']], db: true, env: dbEnv }, lanes(2, { slots: 4 }));
+  const file = loadConfig(text);
+  const fake = (row: object | undefined, fail: { select?: string; hello6?: string } = {}) => {
+    const calls: { q: string; v: unknown[] }[] = [];
+    const sql = Object.assign(async (s: TemplateStringsArray, ...v: unknown[]) => {
+      const q = s.join('?');
+      calls.push({ q, v });
+      if (q.includes('select slots_set') && fail.select) throw Object.assign(new Error('x'), { code: fail.select });
+      if (q.includes('runner_hello') && v.length === 6 && fail.hello6) throw Object.assign(new Error('x'), { code: fail.hello6 });
+      return q.includes('runner_hello') ? [{ n: 3 }] : row ? [row] : [];
+    }, { json: (x: unknown) => x });
+    return { sql, calls };
+  };
+  const said: string[] = [], say = (m: string) => said.push(m);
+  // the board's setting fits: run it, report it, no refusal
+  let f = fake({ slots_set: 12, lanes_set: null });
+  let r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
+  assert.deepEqual([r.cfg.slots, r.cfg.dbLanes, r.ended, r.fromBoard], [12, 2, 3, true]);
+  assert.deepEqual(f.calls[1]!.v.slice(3), [12, 2, null]);
+  // a setting runner.json cannot take (9 lanes on a file with one shared stack): runner.json's counts, and the reason
+  // in the hello for the page
+  const shared = cfgWith({ steps: [['a']], db: true, env: { TEST_STACK_PROJECT: 'it', TEST_STACK_PG_PORT: '55432' } }, { slots: 4 });
+  f = fake({ slots_set: null, lanes_set: 2 });
+  r = await boardHello(f.sql, 'pc', 'http://h:1', shared, loadConfig(shared), say);
+  assert.deepEqual([r.cfg.dbLanes, r.fromBoard], [1, false]);
+  assert.match(String(f.calls[1]!.v[5]), /does not fit runner\.json/);
+  // no setting columns (undefined column): one line, runner.json, the old hello with 3 arguments
+  said.length = 0;
+  f = fake(undefined, { select: '42703' });
+  r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
+  assert.deepEqual([r.cfg, r.ended, r.fromBoard, f.calls[1]!.v.length], [file, 3, false, 3]);
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /board is older than this runner.*4 slots and 2 DB lane/);
+  // the columns there but the hello still the old one (undefined function): the same
+  f = fake({ slots_set: 12, lanes_set: null }, { hello6: '42883' });
+  r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
+  assert.deepEqual([r.cfg.slots, f.calls.length, f.calls[2]!.v.length], [4, 3, 3]);
+  // anything else still stops the start
+  f = fake(undefined, { select: '28P01' });
+  await assert.rejects(boardHello(f.sql, 'pc', 'http://h:1', text, file, say));
 });
