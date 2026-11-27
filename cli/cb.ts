@@ -856,14 +856,17 @@ ${body}`, json: pg };
       const n = Number(args[0].replace('#', ''));
       const [t] = await sql`select * from cb.tasks where id = ${n}`;
       if (!t) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
-      const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit 10`;
+      // #4448: the last 10 notes by default; --all prints every one, and the NOTES line says how many are hidden
+      const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit ${o.all ? null : 10}`; // limit null = no limit; never a sql`` fragment (the relay bridge cannot carry one)
+      const [{ notes_total }] = await sql`select count(*)::int as notes_total from cb.events where task_id = ${n} and kind in ('note', 'done')`;
+      const hidden = notes_total > notes.length ? `, ${notes.length} of ${notes_total} shown: cb show ${n} --all for every note` : '';
       const goals = await sql`select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
         where gt.task_id = ${n} and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank`;
       const [{ parts }] = await sql`select cb._parts_words(${n}) as parts`; // a parts card (#3703): its parts in plain words
       return { out: [line(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
-        t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first)`,
+        t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first${hidden})`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
-        .filter(Boolean).join('\n'), json: { ...t, notes } };
+        .filter(Boolean).join('\n'), json: { ...t, notes, notes_total } };
     }
     case 'search': { // #4339: is it filed already? Run before a cb bug or cb add.
       need(1, 'search [project] "<words>" [--notes] [--all]   e.g. cb search claude-board "relay drops"');
