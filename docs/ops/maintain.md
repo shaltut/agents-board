@@ -557,7 +557,24 @@ pager or remote login opened that way runs next. In a Codex seat the guard there
 `less`, `tmux`, `docker exec -it c sh`, `kubectl exec -i pod -- sh`, `xargs`, `read`, `cat | sh`, `Read-Host`, ...),
 inside `bash -c "..."`, `$(...)` and the like too, whether or not Codex asked for a TTY. The one-shot forms stay
 allowed: `bash -c "..."`, `python x.py`, `python -c`, `psql -c`, `ssh -n host cmd`, `docker exec c ls`, or input from
-`< file`, a heredoc or a pipe. Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
+`< file`, a heredoc or a pipe. Codex sends no TTY or stdin field, so the rule reads the command text alone (PR 104
+review), and fails closed where it cannot read it:
+
+- A variable, `eval` or a substitution as the command word counts unless a literal assignment earlier in the same
+  command says what it runs (`X=python3; $X x.py` passes; `$SHELL`, `$(echo bash)` and `eval $cmd` do not).
+- `<&0`, `<&3` (any descriptor copy, since `exec 3<&0` makes one of the input) and `< /dev/stdin` read the seat's own
+  input, so they are no feed.
+- Editors, pagers and other full-screen programs count even when piped into (`ls | vim -`, `git log | less`, `fzf`), as
+  do git's interactive modes (`add -p`, `add -i`, `checkout -p`, `rebase -i`, `clean -i`, `commit --interactive`) and
+  `crontab -e`.
+- grep, sed, head, tail and cut given a file read that file, not the input (`grep foo file | awk` passes).
+
+Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
+handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every
+Codex, agy and OpenCode seat's pane also gets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR` and `VISUAL` set to
+`false`, `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` set to `cat`, `GH_PROMPT_DISABLED=1` and
+`GIT_TERMINAL_PROMPT=0` (`NO_PROMPT_ENV` in `cli/agents/env.ts`). An editor fails at once and a pager only prints.
+Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
 allowed and `view_image` is a read with the secret-file rule; `spawn_agent` stays blocked until the live check (#4612)
 shows a sub-agent's own tools reach the hook.
 
