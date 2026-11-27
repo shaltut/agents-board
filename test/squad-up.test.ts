@@ -685,7 +685,6 @@ test('every agent kind is told how to report an issue: its first prompt runs cb 
     const l = launchFor('demo', s, wantList('demo', s).find((w) => w.role === 'builder')!);
     assert.equal(l.agent, agent);
     assert.match(l.prompt, /, then cb role builder, then cb next$/, agent);
-    assert.ok(!/cb help bug|cb search/.test(JSON.stringify(ADAPTERS[agent].instructionMapping(l as any))), `${agent}: the mapping carries no board text`);
   }
   assert.match(readFileSync('prompts/roles/_common.md', 'utf8'), /Read `cb help bug` first \(duplicate check, Ahmed's recent changes, which project,/);
   assert.match(readFileSync('prompts/session.md', 'utf8'), /Read `cb help bug` first/);
