@@ -69,7 +69,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     add: { use: 'cb add <project> "<title>" ["<body>"] [-s <status>] [-p P0-P3] [-b "<body>"] [-l tag,tag] [--assignee <name>] [--link k=v] [--type <type>] [--epic E3] [--stage build --why "<why>"] [--repo <repo,repo>]', topic: 'work',
       does: 'Register work; prints #<id>. Defaults: -s backlog (in a pipeline project: next, starting at design), -p P2, --type task. -s in_progress = you are doing it now; -s next = it comes next. Types: task bug feature change chore research (a bug: prefer cb bug). In a pipeline project a new card starts at design; --stage build --why (lead only, bug or chore) skips it. --repo names the repos the card touches (a project of several repos).',
       eg: 'cb add iris "Fix month parse" -s in_progress -p P1 -b "3 B64 pends trace to it" -l ocr',
-      more: 'The first cb add to a new name creates that project: check the spelling. A number is never a project. Title then body as two quoted arguments works too (cb add iris "Fix month parse" "3 B64 pends trace to it"); bare words without quotes are all title (cb add iris Fix month parse). Both must be quoted phrases: a one-word body, or a quoted and a bare word mixed, needs -b. Never both -b and a second argument.' },
+      more: 'The first cb add to a new name creates that project: check the spelling. A number is never a project. Title then body as two quoted arguments works too (cb add iris "Fix month parse" "3 B64 pends trace to it"); bare words without quotes are all title (cb add iris Fix month parse). Only two quoted phrases split into title and body; with -b too, the body is given twice and refused. A one-word body needs -b. A quoted phrase mixed with bare words is refused without -b, and with -b all of it is the title. An empty argument counts as absent.' },
     tag: { use: 'cb tag <id> <tag>... [-<tag>]...',
       does: 'Add tags (short lowercase work streams: ocr, tamarind); -<tag> removes one. Prints the task\'s tags.',
       eg: 'cb tag 42 ocr b64 -old' },
@@ -107,7 +107,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
     bug: { use: 'cb bug <project> "<title>" "<body>" | -b "<what happened, how to reproduce, expected vs actual>" [-p P1] [-l tag] [--stage build --why "<why>"] [--repo <repo,repo>]', topic: 'work',
       does: 'File a bug you found outside your task; it goes to Next and the project\'s orchestrator is told and assigns it. Then keep working on your task. A problem with the board itself (cb, relay, web board): project claude-board.',
       eg: 'cb bug iris "Dates before 1970 parse as 1900" -b "row 8812: 1969-02-01 read as 1900-02-01; expected 1969-02-01"',
-      more: 'The body is required: -b "...", or a second quoted phrase after a quoted title (never both). The project must exist: a typo errors with the known projects instead of creating one. Filed already? Check first: cb search <project> "<words>".' },
+      more: 'The body is required: -b "...", or a second quoted phrase after a quoted title (not both: two quoted phrases plus -b is refused; with -b, any other words are all title). The project must exist: a typo errors with the known projects instead of creating one. Filed already? Check first: cb search <project> "<words>".' },
   }],
   ['ASK AHMED', {
     ask: { use: 'cb ask <project> "<question>" -o "<Label (Recommended)>=<why>" -o "<Label>=<tradeoff>" [-c "<context>"] [--multi] [--blocking -t <id>] [--to <user>] [--free] [--after Q<id> [--if "<Label>"]] [-i "<Caption>=<picture>" ...]', topic: 'ask',

@@ -47,6 +47,16 @@ test('cb add: a second quoted argument is the body; bare words stay one title; a
     assert.match(mixed.err, /got 2 arguments after the project .*or quote the whole title as one argument/);
   }
   assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused add creates no card');
+  // with -b, a mix of quoted and bare is all title, as before #4447
+  const mixB = cb(['add', 'demo', 'Fix month', 'parse', '-b', 'x']);
+  assert.deepEqual({ ...(await row(mixB.out)) }, { title: 'Fix month parse', body: 'x' });
+  const threeB = cb(['add', 'demo', 'Fix minute parse', 'part one', 'part two', '-b', 'y']);
+  assert.deepEqual({ ...(await row(threeB.out)) }, { title: 'Fix minute parse part one part two', body: 'y' });
+  // an empty or blank argument (an empty "$BODY" from a script) counts as absent
+  const emptyBody = cb(['add', 'demo', 'Fix second parse', '']);
+  assert.deepEqual({ ...(await row(emptyBody.out)) }, { title: 'Fix second parse', body: '' });
+  const blankB = cb(['add', 'demo', 'Fix week parse', '  ', '-b', 'z']);
+  assert.deepEqual({ ...(await row(blankB.out)) }, { title: 'Fix week parse', body: 'z' });
 });
 
 test('add prints id', async () => {

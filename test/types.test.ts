@@ -116,6 +116,13 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   assert.equal(mixed.code, 1, 'a one-word body is not split off a quoted title');
   assert.match(mixed.err, /bug got 2 arguments after the project .*Give the body with -b \(cb bug <project> "<title>" -b "<body>"\)/);
   assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused bug creates no card');
+  const mixB = cb(['bug', 'iris', 'claims page', 'broken', '-b', 'Open /claims. Blank.'], env);
+  assert.equal(mixB.code, 0, mixB.err);
+  const [b3] = await sql`select title, body from cb.tasks where id = ${Number(/^#(\d+)/.exec(mixB.out)![1])}`;
+  assert.deepEqual({ ...b3 }, { title: 'claims page broken', body: 'Open /claims. Blank.' }, 'with -b, a mix is all title');
+  const emptyBody = cb(['bug', 'iris', 'claims page blank', ''], env);
+  assert.equal(emptyBody.code, 1, 'an empty second argument is no body');
+  assert.match(emptyBody.err, /describe it: -b "what happened/);
 });
 
 test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {
