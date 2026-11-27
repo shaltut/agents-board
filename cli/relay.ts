@@ -132,14 +132,16 @@ let busy = false, again = false;
 // again every 5 minutes: a git pull that misses the relay's own files does not restart it, and a row can be made anew.
 // After a cb update flip the relay restarts into the new version within seconds, and its first read sends the new sha.
 const CODE_ROOT = join(HERE, '..');
-let codeDue = 0; // Infinity: a board from before cb.seat_code
+let codeDue = 0;
 async function sendCode() {
   if (Date.now() < codeDue) return;
   try {
     const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeSha(CODE_ROOT)}) as ok`;
     if (ok) codeDue = Date.now() + 300_000; // no row yet: the next read tries again
   } catch (e: any) {
-    if (e?.code === '42883') codeDue = Infinity;
+    // a board from before cb.seat_code: asked again in 5 minutes, so a board deployed after this relay started hears it
+    // without a relay restart (a deploy changes no relay file)
+    if (e?.code === '42883') codeDue = Date.now() + 300_000;
     else log(`code sha not sent: ${e?.code ?? e?.message}`);
   }
 }
