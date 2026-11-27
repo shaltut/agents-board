@@ -363,3 +363,55 @@ test('the fence reads two filled paths and quoted $( ) paths as reads; judges op
     for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
   }
 });
+
+// PR 77 round 5: a partly filled subcommand after a filled word ($S$X, ch$X, ch${X}, check%X%) is filled (I2); an option
+// outside git's global options ends the test, a program that never runs or prints its arguments (cat, grep, rg, diff,
+// git itself in command position ...) runs no filled word when it is a real command word, and the test stops at a closing
+// ) or backtick (I3).
+test('the fence judges a partly filled subcommand as git; two variables or a variable after an option in a read pass', () => {
+  const writes = [
+    'caffeinate $GIT $S$X -- opencode.json',
+    'caffeinate $GIT ch$X -- opencode.json',
+    'caffeinate $G $S$X -- opencode.json',
+    'bash -c "$G ch$X -- opencode.json"',
+    'bash -c "$G $S$X -- opencode.json"',
+    'caffeinate $G ch$X -- opencode.json',
+    'caffeinate $G ch${X} -- opencode.json',
+    'caffeinate $G che$(echo ck)out -- opencode.json',
+    'caffeinate $G check%X% -- opencode.json',
+    'caffeinate $(echo --name) cat $GIT checkout -- opencode.json',
+    'cat $(caffeinate $GIT checkout -- opencode.json)',
+    'echo $A $B checkout -- opencode.json | sh'];
+  const reads = [
+    'git diff $BASE $HEAD -- opencode.json',
+    'git diff "$BASE" "$HEAD" -- .claude/settings.json',
+    'git diff $BASE $HEAD --stat -- .codex/config.toml',
+    'git log --oneline $FROM $TO -- opencode.json',
+    'git diff ${BASE} ${HEAD} -- opencode.json',
+    'git show $SHA $SHA2 -- opencode.json',
+    'git -C $REPO diff $A $B -- opencode.json',
+    'git log -n $N $REV -- opencode.json',
+    'git blame -L $A,$B $REV -- opencode.json',
+    'git log --format=%h $A $B -- opencode.json',
+    'rg -n $PAT $DIR opencode.json',
+    'rg -n -e $A -e $B opencode.json',
+    'grep -n -e $A -e $B .claude/settings.json',
+    'grep -n $A $FILE opencode.json',
+    'cat $A $B opencode.json',
+    'wc -l $F $G opencode.json',
+    'Select-String -Path $HOME/.codex/config.toml -Pattern $P',
+    'Get-Content $A, $B .claude/settings.json',
+    'git diff $(git rev-parse $A) $(git rev-parse $B) -- opencode.json',
+    'cat `echo $A` opencode.json',
+    'cat "`echo $A`" opencode.json',
+    'diff $(dirname $A) $(dirname $B)/opencode.json',
+    'Get-Content -Path $HOME/.codex/config.toml -TotalCount $N',
+    'Get-Content $env:USERPROFILE/.codex/config.toml -Tail $N',
+    'grep -A $N -B $M hooks opencode.json',
+    'cmp $A $B opencode.json',
+    'stat -c %y $HOME/.claude/settings.json ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});

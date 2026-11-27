@@ -510,6 +510,9 @@ test('long commands stay fast', () => {
     ['fence, 120 KB of $A -c after an unknown program then a fence path', asBuilder('caffeinate ' + '$A -c '.repeat(20000) + 'opencode.json')],
     ['fence, 140 KB of $A ./x (paths, never git) then a fence path', asBuilder('caffeinate ' + '$A ./x '.repeat(20000) + 'opencode.json')],
     ['fence, 200 KB of quoted "$A log" words then a fence path', asBuilder('caffeinate ' + kb200('"$A log" ') + 'opencode.json')],
+    // PR 77 round 5 (I1): group ends are found once per segment, so 300 KB of unclosed $( groups inside quotes stays linear
+    ["fence, 300 KB of unclosed $( groups in a quoted word, then a copy, as a builder", asBuilder("echo '" + '$( a '.repeat(60000) + "opencode.json'; cp /tmp/x opencode.json")],
+    ["fence, 300 KB of unclosed ${ groups after a comment, then a copy, as a builder", asBuilder('echo ok # ' + '${ a '.repeat(60000) + 'opencode.json\ncp /tmp/x opencode.json')],
     ['an unterminated quoted heredoc header, then 600 KB', () => check(heredocThen600KB)],
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],

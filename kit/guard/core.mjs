@@ -751,21 +751,43 @@ const GIT_COMMANDS = new Set([...GIT_READS, 'add', 'am', 'apply', 'archive', 'bi
   'merge-recursive-theirs', 'merge-resolve', 'merge-subtree', 'pickaxe', 'quiltimport', 'remote-ext', 'remote-fd', 'remote-ftp', 'remote-ftps',
   'remote-http', 'remote-https', 'repo', 'submodule--helper', 'subtree', 'survey', 'update', 'upload-archive--writer', 'web--browse']);
 // the index just past the filled word at raw[k]: past a whole ${...}, $(...) or backtick group
+const SHAPES = new WeakMap();
+function shape(raw) {
+  let r = SHAPES.get(raw);
+  if (r) return r;
+  const ends = new Int32Array(raw.length).fill(raw.length), closingTick = new Uint8Array(raw.length), nextTick = new Int32Array(raw.length + 1).fill(-1);
+  const st = { '(': [], '{': [] };
+  let ticks = 0;
+  for (let j = 0; j < raw.length; j++) {
+    const x = raw[j];
+    if (x === '(' || x === '{') st[x].push(j);
+    else if (x === ')' || x === '}') { const o = st[x === ')' ? '(' : '{'].pop(); if (o !== undefined) ends[o] = j + 1; }
+    else if (x === '`') closingTick[j] = ticks++ % 2;
+  }
+  for (let j = raw.length - 1, n = -1; j >= 0; j--) { nextTick[j] = n; if (raw[j] === '`') n = j; }
+  r = { ends, closingTick, nextTick };
+  SHAPES.set(raw, r);
+  return r;
+}
 function filledEnd(raw, k) {
   const open = raw[k] === '`' ? '`' : raw[k] === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? raw[k + 1] : null;
   if (!open) return k + 1;
-  if (open === '`') { const j = raw.indexOf('`', k + 1); return j < 0 ? raw.length : j + 1; }
-  const close = open === '(' ? ')' : '}';
-  for (let j = k + 2, depth = 1; j < raw.length; j++) {
-    if (raw[j] === open) depth++;
-    else if (raw[j] === close && --depth === 0) return j + 1;
-  }
-  return raw.length;
+  const { ends, nextTick } = shape(raw);
+  if (open === '`') { const j = nextTick[k]; return j < 0 ? raw.length : j + 1; }
+  return ends[k + 1];
 }
 // a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
 const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
 // git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
 const MAX_FILLED_OPTS = 32;
+const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', '--exec-path', '--html-path', '--man-path', '--info-path',
+  '-p', '--paginate', '-P', '--no-pager', '--no-replace-objects', '--no-lazy-fetch', '--no-optional-locks', '--no-advice', '--bare',
+  '--git-dir', '--work-tree', '--namespace', '--config-env', '--attr-source', '--literal-pathspecs', '--glob-pathspecs',
+  '--noglob-pathspecs', '--icase-pathspecs', '--list-cmds', '--super-prefix', '--shallow-file', '--']);
+// programs that neither run nor print their arguments (not echo/printf: what they print may be run); git in command
+// position is judged whole by the command-position rule, so its later words are arguments too
+const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'jq', 'cmp', 'diff', 'stat', 'sha256sum', 'md5sum',
+  'get-content', 'gc', 'select-string', 'sls', 'test-path', 'get-item', 'gi']);
 // a filled word at raw[k] (any position): true when it is a git call that writes. Its options are judged as git's, not
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
@@ -774,16 +796,18 @@ function filledWrites(raw, k, judge) {
   const after = filledEnd(raw, k);
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
-    if (/^[(){}]$/.test(x)) continue;
+    if (x === ')' || (x === '`' && shape(raw).closingTick[j])) return false; // the filled word's command ended
+    if (/^[({}]$/.test(x)) continue;
     const v = unquote(x);
     if (x !== '`' && v.startsWith('-')) {
       if (++opts > MAX_FILLED_OPTS) return true;
+      if (!GIT_GLOBAL_OPTS.has(v.split('=')[0]) && !/^-C./.test(v)) return false;
       const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
       if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
       if (GIT_OPT_ARG.has(v)) j++;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v);
+    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
     return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
@@ -791,7 +815,7 @@ function filledWrites(raw, k, judge) {
 }
 const gitWrites = (seg, inQuote = false) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
-  let start = true, runsEnv = false, launched = false, ticks = 0;
+  let start = true, runsEnv = false, launched = false, noRun = false, afterClose = false, ticks = 0;
   const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
   // round 4, I5: each git call reads the rest of the segment, so a segment judges at most MAX_COMMANDS_PER_SEGMENT of them
   // and blocks past that (a scan that runs past the hook's timeout lets the command through), as scanCommands does
@@ -804,6 +828,8 @@ const gitWrites = (seg, inQuote = false) => {
       if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
       if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
+      noRun = false;
+      afterClose = t === ')' || t === '}' || (t === '`' && ticks % 2 === 0);
       continue;
     }
     const u = unquote(t);
@@ -831,10 +857,12 @@ const gitWrites = (seg, inQuote = false) => {
     else if ((isGit || filled) && judge(words, start && isGit)) return true;
     // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
     // behind), judged by the word after it (GIT_COMMANDS)
-    if (isFilled(u) && filledWrites(raw, k, judge)) return true;
+    if (isFilled(u) && !noRun && filledWrites(raw, k, judge)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
+      // only a real command word: not one after a closing ) } or backtick (caffeinate $(echo --name) cat $GIT ...)
+      noRun = !launched && !afterClose && (isGit || NO_RUN.has(cmdName(t).toLowerCase()));
     }
   }
   return false;
