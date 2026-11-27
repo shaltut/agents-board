@@ -40,14 +40,16 @@ async function paired() {
   const { link } = await r.json();
   text(`/start ${new URL(link).searchParams.get('start')}`);
   await until(async () => (await (await app.request('/api/telegram', { headers: PAGE })).json()).paired, 'pairing');
-  fake.calls.length = 0;
+  fake.calls.length = 0; fake.attempts.length = 0; // a fresh board numbers its questions from 1 again
   return sql;
 }
 const ask = async (sql: any, body: string, more: Record<string, unknown> = {}) => Number((await sql`select cb.ask(project => 'demo',
   body => ${body}, options => ${(more.options ?? null) as any}::jsonb, context => ${(more.context ?? null) as any}, multi => ${!!more.multi},
   actor => 'W1', to_user => ${(more.to_user ?? null) as any}, parent => ${(more.parent ?? null) as any}, if_answer => ${(more.if_answer ?? null) as any}) as id`)[0].id);
-// the test's own client returns bigint as text; Telegram sends numbers
-const msgOf = async (sql: any, id: number) => Number((await sql`select message_id from cb.telegram_messages where question_id = ${id}`)[0].message_id);
+// the test's own client returns bigint as text; Telegram sends numbers. The row is written just after the send the test
+// saw: wait for it (read at once, it raced the insert)
+const msgOf = async (sql: any, id: number, ms = 4000) => Number((await until(async () =>
+  (await sql`select message_id from cb.telegram_messages where question_id = ${id}`)[0], `the row for Q${id}`, ms)).message_id);
 const status = async (sql: any, id: number) => (await sql`select status, answer, answered_by, sent_back from cb.questions where id = ${id}`)[0];
 
 test('compose: plain text, options as buttons, a send-back row, context cut to the 4096 limit and said so', () => {
@@ -432,4 +434,100 @@ test('an API that keeps failing a send is tried again with growing gaps, not ham
     fake.drop.next = 0; // the API is back: the next try sends it
     await until(() => sentFor(id).length, 'sent once the API is back', 8000);
   } finally { fake.drop.next = 0; }
+});
+
+// #4629 (PR 87 review m1-m4): what a send's failure leads to, per question.
+const triesFor = (qid: number) => fake.attempts.filter((a) => a.text.startsWith(`Q${qid} `));
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function capture() {
+  const logged: string[] = [], orig = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.join(' ')); };
+  return { logged, restore: () => { console.error = orig; } };
+}
+const clean = (logged: string[]) => logged.every((l) => !l.includes('123:test') && !l.includes(String(AHMED)));
+
+test('a send Telegram accepted whose row will not save is not sent again: only the row is retried (#4629 m1)', async () => {
+  const sql = await paired();
+  const { logged, restore } = capture();
+  await sql`drop trigger if exists test_refuse_row on cb.telegram_messages`;
+  await sql`create or replace function cb.test_refuse_row() returns trigger language plpgsql as $$ begin raise exception 'test: row refused'; end $$`;
+  await sql`create trigger test_refuse_row before insert on cb.telegram_messages for each row execute function cb.test_refuse_row()`;
+  try {
+    const id = await ask(sql, 'Saved?', { options: ['Yes', 'No'] });
+    await until(() => sentFor(id).length, 'sent');
+    await pause(2500); // past the first retry gaps (1 s, then 2 s)
+    assert.equal(sentFor(id).length, 1, 'Telegram got it once: only the row is retried');
+    assert.ok(logged.some((l) => l.includes(`Q${id} `) && /sent, not recorded/.test(l)), 'logged as sent, not as a failed send');
+    assert.ok(logged.some((l) => /1 sent but not recorded; trying again in \d+s/.test(l)), 'the count says sent, not unsent');
+    await sql`drop trigger test_refuse_row on cb.telegram_messages`;
+    assert.equal(await msgOf(sql, id, 9000), sentFor(id)[0]!.message_id, 'the row holds the message Telegram took');
+    assert.equal(sentFor(id).length, 1);
+    assert.ok(clean(logged), 'no token or chat id in a log line');
+  } finally {
+    restore();
+    await sql`drop trigger if exists test_refuse_row on cb.telegram_messages`;
+    await sql`drop function if exists cb.test_refuse_row()`;
+  }
+});
+
+test('a send Telegram refuses (403/400) is not tried again and is logged as not reached; the chat writing in tries it again (#4629 m2)', async () => {
+  const sql = await paired();
+  const { logged, restore } = capture();
+  fake.hook.send = (b) => /Blocked\?/.test(b.text) ? { status: 403, description: 'Forbidden: bot was blocked by the user' } : null;
+  try {
+    const id = await ask(sql, 'Blocked?');
+    await until(() => triesFor(id).length, 'tried');
+    await pause(2500); // a retry would have come at 1 s and 2 s
+    assert.equal(triesFor(id).length, 1, 'refused once: not tried again');
+    assert.ok(logged.some((l) => new RegExp(`Q${id} not reached Telegram: telegram sendMessage: 403`).test(l)), 'the refusal is logged');
+    assert.ok(logged.some((l) => /1 not reached Telegram/.test(l)), 'and counted');
+    const other = await ask(sql, 'Fine?'); // a change on the board sends the next question, and leaves the refused one
+    await until(() => sentFor(other).length, 'another question still goes');
+    await pause(300);
+    assert.equal(triesFor(id).length, 1, 'a board change does not try it again either');
+    fake.hook.send = null; // unblocked: Ahmed starts the bot again, and the chat writes in
+    text('/start');
+    await until(() => sentFor(id).length, 'sent once the chat writes to the bot');
+    assert.ok(clean(logged), 'no token or chat id in a log line');
+  } finally { restore(); fake.hook.send = null; }
+});
+
+test('one question that keeps failing does not slow a new one: each question has its own gap (#4629 m3)', async () => {
+  const sql = await paired();
+  let briefOk = false;
+  fake.hook.send = (b) => /Stuck\?/.test(b.text) || (/Brief\?/.test(b.text) && !briefOk) ? 'drop' : null;
+  try {
+    const stuck = await ask(sql, 'Stuck?');
+    // let its gap grow to 4 s (a shared gap would now be 8 s)
+    await until(() => { const t = triesFor(stuck); return t.length >= 2 && t.at(-1)!.at - t.at(-2)!.at >= 3500; }, 'a 4 s gap', 15000);
+    const brief = await ask(sql, 'Brief?');
+    await until(() => triesFor(brief).length, 'its first send dropped');
+    await pause(400); // the board is quiet: only a retry sends it now
+    briefOk = true;
+    await until(() => sentFor(brief).length, 'retried on its own 1 s gap, not the stuck one\'s', 3000);
+  } finally { fake.hook.send = null; }
+});
+
+test('a 429 waits at least its retry_after, even over 30 s, and holds the other sends meanwhile (#4629 m4)', async () => {
+  const sql = await paired();
+  const { logged, restore } = capture();
+  fake.hook.send = () => ({ status: 429, description: 'Too Many Requests: retry after 45', retry_after: 45 });
+  try {
+    const id = await ask(sql, 'Flood?');
+    await until(() => triesFor(id).length, 'tried');
+    const wait = await until(() => logged.map((l) => /not sent; trying again in (\d+)s/.exec(l)?.[1]).filter(Boolean).at(-1), 'the retry logged');
+    assert.ok(Number(wait) >= 40, `the wait is the retry_after (45 s), not the 1 s backoff: ${wait}s`);
+    const other = await ask(sql, 'Meanwhile?'); // a board change inside the window
+    await pause(2500);
+    assert.equal(triesFor(id).length, 1, 'not tried again inside the window');
+    assert.equal(triesFor(other).length, 0, 'nor is any other send: the window is the bot\'s');
+    assert.ok(clean(logged), 'no token or chat id in a log line');
+    fake.hook.send = null;
+    await tg.stopTelegram(); // a restart forgets the window (it is in memory) and sends what waits
+    tg.startTelegram({ token: '123:test', api: fake.url });
+    await until(() => sentFor(id).length && sentFor(other).length, 'both sent after the restart');
+  } finally {
+    restore(); fake.hook.send = null;
+    if (!(await tg.telegramStatus()).configured) tg.startTelegram({ token: '123:test', api: fake.url });
+  }
 });
