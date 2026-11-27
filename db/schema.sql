@@ -4650,11 +4650,12 @@ end $$;
 
 -- Ahmed replaces one role's text, or _common (the rules every role follows), for every project (#4332, Q2969). Dashboard
 -- only. Kept as given apart from blank lines and spaces at either end. A text the same as the saved one writes nothing.
--- Every change keeps the old and new text (cb.role_text_edits) and writes an event. Seats read the new text at their next
+-- Every change keeps the old and new text (cb.role_text_edits) and writes an event naming that row (role, edit_id and the
+-- two lengths: the texts stay in role_text_edits, not doubled into cb.events). Seats read the new text at their next
 -- cb role. The cap keeps what every seat reads at start short: the longest file is about 4,000 characters.
 create function cb.role_text_set(role text, body text, actor text default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
-declare a text; b text := btrim(coalesce(body, ''), E' \t\r\n'); old text; r cb.role_texts;
+declare a text; b text := btrim(coalesce(body, ''), E' \t\r\n'); old text; r cb.role_texts; eid bigint;
 begin
   perform cb.dashboard_only('Project settings');
   a := cb.set_actor(actor);
@@ -4673,9 +4674,10 @@ begin
   insert into cb.role_texts as x (role, body, updated_at, updated_by) values (role, b, now(), a)
     on conflict on constraint role_texts_pkey do update set body = excluded.body, updated_at = excluded.updated_at, updated_by = excluded.updated_by
     returning * into r;
-  insert into cb.role_text_edits (role, before, after, actor) values (role, old, b, a);
+  insert into cb.role_text_edits (role, before, after, actor) values (role, old, b, a) returning id into eid;
   insert into cb.events (actor, project, kind, summary, data)
-    values (a, null, 'updated', 'role text updated', jsonb_build_object('role', role, 'before', old, 'after', b));
+    values (a, null, 'updated', 'role text updated',
+            jsonb_build_object('role', role, 'edit_id', eid, 'before_length', length(old), 'after_length', length(b)));
   return jsonb_build_object('role', role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by, 'changed', true);
 end $$;
 
@@ -4843,9 +4845,11 @@ end $$;
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
 -- Every refusal names the field. base (#4332): the version the caller's copy was taken at (cb.squad_get with_version,
 -- cb.squad_page); another version is refused, so a page or a file can't silently undo a save made since. null skips the
--- check (a CLI from before it, cb squad set --overwrite). A save that changes nothing writes nothing and keeps the version.
--- base is after actor: callers pass actor third by position.
-create function cb.squad_set(project text, squad jsonb, actor text default null, base int default null) returns jsonb language plpgsql as $$
+-- check (a CLI from before it). A save that changes nothing writes nothing and keeps the version. Returns the saved squad;
+-- with_version adds "version" (as saved now) and "changed" (false for a no-op), from the same locked read, for cb squad set
+-- and the page. base and with_version are after actor: callers pass actor third by position.
+create function cb.squad_set(project text, squad jsonb, actor text default null, base int default null,
+                             with_version boolean default false) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare
   a text := cb.set_actor(actor); p text := cb.read_project(project);
@@ -5089,12 +5093,14 @@ begin
     raise exception 'Someone changed this squad since your copy was taken (it is now version %, your copy is version %). Load it again (reopen the page, or cb squad show % --json), make your change there and save.', ver, base, p;
   end if;
   -- nothing changed: no event (the supervisor's 20-snapshot window keeps real versions only) and the same version
-  if cur is not distinct from ns then return ns; end if;
+  if cur is not distinct from ns then
+    return ns || case when with_version then jsonb_build_object('version', ver, 'changed', false) else '{}'::jsonb end;
+  end if;
   update cb.projects pr set squad = ns, squad_version = ver + 1 where pr.slug = p;
   -- 'edited' is not an allowed event kind (events_kind_check); 'updated' is. via: the dashboard (page) or a session (cli)
   insert into cb.events (actor, project, kind, summary, data) values (a, p, 'updated', 'squad updated',
     jsonb_build_object('squad', ns, 'version', ver + 1, 'via', case when cb._is_dashboard() then 'page' else 'cli' end));
-  return ns;
+  return ns || case when with_version then jsonb_build_object('version', ver + 1, 'changed', true) else '{}'::jsonb end;
 end $$;
 
 -- ---------------------------------------------------------------- Project settings page (#4332)

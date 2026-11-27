@@ -492,7 +492,9 @@ squad file (`cb squad set <project> -f <file>`):
 - Every save that changes a squad raises its version. `cb squad show <p> --json` prints it as `"version"` and `cb squad
   set` sends it back, so a file taken before a newer save (from the project settings page or another set) is refused.
   Take it again with `show --json` and redo the change. Once the squad has a version, a kept squad file with no
-  `version` is refused unless you pass `--overwrite`. A script that sets a squad from a stored file needs one or the other.
+  `version` is refused unless you pass `--overwrite`, which replaces the current squad, including changes made on the
+  page. A save made between its read and its write is still refused. A script that sets a squad from a stored file needs
+  one or the other.
 - Role texts live in the database (`cb.role_texts`), and Ahmed edits them on the project settings page. Every edit is
   kept in `cb.role_text_edits`. Setup seeds only a role that has no row from `prompts/roles/*.md`. It never overwrites or
   deletes a row, so a change to those files after a board's first setup has to be pasted on the page.

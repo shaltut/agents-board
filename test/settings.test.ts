@@ -61,7 +61,10 @@ test('squad_set: each real change raises the version once, a no-op writes nothin
   assert.equal(await version(sql), 1);
   assert.equal((await events(sql)).length, 1);
 
-  await sql`select cb.squad_set('demo', ${sql.json(MORE)}, 'ahmed', base => 1)`;
+  assert.deepEqual((await sql`select cb.squad_set('demo', ${sql.json(MORE)}, 'ahmed', base => 1, with_version => true) as s`)[0].s,
+    { ...MORE, version: 2, changed: true });
+  assert.deepEqual((await sql`select cb.squad_set('demo', ${sql.json(MORE)}, 'ahmed', base => 2, with_version => true) as s`)[0].s,
+    { ...MORE, version: 2, changed: false });
   assert.equal(await version(sql), 2);
   // a copy taken at version 1 can't undo the change made since
   await assert.rejects(sql`select cb.squad_set('demo', ${sql.json(SQUAD)}, 'ahmed', base => 1)`,
@@ -134,11 +137,13 @@ test('cb squad show --json carries the version and cb squad set takes it back as
     // no version once the squad has one: refused, unless --overwrite
     const bare = cb(['squad', 'set', 'demo', '-f', file('a.json', SQUAD)]);
     assert.equal(bare.code, 1);
-    assert.match(bare.err, /demo's squad was saved as version 2, and this file has no version, so it could undo a newer change\. Take the current squad with cb squad show demo --json, edit that and set it again; or add --overwrite to replace it anyway\./);
+    assert.match(bare.err, /demo's squad was saved as version 2, and this file has no version, so it could undo a newer change\. Take the current squad with cb squad show demo --json, edit that and set it again\. \(--overwrite replaces the current squad with this file, including any change made on the settings page\.\)/);
     assert.equal(await version(sql), 2);
-    const forced = cb(['squad', 'set', 'demo', '-f', file('a.json', SQUAD), '--overwrite']);
+    const forced = cb(['squad', 'set', 'demo', '-f', file('a.json', SQUAD), '--overwrite', '--json']);
     assert.equal(forced.code, 0, forced.err);
-    assert.equal(forced.out, 'squad saved for demo (version 3)');
+    // the reply comes from squad_set's own locked read: version and changed
+    assert.deepEqual(JSON.parse(forced.out), { ...SQUAD, version: 3, changed: true });
+    assert.equal(cb(['squad', 'set', 'demo', '-f', file('a.json', SQUAD), '--overwrite']).out, 'nothing changed for demo: the squad is already this (version 3)');
     assert.match(cb(['squad', 'set', 'demo', '-f', file('d.json', { ...SQUAD, version: 'x' })]).err, /"version" in the squad file must be the number cb squad show demo --json printed/);
   } finally { rmSync(dir, { recursive: true }); }
 });
@@ -218,7 +223,11 @@ test('role_text_set: Ahmed only, plain refusals, a cap, history with before and 
     [['builder', true, 'Build the card.', 'ahmed'], ['_common', false, 'Rules for all.', 'ahmed'], ['builder', false, 'yyyyyyyyyyyyyyy', 'ahmed']]);
   const ev = await sql`select actor, project, data from cb.events where summary = 'role text updated' order by id`;
   assert.equal(ev.length, 3);
-  assert.deepEqual([ev[0].actor, ev[0].project, ev[0].data.role, ev[0].data.before === before, ev[0].data.after], ['ahmed', null, 'builder', true, 'Build the card.']);
+  // the event names the edit row and the sizes; the texts themselves stay in role_text_edits, not in cb.events
+  const ids = (await sql`select id from cb.role_text_edits order by id`).map((e: any) => Number(e.id));
+  assert.deepEqual([ev[0].actor, ev[0].project, ev[0].data], ['ahmed', null,
+    { role: 'builder', edit_id: ids[0], before_length: before.length, after_length: 'Build the card.'.length }]);
+  assert.deepEqual(ev.map((e: any) => e.data.edit_id), ids);
 
   const [{ pg }] = await sql`select cb.role_text_page() as pg`;
   assert.deepEqual(pg.roles.map((x: any) => x.role), ['_common', 'lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);

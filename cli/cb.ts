@@ -805,13 +805,14 @@ ${body}`, json: pg };
         if (hasVersion) delete doc.version;
         if (hasVersion && !(Number.isInteger(base) && base >= 0))
           throw new Error(`"version" in the squad file must be the number cb squad show ${args[1]} --json printed`);
-        const before = ((await callFn('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
-        if (!hasVersion && before > 0 && !o.overwrite)
-          throw new Error(`${args[1]}'s squad was saved as version ${before}, and this file has no version, so it could undo a newer change. Take the current squad with cb squad show ${args[1]} --json, edit that and set it again; or add --overwrite to replace it anyway.`);
-        const saved = await callFn('squad_set', { project: args[1], squad: doc, actor, base: o.overwrite ? null : base });
-        const after = ((await callFn('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
-        return { out: after === before ? `nothing changed for ${args[1]}: the squad is already this (version ${after})`
-          : `squad saved for ${args[1]} (version ${after})`, json: { ...(saved as any), version: after } };
+        // a file with no version: the version just read is its base, so it may not undo a newer change unless --overwrite
+        // says replace what is there. Even then a save made between this read and the set is refused (the race check).
+        const now = ((await callFn('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
+        if (!hasVersion && now > 0 && !o.overwrite)
+          throw new Error(`${args[1]}'s squad was saved as version ${now}, and this file has no version, so it could undo a newer change. Take the current squad with cb squad show ${args[1]} --json, edit that and set it again. (--overwrite replaces the current squad with this file, including any change made on the settings page.)`);
+        const saved: any = await callFn('squad_set', { project: args[1], squad: doc, actor, base: o.overwrite || !hasVersion ? now : base, with_version: true });
+        return { out: saved.changed ? `squad saved for ${args[1]} (version ${saved.version})`
+          : `nothing changed for ${args[1]}: the squad is already this (version ${saved.version})`, json: saved };
       }
       const sq = await callFn('squad_get', { project: args[1], with_version: true }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
