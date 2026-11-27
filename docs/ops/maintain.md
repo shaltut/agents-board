@@ -72,6 +72,8 @@ Then the workers, right away, because their `cb` must match the schema:
   It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
 - **Install the release on a copy** (#4352): `cb update --from <board https address>` on the worker (the Mac),
   instead of the tar lines above. A git checkout (the PC) is refused: it updates with `git pull --ff-only`.
+  Once a copy has had one `cb update`, never use the tar lines on it again: they would extract into the version in
+  use (through the link) instead of a new one. This change touches `cli/relay.ts`, so the Mac gate below applies.
   - First run: the copy moves to `<copy>.home` and `<copy>` becomes a link to it (a symlink; a junction on Windows),
     the same code. Each release goes in `<copy>.home/versions/<sha>`: written from the verified archive, `bin/cb` made
     executable (git stores it 644), checked file by file against the manifest, then `cb help` and `cb sessions` run

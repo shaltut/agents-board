@@ -92,6 +92,9 @@ test('the image (no .git) serves the release.tgz made at deploy; without one it 
   writeFileSync(join(image, 'release.tgz'), gitArchive(root));
   const r = releaseAt(image);
   assert.deepEqual(r.manifest, releaseAt(root).manifest);
+  assert.equal(r.deps, null); // no lockfile beside it: cb update then refuses with "update the board first"
+  writeFileSync(join(image, 'pnpm-lock.yaml'), 'lockfileVersion: x\n'); // the image copies it to /app (Dockerfile)
+  assert.deepEqual(releaseAt(image).deps, { 'pnpm-lock.yaml': createHash('sha256').update('lockfileVersion: x\n').digest('hex') });
   assert.throws(() => releaseAt(dir()), /no release\.tgz in .* and no git checkout: make it at deploy/);
 });
 

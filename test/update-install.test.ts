@@ -13,6 +13,7 @@ import { freshDb, TEST_URL } from './helpers.ts';
 import { releaseApp, setRelease } from '../server/release.ts';
 import { releaseAt } from '../cli/release-archive.ts';
 import { startedAs } from '../cli/started-as.ts';
+import { layout, runningFrom } from '../cli/update-install.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-upd-${process.pid}-`));
 const server = serve({ fetch: releaseApp.fetch, port: 0, hostname: '127.0.0.1' });
@@ -113,6 +114,15 @@ test('cb update --rollback flips back to the version before, and again to the ne
   assert.equal(back.code, 0, back.err);
   assert.equal(JSON.parse(back.out).current, B);
   assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B)));
+  // an update that stopped between its flip and its note: the note disagrees with the link, so no blind flip
+  const note = readFileSync(join(home, 'versions', 'state.json'), 'utf8');
+  writeFileSync(join(home, 'versions', 'state.json'), JSON.stringify({ current: 'original', previous: B }));
+  try {
+    const off = await cb(['update', '--rollback', '--root', live]);
+    assert.equal(off.code, 1);
+    assert.match(off.err, /says original is in use, but .* points at [0-9a-f]{40} \(an update stopped between its flip and its note\)/);
+    assert.equal(realpathSync(live), realpathSync(join(home, 'versions', B)));
+  } finally { writeFileSync(join(home, 'versions', 'state.json'), note); }
 });
 
 test('cb update refuses: a git checkout, a runner running from the copy, a second update, other packages; nothing changes', { timeout: 300_000 }, async () => {
@@ -176,6 +186,20 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   assert.equal(realpathSync(live), before);
   assert.ok(!readdirSync(join(home, 'versions')).some((d) => d.startsWith('.staging') || d === bad));
   git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
+});
+
+test('the runner or supervisor is found by its real command lines: through bin/cb, cb.ts, the spawned child, or a relative path', () => {
+  const L = layout(live);
+  const p = (cmd: string, pid = 9_000_001) => ({ pid, cmd });
+  const run = runningFrom(L, [
+    p(`/bin/sh ${live}/bin/cb runner`, 1), p(`node ${live}/bin/../cli/cb.ts supervise`, 2),
+    p(`node ${home}/versions/${B}/cli/runner.ts`, 3), p('node cli/cb.ts runner', 4),
+    p(`node ${live}/cli/relay.ts --pane w1:p1 --agent claude`, 5), p(`node ${live}/cli/cb.ts sessions`, 6),
+    p('node /elsewhere/claude-board/cli/cb.ts runner', 7), p('node /elsewhere/claude-board/cli/relay.ts', 8)]
+    .map((x) => ({ ...x, cmd: process.platform === 'win32' ? x.cmd.replaceAll('/', '\\') : x.cmd })));
+  assert.deepEqual(run.daemons.map((x) => x.pid), [1, 2, 3, 4]);
+  assert.deepEqual(run.relays.map((x) => x.pid), [5]);
+  assert.deepEqual(run.others.map((x) => x.pid), [6]);
 });
 
 test('a relay or cb started through the copy path watches and relaunches through it, not the real version folder', () => {

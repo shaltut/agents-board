@@ -72,14 +72,17 @@ export function processes(): Proc[] {
   if (r.status !== 0) throw new Error(`cannot list processes (${String(r.stderr || r.error?.message || '').trim().slice(0, 200)})`);
   return r.stdout.split(/\r?\n/).map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m![1]), cmd: m![2]! }));
 }
-/** The processes running code from this copy, by kind: relays restart themselves; a runner or supervisor does not. */
+/** The processes running code from this copy, by kind: relays restart themselves; a runner or supervisor does not.
+ *  A runner or supervisor started by a relative path (node cli/cb.ts runner) names no folder: counted as this copy's. */
 export function runningFrom(L: Layout, procs: Proc[]) {
   const norm = (s: string) => (win ? s.replace(/\\/g, '/').toLowerCase() : s);
   const roots = [norm(L.live) + '/', norm(L.home) + '/'];
   const mine = new Set([process.pid, process.ppid]);
-  const ours = procs.filter((p) => !mine.has(p.pid) && roots.some((r) => norm(p.cmd).includes(r)));
-  const kind = (c: string) => /\/cli\/relay\.ts\b/.test(norm(c)) ? 'relay'
-    : /\/cli\/(runner|supervise)\.ts\b|\/cli\/cb\.ts["']?\s+(runner|supervise)\b/.test(norm(c)) ? 'daemon' : 'other';
+  const DAEMON = /(^|[\s"'/])cli\/(runner|supervise)\.ts\b|(^|[\s"'/])(cli\/cb\.ts|bin\/cb)["']?\s+(runner|supervise)\b/;
+  const RELATIVE = /(^|[\s"'])(\.\/)?(cli|bin)\/(runner\.ts|supervise\.ts|cb\.ts|cb)["']?(\s|$)/;
+  const kind = (c: string) => /\/cli\/relay\.ts\b/.test(norm(c)) ? 'relay' : DAEMON.test(norm(c)) ? 'daemon' : 'other';
+  const ours = procs.filter((p) => !mine.has(p.pid)
+    && (roots.some((r) => norm(p.cmd).includes(r)) || (kind(p.cmd) === 'daemon' && RELATIVE.test(norm(p.cmd)))));
   return { relays: ours.filter((p) => kind(p.cmd) === 'relay'), daemons: ours.filter((p) => kind(p.cmd) === 'daemon'), others: ours.filter((p) => kind(p.cmd) === 'other') };
 }
 function refuseDaemons(run: ReturnType<typeof runningFrom>, force: boolean) {
@@ -238,6 +241,8 @@ export function rollback(o: { root: string; force?: boolean; procs?: () => Proc[
   const st = readState(L);
   const now = currentId(L)!;
   if (!st?.previous) throw new Error(`no previous version recorded in ${L.state}`);
+  if (st.current !== now) throw new Error(`${L.state} says ${st.current} is in use, but ${L.live} points at ${now} (an update stopped between its flip and its note): `
+    + 'run cb update again to settle it, or point the link by hand');
   const to = targetOf(L, st.previous);
   if (!existsSync(to)) throw new Error(`the previous version is gone (${to})`);
   const run = runningFrom(L, (o.procs ?? processes)());
