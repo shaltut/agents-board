@@ -65,6 +65,14 @@ test('managing the queue from the web is Ahmed\'s: another admin gets 403 before
     assert.equal(r.status, 200, `${fn}: ${await r.clone().text()}`);
   }
   assert.deepEqual({ ...(await sql`select mode, slots_set from cb.runners`)[0] }, { mode: 'paused', slots_set: 3 });
+  // the page's Save: an empty field clears that number (clear_*), a filled one replaces it; the other is kept
+  const save = async (body: object) => {
+    const r = await web('/api/rpc/runner_limits_set', { cookie: ahmed, body: { runner: 'pc', ...body } });
+    assert.equal(r.status, 200, await r.clone().text());
+    return { ...(await sql`select slots_set, lanes_set from cb.runners`)[0] };
+  };
+  assert.deepEqual(await save({ slots: 5, db_lanes: null, clear_slots: false, clear_lanes: true }), { slots_set: 5, lanes_set: null });
+  assert.deepEqual(await save({ slots: null, db_lanes: null, clear_slots: true, clear_lanes: true }), { slots_set: null, lanes_set: null });
   const retry = await web('/api/rpc/job_retry', { cookie: ahmed, body: { id: job.id } });
   assert.equal(retry.status, 200, await retry.clone().text());
 });
