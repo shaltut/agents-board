@@ -328,6 +328,12 @@ const killBlocked = [
   "bash -c 'kill ${PID} $(pgrep node)'",
   // ... and so do its options that name the image
   'taskkill //PID ${PID} //IM node.exe //F',
+  // #4455: a PID-equals filter takes a ${name}, but nothing wider: another filter, another operator, a lookup inside
+  'taskkill //PID ${PID} //FI "IMAGENAME eq node.exe"',
+  'taskkill /F /FI "PID eq ${a:-$(pgrep node)}"',
+  'taskkill /F /FI "PID eq ${PID}$(pgrep node)"',
+  'taskkill /F /FI "PID ne ${PID}"',
+  'taskkill /F /FI "PID eq ${PID}" /FI "IMAGENAME eq node.exe"',
   'Stop-Process -Id ${pid} -Name node',
   'kill -s ${SIG} -1',
   // #3883 n2: options between the shell and -Command / -c / /c, values included
@@ -391,6 +397,8 @@ const killPassed = [
   'Get-Process node | Select-Object Id, Path; Get-Content server.log -Tail 50 | Select-String "kill"',
   'Get-Process node | Format-Table; Write-Host "will terminate the mock later"',
   'taskkill /F /FI "PID eq $pid"',
+  'taskkill /F /FI "PID eq ${pid}"',
+  'taskkill //PID ${PID} //FI "PID eq ${PID}"',
   'kill %1; ps',
   'ps -fp $PID; kill $PID',
   'wmic process where processid=1234 delete',
