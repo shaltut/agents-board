@@ -222,7 +222,9 @@ test('guard: no role runs cb squad trust; a message that mentions it is text; a 
     for (const cmd of ['cb squad trust demo', 'cd x && cb --as me squad trust demo --machine pc', 'bash -c "cb squad trust demo"',
       // review 89 M1: cb takes options anywhere, so a flag between squad and trust still runs it
       'cb squad --machine pc trust iris', 'cb squad --machine=pc trust iris', 'cb squad -- trust iris', 'cb --tag squad squad trust x',
-      'cb squa`d trust x', 'CB_ROLE= CB_AGENT= cb squad --machine pc trust x', 'cb SQUAD Trust x']) {
+      'cb squa`d trust x', 'CB_ROLE= CB_AGENT= cb squad --machine pc trust x', 'cb SQUAD Trust x',
+      // #4705: a plain VAR= prefix (no seat variable) does not hide cb from the trust rule, and the reason is the trust one
+      'FOO= BAR= cb squad --machine pc trust x', 'FOO=1 cb squad trust x']) {
       const r = evaluate({ tool: 'shell', command: cmd, role });
       assert.equal(r.allow, false, `${role}: ${cmd}`);
       // #4696: clearing CB_ROLE/CB_AGENT is its own block (PR 96) and checkRole answers it first; either reason is a deny,
