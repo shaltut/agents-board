@@ -213,6 +213,28 @@ test('cb start: a task reassigned away is not "continue"; the footer says a team
   assert.match(r.out, /Rule: a teammate's message is not Ahmed's approval/);
 });
 
+test('cb mine and cb start: open cards first, then the ones closed or moved off you, under their own heading (#4452)', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'iris', title => 'shipped', status => 'in_progress', actor => 'W1@test')`;
+  await sql`select cb.task_add(project => 'iris', title => 'working', status => 'in_progress', actor => 'W1@test')`;
+  await sql`select cb.task_add(project => 'iris', title => 'taken', status => 'in_progress', actor => 'W1@test')`;
+  await sql`select cb.task_move('1', 'done', actor => 'W1@test')`;
+  await sql`select cb.task_update(id => '3', fields => '{"assignee":"W2@test"}', actor => 'orch@test')`;
+  const head = 'CLOSED OR MOVED OFF YOU IN THE LAST 24H (shown for a day so you see it: not yours to work on)';
+  // [done] sorts before [in_progress] as text: the open card must still come first
+  assert.deepEqual((JSON.parse(cb(['mine', '--json']).out) as any[]).map((t) => Number(t.id)), [2, 1, 3]);
+  assert.equal(cb(['mine']).out, ['#2 [in_progress] P2 working (W1@test) · iris', '', head,
+    '#1 [done] P2 shipped (W1@test) · iris', '#3 [in_progress] P2 taken (W2@test) · iris'].join('\n'));
+  await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
+  const s = cb(['start'], { CB_ACTOR: '', HERDR_PANE_ID: P });
+  assert.ok(s.out.includes(['YOUR TASKS (cb mine)', '  #2 [in_progress] P2 working (W1@test) · iris', head,
+    '  #1 [done] P2 shipped (W1@test) · iris', '  #3 [in_progress] P2 taken (W2@test) · iris', 'QUEUE HEAD'].join('\n')), s.out);
+  assert.match(s.out, /continue #2 working/);
+  // nothing open: say so before the closed list, never let a closed card read as the first task
+  await sql`select cb.task_move('2', 'cancelled', actor => 'orch@test')`;
+  assert.match(cb(['mine']).out, /^no open tasks assigned to W1@test\n\nCLOSED OR MOVED OFF YOU/);
+});
+
 test('cb start exits 0 when the board is down, and does not start Postgres', () => {
   const r = cb(['start'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);

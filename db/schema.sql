@@ -890,7 +890,8 @@ begin
 end $$;
 
 -- My open tasks, plus anything of mine that changed in the last 24h, so a
--- cancelled or reassigned task is seen at least once.
+-- cancelled or reassigned task is seen at least once. Open ones come first (#4452): by status alone, text order put
+-- [cancelled] and [done] ahead of [in_progress], and a session read closed work as its own.
 create function cb.mine(actor text default null)
 returns setof cb.tasks language plpgsql as $$
 #variable_conflict use_variable
@@ -909,7 +910,7 @@ begin
               select 1 from cb.events e where e.task_id = t.id and e.data -> 'assignee' ->> 'from' = a
                  and e.at > now() - interval '24 hours'))
         or h.repo is not null) w
-   order by (w.v).status, (w.v).priority, (w.v).rank;
+   order by ((w.v).assignee is distinct from a or (w.v).status in ('done', 'cancelled')), (w.v).status, (w.v).priority, (w.v).rank;
 end $$;
 
 -- ---------------------------------------------------------------- questions
