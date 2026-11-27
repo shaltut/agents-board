@@ -23,6 +23,8 @@ function LoadNewTexts({ roles }: { roles: RoleTextPage['roles'] }) {
   if (seeds.isError) console.error('release role texts did not load', seeds.error)
   const changes = seeds.data ? seedChanges(seeds.data, roles) : []
   if (changes.length === 0) return null
+  // a text changed on this page also differs from the release's: say so, so loading never overwrites an edit unseen
+  const edited = changes.filter((k) => roles.find((r) => r.role === k)?.updated_by)
   async function load() {
     setBusy(true); setFailed(null)
     try {
@@ -42,8 +44,9 @@ function LoadNewTexts({ roles }: { roles: RoleTextPage['roles'] }) {
         <Button size="sm" disabled={busy} onClick={load}>{busy ? 'Loading…' : `Replace ${plural(changes.length, 'text')}`}</Button>
       </span>
     ) : <Button size="sm" variant="outline" onClick={() => setAsking(true)}>Load the new texts</Button>}>
-      This version of the board comes with new wording for {changes.map(roleTextLabel).join(', ')}.
-      {asking ? ' Loading replaces what is saved below, edits included; each old text stays under Last edits.' : ' Nothing changes until you load it.'}
+      {plural(changes.length, 'saved text')} {changes.length === 1 ? 'differs' : 'differ'} from the ones this version of the board ships: {changes.map(roleTextLabel).join(', ')}.
+      {edited.length > 0 && ` Changed on this page since: ${edited.map(roleTextLabel).join(', ')}.`}
+      {asking ? ' Loading replaces what is saved below with the shipped texts, your edits included; each old text stays under Last edits.' : ' Nothing changes until you load them.'}
       {failed && <span className="mt-1 block text-destructive" role="alert">{failed}</span>}
     </Notice>
   )

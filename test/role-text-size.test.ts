@@ -1,12 +1,12 @@
 // #4525 (and #4350): every text a seat is handed fits where it is printed, uncut. The binding limit is the start hook's
-// re-injection after a compaction (hooks/limits.mjs): a seat that holds cards gets at most ROLE_ROOM characters for what
-// cb role prints, which is the board-wide text, its project's addition (capped at 1000) and the ask-first line. cb role
-// itself prints everything; cb.role_text_set caps a stored text at 8000. Lengths are JS lengths, as the hook counts.
+// re-injection after a compaction (CAP and RESUME_KEEP in hooks/session-start.mjs, read here from its source): a seat
+// that holds cards gets at most ROLE_ROOM characters for what cb role prints, which is the board-wide text, its
+// project's addition (capped at 1000) and the ask-first line. cb role itself prints everything; cb.role_text_set caps a
+// stored text at 8000. Lengths are JS lengths, as the hook counts.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { freshDb } from './helpers.ts';
-import { CAP, RESUME_KEEP, ROLE_ROOM } from '../hooks/limits.mjs';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -14,12 +14,15 @@ async function db() { const s = await freshDb(); clients.push(s); return s; }
 
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'];
 const file = (r: string) => readFileSync(`prompts/roles/${r}.md`, 'utf8').trim();
+const hook = readFileSync('hooks/session-start.mjs', 'utf8');
+const num = (name: string) => Number(hook.match(new RegExp(`^const ${name} = (\\d+);`, 'm'))?.[1]);
+const CAP = num('CAP'), RESUME_KEEP = num('RESUME_KEEP'), ROLE_ROOM = CAP - RESUME_KEEP;
 
-test('the hook\'s numbers: the role gets what the cards leave, and the hook reads them from hooks/limits.mjs', () => {
-  assert.equal(ROLE_ROOM, CAP - RESUME_KEEP);
-  const hook = readFileSync('hooks/session-start.mjs', 'utf8');
-  assert.match(hook, /import \{ CAP, RESUME_KEEP \} from '\.\/limits\.mjs'/);
-  assert.doesNotMatch(hook, /const CAP = /, 'no second copy of the cap in the hook');
+test('the hook\'s numbers: the role gets what the cards leave (CAP - RESUME_KEEP), and the hook uses both', () => {
+  assert.ok(CAP > 0 && RESUME_KEEP > 0, 'the hook still says const CAP = <n>; and const RESUME_KEEP = <n>;');
+  assert.equal(ROLE_ROOM, 6000);
+  assert.match(hook, /Math\.min\(role\.length, CAP - Math\.min\(resume\.length, RESUME_KEEP\)\)/);
+  assert.match(hook, /cb\.role_text\(\$\{r\.role\}, \$\{r\.project \?\? null\}\)/, 'the hook reads the text with the seat\'s project, as cb role does');
 });
 
 test('every role, with the longest project addition and ask-first line, fits what the hook re-injects', async () => {

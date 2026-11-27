@@ -537,7 +537,7 @@ squad file (`cb squad set <project> -f <file>`):
   loads every text in one transaction through `cb.role_text_import`, each change kept in `cb.role_text_edits` (#4525).
 - Each project also has its own addition (at most 1000 characters) and who its stuck seats ask first (the lead, Ahmed or
   a named session; the lead until set), in `cb.project_role_settings`, set on the same page. `cb role` and the start hook
-  print them after the board-wide text. The start hook's re-injection limits are in `hooks/limits.mjs`;
+  print them after the board-wide text. The start hook's re-injection limits are `CAP` and `RESUME_KEEP` in `hooks/session-start.mjs`;
   `test/role-text-size.test.ts` checks every text, with the longest addition, fits them uncut.
 
 ## Tests

@@ -4753,7 +4753,8 @@ end $$;
 -- Ahmed sets one project's addition and who its stuck seats ask first (#4525, Q2992, Q2994). Dashboard only, as the role
 -- texts. null leaves that part as it is; an empty addition removes it. ask_first is lead, ahmed or a session name. The
 -- addition has its own cap: with the longest board-wide text it must still fit what the start hook re-injects after a
--- compaction (hooks/limits.mjs; test/role-text-size.test.ts adds them up). A change writes an event with both texts.
+-- compaction (CAP and RESUME_KEEP in hooks/session-start.mjs; test/role-text-size.test.ts adds them up). A change
+-- writes an event with both texts.
 create function cb.project_role_set(project text, addition text default null, ask_first text default null, actor text default null)
 returns jsonb language plpgsql as $$
 #variable_conflict use_variable

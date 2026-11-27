@@ -6,10 +6,14 @@
 // holds Claude's pipe (#4482), and an unreachable board costs at most BUDGET_MS, then the hook prints the hint alone.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CAP, RESUME_KEEP } from './limits.mjs'; // the re-injected block's size; the hint and the guard line always print whole
 
 const BUDGET_MS = 2000; // everything after node's own start: stdin, the board, the write
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']; // cb.role_text's list
+// The re-injected block; the hint and the guard line always print whole. The cards keep at least RESUME_KEEP, so the
+// role gets CAP - RESUME_KEEP: the longest board-wide text plus the longest project addition and ask-first line fits
+// uncut (#4525; test/role-text-size.test.ts reads these two lines). Kept here, not imported: a hook never fails to load.
+const CAP = 7500;
+const RESUME_KEEP = 1500;
 const started = Date.now();
 const left = () => Math.max(0, BUDGET_MS - (Date.now() - started));
 
