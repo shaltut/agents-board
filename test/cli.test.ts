@@ -151,7 +151,7 @@ test('cb tell sends to one session and says whether it is live', async () => {
   await sql`insert into cb.events (actor, project, kind, summary, at) values ('W2@macbook', 'demo', 'note', 'working', now() - interval '4 minutes')`;
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
-  assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; have it run cb relay --restart\)/);
+  assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {

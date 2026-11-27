@@ -553,11 +553,12 @@ async function run(): Promise<unknown> {
           throw new Error(`${args[0]} works in ${t.project}; this session works in ${sessionProject}. Sessions only talk inside their project: tell one of yours (cb sessions), or ask your orchestrator to pass it on.`);
       }
       const id = await callFn('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
-      // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits
+      // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits.
+      // A name with no session row (its pane re-bound) is never "still writing", as in the digest
       const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
-        cb._board_active(${args[0]}) as mins`;
+        case when exists (select 1 from cb.sessions where actor = ${args[0]}) then cb._board_active(${args[0]}) end as mins`;
       const how = s.live ? 'relay live: delivered within seconds'
-        : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; have it run cb relay --restart`
+        : s.mins !== null ? `its relay is down, but the session last wrote to the board ${s.mins}m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart`
         : 'relay not live and nothing from the session on the board in 30 minutes: it may be gone; the message waits up to 24h for its relay to start';
       return { out: `message #${id} to ${args[0]} (${how})`, json: id };
     }
