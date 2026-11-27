@@ -72,7 +72,7 @@ export function checkFirst(cmd: string | undefined, args: string[], me: string):
   // rest becomes a space, never nothing: C:\w\cli must stay three words, as the board's search splits it (review I1)
   const words = title.replace(/"/g, '').replace(/[`$\\]/g, ' ').replace(/(?<!\S)-+/g, '').trim().split(/\s+/).slice(0, 6).join(' ');
   const check = id && ON_CARD.has(cmd ?? '') ? `cb show ${id}`
-    : id && STAGED.has(cmd ?? '') ? `cb show ${id} --json (its stage; a card in parts: the parts line of cb show ${id})`
+    : id && STAGED.has(cmd ?? '') ? `cb show ${id} (its first line ends with its stage in words; a card in parts: its parts line)`
     : (cmd === 'add' || cmd === 'bug') && args[0] ? `cb search ${args[0]} "${words || '<title words>'}"`
     // cb.tell and cb.broadcast record the message as an event of its sender; cb session lists a name's recent events
     : cmd === 'tell' || cmd === 'broadcast' ? `cb session ${me} (the messages you sent are in its RECENT list)`

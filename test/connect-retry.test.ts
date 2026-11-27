@@ -106,7 +106,7 @@ test('checkFirst names the command that shows whether this one landed, and every
     ['bug', ['demo', 'one two three four five six seven eight'], 'check with cb search demo "one two three four five six" before running it again'],
     // a leading - would exclude the word from the search; a - inside a word stays
     ['add', ['demo', 'Drop the -v flag from re-runs'], 'check with cb search demo "Drop the v flag from re-runs" before running it again'],
-    ['pass', ['42', 'built'], 'check with cb show 42 --json (its stage; a card in parts: the parts line of cb show 42) before running it again'],
+    ['pass', ['42', 'built'], 'check with cb show 42 (its first line ends with its stage in words; a card in parts: its parts line) before running it again'],
     ['tell', ['W2@test', 'hi'], 'check with cb session W1@test (the messages you sent are in its RECENT list) before running it again'],
     ['broadcast', ['hi all'], 'check with cb session W1@test (the messages you sent are in its RECENT list) before running it again'],
     ['run', ['test'], 'check with cb jobs (the queued and running jobs) before running it again'],
