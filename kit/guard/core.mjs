@@ -388,7 +388,7 @@ function scanKills(text, seen, inArgs) {
 
 // Protected branches (#3746): a squad session's pane carries CB_PROTECTED_BRANCHES (cb squad up), and a git push whose
 // destination is one of them is blocked. Unset or empty: no check at all.
-const GIT_OPT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env']); // git -C <path> push
+const GIT_OPT_ARG = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--attr-source']); // git -C <path> push
 const PUSH_OPT_ARG = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec']); // git push -o ci.skip ...
 // a list entry with * is a glob: * is any run of characters, / included; the rest is literal; the whole name must match
 const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -631,10 +631,12 @@ function secretReadOne(command) {
 // pairs and a backslash inside the word (.cla""ude, .cl\aude), a glob (.cl*, .claud?), trailing dots (.claude.), the 8.3
 // name (CLAUDE~1), ./ and seg/../ (review 68-I2). A URL names no local file. Fail closed. Linear: a few single-pass
 // tests per segment.
-const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~])`;
-const FENCE_END = String.raw`(?=[\s"';&|)>]|$)`;
+// PR 77 review I2: a backtick starts and ends a path too (echo `cp x ~/.claude/settings.json` hid it)
+const TICK = '`';
+const FENCE_LEAD = String.raw`(?:^|[\s"'=:(\\/~` + TICK + '])';
+const FENCE_END = String.raw`(?=[\s"';&|)>` + TICK + ']|$)';
 const FENCE_NAME = String.raw`(?:\.claude\.*|claude~\d)`;
-const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\/\s"';&|)>]|$)|${FENCE_NAME}(?:[\\/]+settings[\w.*?-]*\.json|[\\/]*)${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}[\\/]+settings[\w.*?-]*\.json${FENCE_END})`, 'i');
+const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\/\s"';&|)>` + TICK + String.raw`]|$)|${FENCE_NAME}(?:[\\/]+settings[\w.*?-]*\.json|[\\/]*)${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}${FENCE_END}|\.c[\w.-]{0,64}[*?[][^\s/\;&|]{0,64}[\\/]+settings[\w.*?-]*\.json${FENCE_END})`, 'i');
 // The other agents' own guard and config files (#4002 install gate): the hook file each adapter's guardInstallSpec names
 // (~/.codex/hooks.json, a seat's .agents/hooks.json, OpenCode's plugins folder), Codex's config and profiles (hook trust,
 // [features] hooks), every OpenCode config (opencode.json[c] anywhere: plugins, permissions, MCP) and all of ~/.gemini
@@ -645,7 +647,8 @@ const FENCE_PATH = new RegExp(FENCE_LEAD + String.raw`(?:\.claude-board\.*(?=[\\
 // but ~/.gemini and ~/.config/opencode only under a home folder: a repo's .gemini/ (a styleguide) is not agy's config.
 // Trailing dots (Windows drops them) and the 8.3 names (CODEX~1) count, as for .claude.
 const AGENT_FENCE = new RegExp(FENCE_LEAD + String.raw`(?:(?:\.codex\.*|codex~\d)(?:[\\/]+(?:hooks\.json|[\w.-]*\.toml)\.*|[\\/]*)|\.agents\.*[\\/]+hooks\.json\.*|opencode\.jsonc?\.*|(?:\.opencode\.*|openco~\d)(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
-const HOME = String.raw`(?:~|\$\{?HOME\}?|\$env:(?:USERPROFILE|HOME)|%USERPROFILE%|[\\/](?:Users|home)[\\/]+[^\\/\s"';&|)>]+|[\\/]root)[\\/]+`;
+// #4551 (review 68-m3): bash's $USERPROFILE (Git Bash has it) and PowerShell's ${env:USERPROFILE} too
+const HOME = String.raw`(?:~|\$\{?(?:HOME|USERPROFILE)\}?|\$\{?env:(?:USERPROFILE|HOME)\}?|%USERPROFILE%|[\\/](?:Users|home)[\\/]+[^\\/\s"';&|)>]+|[\\/]root)[\\/]+`;
 const HOME_AGENT_FENCE = new RegExp(HOME + String.raw`(?:(?:\.gemini\.*|gemini~\d)(?:[\\/]+[^\s"';&|)>]*)?|\.config\.*[\\/]+opencode\.*(?:[\\/]+plugins?\.*(?:[\\/]+[^\s"';&|)>]*)?|[\\/]*))` + FENCE_END, 'i');
 // the cd argument is in the fence: anything under .claude-board, or the .claude folder itself
 const IN_BOARD_DIR = /(?:^|[\\/~])\.claude-board\.*(?:[\\/]|$)/i;
@@ -676,15 +679,191 @@ const FENCE_WRITER = new RegExp(String.raw`(?<![\w.\\/-])(?:${FENCE_WORDS.join('
 // fence path were blocked), found after its global options (-C dir, -c k=v, --git-dir dir, quoted or not); anything else,
 // an unknown or unreadable form included, or a read with --output, is a writer (fail closed). A formatter writes only
 // with its write flag.
-const GIT_WORD = /(?<![\w.\\/-])git(?![\w.\\/-])/gi;
+// #4551 (review 68-m1): git is judged as a command, not as a word anywhere (rg -n git opencode.json is rg's search text).
+// - In command position every form above holds, a missing or shell-filled subcommand included. Command position: the
+//   segment's first word past VAR=x assignments and !, if, then, else, do, while, time, or the first word after ( { $( or
+//   a backtick; any spelling of git (/usr/bin/git, git.exe, a quoted path).
+// - Anywhere else (sudo git, xargs git, timeout 5 git, find -exec git, pnpm exec git: no launcher list to fall behind) it
+//   is a git call when the word past its options is a bare word (add, checkout) or one the shell fills in ($S), and then
+//   the same rules hold. A path or file name there (rg -n git opencode.json, cb help git -- .codex) is text: a read.
+// - A quoted word with a space or separator in it (bash -c "git add opencode.json") is judged as a command line too.
+// Review 68-m2: a git call that runs a program is a writer: -c or --config-env setting an alias, include, external diff,
+// textconv, filter, credential helper, pager (but cat, less, more), editor, fsmonitor, hooks path or ssh command;
+// --exec-path=<dir>; grep -O (--open-files-in-pager); GIT_EXTERNAL_DIFF, GIT_CONFIG*, GIT_SSH*, GIT_EXEC_PATH,
+// GIT_ASKPASS, GIT_EDITOR or a pager (but cat, less, more) assigned earlier in the segment.
 const GIT_READS = new Set(['diff', 'log', 'show', 'blame', 'annotate', 'grep', 'status', 'ls-files', 'ls-tree', 'cat-file', 'rev-parse',
   'rev-list', 'describe', 'shortlog', 'whatchanged', 'diff-tree', 'diff-files', 'diff-index', 'show-ref', 'name-rev', 'help', 'version']);
-const gitWrites = (seg) => {
-  for (const m of seg.matchAll(GIT_WORD)) {
-    const w = seg.slice(m.index + 3).match(/"[^"]*"|'[^']*'|[^\s;&|]+/g) ?? [];
-    let i = 0;
-    while (i < w.length && w[i].startsWith('-')) i += GIT_OPT_ARG.has(w[i]) ? 2 : 1;
-    if (!GIT_READS.has((w[i] ?? '').toLowerCase()) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
+// a segment's words, quote-aware (an unclosed quote runs to the end), with ( ) { } and a backtick as words of their own
+const GIT_TOKEN = /(?:"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s(){}`"'\\])+|[(){}`]/g;
+const GIT_OPENER = /^[(){}`]$/;
+const SHELL_KEYWORD = new Set(['!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time']);
+const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+const PAGER_OK = /^\s*(?:(?:cat|less|more)(?:\s+-\w+)*)?\s*$/i;
+const GIT_RUNS_ENV = /^(?:GIT_EXTERNAL_DIFF|GIT_CONFIG\w*|GIT_SSH\w*|GIT_EXEC_PATH|GIT_ASKPASS|GIT_EDITOR|(?:GIT_)?PAGER)=/i;
+const GIT_RUNS_KEY = /^(?:alias|include|includeif|pager)\.|^(?:core\.(?:fsmonitor|hookspath|sshcommand|askpass|gitproxy|editor)|sequence\.editor)$|\.(?:external|textconv|command|cmd|program|helper|clean|smudge|process|proxycommand)$/i;
+const BARE = /^[a-z][\w-]*$/i;
+// git's words (w[0] is git): true when the call writes or runs a program. atCommand: git is in command position;
+// runsEnv: the segment set a program-running git variable before it
+function gitCallWrites(w, atCommand, runsEnv) {
+  let i = 1;
+  for (; i < w.length && w[i].startsWith('-'); i++) {
+    const o = w[i];
+    if (/^--exec-path=/i.test(o)) return true;
+    const isEnv = /^--config-env(?:=|$)/.test(o);
+    const cfg = o === '-c' || o === '--config-env' ? (w[++i] ?? '') : isEnv ? o.slice(13) : null;
+    if (cfg === null) { if (GIT_OPT_ARG.has(o)) i++; continue; }
+    const eq = cfg.indexOf('='), key = eq < 0 ? cfg : cfg.slice(0, eq);
+    if (GIT_RUNS_KEY.test(key)) return true;
+    if (/^core\.pager$/i.test(key) && (isEnv || !PAGER_OK.test(eq < 0 ? '' : cfg.slice(eq + 1)))) return true;
+  }
+  const sub = w[i] ?? '';
+  if (!atCommand && !BARE.test(sub) && !/[$%`]/.test(sub)) return false; // text, not a git call
+  const s = sub.toLowerCase();
+  if (runsEnv || !GIT_READS.has(s) || w.some((x) => /^--output(?:=|$)/.test(x))) return true;
+  return s === 'grep' && w.slice(i + 1).some((x) => /^--op/.test(x) || /^-(?!-)[A-Za-z]*O/.test(x));
+}
+// PR 77 review I1: a command word the shell fills in ($GIT, "$GIT", ${GIT:-git}, $(...), a backtick) is an unknown
+// program, judged as git (fail closed: $GIT checkout -- opencode.json blocks, $GIT log -- opencode.json reads). So is an
+// expansion after one of these launchers (sudo $GIT checkout ...), with the argument-position rule. A PowerShell
+// assignment ($x = ...) is not a command word.
+const LAUNCHERS = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'timeout', 'gtimeout', 'time', 'stdbuf',
+  'ionice', 'watch', 'parallel', 'strace', 'ltrace', 'xargs', 'npx', 'pnpx', 'bunx', 'pnpm', 'npm', 'yarn', 'bun', 'ssh', 'eval', 'coproc',
+  'chronic', 'unbuffer', 'flock', 'setsid', 'script', 'runas', 'start', 'start-process', 'find', 'fd', 'busybox', 'wsl', 'winpty']);
+const PS_ASSIGN = /^\$[\w:.{}]+(?:[+\-*/]?=.*)?$/;
+// Every git command name, read or write (PR 77 round 3: a list of only the writing ones missed merge-file, stage and a
+// read's --output). A shell-filled word, in ANY position, whose next word that is not an option is one of these, or is
+// filled in itself ($SUB, a backtick), is git, judged with the command-position rule: an unknown subcommand writes, a read
+// is still checked for --output. Anything else after it is not git ($PAGER opencode.json, echo $HOME opencode.json).
+const GIT_COMMANDS = new Set([...GIT_READS, 'add', 'am', 'apply', 'archive', 'bisect', 'branch', 'bugreport', 'bundle', 'check-attr',
+  'check-ignore', 'check-mailmap', 'check-ref-format', 'checkout', 'checkout-index', 'cherry', 'cherry-pick', 'citool', 'clean', 'clone',
+  'column', 'commit', 'commit-graph', 'commit-tree', 'config', 'count-objects', 'credential', 'daemon', 'diagnose', 'difftool',
+  'fast-export', 'fast-import', 'fetch', 'fetch-pack', 'filter-branch', 'fmt-merge-msg', 'for-each-ref', 'for-each-repo', 'format-patch',
+  'fsck', 'gc', 'get-tar-commit-id', 'gui', 'hash-object', 'hook', 'http-backend', 'index-pack', 'init', 'instaweb', 'interpret-trailers',
+  'lfs', 'ls-remote', 'mailinfo', 'mailsplit', 'maintenance', 'merge', 'merge-base', 'merge-file', 'merge-index', 'merge-one-file',
+  'merge-tree', 'mergetool', 'mktag', 'mktree', 'multi-pack-index', 'mv', 'notes', 'pack-objects', 'pack-redundant', 'pack-refs',
+  'patch-id', 'prune', 'prune-packed', 'pull', 'push', 'range-diff', 'read-tree', 'rebase', 'receive-pack', 'reflog', 'refs', 'remote',
+  'repack', 'replace', 'replay', 'request-pull', 'rerere', 'reset', 'restore', 'revert', 'rm', 'send-email', 'send-pack', 'show-branch',
+  'show-index', 'sparse-checkout', 'stage', 'stash', 'stripspace', 'submodule', 'svn', 'switch', 'symbolic-ref', 'tag', 'unpack-file',
+  'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'upload-archive', 'upload-pack', 'var', 'verify-commit',
+  'verify-pack', 'verify-tag', 'worktree', 'write-tree', 'backfill', 'checkout--worker', 'credential-cache',
+  'credential-cache--daemon', 'credential-store', 'credential-wincred', 'diff-pairs', 'difftool--helper', 'fsck-objects', 'fsmonitor--daemon',
+  'http-fetch', 'http-push', 'imap-send', 'init-db', 'last-modified', 'merge-octopus', 'merge-ours', 'merge-recursive', 'merge-recursive-ours',
+  'merge-recursive-theirs', 'merge-resolve', 'merge-subtree', 'pickaxe', 'quiltimport', 'remote-ext', 'remote-fd', 'remote-ftp', 'remote-ftps',
+  'remote-http', 'remote-https', 'repo', 'submodule--helper', 'subtree', 'survey', 'update', 'upload-archive--writer', 'web--browse']);
+// the index just past the filled word at raw[k]: past a whole ${...}, $(...) or backtick group
+const SHAPES = new WeakMap();
+function shape(raw) {
+  let r = SHAPES.get(raw);
+  if (r) return r;
+  const ends = new Int32Array(raw.length).fill(raw.length), closingTick = new Uint8Array(raw.length), nextTick = new Int32Array(raw.length + 1).fill(-1);
+  const st = { '(': [], '{': [] };
+  let ticks = 0;
+  for (let j = 0; j < raw.length; j++) {
+    const x = raw[j];
+    if (x === '(' || x === '{') st[x].push(j);
+    else if (x === ')' || x === '}') { const o = st[x === ')' ? '(' : '{'].pop(); if (o !== undefined) ends[o] = j + 1; }
+    else if (x === '`') closingTick[j] = ticks++ % 2;
+  }
+  for (let j = raw.length - 1, n = -1; j >= 0; j--) { nextTick[j] = n; if (raw[j] === '`') n = j; }
+  r = { ends, closingTick, nextTick };
+  SHAPES.set(raw, r);
+  return r;
+}
+function filledEnd(raw, k) {
+  const open = raw[k] === '`' ? '`' : raw[k] === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? raw[k + 1] : null;
+  if (!open) return k + 1;
+  const { ends, nextTick } = shape(raw);
+  if (open === '`') { const j = nextTick[k]; return j < 0 ? raw.length : j + 1; }
+  return ends[k + 1];
+}
+// a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
+const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
+// git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
+const MAX_FILLED_OPTS = 32;
+const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', '--exec-path', '--html-path', '--man-path', '--info-path',
+  '-p', '--paginate', '-P', '--no-pager', '--no-replace-objects', '--no-lazy-fetch', '--no-optional-locks', '--no-advice', '--bare',
+  '--git-dir', '--work-tree', '--namespace', '--config-env', '--attr-source', '--literal-pathspecs', '--glob-pathspecs',
+  '--noglob-pathspecs', '--icase-pathspecs', '--list-cmds', '--super-prefix', '--shallow-file', '--']);
+// programs that neither run nor print their arguments (not echo/printf: what they print may be run); git in command
+// position is judged whole by the command-position rule, so its later words are arguments too
+const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'jq', 'cmp', 'diff', 'stat', 'sha256sum', 'md5sum',
+  'get-content', 'gc', 'select-string', 'sls', 'test-path', 'get-item', 'gi']);
+// a filled word at raw[k] (any position): true when it is a git call that writes. Its options are judged as git's, not
+// skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
+// git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
+// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
+function filledWrites(raw, k, judge) {
+  const after = filledEnd(raw, k);
+  for (let j = after, opts = 0; j < raw.length; j++) {
+    const x = raw[j];
+    if (x === ')' || (x === '`' && shape(raw).closingTick[j])) return false; // the filled word's command ended
+    if (/^[({}]$/.test(x)) continue;
+    const v = unquote(x);
+    if (x !== '`' && v.startsWith('-')) {
+      if (++opts > MAX_FILLED_OPTS) return true;
+      if (!GIT_GLOBAL_OPTS.has(v.split('=')[0]) && !/^-C./.test(v)) return false;
+      const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
+      if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
+      if (GIT_OPT_ARG.has(v)) j++;
+      continue;
+    }
+    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
+    if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
+    return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
+  }
+  return false;
+}
+const gitWrites = (seg, inQuote = false) => {
+  const raw = seg.match(GIT_TOKEN) ?? [];
+  let start = true, runsEnv = false, launched = false, noRun = false, afterClose = false, ticks = 0;
+  const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
+  // round 4, I5: each git call reads the rest of the segment, so a segment judges at most MAX_COMMANDS_PER_SEGMENT of them
+  // and blocks past that (a scan that runs past the hook's timeout lets the command through), as scanCommands does
+  let budget = MAX_COMMANDS_PER_SEGMENT;
+  const judge = (words, atCommand) => (--budget < 0 ? true : gitCallWrites(words(), atCommand, runsEnv));
+  for (let k = 0; k < raw.length; k++) {
+    const t = raw[k];
+    if (GIT_OPENER.test(t)) {
+      // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
+      if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
+      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
+      start = true;
+      noRun = false;
+      afterClose = t === ')' || t === '}' || (t === '`' && ticks % 2 === 0);
+      continue;
+    }
+    const u = unquote(t);
+    if (start && PS_ASSIGN.test(u) && (/=/.test(u) || /^[+\-*/]?=/.test(raw[k + 1] ?? ''))) { // $x = ..., $env:X='y'
+      if (!/=/.test(u)) k++;
+      continue;
+    }
+    // a quoted command line, judged on its own: one layer of quotes off (an unclosed quote dropped, so it always shrinks)
+    if (/["']/.test(t) && /[\s;&|]/.test(u)) {
+      const inner = u === t ? t.replace(/["']/g, '') : u;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some((x) => gitWrites(x, true))) return true;
+    }
+    if (ASSIGNMENT.test(u)) { // VAR=x git ..., env VAR=x git ...
+      const eq = u.indexOf('=');
+      if (GIT_RUNS_ENV.test(u) && !(/pager$/i.test(u.slice(0, eq)) && PAGER_OK.test(u.slice(eq + 1)))) runsEnv = true;
+      if (start) continue;
+    }
+    const filled = isFilled(u) && (start || launched);
+    // a filled word takes the argument-position rule ($PAGER opencode.json is no git call; $GIT $SUB still blocks)
+    const isGit = cmdName(t) === 'git';
+    // a $( or ${ group in command position: the subcommand slot is the word after the whole group (round 4, I4); inside
+    // a quoted line ("$(git rev-parse --show-toplevel)/x", "$USER reading x") a filled first word takes the filledWrites test
+    const words = () => (u === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? ['$', ...rest(filledEnd(raw, k))] : rest(k));
+    if (filled && start && inQuote) { if (filledWrites(raw, k, judge)) return true; }
+    else if ((isGit || filled) && judge(words, start && isGit)) return true;
+    // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
+    // behind), judged by the word after it (GIT_COMMANDS)
+    if (isFilled(u) && !noRun && filledWrites(raw, k, judge)) return true;
+    if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
+      start = false;
+      if (LAUNCHERS.has(cmdName(t))) launched = true;
+      // only a real command word: not one after a closing ) } or backtick (caffeinate $(echo --name) cat $GIT ...)
+      noRun = !launched && !afterClose && (isGit || NO_RUN.has(cmdName(t).toLowerCase()));
+    }
   }
   return false;
 };
@@ -704,8 +883,10 @@ const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), th
 const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi, '');
 // review 68-I2: /./ and seg/../ folded, so ~/.codex/./hooks.json and ~/.codex/x/../hooks.json name the file they reach
 // (bounded: a few passes, each linear)
+// #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
+// ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
 const fold = (t) => {
-  let s = t.replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
+  let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
   for (let i = 0; i < 8; i++) {
     const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
     if (n === s) break;
@@ -713,7 +894,11 @@ const fold = (t) => {
   }
   return s;
 };
-const forms = (t) => { const u = unhide(t); return [t, u, fold(t), fold(u)]; };
+// #4551 (review 68-m3): an NTFS stream suffix names the file or folder itself (hooks.json::$DATA is hooks.json's main
+// stream, .codex::$INDEX_ALLOCATION or .codex:$I30:$INDEX_ALLOCATION the folder), and a shell that expands $DATA to
+// nothing leaves hooks.json:: behind
+const noStream = (t) => t.replace(/:(?:\$I30)?:(?:\$(?:DATA|INDEX_ALLOCATION))?(?=[\\/\s"';&|)>]|$)/gi, '');
+const forms = (t) => { const u = unhide(t), n = noStream(t); return [t, u, fold(t), fold(u), n, fold(n), noStream(fold(u))]; };
 const fencePath = (t) => forms(t).some((f) => FENCE_PATH.test(f) || AGENT_FENCE.test(f) || HOME_AGENT_FENCE.test(f));
 function redirects(seg, anyTarget) {
   for (const m of seg.matchAll(REDIRECT_TARGET)) {
@@ -729,6 +914,10 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // a URL names a remote file, never a local one (review 68-I1: curl https://x/.agents/hooks.json -o /tmp/h.json is a read)
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
+// a definition in command position: name() {, function name, alias [--] name=, hash -p, PowerShell Set-Alias / New-Alias / sal / nal
+const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
+// judged with quoted text blanked (round 2: grep -E "a|function b" opencode.json is a search, not a definition)
+const QUOTED_TEXT = /"(?:\\.|[^"\\])*"|'[^']*'/g;
 // #4587: a line continuation, joined as the shell joins it, before anything reads the command (the prefilter too: a
 // split open\<newline>code.json names no fence word). bash drops a backslash-newline with nothing between, so
 // .cla\<newline>ude is .claude: SHELL_ESCAPES's space would leave that split. Only an odd run of backslashes continues
@@ -749,6 +938,9 @@ function fenceWriteOne(command) {
   const text = stripMessages(command).replace(URL_WORD, ' ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
+  // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
+  // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
+  if (DEFINES_FN.test(text.replace(QUOTED_TEXT, '""'))) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
