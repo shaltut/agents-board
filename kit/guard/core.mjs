@@ -980,7 +980,100 @@ const IN_PLACE = thenLater(SEGMENTS, String.raw`(?<![\w.-])(?:sed|perl)(?![\w.-]
 // the guard's installer, not any project's install.mjs: the file named under a guard folder, or run from inside one
 const INSTALLER = /(?:^|[\s"'\\/])install\.mjs(?![\w.-])/i;
 const GUARD_DIR = /(?:^|[\s"'\\/])guard(?=[\\/\s"';&|)]|$)/i;
-const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && GUARD_DIR.test(s) };
+// PR 96 review I1: Codex sends no cwd, so a bare node install.mjs (or ./install.mjs) may be run from inside kit/guard,
+// and a glob or variable (kit/gu*/install.mjs, $D/install.mjs) hides the folder: each counts as the guard's (fail closed;
+// scripts/install.mjs stays another project's)
+const INSTALLER_DIR = /(?:^|[\s"'=(])([^\s"';&|()]*?)install\.mjs(?![\w.-])/gi;
+const hiddenInstaller = (s) => [...s.matchAll(INSTALLER_DIR)].some((m) => !m[1] || /^\.[\\/]+$/.test(m[1]) || /[*?[\]{}$`%]/.test(m[1]));
+// PR 96 review r2 (minor): only a run of it counts, so cat install.mjs and git add kit/guard/install.mjs pass: a JS runner
+// anywhere in the command (a pipe or a < redirect feeds it too, and interpreter code can name it), or, in a segment
+// naming the file, the file itself, a launcher or a command word the guard cannot read ($N, "$(which node)") as the
+// command word
+const JS_RUNNER = /(?<![\w.\\/-])(?:node|nodejs|bun|deno|tsx|ts-node)(?:\.exe)?(?![\w.\\/-])/i;
+function installerRuns(s) {
+  if (JS_RUNNER.test(s)) return true;
+  for (const seg of s.match(SEGMENTS) ?? []) {
+    if (!INSTALLER.test(seg)) continue;
+    const first = seg.trim().split(/[ \t]+/)[0] ?? '';
+    if (!/^[A-Za-z][\w.-]*$/.test(first) || LAUNCHERS.has(first.toLowerCase()) || INSTALLER.test(` ${first}`)) return true;
+  }
+  return false;
+}
+const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && (GUARD_DIR.test(s) || hiddenInstaller(s)) && installerRuns(s) };
+// --check counts only as a word of the command itself: not inside quotes (--target "x --check") or a comment (# --check)
+const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(seg.replace(QUOTED_TEXT, '""').replace(/(?:^|[ \t])#.*$/s, ''));
+// and an install that clears or sets the seat's variables (CB_ROLE= CB_AGENT= node install.mjs, env -u CB_ROLE) is
+// blocked even with --check: those variables are what make the installer itself refuse to run in a seat
+const SEAT_VARS = /CB_(?:ROLE|AGENT)(?![\w])/i;
+// PR 96 review r2 (1): CB_ROLE and CB_AGENT are what make a pane a seat: with them the guard applies its seat rules and
+// the installer refuses to run. A seat that assigns, unsets or removes either (CB_ROLE= codex exec, env -u, unset,
+// Remove-Item Env:, SetEnvironmentVariable, $env:CB_ROLE=, a delete in interpreter code) or clears its whole environment
+// (env -i, exec -c, -UseNewEnvironment, os.environ.clear) would run that command, or a child CLI, with the
+// dangerous-command rules only. A name the guard cannot read (unset $n, env -u $X, Env:CB_*) counts as one of them.
+// Reading them stays open ($CB_ROLE, ${CB_ROLE:-x}, $env:CB_ROLE, printenv, grep). Quoted text is judged only when
+// the command runs code (bash -c "unset CB_ROLE"), so grep "CB_ROLE=" stays a search. Each test reads a segment once.
+const SEAT_VAR = /^CB_(?:ROLE|AGENT)$/i;
+// a mention that is not a $ read: CB_ROLE, Env:CB_ROLE, process.env.CB_ROLE, 'CB_ROLE'
+const SEAT_VAR_NAMED = /(?<![\w$]|\$\{|\$env:)CB_(?:ROLE|AGENT)(?!\w)/i;
+// an assignment: CB_ROLE=, CB_ROLE+=, export/set CB_ROLE=, $env:CB_ROLE =, process.env.CB_ROLE=, os.environ['CB_ROLE'] =
+const SEAT_VAR_SET = /(?<![\w$]|\$\{)CB_(?:ROLE|AGENT)(?!\w)["'`]?\]?[ \t]*\+?=(?!=)/i;
+// a command or call that removes or sets the variable named after it in the same segment (a word before : is a drive:
+// Get-Item Env:CB_ROLE reads)
+const SEAT_VAR_REMOVER = /(?<![\w.$:\\/-])(?:unset|unsetenv|putenv|setenv|setx|delete|del|env|set|reg(?:\.exe)?|(?:remove|clear|set|new|rename|move|copy)-item(?:property)?|ri|rm|erase|cli|si|ni|rni|ren|mi|mv)(?![\w:-])|\.(?:pop|remove)\b|SetEnvironmentVariable|(?<![\w.$:\\/-])(?:export|declare|typeset|local|readonly)[ \t]+(?:[-+]\w+[ \t]+)*?(?:\+\w*x|-\w*n)(?!\w)/i;
+const HIDDEN_NAME = /[$`*?[{(%"']/;
+const UNSET = /(?<![\w.$:\\/-])(?:unset|unsetenv)(?![\w-])/i;
+const ENV_DRIVE_WRITER = /(?<![\w.$:\\/-])(?:(?:remove|clear|set|new|rename|move|copy)-item(?:property)?|ri|rm|del|erase|cli|si|ni|rni|ren|mi|mv)(?![\w-])/i;
+const ENV_DRIVE = /(?<![\w$])env:[\\/]*([^\s;&|)]*)/gi;
+const SET_ENV_CALL = /SetEnvironmentVariable[ \t]*\([ \t]*(?:(['"])([A-Za-z_]\w*)\1)?/gi;
+const ENV_CLEARS = /(?<![\w.$:\\/-])exec[ \t]+-[a-z]*c(?![\w-])|-usenewenv\w*|environ\.clear[ \t]*\(|process\.env[ \t]*=(?!=)/i;
+const SEAT_RUNS_CODE = new RegExp(String.raw`${INTERPRETER.source}|(?<![\w.\\/-])(?:eval|iex|invoke-expression|cmd|fish|source)(?![\w.\\/-])`, 'i');
+// env's own options, word by word up to its command: -i, -, --ignore-environment, or -u/--unset of a seat variable or of
+// a name the guard cannot read
+function envChangesSeat(seg) {
+  const w = seg.trim().split(/[ \t]+/);
+  for (let i = 0; i < w.length; i++) {
+    if (!/^(?:\S*[\\/])?env(?:\.exe)?$/i.test(w[i])) continue;
+    for (let j = i + 1; j < w.length; j++) {
+      const x = w[j];
+      if (x === '-' || x === '--ignore-environment' || /^-[a-zA-Z0-9]*i/.test(x)) return true;
+      let name = null;
+      if (/^--unset(?:=|$)/.test(x)) name = x.length > 7 ? x.slice(8) : w[++j] ?? '';
+      else if (/^-[a-zA-Z0-9]*u/.test(x)) name = x.slice(x.indexOf('u') + 1) || (w[++j] ?? '');
+      if (name !== null) {
+        if (!/^[A-Za-z_]\w*$/.test(name) || SEAT_VAR.test(name)) return true;
+        continue;
+      }
+      if (x.startsWith('-') || /^[A-Za-z_]\w*=/.test(x)) continue;
+      i = j - 1; // the command: an env further on is read from there
+      break;
+    }
+  }
+  return false;
+}
+function seatVarChangeOne(command) {
+  const raw = stripMessages(String(command ?? ''));
+  const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
+  if (SEAT_VAR_SET.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
+  for (const seg of t.match(SEGMENTS) ?? []) {
+    const r = SEAT_VAR_REMOVER.exec(seg);
+    if (r && SEAT_VAR_NAMED.test(seg.slice(r.index))) return SEAT_VARS_CHANGE;
+    const u = UNSET.exec(seg);
+    if (u && HIDDEN_NAME.test(seg.slice(u.index + u[0].length))) return SEAT_VARS_CHANGE;
+    if (envChangesSeat(seg)) return SEAT_VARS_CHANGE;
+  }
+  // the Env: drive and .NET take the name as text: judged unblanked (Remove-Item ("Env:" + $n), Env:CB_*)
+  for (const seg of raw.match(SEGMENTS) ?? []) {
+    if (ENV_DRIVE_WRITER.test(seg)) {
+      for (const m of seg.matchAll(ENV_DRIVE)) {
+        const name = m[1].replace(/["')]+$/, '');
+        if (!/^[A-Za-z_]\w*$/.test(name) || SEAT_VAR.test(name)) return SEAT_VARS_CHANGE;
+      }
+    }
+    for (const m of seg.matchAll(SET_ENV_CALL)) if (!m[2] || SEAT_VAR.test(m[2])) return SEAT_VARS_CHANGE;
+  }
+  return null;
+}
+const SEAT_VARS_CHANGE = 'changing CB_ROLE or CB_AGENT (assigning, unsetting or removing either, or clearing the environment with env -i or the like): those two variables are what make this pane a seat, so a command or a child CLI (codex exec, opencode run, claude -p, agy) started without them runs with the dangerous-command rules only, and the guard installer would run. Reading them is fine (echo $CB_ROLE). A test that needs other values sets them in its own child\'s env inside the test file. A change to your seat: cb ask';
 const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), the .claude folder itself, ~/.claude-board (the guard, the runner config) and the other agents\' hook and config files (~/.codex hooks.json and *.toml, .agents/hooks.json, ~/.gemini, opencode.json, OpenCode plugins) are Ahmed\'s; a squad seat never writes them or runs the guard installer. Reading them is fine. A change there is his: cb ask';
 // a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
 // original is tested too, so a Windows path keeps its separators)
@@ -1045,10 +1138,11 @@ const NOCLOBBER = /(&?>>?&?)[|!]/g;
 // as > before the split, or its & cut the target off into a segment of its own
 const BOTH_TO = />&(?![ \t]*[\d-])/g;
 const fenceWrite = rawAndJoined(fenceWriteOne);
+const seatVarChange = rawAndJoined(seatVarChangeOne);
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '$1 ').replace(BOTH_TO, '> ');
-  if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
+  if (GUARD_INSTALL.test(text) && (SEAT_VARS.test(text) || !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || CHECK_WORD(s)))) return FENCE;
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
@@ -1148,6 +1242,8 @@ function squadTrustRun(command) {
 export function checkRole(command, role) {
   if (!role) return null;
   if (!ROLES.includes(role)) return `unknown CB_ROLE "${role}"`;
+  const seatVars = seatVarChange(String(command ?? ''));
+  if (seatVars) return seatVars;
   const secret = secretRead(String(command ?? ''));
   if (secret) return secret;
   const fence = fenceWrite(String(command ?? ''));

@@ -160,23 +160,24 @@ test('guardInstallSpec: ~/.codex/hooks.json, shim-codex.mjs under the board, mat
   const g = codexAdapter.guardInstallSpec('C:/w/board//', 'win32');
   assert.equal(g.targetPath, '~/.codex/hooks.json');
   assert.equal(g.shimFile, 'C:/w/board/kit/guard/shim-codex.mjs');
-  assert.equal(g.matchers.win32, '^(Bash|PowerShell|apply_patch|Edit|Write|request_user_input|update_plan|view_image)$');
-  assert.equal(g.matchers.darwin, '^(Bash|apply_patch|Edit|Write|request_user_input|update_plan|view_image)$');
-  assert.equal(g.matchers.linux, g.matchers.darwin);
+  // #4609: a catch-all on every platform, so a tool Codex adds later still reaches the shim
+  for (const p of ['win32', 'darwin', 'linux']) assert.equal(g.matchers[p], '.*', p);
   assert.match(g.notes, /Hooks need review/);
   assert.match(g.notes, /never edit that one/);
   assert.match(g.notes, /never guarded/);
 });
 
-test('matcher and shim agree: every tool the shim judges matches (PowerShell only on win32); the matcher names nothing the shim calls unknown', () => {
+test('matcher and shim agree: the catch-all sends every tool to the shim, which judges its own and calls the rest unknown', () => {
   const g = codexAdapter.guardInstallSpec('C:/w/board', 'win32');
   for (const [platform, m] of Object.entries(g.matchers)) {
-    const re = new RegExp(m);
-    for (const t of HANDLED_TOOLS) assert.equal(re.test(t), platform === 'win32' || t !== 'PowerShell', `${platform} ${t}`);
-    for (const t of m.slice(2, -2).split('|')) {
-      assert.equal(parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls', path: 'a.png' } })).ok, true, `${platform} names ${t}, the shim must judge it`);
-    }
-    for (const t of ['mcp__x__y', 'BashX', 'bash', 'shell', 'local_shell', '']) assert.equal(re.test(t), false, `${platform} ${t}`);
+    const re = new RegExp(`^(?:${m})$`);
+    for (const t of [...HANDLED_TOOLS, 'mcp__x__y', 'spawn_agent', 'write_stdin']) assert.equal(re.test(t), true, `${platform} ${t}`);
+  }
+  for (const t of HANDLED_TOOLS) assert.equal(parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls', path: 'a.png' } })).ok, true, t);
+  for (const t of ['mcp__x__y', 'BashX', 'bash', 'shell', 'local_shell']) {
+    const p = parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls' } }));
+    assert.equal(p.ok, false, t);
+    assert.equal(p.unknown, true, `${t}: unknown (denied in a seat, allowed outside one)`);
   }
 });
 
