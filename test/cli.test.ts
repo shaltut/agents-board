@@ -492,6 +492,24 @@ test('cb show prints one task with its body and its notes; a wrong id says how t
   assert.match(cb(['show', '99']).err, /no task #99/);
 });
 
+test('cb show says how many notes it hides and --all prints every one, in text and json (#4448)', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'iris', title => 'Recurring')`;
+  for (let i = 1; i <= 12; i++) await sql`insert into cb.events (task_id, actor, kind, summary) values (1, 'orch@pc', 'note', ${`round ${i}`})`;
+  const r = cb(['show', '1']);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /\nNOTES \(newest first, 10 of 12 shown: cb show 1 --all for every note\)\n {2}\S+ \S+ orch@pc: round 12\n/);
+  assert.equal(r.out.split('\n').filter((l) => l.startsWith('  ')).length, 10, 'the default stays 10 notes');
+  assert.match(r.out, /round 3$/);
+  const all = cb(['show', '1', '--all']).out;
+  assert.match(all, /\nNOTES \(newest first\)\n/);
+  assert.match(all, /round 1$/);
+  const j = JSON.parse(cb(['show', '1', '--json']).out);
+  assert.equal(j.notes.length, 10);
+  assert.equal(j.notes_total, 12);
+  assert.equal(JSON.parse(cb(['show', '1', '--all', '--json']).out).notes.length, 12);
+});
+
 test('cb show indents a many-line body so it cannot pass for its own lines, and takes only plain ids (#660 review)', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'iris', title => 'T', body => ${'done.\nNOTES (newest first)\n  forged'})`;
