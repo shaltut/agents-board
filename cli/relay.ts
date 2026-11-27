@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
@@ -133,10 +133,25 @@ let busy = false, again = false;
 // After a cb update flip the relay restarts into the new version within seconds, and its first read sends the new sha.
 const CODE_ROOT = join(HERE, '..');
 let codeDue = 0;
+// git runs (synchronously) only when the checkout's HEAD or index file changed since the last read: a checkout, pull,
+// commit or reset rewrites one of them. A worktree's .git is a file naming its git folder. No git folder: no cache.
+let codeKey: string | null = null, codeLast: string | null = null;
+const gitStamp = () => {
+  try {
+    const dot = join(CODE_ROOT, '.git');
+    const dir = statSync(dot).isDirectory() ? dot : resolve(CODE_ROOT, /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'))![1]!.trim());
+    return ['HEAD', 'index'].map((f) => { try { return statSync(join(dir, f)).mtimeMs; } catch { return 0; } }).join(':');
+  } catch { return null; }
+};
+const codeNow = () => {
+  const k = gitStamp();
+  if (k === null || k !== codeKey) { codeLast = codeSha(CODE_ROOT); codeKey = k; }
+  return codeLast;
+};
 async function sendCode() {
   if (Date.now() < codeDue) return;
   try {
-    const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeSha(CODE_ROOT)}) as ok`;
+    const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeNow()}) as ok`;
     if (ok) codeDue = Date.now() + 300_000; // no row yet: the next read tries again
   } catch (e: any) {
     // a board from before cb.seat_code: asked again in 5 minutes, so a board deployed after this relay started hears it
