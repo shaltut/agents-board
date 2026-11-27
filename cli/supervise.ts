@@ -152,7 +152,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
     if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
     // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
     // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
-    const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
+    const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.unconfirmed ? 'prompt not confirmed' : r.pane ? 'prompt not sent' : 'start failed';
     if (kind === 'start failed') {
       memory.failedAt.set(l.name, now);
       await log(project, 'failed', l.name, kind);
@@ -231,7 +231,8 @@ async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'di
   const local = l.prompt.includes('. Repos: ');
   const text = why === 'dialog'
     ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run${local ? ' the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`
-    : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it${local ? ' with the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`;
+    // PR 117 S2: a prompt herdr refused and one that may have landed read the same: the lead looks before sending
+    : `supervisor: ${l.name} started in ${where} but its first prompt may not have landed: check the pane, then send it if it is not there${local ? ' with the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`;
   return tell(d, lead, text, out);
 }
 

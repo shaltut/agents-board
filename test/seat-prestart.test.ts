@@ -456,14 +456,17 @@ test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks 
 // for the agent to start working (herdr's --wait: agent_prompt_stalled when it does not within 5 s); stalled, the pane is
 // read, and a prompt that is not on the screen is sent once more. For every agent kind: the fake here is a Claude seat.
 const STALLED = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_prompt_stalled"}}' };
-function promptWorld(prompts: ('ok' | 'stall')[], screen: string[] = []) {
+const TIMED_OUT = { status: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' };
+const UNCONFIRMED = 'started demo-B1@m, its first prompt may not have landed (the agent did not start working): check herdr pane w9:p2, then send it if it is not there: herdr agent prompt demo-b1-m "cb iam demo-B1@m demo --role builder, then cb next"';
+function promptWorld(prompts: ('ok' | 'stall' | 'timeout')[], screen: (string | null)[] = []) {
   const calls: string[][] = [];
   let n = 0, reads = 0;
   const run: Runner = (_m, args) => {
     calls.push(args);
     if (args[0] === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
-    if (args[0] === 'agent' && args[1] === 'prompt') return prompts[n++] === 'stall' ? STALLED : ok({});
-    if (args[0] === 'pane' && args[1] === 'read') return { status: 0, stdout: screen[reads++] ?? '', stderr: '' };
+    if (args[0] === 'agent' && args[1] === 'prompt') { const k = prompts[n++]; return k === 'stall' ? STALLED : k === 'timeout' ? TIMED_OUT : ok({}); }
+    // null: the read fails (herdr exits non-zero)
+    if (args[0] === 'pane' && args[1] === 'read') { const s = screen[reads++]; return s === null ? { status: 1, stdout: '', stderr: 'pane_not_found' } : { status: 0, stdout: s ?? '', stderr: '' }; }
     return ok({});
   };
   return { calls, run, prompts: () => calls.filter((c) => c[0] === 'agent' && c[1] === 'prompt') };
@@ -493,11 +496,28 @@ test('startOne (#4687): a stalled prompt that is on the screen (it landed, the s
   assert.equal(w.prompts().length, 1);
 });
 
-test('startOne (#4687): dropped twice: the seat is up, the line says the prompt is not confirmed and how to send it', () => {
-  const w = promptWorld(['stall', 'stall'], ['', '']);
+test('startOne (#4687): dropped twice: the seat is up, the line says the prompt may not have landed and how to check and send it', () => {
+  const w = promptWorld(['stall', 'stall'], ['opencode  > \n  ask anything...']); // read, and the prompt is not there
   const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
   assert.equal(r.ok, false);
-  assert.equal(r.line, 'started demo-B1@m, prompt not confirmed (sent twice, the agent never started working): herdr agent prompt demo-b1-m "cb iam demo-B1@m demo --role builder, then cb next"');
+  assert.equal(r.unconfirmed, true);
+  assert.equal(r.line, UNCONFIRMED);
   assert.equal(w.prompts().length, 2);
   assert.ok(!w.calls.some((c) => c[0] === 'pane' && c[1] === 'close'), 'the agent is up: its pane stays');
+});
+
+// PR 117 review B1: a resend only on herdr's own stall and a screen that was read and lacks the prompt. A pane read that
+// fails, or a herdr timeout (the submit may have landed: over a slow --machine relay it counts the submit time), is no
+// proof the text was lost, and a second prompt would have cb next take a second card. S1: the visible screen is read
+test('startOne (PR 117 B1, S1): a failed pane read or a herdr timeout never resends; the read is of the visible screen', () => {
+  for (const [what, prompts, screen] of [['the read fails', ['stall'], [null]], ['the read is empty', ['stall'], ['']], ['herdr timed out', ['timeout'], []]] as const) {
+    const w = promptWorld([...prompts], [...screen]);
+    const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+    assert.equal(w.prompts().length, 1, what);
+    assert.equal(r.line, UNCONFIRMED, what);
+  }
+  const w = promptWorld(['stall', 'ok'], ['opencode  > \n  ask anything...']);
+  startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  const read = w.calls.find((c) => c[0] === 'pane' && c[1] === 'read')!;
+  assert.deepEqual(read.slice(3), ['--source', 'visible', '--format', 'text']);
 });
