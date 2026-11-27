@@ -18,17 +18,17 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput =>
 
 test('registry: codex resolves to the codex adapter; its default model is null (cb._role_model gives none for non-Claude)', () => {
   assert.equal(ADAPTERS.codex, codexAdapter);
-  assert.throws(() => getAdapter('codex'), /agent "codex" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('codex', { env: {} }), /agent "codex" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('codex', { env: { CB_MCP_GATE_OK: 'codex' } }), ADAPTERS.codex);
   assert.equal(codexAdapter.kind, 'codex');
   assert.equal(codexAdapter.relayStart, 'pane-prestart');
   for (const r of ['builder', 'lead', 'reviewer']) assert.equal(defaultModelFor('codex', r), null);
 });
 
-test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a builder, exact argv', () => {
+test('buildLaunch: --no-daemon first, model, never ask, no sandbox for a builder (Q3023), exact argv', () => {
   assert.deepEqual(codexAdapter.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
     kind: 'codex',
-    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'workspace-write',
-      '-c', 'sandbox_workspace_write.network_access=true',
+    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'danger-full-access',
       '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
       '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
@@ -49,7 +49,7 @@ test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; confi
   }
 });
 
-test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no network opening; other roles workspace-write', () => {
+test('buildLaunch: reviewer, qa and investigator get a read-only sandbox; other roles no sandbox (Q3023) and no network flag', () => {
   for (const role of ['reviewer', 'qa', 'investigator']) {
     const a = codexAdapter.buildLaunch(input({ role })).args;
     assert.equal(a[a.indexOf('-s') + 1], 'read-only', role);
@@ -57,7 +57,8 @@ test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no 
   }
   for (const role of ['lead', 'architect', 'owner', 'builder']) {
     const a = codexAdapter.buildLaunch(input({ role })).args;
-    assert.equal(a[a.indexOf('-s') + 1], 'workspace-write', role);
+    assert.equal(a[a.indexOf('-s') + 1], 'danger-full-access', role);
+    assert.ok(!a.some((x) => x.startsWith('sandbox_workspace_write')), role);
   }
 });
 

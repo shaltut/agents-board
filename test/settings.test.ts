@@ -35,14 +35,22 @@ const MORE = { ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 4, model: 's
 const events = async (sql: any) => (await sql`select data from cb.events where summary = 'squad updated' order by id`).map((e: any) => e.data);
 const version = async (sql: any) => (await sql`select squad_version as v from cb.projects where slug = 'demo'`)[0].v;
 
-test('the save gate and the launch gate name the same main agents: cb._agents_main() = INSTALLED', async () => {
+test('the save gate and the launch gate name the same main agents: cb._agents_main() = INSTALLED, all four (#4585, Q3024)', async () => {
   const sql = await db();
   const [{ a }] = await sql`select cb._agents_main() as a`;
   assert.deepEqual([...a].sort(), [...INSTALLED].sort());
-  // and _check_seat refuses by that list, with the same words as before
+  assert.deepEqual([...a].sort(), ['agy', 'claude', 'codex', 'opencode']);
+  // any project saves a role and seats of each agent
+  const four = { ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 4, machine: 'macbook', model: 'sonnet', seats: {
+    '2': { agent: 'codex', model: 'gpt-6.1-sol' }, '3': { agent: 'agy', model: 'gemini-4-neon-xhigh' }, '4': { agent: 'opencode', model: 'anthropic/claude-opus-5-5' } } },
+    reviewer: { count: 1, machine: 'macbook', agent: 'codex', model: 'gpt-6.1-sol' } } };
   await sql`select cb.ensure_project('demo')`;
-  await assert.rejects(sql`select cb.squad_set('demo', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 1, machine: 'macbook', agent: 'codex', model: 'gpt-6.1-sol' } } })}, 'ahmed')`,
-    /builder agent "codex" cannot be assigned as a primary seat yet \(phase 1 supports claude only; non-Claude agents are allowed in fallback\)/);
+  const [{ s }] = await sql`select cb.squad_set('demo', ${sql.json(four)}, 'ahmed') as s`;
+  assert.deepEqual(Object.values(s.roles.builder.seats).map((x: any) => x.agent), ['codex', 'agy', 'opencode']);
+  assert.equal(s.roles.reviewer.agent, 'codex');
+  // the page offers each as a main agent
+  const [{ o }] = await sql`select cb.squad_options() as o`;
+  assert.deepEqual(o.agents.filter((x: any) => x.main).map((x: any) => x.agent), ['claude', 'codex', 'opencode', 'agy']);
 });
 
 test('squad_set: each real change raises the version once, a no-op writes nothing, a stale base is refused in plain words', async () => {
@@ -154,7 +162,7 @@ test('squad_options: the agents (main or backup only), the limits and the names 
   await sql`select cb.squad_set('demo', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
     builder: { count: 2, machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }], seats: { '2': { model: 'opus' } } } } })}, 'ahmed')`;
   const [{ o }] = await sql`select cb.squad_options() as o`;
-  assert.deepEqual(o.agents, [{ agent: 'claude', main: true }, { agent: 'codex', main: false }, { agent: 'opencode', main: false }, { agent: 'agy', main: false }]);
+  assert.deepEqual(o.agents, [{ agent: 'claude', main: true }, { agent: 'codex', main: true }, { agent: 'opencode', main: true }, { agent: 'agy', main: true }]);
   assert.deepEqual(o.claude_models, ['opus', 'sonnet', 'haiku', 'fable']);
   assert.deepEqual(o.roles, ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']);
   assert.equal(o.default_models.builder, 'sonnet');

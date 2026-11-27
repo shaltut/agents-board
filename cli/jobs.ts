@@ -29,6 +29,13 @@ function recipeLines(list: any, project: string) {
   }
   return new Map([...by].map(([repo, seen]) => [repo, [...seen.values()].join(', ')]));
 }
+/** Why a project has no recipes (#4601): no runner has said hello, or the runners there offer none for it (their config
+ *  names other projects). The second is not fixed by waiting for a runner, so it says who adds them. */
+export function recipesNone(list: { runners: { name: string; last_seen?: string | null }[] }, project: string): string {
+  if (!list.runners.length) return 'none: no runner is connected';
+  const seen = list.runners.map((r) => `${r.name}, seen ${r.last_seen ? new Date(r.last_seen).toISOString().slice(0, 16).replace('T', ' ') + 'Z' : 'never'}`).join('; ');
+  return `none: no runner offers recipes for ${project} (runners: ${seen}); a project's recipes come from the runner's config on its machine (~/.claude-board/runner.json), which Ahmed edits: cb ask`;
+}
 // a one-repo project (main only) reads as before; with several repos each is named (#3703)
 const oneRepo = (m: Map<string, string>) => m.size === 1 && m.has('main');
 const repoTag = (j: any) => (j.repo && j.repo !== 'main' ? `/${j.repo}` : '');
@@ -46,7 +53,7 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
     const [{ l }] = await sql`select cb.jobs_list(${o.project}) as l`;
     const m = recipeLines(l, o.project!);
     if (o.repo) return m.get(o.repo) || `none for ${o.repo}`;
-    if (!m.size) return 'none: no runner is connected';
+    if (!m.size) return recipesNone(l, o.project!);
     return oneRepo(m) ? m.get('main')! : [...m].map(([repo, line]) => `${repo}: ${line}`).join('; ');
   };
   if (!o.recipe) throw new Error(`usage: cb run <recipe> --sha <sha> [--<param> <value>...] [--wait]. Recipes: ${await known()}`);

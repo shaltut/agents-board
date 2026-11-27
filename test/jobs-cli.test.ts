@@ -4,7 +4,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { splitRunArgs } from '../cli/jobs.ts';
+import { recipesNone, splitRunArgs } from '../cli/jobs.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -83,6 +83,22 @@ test('cb run lists the recipes when the recipe is unknown or missing', async () 
   assert.equal(r.code, 1);
   assert.match(r.err, /test \(files\)/);
   assert.match(cb(['run', '--sha', 'abc1234', '--project', 'demo']).err, /check \(ws\)/);
+});
+
+test('cb run: a runner with no recipes for the project is named, not called missing (#4601)', async () => {
+  const { sql } = await setup();
+  await sql`select cb.ensure_project('other')`;
+  await sql`update cb.sessions set project = 'other' where actor = 'B1@mac'`;
+  const r = cb(['run', 'check', '--sha', 'abc1234', '--project', 'other']);
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(r.err, /no runner is connected/);
+  assert.match(r.err, /no recipe check for other\. Recipes: none: no runner offers recipes for other \(runners: pc, seen .+\); a project's recipes come from the runner's config on its machine \(~\/\.claude-board\/runner\.json\), which Ahmed edits: cb ask/);
+});
+
+test('recipesNone: no runner at all, or runners with none for the project', () => {
+  assert.equal(recipesNone({ runners: [] }, 'demo'), 'none: no runner is connected');
+  assert.match(recipesNone({ runners: [{ name: 'pc', last_seen: '2026-11-27T15:08:54Z', recipes: [{ project: 'x' }] }] }, 'demo'),
+    /^none: no runner offers recipes for demo \(runners: pc, seen 2026-11-27 15:08Z\)/);
 });
 
 test('cb run --wait prints the result and exits by it', async () => {

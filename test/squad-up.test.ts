@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, launchSpec, opencodePort, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
 import { squadShow } from '../cli/squad-show.ts';
 import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
 import { help } from '../cli/help.ts';
@@ -636,7 +636,7 @@ test('launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude',
   }
 });
 
-// synthetic: cb.squad_set refuses a non-Claude primary seat in phase 1, so this squad never comes from the board
+// synthetic: cb.squad_set refuses a non-Claude primary seat outside cb._agents_projects() (#4585), so a demo squad never holds one
 const MIXED: any = { ...squad, roles: { ...squad.roles,
   builder: { count: 3, model: 'sonnet', machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }],
     seats: { '2': { model: 'opus' }, '3': { agent: 'codex', model: 'gpt-6.1-sol', fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] } } },
@@ -738,14 +738,49 @@ test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as b
   assert.match(out, /^start demo-B1@macbook \(builder, sonnet\) on macbook$/m);
 });
 
-test('startOne refuses an unimplemented agent before creating a pane', () => {
+// #4585: one builder each of claude, codex, agy and opencode on the PC (synthetic paths)
+const FOUR: any = {
+  machines: { pc: { herdr: null, repo: 'C:/work/demo', board: 'C:/work/board' } },
+  roles: { lead: { count: 1, model: 'opus', machine: 'pc' }, builder: { count: 4, model: 'sonnet', machine: 'pc', seats: {
+    '2': { agent: 'codex', model: 'gpt-6.1-sol' }, '3': { agent: 'agy', model: 'gemini-4-neon-xhigh' }, '4': { agent: 'opencode', model: 'anthropic/claude-opus-5-5' } } } },
+  areas: [],
+};
+const CODEX_BUILDER_SANDBOX = 'danger-full-access'; // Q3023
+const AGY_ARGS = ['--dangerously-skip-permissions', '--settings', 'C:/work/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh'];
+test('squad up --dry-run (#4585): four builders, one per agent, plan four launches; without CB_MCP_GATE_OK the three others say would fail', async () => {
+  const up = () => squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? FOUR : []), fake((c) => (c.args[1] === 'get' ? GONE : undefined)).run);
+  const starts = ['start demo-B1@pc (builder, sonnet) on pc', 'start demo-B2@pc (builder, codex/gpt-6.1-sol) on pc',
+    'start demo-B3@pc (builder, agy/gemini-4-neon-xhigh) on pc', 'start demo-B4@pc (builder, opencode/anthropic/claude-opus-5-5) on pc'];
+  const shut = (await up()).split('\n');
+  for (const s of starts) assert.ok(shut.includes(s), s);
+  for (const k of ['codex', 'agy', 'opencode']) assert.ok(shut.some((l) => l.startsWith(`  would fail: agent "${k}" cannot start a seat with MCP off for one run`)), k);
+  assert.equal(shut.filter((l) => l.startsWith('  would fail')).length, 3);
+  process.env.CB_MCP_GATE_OK = 'codex,opencode,agy';
+  try {
+    assert.deepEqual((await up()).split('\n'), ['start orch@pc (lead, opus) on pc', ...starts]);
+    const spec = (n: string) => launchSpec(launchFor('demo', FOUR, wantList('demo', FOUR).find((w) => w.name === n)!)).spec;
+    const b1 = spec('demo-B1@pc'), b2 = spec('demo-B2@pc'), b3 = spec('demo-B3@pc'), b4 = spec('demo-B4@pc'), port = String(opencodePort('demo-B4@pc'));
+    assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
+      '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
+    assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+    assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
+      ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+    // the port is the seat's own, stable across restarts, in range
+    assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
+  } finally { delete process.env.CB_MCP_GATE_OK; }
+});
+
+test('startOne refuses an agent whose MCP check is not confirmed here (or an unknown one) before creating a pane', () => {
   const b3 = launchFor('demo', MIXED, mixedWant('demo-B3@macbook'));
   const each: Record<string, { pane: string; panes: number }>[] = [{}, { macbook: { pane: 'w4:p1', panes: 1 } }];
   for (const tabs of each) { // a new tab, or a split of this run's tab
     const f = fake((c) => (c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
     const r = startOne(b3, f.run, tabs);
     assert.equal(r.ok, false);
-    assert.equal(r.line, 'failed demo-B3@macbook: agent "codex" is not installed yet (phase 1 supports claude only)');
+    assert.match(r.line, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off for one run: .*set CB_MCP_GATE_OK=codex /);
     assert.equal(r.pane, undefined);
     assert.deepEqual(f.calls, [], 'no herdr call: no pane, never a Claude start in its place');
   }
@@ -754,10 +789,10 @@ test('startOne refuses an unimplemented agent before creating a pane', () => {
   assert.equal(f.calls.length, 0);
 });
 
-test('squad up starts the Claude seats and refuses the codex one without touching a pane for it', async () => {
+test('squad up starts the Claude seats and refuses the codex one (its MCP check not confirmed here) without touching a pane for it', async () => {
   const f = fake((c) => (c.args[1] === 'get' ? GONE : c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
   const out = await squadUp('demo', false, async (fn: string) => (fn === 'squad_get' ? MIXED : []), f.run);
-  assert.match(out, /^failed demo-B3@macbook: agent "codex" is not installed yet/m);
+  assert.match(out, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off/m);
   assert.match(out, /^started demo-B2@macbook$/m);
   assert.ok(f.calls.filter((c) => c.args.includes('demo-b3-macbook')).every((c) => c.args[1] === 'get'), 'only herdr agent get for the codex seat');
   assert.ok(!f.calls.some((c) => c.args.includes('demo-B3@macbook')), 'no tab labelled for it');

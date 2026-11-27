@@ -6,7 +6,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind, mcpGateRefusal } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, INSTALLED, defaultModelFor, getAdapter, isAgentKind, mcpGateRefusal } from '../cli/agents/index.ts';
 import { checkRoleSettings, claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
@@ -38,11 +38,17 @@ test('seatKey: sha1 of lowercased machine and trimmed pane, 12 hex', () => {
   assert.notEqual(seatKey('testbox', 'p1'), seatKey('testbox', 'p2'));
 });
 
-test('registry: every agent kind has an adapter; only claude is installed; anything else is unknown', () => {
+test('registry (#4585): every agent kind has an adapter and is installed, behind its MCP gate; anything else is unknown', () => {
   assert.deepEqual([...AGENT_KINDS], ['claude', 'codex', 'opencode', 'agy']);
+  assert.deepEqual([...INSTALLED], [...AGENT_KINDS]);
   for (const k of AGENT_KINDS) assert.equal(ADAPTERS[k].kind, k);
-  assert.equal(getAdapter('claude'), claudeAdapter);
-  for (const k of ['codex', 'opencode', 'agy'] as const) assert.throws(() => getAdapter(k), new RegExp(`agent "${k}" is not installed yet \\(phase 1 supports claude only\\)`));
+  assert.equal(getAdapter('claude', { env: {} }), claudeAdapter);
+  for (const k of ['codex', 'opencode', 'agy'] as const) {
+    assert.throws(() => getAdapter(k, { env: {} }), new RegExp(`: agent "${k}" cannot start a seat with MCP off for one run`), k);
+    assert.equal(getAdapter(k, { env: { CB_MCP_GATE_OK: k } }), ADAPTERS[k], k);
+    // an installed set without it (a rolled-back cb) still refuses by name
+    assert.throws(() => getAdapter(k, { installed: new Set(['claude'] as const), env: { CB_MCP_GATE_OK: k } }), new RegExp(`: agent "${k}" is not installed yet \\(this cb runs claude only\\)$`));
+  }
   assert.throws(() => getAdapter('grok' as any), /unknown agent "grok"/);
   assert.equal(isAgentKind('agy'), true);
   assert.equal(isAgentKind('grok'), false);
@@ -115,8 +121,8 @@ test('getAdapter (#4392): an installed agent with an open MCP gate is refused by
     }
   }
   assert.equal(getAdapter('claude', { installed, env: {} }), claudeAdapter); // no gate: never needs the opt-in
-  // the opt-in never installs an agent: without the installed override, codex stays not installed
-  assert.throws(() => getAdapter('codex', { env: { CB_MCP_GATE_OK: 'codex' } }), /agent "codex" is not installed yet/);
+  // the opt-in never installs an agent: an installed set without codex keeps it out
+  assert.throws(() => getAdapter('codex', { installed: new Set(['claude'] as const), env: { CB_MCP_GATE_OK: 'codex' } }), /agent "codex" is not installed yet/);
 });
 
 test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file left', () => {

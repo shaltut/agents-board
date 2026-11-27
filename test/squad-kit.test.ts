@@ -396,15 +396,12 @@ test('squad_set validates agent gate, per-agent models in fallback, and seats (#
   assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved);
   assert.deepEqual(await set(saved), saved, 'a saved squad saves again unchanged');
 
-  const gate = (label: string, k: string) => new RegExp(`: ${label} agent "${k}" cannot be assigned as a primary seat yet \\(phase 1 supports claude only; non-Claude agents are allowed in fallback\\)$`);
   const fb = (f: any) => mod((s) => { s.roles.builder.fallback = f; });
   const bad: [any, RegExp][] = [
     [mod((s) => { s.roles.builder.agent = 'grok'; }), /: builder agent must be one of claude, codex, opencode, agy \(got "grok"\)$/],
     [mod((s) => { s.roles.builder.agent = 5; }), /: builder agent must be one of claude, codex, opencode, agy/],
-    [mod((s) => { s.roles.builder.agent = 'codex'; s.roles.builder.model = 'gpt-6.1-sol'; }), gate('builder', 'codex')],
-    [mod((s) => { s.roles.owner.agent = 'opencode'; }), gate('owner', 'opencode')],
-    [mod((s) => { s.roles.lead.agent = 'agy'; }), gate('lead', 'agy')],
-    [mod((s) => { s.roles.builder.seats = { '2': { agent: 'codex', model: 'gpt-6.1-sol' } }; }), gate('builder seat 2', 'codex')],
+    [mod((s) => { s.roles.owner.agent = 'opencode'; }), /: owner model for opencode must be provider\/model/],
+    [mod((s) => { s.roles.lead.agent = 'agy'; }), /: lead model for agy must be/],
     [mod((s) => { s.roles.builder.model = null; }), /: builder model must be opus, sonnet, haiku or fable$/],
     [fb({ agent: 'codex', model: 'gpt-6.1-sol' }), /: builder fallback must be a list of at most 5/],
     [fb(Array.from({ length: 6 }, (_, i) => ({ agent: 'codex', model: `gpt-${i}` }))), /: builder fallback must be a list of at most 5/],
