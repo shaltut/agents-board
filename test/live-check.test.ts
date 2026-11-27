@@ -204,3 +204,17 @@ test('setup: an exported GIT_CONFIG never takes setup\'s scratch identity (#4694
   assert.equal(git(dir, 'config', '--local', 'user.email').stdout.trim(), 'live-check@example.invalid');
   assert.equal(git(dir, 'log', '-1', '--format=%an <%ae>').stdout.trim(), 'Live Check <live-check@example.invalid>');
 });
+
+// #4705 (PR 118/119 review): the operator's identity and config overrides in the environment never reach the scratch
+// commit the third-party seats read: GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS
+test('setup: the operator\'s GIT_AUTHOR_*, GIT_COMMITTER_* and git config env never reach the scratch commit (#4705)', () => {
+  const env = { ...SAFE, GIT_AUTHOR_NAME: 'Operator Person', GIT_AUTHOR_EMAIL: 'op@private.example', GIT_COMMITTER_NAME: 'Operator Person',
+    GIT_COMMITTER_EMAIL: 'op@private.example', GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z', GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'user.name',
+    GIT_CONFIG_VALUE_0: 'Operator Person', GIT_CONFIG_KEY_1: 'user.email', GIT_CONFIG_VALUE_1: 'op@private.example',
+    GIT_CONFIG_PARAMETERS: "'user.name'='Operator Person'" };
+  const dir = join(root, 'scratch-identity');
+  setup({ dir, machine: 'box', board: BOARD, env });
+  const who = git(dir, 'log', '-1', '--format=%an <%ae>|%cn <%ce>|%ad').stdout.trim();
+  assert.match(who, /^Live Check <live-check@example\.invalid>\|Live Check <live-check@example\.invalid>\|/);
+  assert.doesNotMatch(who, /Operator|private|2001/);
+});
