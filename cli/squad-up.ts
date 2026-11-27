@@ -211,29 +211,45 @@ const WORD = /^[A-Za-z]{1,24}(?:'[A-Za-z]{1,3})?$/;
 // dashes, at most 60 characters; a short flag is one letter
 const LONG_FLAG = /^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const isFlag = (t: string) => (LONG_FLAG.test(t) && t.length <= 62) || /^-[A-Za-z]$/.test(t);
-// #4617 L1: any word that sounds like a secret or names an account cuts the word after it (API_KEY: x, access_token x,
-// passphrase x, credentials x, user x, mysql -p x); bypass and oauth are not secrets (the cosmetic note)
-const SECRETISH = /token|key|secret|(?<!by)pass|pwd|(?<!o)auth|cred|bearer/i;
-const NAMES = new Set(['basic', 'profile', 'user', 'username', 'account', 'org', 'organization', 'login', 'email', 'tenant', '-p', '-u']);
-const valueNext = (prev: string) => SECRETISH.test(prev) || NAMES.has(prev.toLowerCase());
-// what went wrong is never a value: these may follow a secret-ish word and stay (error: auth failed)
-const OUTCOME = /^(?:error|usage|unknown|unexpected|unrecognized|invalid|not|found|no|such|panic|fatal|failed|denied|unauthorized|refused|rejected|expired|missing|required|is|was)$/i;
-const LEAD = /^[\[({'"`\u2018\u201c\u00ab]*/, TRAIL = /[\])}'"`\u2019\u201d\u00bb,.:;!?]*$/; // L3: curly quotes too
-function cleanToken(tok: string, prev: string): string {
-  const lead = LEAD.exec(tok)![0], rest = tok.slice(lead.length);
-  const trail = TRAIL.exec(rest)![0], core = rest.slice(0, rest.length - trail.length);
-  if (valueNext(prev) && !OUTCOME.test(core)) return '…';
+// #4617 L1, PR 105 review B4: a word that names a secret or an account opens a context, and the next value in it is cut
+// (API_KEY: x, access_token x, passphrase x, credentials x, user x, mysql -p x, --username x). A secret word is a whole
+// word or a part of a compound (accessToken, AUTH_TOKEN, client-secret, apikey), never a piece of an ordinary word:
+// passed, keyboard, author, credit, bypass and oauth are not secrets
+const SECRET_PARTS = new Set(['token', 'tokens', 'key', 'keys', 'apikey', 'privatekey', 'secret', 'secrets', 'password', 'passwords', 'passwd',
+  'passphrase', 'pass', 'pwd', 'auth', 'authorization', 'credential', 'credentials', 'cred', 'creds', 'bearer', 'cookie', 'signature']);
+const NAMES = new Set(['basic', 'profile', 'user', 'username', 'account', 'org', 'organization', 'login', 'email', 'tenant', 'p', 'u']);
+const secretWord = (w: string) => w.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[^A-Za-z]+/).some((x) => SECRET_PARTS.has(x.toLowerCase()));
+// B3: an account name given as a flag (--user, --username, --profile, -p) counts as the name
+const valueNext = (w: string) => secretWord(w) || NAMES.has(w.replace(/^-+/, '').toLowerCase());
+// what went wrong is never a value: these end the context and stay (error: auth failed, password is missing)
+const OUTCOME = /^(?:error|usage|unknown|unexpected|unrecognized|invalid|not|found|no|such|panic|fatal|failed|denied|unauthorized|refused|rejected|expired|missing|required|empty|unset|wrong|bad)$/i;
+// B5: these sit between the word and its value (password is x, token was x, the key is set to x) and keep the context
+const LINKING = new Set(['is', 'was', 'are', 'were', 'be', 'been', 'set', 'to', 'as', 'now', 'currently', 'still', 'the', 'a', 'an']);
+const LEAD = /^[\[({'"`‘“«]*/, TRAIL = /[\])}'"`’”»,.:;!?]*$/; // L3: curly quotes too
+// B7: a line is cut before it is cleaned, so no pattern runs over more than this
+const PANE_RAW_MAX = 1000;
+function cleanToken(lead: string, core: string, trail: string): string {
   const eq = core.indexOf('=');
   if (eq > 0 && isFlag(core.slice(0, eq))) return `${lead}${core.slice(0, eq)}=…`;
   return core && (isFlag(core) || WORD.test(core)) ? lead + core + trail : '…';
 }
 function cleanLine(line: string): string {
-  let prev = '';
+  let open = false; // a secret or account word came before, and its value has not
   const out: string[] = [];
+  const push = (t: string) => { if (!(t === '…' && out[out.length - 1] === '…')) out.push(t); };
   for (const tok of line.split(/\s+/).filter(Boolean)) {
-    const t = cleanToken(tok, prev);
-    prev = tok.replace(LEAD, '').replace(TRAIL, '');
-    if (!(t === '…' && out[out.length - 1] === '…')) out.push(t);
+    const lead = LEAD.exec(tok)![0], rest = tok.slice(lead.length);
+    const trail = TRAIL.exec(rest)![0], core = rest.slice(0, rest.length - trail.length);
+    // B1: punctuation alone (: = - :=) is shown as … and leaves the context as it was (password : x)
+    if (!/[A-Za-z0-9]/.test(core)) { push('…'); continue; }
+    if (open) {
+      if (LINKING.has(core.toLowerCase())) { push(cleanToken(lead, core, trail)); continue; }
+      open = false;
+      push(OUTCOME.test(core) ? cleanToken(lead, core, trail) : '…');
+      continue;
+    }
+    push(cleanToken(lead, core, trail));
+    open = core.indexOf('=') <= 0 && valueNext(core); // --token=x: its value is already cut
   }
   const l = out.join(' ');
   return l.length > PANE_LINE_MAX ? `${l.slice(0, PANE_LINE_MAX)}…` : l;
@@ -242,9 +258,10 @@ export function paneTail(run: Runner, m: string | null, pane: string): string {
   let r: Res;
   try { r = run(m, ['pane', 'read', pane, '--source', 'recent', '--lines', '40', '--format', 'text'], 10_000); } catch { return ''; }
   if (r.status !== 0 || !r.stdout) return '';
-  // #4617 L2: a tab is a space before the control characters go (it glued a value onto the word before it)
-  return String(r.stdout).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\t/g, ' ').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
-    .split('\n').map((s) => s.trim()).filter((s) => s && ERROR_LINE.test(s))
+  // #4617 L2, PR 105 review B2: every control character but the line end is a space (a tab, vertical tab, form feed or
+  // bare CR glued a value onto the word before it); B7: each line is cut to PANE_RAW_MAX before anything reads it
+  return String(r.stdout).slice(-PANE_RAW_MAX * 40).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
+    .split('\n').map((s) => s.slice(0, PANE_RAW_MAX).trim()).filter((s) => s && ERROR_LINE.test(s))
     .map(cleanLine).slice(-PANE_LINES).join(' | ');
 }
 
