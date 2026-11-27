@@ -103,6 +103,26 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   assert.equal(nobody.out, '#7 bug filed in newproj; no session works in newproj yet: it waits in Next');
   const own = cb(['bug', 'iris', 'orch found one', '-b', 'z'], { CB_ACTOR: 'orch@shaltoot' });
   assert.equal(own.out, '#8 bug filed in iris; you triage it: cb edit 8 --assignee <worker>');
+  // #4447: the body as a second quoted argument, no -b; both ways at once is refused
+  const two = cb(['bug', 'iris', 'claims page blank again', 'Open /claims as payer. Expected list, got blank.'], env);
+  assert.equal(two.code, 0, two.err);
+  const [b2] = await sql`select title, body from cb.tasks where id = ${Number(/^#(\d+)/.exec(two.out)![1])}`;
+  assert.deepEqual({ ...b2 }, { title: 'claims page blank again', body: 'Open /claims as payer. Expected list, got blank.' });
+  const twice = cb(['bug', 'iris', 'claims page blank', 'a body', '-b', 'another'], env);
+  assert.equal(twice.code, 1);
+  assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb bug <project> "<title>" -b "<body>"/);
+  const n = (await sql`select count(*)::int as n from cb.tasks`)[0].n;
+  const mixed = cb(['bug', 'iris', 'claims page', 'broken'], env);
+  assert.equal(mixed.code, 1, 'a one-word body is not split off a quoted title');
+  assert.match(mixed.err, /bug got 2 arguments after the project .*Give the body with -b \(cb bug <project> "<title>" -b "<body>"\)/);
+  assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused bug creates no card');
+  const mixB = cb(['bug', 'iris', 'claims page', 'broken', '-b', 'Open /claims. Blank.'], env);
+  assert.equal(mixB.code, 0, mixB.err);
+  const [b3] = await sql`select title, body from cb.tasks where id = ${Number(/^#(\d+)/.exec(mixB.out)![1])}`;
+  assert.deepEqual({ ...b3 }, { title: 'claims page broken', body: 'Open /claims. Blank.' }, 'with -b, a mix is all title');
+  const emptyBody = cb(['bug', 'iris', 'claims page blank', ''], env);
+  assert.equal(emptyBody.code, 1, 'an empty second argument is no body');
+  assert.match(emptyBody.err, /describe it: -b "what happened/);
 });
 
 test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {

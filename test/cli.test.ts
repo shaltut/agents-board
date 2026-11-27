@@ -20,6 +20,45 @@ function cb(args: string[], env: Record<string, string> = {}) {
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
 
+test('cb add: a second quoted argument is the body; bare words stay one title; a body given twice is refused (#4447)', async () => {
+  const sql = await db();
+  const row = async (out: string) => (await sql`select title, body from cb.tasks where id = ${Number(out.slice(1))}`)[0];
+  const two = cb(['add', 'demo', 'Fix month parse', 'Row 8812 reads 1969 as 1900. Expected 1969.', '-s', 'next']);
+  assert.equal(two.code, 0, two.err);
+  assert.deepEqual({ ...(await row(two.out)) }, { title: 'Fix month parse', body: 'Row 8812 reads 1969 as 1900. Expected 1969.' });
+  const flag = cb(['add', 'demo', 'Fix day parse', '-b', 'the -b body']);
+  assert.deepEqual({ ...(await row(flag.out)) }, { title: 'Fix day parse', body: 'the -b body' });
+  // unquoted: the shell hands over one word per argument, none holding a space: all title, as before
+  const bare2 = cb(['add', 'demo', 'Fix', 'parse']);
+  assert.deepEqual({ ...(await row(bare2.out)) }, { title: 'Fix parse', body: '' });
+  const bare3 = cb(['add', 'demo', 'Fix', 'year', 'parse', '-b', 'still the -b body']);
+  assert.deepEqual({ ...(await row(bare3.out)) }, { title: 'Fix year parse', body: 'still the -b body' });
+  const n = (await sql`select count(*)::int as n from cb.tasks`)[0].n;
+  const twice = cb(['add', 'demo', 'Fix hour parse', 'a body', '-b', 'another body']);
+  assert.equal(twice.code, 1);
+  assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb add <project> "<title>" -b "<body>"/);
+  const three = cb(['add', 'demo', 'Fix minute parse', 'part one', 'part two']);
+  assert.equal(three.code, 1);
+  assert.match(three.err, /^cb: add got 3 arguments after the project .*Give the body with -b \(cb add <project> "<title>" -b "<body>"\), or quote the whole title as one argument$/);
+  // a quoted phrase and a bare word, either order: refused, never split into a one-word title or body
+  for (const words of [['Fix month', 'parse'], ['Fix', 'month parse']]) {
+    const mixed = cb(['add', 'demo', ...words]);
+    assert.equal(mixed.code, 1, JSON.stringify(words));
+    assert.match(mixed.err, /got 2 arguments after the project .*or quote the whole title as one argument/);
+  }
+  assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused add creates no card');
+  // with -b, a mix of quoted and bare is all title, as before #4447
+  const mixB = cb(['add', 'demo', 'Fix month', 'parse', '-b', 'x']);
+  assert.deepEqual({ ...(await row(mixB.out)) }, { title: 'Fix month parse', body: 'x' });
+  const threeB = cb(['add', 'demo', 'Fix minute parse', 'part one', 'part two', '-b', 'y']);
+  assert.deepEqual({ ...(await row(threeB.out)) }, { title: 'Fix minute parse part one part two', body: 'y' });
+  // an empty or blank argument (an empty "$BODY" from a script) counts as absent
+  const emptyBody = cb(['add', 'demo', 'Fix second parse', '']);
+  assert.deepEqual({ ...(await row(emptyBody.out)) }, { title: 'Fix second parse', body: '' });
+  const blankB = cb(['add', 'demo', 'Fix week parse', '  ', '-b', 'z']);
+  assert.deepEqual({ ...(await row(blankB.out)) }, { title: 'Fix week parse', body: 'z' });
+});
+
 test('add prints id', async () => {
   await db();
   const r = cb(['add', 'demo', 'Fix RI grading', '-p', 'P1']);
