@@ -5459,3 +5459,108 @@ begin
   select jsonb_build_object('total', (select count(*) from hit),
     'cards', coalesce((select jsonb_agg(to_jsonb(h) - 'n' order by h.n) from hit h where lim is null or h.n <= lim), '[]')));
 end $$;
+
+-- ---------------------------------------------------------------- Session usage ledger (#4349)
+
+-- One row per agent session: its CUMULATIVE token counts (and the cost its status line reported, when one was fresh),
+-- as the session's Stop hook (hooks/usage-stop.mjs) last summed them from its transcript. Numbers only: no transcript
+-- text ever reaches the board. Never read inside sessions_overview (#4344): cb.usage_summary is the read.
+create table if not exists cb.session_usage (
+  session_id         text primary key,
+  machine            text not null,
+  pane               text not null default '',
+  actor              text,
+  project            text references cb.projects(slug) on update cascade on delete set null,
+  model              text,
+  input_tokens       bigint not null default 0,
+  output_tokens      bigint not null default 0,
+  cache_read_tokens  bigint not null default 0,
+  cache_write_tokens bigint not null default 0,
+  cost_usd           numeric(12,4),
+  first_seen         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+create index if not exists session_usage_updated on cb.session_usage (updated_at desc);
+
+drop function if exists cb.usage_report cascade;
+drop function if exists cb.usage_summary cascade;
+
+-- The hook's write. Idempotent and monotonic: each counter keeps the larger of the stored and the sent value (a hook
+-- that lost its state and is still catching up never lowers a row), cost keeps the last one given, and a report that
+-- changes nothing leaves the row untouched (updated_at too). The pane's board binding names the actor and project.
+-- The first report places the row: its machine and pane stay, and actor and project are only filled in while empty, so
+-- a later caller can never move a session's row to another seat; a report from another machine is refused.
+-- An all-zero report is ignored: a ledger of zero rows reads as "free" (the zero-fill trap the card names).
+-- Returns 'new', 'updated', 'same' or 'ignored'.
+create function cb.usage_report(machine text, pane text, session_id text, model text, input_tokens bigint, output_tokens bigint,
+                                cache_read_tokens bigint, cache_write_tokens bigint, cost_usd numeric default null)
+returns text language plpgsql as $$
+#variable_conflict use_variable
+declare
+  m text := lower(trim(coalesce(machine, ''))); p text := trim(coalesce(pane, '')); sid text := trim(coalesce(session_id, ''));
+  mo text := nullif(trim(coalesce(model, '')), ''); ba text; bp text; n int; existed boolean;
+begin
+  if m = '' or sid !~ '^[A-Za-z0-9_-]{1,100}$' then raise exception 'usage_report needs a machine and a session id (letters, digits, - and _)'; end if;
+  if length(m) > 100 or length(p) > 100 then raise exception 'usage_report: machine and pane are names of at most 100 characters'; end if;
+  -- a model id only: anything else (text from a broken transcript) is stored as unknown, never as given
+  if mo is not null and mo !~ '^[A-Za-z0-9._:@/\[\]-]{1,100}$' then mo := 'unknown'; end if;
+  if least(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) < 0 or cost_usd < 0 then
+    raise exception 'usage_report: counts and cost cannot be negative';
+  end if;
+  if coalesce(input_tokens, 0) + coalesce(output_tokens, 0) + coalesce(cache_read_tokens, 0) + coalesce(cache_write_tokens, 0) = 0
+     and coalesce(cost_usd, 0) = 0 then
+    return 'ignored';
+  end if;
+  if p <> '' then select s.actor, s.project into ba, bp from cb.sessions s where s.machine = m and s.pane = p; end if;
+  existed := exists (select 1 from cb.session_usage u where u.session_id = sid);
+  if exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
+    raise exception 'usage_report: session % is recorded from another machine', sid;
+  end if;
+  insert into cb.session_usage as u (session_id, machine, pane, actor, project, model, input_tokens, output_tokens,
+                                     cache_read_tokens, cache_write_tokens, cost_usd)
+  values (sid, m, p, ba, bp, mo, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
+          coalesce(cache_read_tokens, 0), coalesce(cache_write_tokens, 0), cost_usd)
+  on conflict on constraint session_usage_pkey do update
+    set actor = coalesce(u.actor, excluded.actor), project = coalesce(u.project, excluded.project),
+        model = coalesce(excluded.model, u.model),
+        input_tokens = greatest(u.input_tokens, excluded.input_tokens),
+        output_tokens = greatest(u.output_tokens, excluded.output_tokens),
+        cache_read_tokens = greatest(u.cache_read_tokens, excluded.cache_read_tokens),
+        cache_write_tokens = greatest(u.cache_write_tokens, excluded.cache_write_tokens),
+        cost_usd = coalesce(excluded.cost_usd, u.cost_usd),
+        updated_at = now()
+    where (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+           u.cache_write_tokens, u.cost_usd)
+          is distinct from
+          (coalesce(u.actor, excluded.actor), coalesce(u.project, excluded.project),
+           coalesce(excluded.model, u.model), greatest(u.input_tokens, excluded.input_tokens),
+           greatest(u.output_tokens, excluded.output_tokens), greatest(u.cache_read_tokens, excluded.cache_read_tokens),
+           greatest(u.cache_write_tokens, excluded.cache_write_tokens), coalesce(excluded.cost_usd, u.cost_usd));
+  get diagnostics n = row_count;
+  return case when not existed then 'new' when n = 0 then 'same' else 'updated' end;
+end $$;
+
+-- The read: sessions whose ledger row changed within `since`, with their LIFETIME totals (rows are cumulative, so this
+-- is "what the sessions active in the window have used so far", not spend inside the window). No project = every
+-- project, rows with no bound project included. cost_usd sums only the sessions that reported one: costed says how many.
+create function cb.usage_summary(project text default null, since interval default '24 hours') returns jsonb
+language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); w interval := coalesce(since, interval '24 hours');
+begin
+  return (with r as (
+    select u.* from cb.session_usage u where u.updated_at >= now() - w and (p is null or u.project = p))
+  select jsonb_build_object(
+    'project', p, 'since', w::text,
+    'note', 'model is the main session''s last model; the counts include its subagents, which may run other models',
+    'totals', (select jsonb_build_object('sessions', count(*), 'input_tokens', coalesce(sum(r.input_tokens), 0),
+                 'output_tokens', coalesce(sum(r.output_tokens), 0), 'cache_read_tokens', coalesce(sum(r.cache_read_tokens), 0),
+                 'cache_write_tokens', coalesce(sum(r.cache_write_tokens), 0), 'cost_usd', sum(r.cost_usd),
+                 'costed', count(r.cost_usd)) from r),
+    'sessions', coalesce((select jsonb_agg(jsonb_build_object('session_id', r.session_id, 'machine', r.machine, 'pane', r.pane,
+                 'actor', r.actor, 'project', r.project, 'model', r.model, 'input_tokens', r.input_tokens,
+                 'output_tokens', r.output_tokens, 'cache_read_tokens', r.cache_read_tokens,
+                 'cache_write_tokens', r.cache_write_tokens, 'cost_usd', r.cost_usd, 'first_seen', r.first_seen,
+                 'updated_at', r.updated_at)
+                 order by r.cost_usd desc nulls last, r.output_tokens desc) from r), '[]'::jsonb)));
+end $$;

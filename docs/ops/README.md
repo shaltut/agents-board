@@ -49,7 +49,8 @@ his PC and MacBook and the people he shares it with all use one board.
   messages into that Claude Code session as they happen.
 - **Hooks** (`hooks/`): `deny-ask.mjs` turns Claude's AskUserQuestion into `cb ask`; `session-start.mjs` points new
   sessions at `cb start`, and after a compaction or a resume hands a bound pane what `cb resume` and `cb role <role>`
-  print (at most 2 s; the hint alone when the board does not answer).
+  print (at most 2 s; the hint alone when the board does not answer); `usage-stop.mjs` (off until switched on:
+  maintain.md, "Usage ledger") sends each session's token totals to the board.
 
 ## Who can do what
 
