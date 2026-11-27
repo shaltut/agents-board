@@ -278,6 +278,9 @@ test('freeing one part leaves its sibling on its own clock', async () => {
   await sql`update cb.task_parts set nudged_at = now() - case repo when 'dashboard' then interval '61 minutes' else interval '10 minutes' end where task_id = ${id}`;
   assert.equal(await due(), 2, 'dashboard freed: a note and a message');
   assert.deepEqual(await holders(), ['zed-B1@mac', null]);
+  // #3221 review M2: a part taken off a seat is never held by its relay (urgent), and stays a nudge (no card activity)
+  assert.deepEqual((await sql`select data ->> 'urgent' as u, data ? 'nudge' as n from cb.events where kind = 'message' and summary like ${`#${id} part dashboard went back to the queue: %`}`)
+    .map((r: any) => [r.u, r.n]), [['true', true]]);
   // the free note on the card is not activity for the api part: its own nudge hour runs out and it is freed too
   await sql`update cb.task_parts set nudged_at = now() - interval '61 minutes' where task_id = ${id} and repo = 'api'`;
   assert.equal(await due(), 2);

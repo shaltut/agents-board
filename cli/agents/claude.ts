@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seatKey } from '../bridge.ts';
 import type { AgentAdapter, AgentState, QuotaSignal, SeatHandle } from './types.ts';
+import { claudePreseed } from './trust.ts';
 
 export type ClaudeEndpoint = { socket: string; token: string; pid?: number; sessionId?: string; updatedAt: number };
 
@@ -207,7 +208,7 @@ export const claudeAdapter: AgentAdapter = {
   },
 
   trustSpec() {
-    return { dialogHint: 'folder trust or bypass warning', extraArgs: [] };
+    return { dialogHint: 'folder trust or bypass warning', preseed: claudePreseed, extraArgs: [] };
   },
 
   disableAskSpec() {
