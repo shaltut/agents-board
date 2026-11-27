@@ -841,7 +841,7 @@ ${body}`, json: pg };
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');
-      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail);
+      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'runner.ts')], { stdio: 'inherit' });
@@ -865,9 +865,16 @@ ${body}`, json: pg };
       return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {
-      need(1, 'role <role> [--json]   e.g. cb role builder');
-      const text = await callFn('role_text', { role: args[0] }) as string;
-      return { out: text, json: { role: args[0], text } };
+      need(1, 'role <role> [--project p] [--json]   e.g. cb role builder');
+      // #4525: in a project (this session's, or --project), its addition and who its seats ask first follow the shared text
+      const project = o.project ?? sessionProject ?? null;
+      // actor: the session named as the one to ask first is told seats ask it. A board whose schema predates #4525 has
+      // only role_text(role): fall back to it, so the role is never lost
+      const text = await callFn('role_text', { role: args[0], project, actor }).catch((e: any) => {
+        if (!/function cb\.role_text\(.*\) does not exist/.test(e?.message ?? '')) throw e;
+        return callFn('role_text', { role: args[0] });
+      }) as string;
+      return { out: text, json: { role: args[0], project, text } };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');

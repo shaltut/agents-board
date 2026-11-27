@@ -126,6 +126,12 @@ export async function sessions(project?: string) {
   return o;
 }
 
+/** The Runners page (#4527): runners, the queue in claim order with why each job waits, running and recent jobs. */
+export async function runners(project?: string) {
+  const [{ q }] = await sql`select cb.runner_queue(${project ?? null}) as q`;
+  return q;
+}
+
 export async function huddles(project?: string) {
   const [{ l }] = await sql`select cb.huddles_list(${project ?? null}) as l`;
   return l;

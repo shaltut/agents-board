@@ -115,7 +115,25 @@ function loadRepo(p: Record<string, unknown>, pp: string, dbLanes: number, laneE
   };
 }
 
-export function loadConfig(text: string): RunnerConfig {
+/** Ahmed's slot setting on the board (#4527, Q2984: cb.runners slots_set and lanes_set; null keeps runner.json's). It
+ *  goes beyond runner.json's old cap of 10, up to the same 64 the board's columns hold (runners_slots_set_check): the
+ *  runner builds a slot list of that size. Lanes stay 1-9, as a lane is one digit in its stack's ports, and never above
+ *  the slots; with only slots set, the lanes follow runner.json's, cut to the slots. */
+export type BoardLimits = { slots?: number | null; dbLanes?: number | null };
+export const BOARD_MAX_SLOTS = 64;
+
+/** runner.json with the board's setting, checked as runner.json is ({lane} in every DB recipe once there are more lanes
+ *  than one). A setting the file cannot take is logged and runner.json's own counts are kept: never a runner that does
+ *  not start. */
+export function withBoard(text: string, cfg: RunnerConfig, board: BoardLimits, say: (m: string) => void): RunnerConfig {
+  if (board.slots == null && board.dbLanes == null) return cfg;
+  try { return loadConfig(text, board); } catch (e) {
+    say(`the board's slot setting does not fit runner.json (${(e as Error).message}): running ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s) from runner.json`);
+    return cfg;
+  }
+}
+
+export function loadConfig(text: string, board: BoardLimits = {}): RunnerConfig {
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (e) { throw new Error(`runner.json: not valid JSON (${(e as Error).message})`); }
   if (!isObj(raw)) fail('runner.json', 'must be an object');
@@ -123,9 +141,10 @@ export function loadConfig(text: string): RunnerConfig {
   if (!isObj(raw.log)) fail('log', 'is required: { host, port, peers }');
   only(raw.log, 'log', ['host', 'port', 'peers']);
   const log = { host: str(raw.log.host, 'log.host'), port: int(raw.log.port, 'log.port', 1, 65535), peers: strList(raw.log.peers, 'log.peers') };
-  const slots = int(raw.slots, 'slots', 1, 10, 2);
+  const slots = board.slots != null ? int(board.slots, "the board's slots", 1, BOARD_MAX_SLOTS) : int(raw.slots, 'slots', 1, 10, 2);
   // DB jobs at once, each in its own lane 1-9 (a single digit, so a port can be written "2544{lane}")
-  const dbLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
+  const fileLanes = int(raw.dbLanes, 'dbLanes', 1, 9, 1);
+  const dbLanes = board.dbLanes != null ? int(board.dbLanes, "the board's DB lanes", 1, 9) : board.slots != null ? Math.min(fileLanes, slots) : fileLanes;
   if (dbLanes > slots) fail('dbLanes', `is above slots (${slots})`);
   // the env values that set one lane's test stack apart from another's (its compose name and ports)
   const laneEnv = strList(raw.laneEnv, 'laneEnv', []);

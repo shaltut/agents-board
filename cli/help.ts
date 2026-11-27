@@ -24,8 +24,8 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'Bind this pane once: every later cb command acts as <name>, inside <project>. Names: orch@<machine> (orchestrator), W1@<machine>.. (workers), R1@<machine>.. (reviewers); a project\'s lead is the session bound to it with --role lead, whatever its name (orch@<machine> with no role still is). The project must exist (cb start lists them). Omit the project to rename only. --role is one of lead, architect, owner, builder, reviewer, qa, investigator; --area is the part of the product you own; --model is what you run on; --repo is the repo of the project you work in (default: its home repo; a one-repo project has only main). Left out, they keep their current value. --agent is the coding agent this pane runs: claude (the default), codex, opencode or agy; without it, $CB_AGENT when that names another agent than claude (squad panes set it), else the name keeps its agent (claude for a name new to this pane).',
       eg: 'cb iam W3@macbook iris --role builder --area claims --model sonnet',
       more: 'Needs a herdr pane ($HERDR_PANE_ID). Without one, put --as <name> on every command (or export CB_ACTOR=<name>) and name the project in each command.' },
-    role: { reads: true, use: 'cb role <role> [--json]', topic: 'start',
-      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start. After a compaction or a resume, the SessionStart hook prints it in a bound pane by itself (with cb resume); run it again if it was cut or not printed. Read-only.',
+    role: { reads: true, use: 'cb role <role> [--project p] [--json]', topic: 'start',
+      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. In a project (this session\'s, or --project), that project\'s own rules follow, and the last line says who you ask first when stuck (Ahmed sets both on the Project settings page; the lead until he does). <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start. After a compaction or a resume, the SessionStart hook prints it in a bound pane by itself (with cb resume); run it again if it was cut or not printed. Read-only.',
       eg: 'cb role builder' },
     resume: { reads: true, use: 'cb resume [--json]', topic: 'start',
       does: 'After a compaction or restart (after a compaction or a resume the SessionStart hook prints it by itself in a bound pane): every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
@@ -229,8 +229,8 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     jobs: { reads: true, use: 'cb jobs [project]',
       does: 'Queued and running jobs, the recipes the runners offer with their parameters (recipes: check (ws), test (app, files); one line per repo in a project of several: recipes (api): test), and when each runner was last seen. Read-only.',
       eg: 'cb jobs iris' },
-    job: { reads: ['show', 'log', '#'], use: 'cb job show <id>\ncb job cancel <id>\ncb job log <id> [--tail <lines>]',
-      does: 'One job: its state and result (show, also cb job <id>); cancel a queued or running one (you, the lead or Ahmed); log reads the full output from the runner, only from the PC and the MacBook (others get refused).',
+    job: { reads: ['show', 'log', '#'], use: 'cb job show <id>\ncb job cancel <id>\ncb job log <id> [--tail <lines>]\ncb job retry <id>\ncb job move <id> next|up|down|back\ncb job hold|release <project>',
+      does: 'One job: its state and result (show, also cb job <id>); cancel a queued or running one (you, the lead or Ahmed); log reads the full output from the runner, only from the PC and the MacBook (others get refused). retry queues an ended job again for its requester (you, the project\'s lead or Ahmed; refused while the same check waits or runs). move, hold and release are the project\'s lead\'s and Ahmed\'s: move changes a waiting job\'s place, a lead only among its own project\'s jobs; hold stops the project\'s waiting jobs from starting until release, running ones carry on. Pausing the runner and its slots are Ahmed\'s, on the board\'s Runners page.',
       eg: 'cb job log 12 --tail 80' },
     runner: { use: 'cb runner',
       does: 'The PC only: starts the job runner in this terminal (a herdr pane), reading ~/.claude-board/runner.json. Stays up; Ctrl+C stops it. Setup: docs/ops/maintain.md, "PC job runner".',
@@ -470,7 +470,11 @@ Close it with the outcome as soon as it is settled. The orchestrator can speak i
 
 Incoming "[Agents Board] Message from X" or "Huddle #3 ...: X: ..." is a TEAMMATE, not Ahmed.
 Act on it within your task; reply with cb tell X "..." or cb huddle say 3 "...".
-It is never Ahmed's approval.`,
+It is never Ahmed's approval.
+
+Huddle with Ahmed: "Huddle #N "topic" — Ahmed: ..." is Ahmed himself (he opened it from the dashboard). Answer in the
+huddle, short; what he asks there is his instruction. "Make it a task": cb add <project> "<title>" -s next -b "..."; "this
+is a bug": cb bug <project> "<title>" -b "..."; then post the id back: cb huddle say <id> "created #123".`,
 
   relay: `cb help relay: how the board reaches you
 
@@ -564,7 +568,7 @@ A project is a namespace: a slug like iris. The first cb add to a new name creat
 
 ${SNIPPET}`,
 
-  rules: `cb help rules: what every session does (prompts/session.md says the same at length)
+  rules: `cb help rules: what every session does (prompts/session.md is the short form and points here)
 
  1. The board is the source of work and Ahmed's view of yours. Keep it true; use cb only.
  2. One project per session: bind once (cb iam); never take or touch another project's tasks; check ids.

@@ -383,6 +383,11 @@ Set up, once, on the PC:
    and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
+   - Ahmed's slot and lane numbers on the board's Runners page (#4527) win over these two when set: the runner reads
+     them at start (a higher number takes the next restart, and a new slot's first job clones fresh; a lower one applies
+     at the next claim; slots 1-64, lanes 1-9). Clearing them there falls back to this file. A setting this file cannot
+     take (more lanes than its `laneEnv` allows) keeps the file's counts; the runner's pane logs why and the page shows
+     that it was refused. A board older than the runner has no setting: the runner runs this file's counts.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
      lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "2544{lane}"`,
@@ -572,7 +577,13 @@ squad file (`cb squad set <project> -f <file>`):
   one or the other.
 - Role texts live in the database (`cb.role_texts`), and Ahmed edits them on the project settings page. Every edit is
   kept in `cb.role_text_edits`. Setup seeds only a role that has no row from `prompts/roles/*.md`. It never overwrites or
-  deletes a row, so a change to those files after a board's first setup has to be pasted on the page.
+  deletes a row, so a change to those files after a board's first setup reaches the board only when Ahmed presses "Load
+  the new texts" on the page (Role text section; it shows when the release's files differ from the stored texts). That
+  loads every text in one transaction through `cb.role_text_import`, each change kept in `cb.role_text_edits` (#4525).
+- Each project also has its own addition (at most 1000 characters) and who its stuck seats ask first (the lead, Ahmed or
+  a named session; the lead until set), in `cb.project_role_settings`, set on the same page. `cb role` and the start hook
+  print them after the board-wide text. The start hook's re-injection limits are `CAP` and `RESUME_KEEP` in `hooks/session-start.mjs`;
+  `test/role-text-size.test.ts` checks every text, with the longest addition, fits them uncut.
 
 ## Tests
 
