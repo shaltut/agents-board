@@ -13,7 +13,7 @@ const pgCtl = join(BIN, 'pg_ctl.exe');
  *  through `.status === 0` would be "not running" and start a second cluster. Windows ends only the direct child: a
  *  postmaster that pg_ctl started keeps running (node db/setup.ts --test --stop stops a worktree's). */
 export function spawnWithin(cmd: string, args: string[], opts: SpawnSyncOptions, ms: number, what: string) {
-  const r = spawnSync(cmd, args, { ...opts, timeout: ms });
+  const r = spawnSync(cmd, args, { windowsHide: true, ...opts, timeout: ms }); // #4491: no console flash from a caller with none
   if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error(`${what} did not finish within ${ms / 1000} s`);
   return r;
 }
@@ -48,23 +48,28 @@ export function ensurePg(dir = PGDATA, port = 5434, adopt = true): void {
   // A worktree's cluster listens on 127.0.0.1 only (the test URL's host): with the default 'localhost', a port another
   // program held on 127.0.0.1 still "started" on ::1, and the tests reached that program (#4413).
   const opts = adopt ? `-p ${port}` : `-p ${port} -c listen_addresses=127.0.0.1`;
-  const args = ['-D', dir, '-o', opts, '-l', log, '-w', 'start'], what = `pg_ctl start in ${dir} (its log: ${log})`;
-  const r = adopt ? spawnWithin(pgCtl, args, { stdio: 'ignore' }, START, what) : startInheritingNothing(args, what);
-  // a test cluster's start is judged by pg_ctl status: PowerShell's exit code for a quickly ended process can read 0
-  if (r.status !== 0 || (!adopt && !running(dir))) throw new Error(`could not start Postgres in ${dir}; see ${log}`);
+  // #4491: the 5434 dev cluster too (setup, seed, the server, cb): a piped command that started it held its pipe
+  const r = startInheritingNothing(['-D', dir, '-o', opts, '-l', log, '-w', 'start'], `pg_ctl start in ${dir} (its log: ${log})`);
+  // #4491 M2: PowerShell that did not run is said as such, never as a Postgres failure with nothing in its log
+  if (r.error) throw new Error(`could not start Postgres in ${dir}: ${POWERSHELL} did not run (${r.error.message})`);
+  // judged by pg_ctl status: PowerShell's exit code for a quickly ended process can read 0
+  if (r.status !== 0 || !running(dir)) throw new Error(`could not start Postgres in ${dir}; see ${log}`);
 }
+
+// #4491 M2: by full path, never from PATH (a stripped env has none): Windows PowerShell 5.1 is in every Windows 10/11
+const POWERSHELL = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
 /** #4482: every process on the way to the postmaster (node, pg_ctl, cmd) is created with handle inheritance on, so the
  *  postmaster also holds every inheritable handle above it. Run from a Git Bash pipeline (`node --test ... | tail`) that
  *  includes the pipe the shell reads: the run that started a worktree's test cluster never returned, its tests long
  *  done, until the cluster stopped; a rerun (cluster already up) passed. Start-Process (ShellExecute) creates pg_ctl
- *  with no inherited handle. */
+ *  with no inherited handle. Every start goes this way (#4491): the worktree test clusters and the 5434 dev cluster. */
 function startInheritingNothing(args: string[], what: string) {
   const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
   const line = args.map((a) => `"${a}"`).join(' ');
   // $p.Handle: read before the exit, so ExitCode is kept; never -Wait, which waits for the postmaster too
   const ps = `$p = Start-Process -FilePath ${q(pgCtl)} -ArgumentList ${q(line)} -WindowStyle Hidden -PassThru; $null = $p.Handle; $p.WaitForExit(); exit $p.ExitCode`;
-  return spawnWithin('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')],
+  return spawnWithin(POWERSHELL, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')],
     { stdio: 'ignore' }, START, what);
 }
 
