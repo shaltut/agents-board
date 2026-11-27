@@ -580,6 +580,15 @@ create function cb.tasks_before() returns trigger language plpgsql as $$
 declare ep text;
 declare ac text; r text;
 begin
+  -- #4593: a for:<agent> label names an agent a seat can run (a typo would keep the card from everyone). Only labels
+  -- added now: one saved before this rule does not block other changes to its card
+  if tg_op = 'INSERT' or new.labels is distinct from old.labels then
+    select l into r from unnest(new.labels) l
+     where lower(l) like 'for:%' and substr(lower(l), 5) <> all(cb._agents_main()) and (tg_op = 'INSERT' or l <> all(old.labels)) limit 1;
+    if r is not null then
+      raise exception 'label % names no agent: for: takes one of %', lower(r), array_to_string(cb._agents_main(), ', ');
+    end if;
+  end if;
   -- squad pipeline guard (#3598): a staged card leaves its flow only through Ahmed's dashboard, or the lead with a note
   if tg_op = 'UPDATE' and old.stage is not null and cb._pipeline(old.project) and current_setting('cb.stage_ok', true) is distinct from 'on' then
     if new.status in ('done', 'cancelled') and new.status is distinct from old.status then
@@ -3691,6 +3700,13 @@ drop function if exists cb.stage_fail cascade;
 drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
+drop function if exists cb._agent cascade;
+drop function if exists cb._for_agents cascade;
+drop function if exists cb._for_skipped cascade;
+drop function if exists cb._agents_words cascade;
+drop function if exists cb._kept cascade;
+drop function if exists cb._for_fits cascade;
+drop function if exists cb._claimable_any cascade;
 drop function if exists cb.work_still_open cascade;
 drop function if exists cb._offerable cascade;
 drop function if exists cb._busy cascade;
@@ -3935,9 +3951,15 @@ end $$;
 -- to merge into the card; the history event keeps all of it plus the stage change.
 create function cb._stage_move(tid bigint, to_stage text, hold text, note text, data jsonb default '{}') returns void language plpgsql as $$
 #variable_conflict use_variable
-declare fromst text;
+declare fromst text; kept text[];
 begin
-  select t.stage into fromst from cb.tasks t where t.id = tid for update;
+  select t.stage, cb._for_agents(t.labels) into fromst, kept from cb.tasks t where t.id = tid for update;
+  -- #4593 review 100 F2 (lead's ruling): a for: label binds the next claim only: a card that passes its stage loses it,
+  -- and the history says so in plain words. Entering its first stage (from none) keeps it
+  if fromst is null or to_stage = fromst then kept := '{}'; end if;
+  if cardinality(kept) > 0 then
+    note := concat_ws('; ', nullif(note, ''), format('it was kept for %s for one stage only, so any seat may take it now', cb._agents_words(kept)));
+  end if;
   perform set_config('cb.stage_ok', 'on', true);
   perform set_config('cb.note', coalesce(note, ''), true);
   perform set_config('cb.data', (coalesce(data, '{}') || jsonb_build_object('stage', jsonb_build_object('from', fromst, 'to', to_stage)))::text, true);
@@ -3946,7 +3968,8 @@ begin
          assignee = hold,
          status = case to_stage when 'approval' then 'review' when 'done' then 'done' else 'next' end,
          links = t.links || coalesce(data -> 'links', '{}'),
-         crew = t.crew || coalesce(data -> 'crew', '{}')
+         crew = t.crew || coalesce(data -> 'crew', '{}'),
+         labels = case when cardinality(kept) > 0 then array(select l from unnest(t.labels) with ordinality u(l, o) where lower(l) not like 'for:%' order by o) else t.labels end
    where t.id = tid;
   perform set_config('cb.stage_ok', '', true);
   perform set_config('cb.note', '', true);
@@ -4227,7 +4250,43 @@ begin
   return not cb._multi_repo(t.project) or coalesce(t.repos[1] = cb._repo(a), false);
 end $$;
 
-create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
+-- #4593: the agent an actor runs, read as cb._role reads its role (its latest session); claude when it has none.
+create function cb._agent(a text) returns text language sql stable as $$
+  select coalesce((select s.agent from cb.sessions s where s.actor = a order by s.last_seen desc limit 1), 'claude')
+$$;
+
+-- #4593: the agents a card is kept for, from its for:<agent> labels, in name order (empty: any agent). Only agents a seat
+-- can run (review 100 F4): a label saved before the rule (for:ahmed) keeps the card from nobody. The names are spelled
+-- out: cb._agents_main is made further down, and a sql function is checked when it is made.
+create function cb._for_agents(labels text[]) returns text[] language sql immutable as $$
+  select coalesce(array(select distinct substr(lower(l), 5) from unnest(labels) l
+                         where lower(l) like 'for:%' and substr(lower(l), 5) = any(array['claude', 'codex', 'opencode', 'agy']) order by 1), '{}')
+$$;
+
+-- #4593 review 100 F3: the seat a kept card waits for, in plain words: "a Codex seat", "an agy or Codex seat".
+create function cb._agents_words(ag text[]) returns text language sql immutable as $$
+  select case when left(w, 1) in ('a', 'e', 'i', 'o', 'u') then 'an ' else 'a ' end || w || ' seat'
+    from (select string_agg(case x when 'claude' then 'Claude' when 'codex' then 'Codex' when 'opencode' then 'OpenCode' else x end, ' or ' order by n) w
+            from unnest(ag) with ordinality u(x, n)) z
+$$;
+
+-- #4593 review 100 F1: the waiting cards kept for an agent, counted by the agents they are kept for ("codex", "agy,codex"),
+-- from a JSON array of label arrays. {} when none.
+create function cb._kept(ls jsonb) returns jsonb language sql immutable as $$
+  select coalesce(jsonb_object_agg(k, n), '{}') from (
+    select array_to_string(cb._for_agents(array(select jsonb_array_elements_text(x))), ',') k, count(*) n
+      from jsonb_array_elements(coalesce(ls, '[]')) x group by 1) z where k <> ''
+$$;
+
+-- #4593: may a take this card, as far as its for: labels go: none, its assignee, or a seat of one of the agents named.
+-- The like is a cheap first look (review 100 F5): nearly every card has no for: label.
+create function cb._for_fits(t cb.tasks, a text) returns boolean language sql stable as $$
+  select t.assignee is not distinct from a or array_to_string(t.labels, ' ') not ilike '%for:%'
+      or cardinality(cb._for_agents(t.labels)) = 0 or cb._agent(a) = any(cb._for_agents(t.labels))
+$$;
+
+-- Everything but the for: labels (#4593 split it out: cb._for_skipped names what only a label kept from a).
+create function cb._claimable_any(t cb.tasks, a text) returns boolean language sql stable as $$
   select case
     when cb._closing(a) then false
     -- #4559: the one place "no new work" lives: cb next, the cb start preview, the relay's offers and cb tick's "can take"
@@ -4252,6 +4311,20 @@ create function cb._claimable(t cb.tasks, a text) returns boolean language sql s
                      and not exists (select 1 from cb.task_parts p where p.task_id = t.id and p.crew ->> 'build' = a)
       else false end, false)
     end
+$$;
+
+create function cb._claimable(t cb.tasks, a text) returns boolean language sql stable as $$
+  -- #4593: a card kept for:<agent> goes only to a seat of that agent, or to its assignee
+  select cb._for_fits(t, a) and cb._claimable_any(t, a)
+$$;
+
+-- #4593: why cb next found nothing for a: the Next cards of the project a could take but for their for: labels (review 100
+-- F7: never a card its role could not take anyway), as "#660: waiting for a Codex seat" (at most 5), or null.
+create function cb._for_skipped(project text, a text) returns text language sql stable as $$
+  select string_agg(format('#%s: waiting for %s', t.id, cb._agents_words(cb._for_agents(t.labels))), ', ' order by t.id)
+    from (select t.* from cb.tasks t where t.status = 'next' and t.project = $1 and t.assignee is null
+            and not cb._for_fits(t, $2) and cb._claimable_any(t, $2)
+          order by t.id limit 5) t
 $$;
 
 
@@ -4485,7 +4558,11 @@ begin
      where e.project = p and e.at > since and (e.data ? 'small' or e.data ? 'unstaged' or e.data ? 'digest')
     union all
     -- 8: cards waiting in Next outside the pipeline with nobody to take them (research has its own line below)
-    select 8, t.priority = 'P0', t.id, format('#%s is not staged: cb edit %s --assignee <session>', t.id, t.id)
+    select 8, t.priority = 'P0', t.id,
+           -- #4593 review 100 F3: a card kept for an agent says which seat it waits for, in plain words
+           case when cardinality(cb._for_agents(t.labels)) > 0
+                then format('#%s is waiting for %s: start one, or cb edit %s --assignee <session>', t.id, cb._agents_words(cb._for_agents(t.labels)), t.id)
+                else format('#%s is not staged: cb edit %s --assignee <session>', t.id, t.id) end
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
     union all
@@ -4533,7 +4610,9 @@ begin
            and not cb._claimable(t, t.assignee)
         union all
         -- an unheld staged card no live session of the project could take, the design wait aside (aged stage_since copy)
-        select t.id, t.priority = 'P0', format('#%s (%s, no live session can take it)', t.id, cb._stage_words(t.stage))
+        select t.id, t.priority = 'P0', format('#%s (%s, %s)', t.id, cb._stage_words(t.stage),
+               case when cardinality(cb._for_agents(t.labels)) > 0 then 'waiting for ' || cb._agents_words(cb._for_agents(t.labels)) || ': none live can take it'
+                    else 'no live session can take it' end)
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null
            -- a parts card (#3703) whose parts at its stage are all held is in work, not waiting
@@ -6250,10 +6329,10 @@ begin
   ), repo_work as (
     -- build and review work per repo (#3703): a part counts under its repo when unheld at its card's stage; a card
     -- without parts under its first repo (one repo: the home repo); no repos named in a project of several: nobody's
-    select pt.repo, f.stage from free f join cb.task_parts pt on pt.task_id = f.id
+    select pt.repo, f.stage, f.labels from free f join cb.task_parts pt on pt.task_id = f.id
      where f.stage in ('build', 'review') and pt.stage = f.stage and pt.status = 'next' and nullif(trim(pt.assignee), '') is null
     union all
-    select case when cardinality(rs) > 1 then f.repos[1] else rs[1] end, f.stage from free f
+    select case when cardinality(rs) > 1 then f.repos[1] else rs[1] end, f.stage, f.labels from free f
      where f.stage in ('build', 'review') and not exists (select 1 from cb.task_parts pt where pt.task_id = f.id)
   )
   select jsonb_build_object(
@@ -6268,6 +6347,15 @@ begin
       'investigator', (select count(*) from free f where f.type = 'research'),
       'architect', (select count(*) from design d where not d.covered or coalesce(d.stage_since, d.updated_at) < now() - interval '15 minutes'),
       'owner', coalesce((select jsonb_object_agg(ar, (select count(*) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes')) from unnest(areas) ar), '{}')),
+    -- #4593 review 100 F1: of those, the cards kept for an agent (for: labels), by the agents named: only a seat of one of
+    -- them can take such a card, so the planner starts or keeps one of those
+    'kept', jsonb_build_object(
+      'builder', (select coalesce(jsonb_object_agg(r, cb._kept((select jsonb_agg(to_jsonb(w.labels)) from repo_work w where w.stage = 'build' and w.repo = r))), '{}') from unnest(rs) r),
+      'reviewer', (select coalesce(jsonb_object_agg(r, cb._kept((select jsonb_agg(to_jsonb(w.labels)) from repo_work w where w.stage = 'review' and w.repo = r))), '{}') from unnest(rs) r),
+      'qa', cb._kept((select jsonb_agg(to_jsonb(f.labels)) from free f where f.stage = 'qa')),
+      'investigator', cb._kept((select jsonb_agg(to_jsonb(f.labels)) from free f where f.type = 'research')),
+      'architect', cb._kept((select jsonb_agg(to_jsonb(d.labels)) from design d where not d.covered or coalesce(d.stage_since, d.updated_at) < now() - interval '15 minutes')),
+      'owner', coalesce((select jsonb_object_agg(ar, cb._kept((select jsonb_agg(to_jsonb(d.labels)) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes'))) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
         -- the session's agent (#4002) and the model it bound with (#4332); null for a holder with no session row
