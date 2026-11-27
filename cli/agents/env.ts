@@ -5,10 +5,12 @@ export const CLAUDE_ONLY_ENV = /^(?:CLAUDE_CODE_|ANTHROPIC_)|^(?:CLAUDECODE|GITH
 export const isClaudeOnly = (name: string) => CLAUDE_ONLY_ENV.test(name);
 // PR 104 review B3: a non-Claude seat's commands must never wait in a terminal for input the guard never sees (Codex
 // write_stdin, #4626): an editor or pager another program opens (git commit with no -m, git rebase -i, git log, gh pr
-// create, man) fails at once or only prints. git runs these through its own sh, so false and cat work on Windows too.
+// create, man) returns at once or only prints. The editor is true, which keeps the text git prepared (r2 R2-B1: false
+// left a conflicted git rebase --continue, which takes no -m, stuck; git commit and git tag -a with no -m still fail on
+// the empty message). git runs these through its own sh, so true and cat work on Windows too.
 // First in the env, so a seat's own value for one of them wins.
 export const NO_PROMPT_ENV: Readonly<Record<string, string>> = Object.freeze({
-  GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
+  GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
   MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0',
 });
 export const withNoPrompt = (env: Record<string, string>): Record<string, string> => ({ ...NO_PROMPT_ENV, ...env });

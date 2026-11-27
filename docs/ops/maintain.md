@@ -572,8 +572,10 @@ review), and fails closed where it cannot read it:
 Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
 handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every
 Codex, agy and OpenCode seat's pane also gets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR` and `VISUAL` set to
-`false`, `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` set to `cat`, `GH_PROMPT_DISABLED=1` and
-`GIT_TERMINAL_PROMPT=0` (`NO_PROMPT_ENV` in `cli/agents/env.ts`). An editor fails at once and a pager only prints.
+`true`, `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` set to `cat`, `GH_PROMPT_DISABLED=1` and
+`GIT_TERMINAL_PROMPT=0` (`NO_PROMPT_ENV` in `cli/agents/env.ts`). An editor returns at once with the text git prepared
+(a conflicted `git rebase --continue` finishes; `git commit` or `git tag -a` with no `-m` fails on the empty message),
+and a pager only prints.
 Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
 allowed and `view_image` is a read with the secret-file rule; `spawn_agent` stays blocked until the live check (#4612)
 shows a sub-agent's own tools reach the hook.

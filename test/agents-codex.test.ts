@@ -6,6 +6,11 @@ import { READ_ONLY_ROLES } from '../kit/guard/core.mjs';
 import { HANDLED_TOOLS, parseCodexInput, runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { ADAPTERS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
+import { NO_PROMPT_ENV } from '../cli/agents/env.ts';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type Call = [string | null, string[], number | undefined];
 const recorder = (res: { status: number | null; stderr?: string; error?: Error } = { status: 0 }) => {
@@ -34,7 +39,7 @@ test('buildLaunch: --no-daemon first, model, never ask, no sandbox for a builder
       '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
-    env: { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_AGENT: 'codex' },
+    env: { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_AGENT: 'codex' },
     prestart: { args: [] },
   });
 });
@@ -85,8 +90,8 @@ test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN, CLAUDE_CODE_*, ANTHROPIC_* and 
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't',
     ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'e', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' } })).env;
-  assert.deepEqual(env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
-  assert.deepEqual(codexAdapter.buildLaunch(input()).env, { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' });
+  assert.deepEqual(env, { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
+  assert.deepEqual(codexAdapter.buildLaunch(input()).env, { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' });
 });
 
 test('buildLaunch: an empty model leaves -m out (Codex uses its own default); Claude names and bad names throw', () => {
@@ -201,7 +206,7 @@ test('disableAskSpec: request_user_input denied by the hook shim', () => {
 // non-Claude seat's pane gets an editor that fails at once and a pager that only prints.
 test('B3: Codex seats run exec without a terminal; codex, agy and opencode seats get the no-prompt editor and pager env', () => {
   const base = { name: 'x@m', role: 'builder', repo: 'main', model: '', board: '/b', cwd: '/w/x' };
-  const NO_PROMPT = { GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', EDITOR: 'false', VISUAL: 'false', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
+  const NO_PROMPT = { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
     MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' };
   const codex = ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } } as LaunchInput);
   const at = codex.args.indexOf('unified_exec_tty');
@@ -214,4 +219,32 @@ test('B3: Codex seats run exec without a terminal; codex, agy and opencode seats
   }
   // a seat's own setting wins (a squad that sets EDITOR on purpose keeps it)
   assert.equal(ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex', PAGER: 'less -F' } } as LaunchInput).env.PAGER, 'less -F');
+});
+
+// PR 104 r2 R2-B1: the editor is true, not false. A conflicted git rebase --continue opens the editor for the message and
+// takes no -m, so false left a seat stuck mid-rebase; true keeps git's prepared message. A commit with no -m still fails
+// (an empty message), so nothing waits for input either way. Real git, in a temp repo with no user config.
+test('R2-B1: with the no-prompt env a conflicted git rebase --continue finishes, and git commit with no -m fails at once', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'noprompt-'));
+  const env = { ...process.env, ...NO_PROMPT_ENV, HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: dir, env, encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'f'), 'base\n'); git('add', 'f'); git('commit', '-qm', 'base');
+    git('checkout', '-qb', 'side'); writeFileSync(join(dir, 'f'), 'side\n'); git('commit', '-qam', 'side change');
+    git('checkout', '-q', 'main'); writeFileSync(join(dir, 'f'), 'main\n'); git('commit', '-qam', 'main change');
+    git('checkout', '-q', 'side');
+    assert.notEqual(git('rebase', 'main').status, 0, 'the rebase stops on the conflict');
+    writeFileSync(join(dir, 'f'), 'both\n'); git('add', 'f');
+    const cont = git('rebase', '--continue');
+    assert.equal(cont.status, 0, cont.stderr);
+    assert.equal(git('log', '-1', '--format=%s').stdout.trim(), 'side change');
+    writeFileSync(join(dir, 'g'), 'x\n'); git('add', 'g');
+    const bare = git('commit');
+    assert.notEqual(bare.status, 0, 'no -m: an empty message aborts the commit');
+    assert.match(bare.stderr, /empty commit message/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
