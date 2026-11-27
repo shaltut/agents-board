@@ -5385,3 +5385,30 @@ begin
   returning events.id into id;
   return id;
 end $$;
+
+-- ---------------------------------------------------------------- Card search (#4339)
+
+drop function if exists cb.task_find cascade;
+
+-- Find cards by their words, to check for a duplicate before filing one: titles and bodies (full text, plus a plain
+-- substring match for words full text drops, as cb.mem_find), and with notes the card's notes (cb log, cb done) too.
+-- Open cards first, then cancelled and done; newest first within each. No project = every project. Every status counts:
+-- a cancelled card is often the duplicate. total counts past the cap (lim; null = no cap).
+create function cb.task_find(q text, project text default null, notes boolean default false, lim int default 20) returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare s text := trim(coalesce(q, '')); p text := cb.read_project(project); tq tsquery; pat text;
+begin
+  if s = '' then raise exception 'what to look for is required: cb search <project> "<words>"'; end if;
+  tq := websearch_to_tsquery('english', s);
+  pat := '%' || replace(replace(replace(s, '\', '\\'), '%', '\%'), '_', '\_') || '%';
+  return (with hit as (
+    select t.id, t.project, t.status, t.stage, t.priority, t.type, t.assignee, t.title,
+           row_number() over (order by t.status in ('done', 'cancelled'), t.id desc) as n
+      from cb.tasks t
+     where (p is null or t.project = p)
+       and (to_tsvector('english', t.title || ' ' || t.body) @@ tq or t.title ilike pat or t.body ilike pat
+            or (coalesce(notes, false) and exists (select 1 from cb.events e where e.task_id = t.id and e.kind in ('note', 'done')
+                                                     and (e.summary ilike pat or to_tsvector('english', e.summary) @@ tq)))))
+  select jsonb_build_object('total', (select count(*) from hit),
+    'cards', coalesce((select jsonb_agg(to_jsonb(h) - 'n' order by h.n) from hit h where lim is null or h.n <= lim), '[]')));
+end $$;

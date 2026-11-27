@@ -347,6 +347,29 @@ test('cb ask warns when no relay listens on the asking name (#550)', async () =>
   assert.match(ask('--as', 'board-dev@shaltoot').err, /^warning: no relay listens on board-dev@shaltoot, so the answer will wait in cb pending --as board-dev@shaltoot$/);
 });
 
+test('cb search (#4339): finds a card by its words, with stage and holder; a project as the first word, else every project', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'Relay drops a message', assignee => 'W2@test', status => 'in_progress')`;
+  await sql`select cb.task_add(project => 'iris', title => 'Relay drops on the Mac')`;
+  await sql`select cb.ensure_project('pipe'), cb.project_pipeline('pipe', true, 'ahmed')`;
+  await sql`select cb.task_add(project => 'pipe', title => 'Staged card about receipts')`;
+  const r = cb(['search', 'demo', 'relay', 'drops']);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '#1 [in_progress] P2 Relay drops a message (W2@test) · demo');
+  assert.match(cb(['search', 'relay drops']).out, /^#\d+ .*· (demo|iris)\n#\d+ .*· (demo|iris)$/, 'no project bound: every project');
+  assert.match(cb(['search', 'pipe', 'receipts']).out, /^#3 \[next, design\] /, 'the stage shows next to the status');
+  assert.match(cb(['search', 'demo', 'nothing-like-this']).out, /^no card in demo matches "nothing-like-this"/);
+  assert.match(cb(['search']).err, /usage: cb search/);
+  assert.match(cb(['search', 'relay', 'drops']).err, /^cb: "relay" is not a project: quote the words, cb search "relay drops", or name the project first/,
+    'unquoted words: the next step is to quote them, not to bind a project');
+  // #660: a pane bound to demo finds nothing there: it widens once and says so; a named project stays put
+  await sql`select cb.iam('pc', 'w1:p2', 'W1@test', 'demo')`;
+  const env = { HERDR_PANE_ID: 'w1:p2', CB_MACHINE: 'pc', CB_ACTOR: '' };
+  assert.match(cb(['search', 'receipts'], env).out, /^no card in demo matches "receipts"; in every project:\n#3 .*· pipe$/);
+  assert.match(cb(['search', 'nothing-like-this'], env).out, /^no card in demo or any other project matches "nothing-like-this"/);
+  assert.match(cb(['search', 'receipts', '--project', 'demo'], env).out, /^no card in demo matches "receipts" \(/, 'an explicit --project stays put');
+});
+
 test('cb mem find: nothing in the bound project searches every project and says so (#660)', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'seed')`;

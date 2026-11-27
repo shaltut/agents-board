@@ -243,6 +243,7 @@ test('members keep the guest page: their own questions and tasks, nothing board-
   assert.deepEqual(await (await web('/api/whoami', { cookie: c })).json(), { role: 'guest', user: { name: 'cai', display: 'Cai' } });
   assert.equal((await web('/api/tasks', { cookie: c })).status, 403);
   assert.equal((await web('/api/rpc/user_add', { cookie: c, body: { name: 'x1' } })).status, 403);
+  assert.equal((await web('/api/rpc/task_find', { cookie: c, body: { q: 'x' } })).status, 403, 'card search crosses projects: not for a member (#4339)');
   assert.equal((await web('/api/me', { cookie: c })).status, 200);
 });
 

@@ -31,7 +31,7 @@ const OPTIONS = {
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
-  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' },
+  repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -839,6 +839,30 @@ ${body}`, json: pg };
         t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first)`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
         .filter(Boolean).join('\n'), json: { ...t, notes } };
+    }
+    case 'search': { // #4339: is it filed already? Run before a cb bug or cb add.
+      need(1, 'search [project] "<words>" [--notes] [--all]   e.g. cb search claude-board "relay drops"');
+      // two or more words: the first is the project (as cb mem add); one: --project, else this pane's, else every project
+      const project = o.project ?? (args.length > 1 ? args[0] : sessionProject);
+      const q = (o.project || args.length < 2 ? args : args.slice(1)).join(' ');
+      const find = (p: string | null) => callFn('task_find', { q, project: p, notes: !!o.notes, lim: o.all ? null : 20 });
+      let r: any = await find(project ?? null).catch((e: any) => {
+        // cb search relay drops: the first word was taken as a project, not as the start of the words
+        if (o.project || args.length < 2 || !/^unknown project /.test(e?.message ?? '')) throw e;
+        throw new Error(`"${args[0]}" is not a project: quote the words, cb search "${args.join(' ')}", or name the project first, cb search <project> "<words>" (known: ${String(e.message).split('known: ')[1] ?? 'none'})`);
+      });
+      const notesHint = o.notes ? '' : ' (--notes searches the notes too)';
+      let head: string[] = [];
+      // #660: a pane's inherited project is searched without the session naming it: on no match widen once, and say so.
+      // A project the session named (--project, or the first word) stays put.
+      if (!r.cards.length && project && !o.project && args.length < 2) {
+        const wide: any = await find(null);
+        if (!wide.cards.length) return { out: `no card in ${project} or any other project matches "${q}"${notesHint}`, json: wide };
+        r = wide;
+        head = [`no card in ${project} matches "${q}"; in every project:`];
+      } else if (!r.cards.length) return { out: `no card${project ? ` in ${project}` : ''} matches "${q}"${notesHint}`, json: r };
+      return { out: [...head, ...r.cards.map((t: any) => line({ ...t, status: t.stage ? `${t.status}, ${t.stage}` : t.status })),
+        ...(r.total > r.cards.length ? [`(${r.cards.length} of ${r.total} shown: --all lists every one)`] : [])].join('\n'), json: r };
     }
     case 'mine': {
       const rows: any = await callFn('mine', { actor });

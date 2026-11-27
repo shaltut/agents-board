@@ -6,7 +6,7 @@ export const RPC_FUNCTIONS = [
   'ask', 'answer', 'send_back', 'reask', 'withdraw', 'answers_pending', 'answer_delivered', 'brief', 'seen', 'iam', 'inbox', 'broadcast', 'task_tag', 'sessions_overview', 'tell', 'type_to', 'task_ping_set', 'task_ping_bulk', 'huddle_open', 'huddle_add', 'huddle_say', 'huddle_close', 'huddles_list', 'user_add', 'user_rotate', 'user_remove', 'user_project_add', 'user_project_remove', 'user_password', 'user_set_role', 'question_assign',
   'tick', 'lock_take', 'lock_release', 'lock_queue',
   'epic_create', 'epic_update', 'epic_close', 'epic_delete', 'epics_list', 'task_block', 'task_unblock',
-  'mem_add', 'mem_rule', 'mem_confirm', 'mem_retire', 'mem_supersede', 'mem_find', 'mem_list', 'mem_show', 'mem_pack',
+  'mem_add', 'mem_rule', 'mem_confirm', 'mem_retire', 'mem_supersede', 'mem_find', 'mem_list', 'mem_show', 'mem_pack', 'task_find',
   'goal_create', 'goal_update', 'goal_status', 'goal_tick', 'goal_opened', 'goal_preview', 'goal_propose', 'goals_list',
   'ask_open', 'ask_record', 'ask_say', 'ask_reply', 'ask_close', 'ask_reroute', 'asks_list',
   'page_set', 'page_get', 'stage_set', 'stage_pass', 'stage_fail', 'digest', 'resume', 'next_step', 'task_queue', 'project_pipeline', 'role_text', 'squad_set', 'squad_get',
