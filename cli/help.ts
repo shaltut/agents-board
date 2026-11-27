@@ -109,15 +109,17 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'Remove a blocker that no longer applies. With nothing else holding it, the task goes to Next.',
       eg: 'cb unblock 13 --by 12' },
     bug: { use: 'cb bug <project> "<title>" "<body>" | -b "<what happened, how to reproduce, expected vs actual>" [-p P1] [-l tag] [--stage build --why "<why>"] [--repo <repo,repo>]', topic: 'work',
-      does: 'File a bug you found outside your task; it goes to Next and the project\'s orchestrator is told and assigns it. Then keep working on your task. A problem with the board itself (cb, relay, web board): project claude-board.',
+      does: 'File a bug you found outside your task; it goes to Next and the project\'s orchestrator is told and triages it (assigns, re-rates or cancels it). Then keep working on your task. A problem with the board itself (cb, relay, web board): project claude-board.',
       eg: 'cb bug iris "Dates before 1970 parse as 1900" -b "row 8812: 1969-02-01 read as 1900-02-01; expected 1969-02-01"',
       more: `How to report an issue (every session, whatever its agent):
-  When     a real fault you saw: a command, output or screen you can show. Not a guess, a wish or a style taste.
+  When     a real fault you saw: a command, output or screen you can show. A command, message or help text that
+           misled you counts too. Not a guess, a wish or a style taste.
   First    duplicate check: cb search <project> "<words>" (--notes searches notes too). Already filed: don't file it
            again; new facts on your own project's card go in cb log <id>.
   Then     Ahmed's recent changes: cb session ahmed (his last 10 board actions: moves, answers, edits), cb mem find
            "<words>" (his rulings), git log on that code. A fresh change he made on purpose is not a fault: if it
-           still looks wrong, cb ask him instead.
+           still looks wrong, cb ask him instead. Unsure whether he meant it: file it anyway and name his change in
+           the body; the lead cancels it or asks him.
   Project  claude-board for a fault in the board itself (cb, the relay, the web board, the runner, squad seats);
            otherwise the project whose code is at fault.
   Body     always -b. What happened; how to repeat it; expected vs actual; the card, job or PR ids; the exact

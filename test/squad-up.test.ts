@@ -690,6 +690,7 @@ test('every agent kind is told how to report an issue: its first prompt runs cb 
   assert.match(readFileSync('prompts/session.md', 'utf8'), /Read `cb help bug` first/);
   const bug = help('bug')!;
   for (const re of [/When +a real fault you saw/, /cb search <project> "<words>"/, /cb session ahmed/, /cb mem find/,
+    /misled you counts too/, /Unsure whether he meant it: file it anyway and name his change in\n +the body; the lead cancels it or asks him/,
     /claude-board for a fault in the board itself/, /otherwise the project whose code is at fault/, /always -b/,
     /how to repeat it; expected vs actual; the card, job or PR ids; the exact\n +command and its output/,
     /Never member, patient or client identifiers, tokens/, /orchestrator \(a squad's lead\) is told and triages it/])
