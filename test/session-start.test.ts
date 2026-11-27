@@ -18,7 +18,7 @@ const paneOf = (n: string) => `p-ss-${n}-${process.pid}`;
 // never this run's own seat: no inbox, no PGAPPNAME (cb would skip its bridge and name its connection by it)
 const { PGAPPNAME: _app, ...base } = process.env;
 const envFor = (pane: string, o: Record<string, string> = {}) => ({ ...base, CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, HERDR_PANE_ID: pane,
-  CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '', ...o });
+  CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '', CB_ROLE: '', ...o });
 
 /** The hook as Claude runs it (async, so a silent server in this process can still accept), with its wall time. */
 function hook(pane: string, source: string | null, o: Record<string, string> = {}) {
@@ -54,7 +54,9 @@ test('after a compaction or a resume, a bound pane gets what cb resume and cb ro
 
   const resume = cb(bound, ['resume']), role = cb(bound, ['role', 'builder']);
   assert.match(resume, /#1 \[in_progress\] Fix the widget/);
-  for (const source of ['compact', 'resume']) {
+  // the role text every seat reads carries the rule for when the hook does not print it (review I1)
+  assert.match(role.replace(/\s+/g, ' '), /if you did not get them \(or you run on another agent\), run `cb resume` and `cb role <your role>`/);
+  for (const source of ['compact', 'resume', 'fork']) {
     const r = await hook(bound, source);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, '');
@@ -146,12 +148,28 @@ test('the board unreachable (refused, silent, or an error): the hint alone, exit
       const r = await hook(pane, 'compact', { CB_DATABASE_URL: url });
       assert.equal(r.status, 0, r.stderr);
       assert.equal(r.stderr, '');
-      assert.equal(contextOf(r), hint, url);
+      // review I1: the hint names the commands to run by hand, never why the board failed
+      assert.equal(contextOf(r), `${hint}\nAfter this compact the board did not answer in time: if you hold a seat, run \`cb resume\` and \`cb role <your role>\` yourself.`, url);
       assert.ok(r.ms < 3000, `${url}: took ${r.ms} ms`);
       console.log(`# hook wall time, board ${url.includes(`:${port}/`) ? 'silent' : url.includes(':1/') ? 'refused' : 'answers with an error'}: ${r.ms} ms`);
     }
+    // the pane's CB_ROLE (squad up sets it) names the role when it is one; anything else stays a placeholder
+    const silentUrl = `postgres://nobody@127.0.0.1:${port}/none`;
+    assert.match(contextOf(await hook(pane, 'resume', { CB_DATABASE_URL: silentUrl, CB_ROLE: 'reviewer' })),
+      /\nAfter this resume the board did not answer in time: if you hold a seat, run `cb resume` and `cb role reviewer` yourself\.$/);
+    assert.match(contextOf(await hook(pane, 'fork', { CB_DATABASE_URL: silentUrl, CB_ROLE: 'x; rm -rf' })), /`cb role <your role>` yourself\.$/);
+    // a plain start says nothing of it
+    assert.doesNotMatch(contextOf(await hook(pane, 'startup', { CB_DATABASE_URL: silentUrl, CB_ROLE: 'reviewer' })), /did not answer/);
   } finally {
     for (const s of held) s.destroy();
     silent.close();
   }
+});
+
+test('the prompts keep the compaction rule for seats the hook does not reach (#4351 review I1)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const one = (f: string) => readFileSync(f, 'utf8').replace(/\s+/g, ' ');
+  for (const f of ['prompts/roles/_common.md', 'prompts/session.md'])
+    assert.match(one(f), /After a compaction or restart, a Claude seat gets `cb resume` and `cb role` printed by the start hook; if you did not get them \(or you run on another agent\), run `cb resume` and `cb role <your role>`\./, f);
+  assert.match(one('prompts/orchestrator.md'), /After a compaction, if the start hook did not print `cb resume` and `cb role` \(or you run on another agent\), run them\./);
 });

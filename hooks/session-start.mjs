@@ -1,13 +1,14 @@
 // Claude Code SessionStart hook: one line that points a new session at the board.
 // Separate from the relay hook (cli/relay.ts), so changing this never restarts live relays.
 // Only herdr panes get it: board sessions always run in one.
-// #4351: after a compaction or a resume, a bound pane also gets what cb resume and cb role <its role> print, so the
+// #4351: after a compaction, a resume or a fork, a bound pane also gets what cb resume and cb role <its role> print, so the
 // session does not have to remember to run them. In-process, never `cb` as a child: no process outlives the hook or
 // holds Claude's pipe (#4482), and an unreachable board costs at most BUDGET_MS, then the hook prints the hint alone.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const BUDGET_MS = 2000; // everything after node's own start: stdin, the board, the write
+const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']; // cb.role_text's list
 const CAP = 6000; // the re-injected block; the hint and the guard line always print whole
 const started = Date.now();
 const left = () => Math.max(0, BUDGET_MS - (Date.now() - started));
@@ -29,7 +30,9 @@ function readStdin(ms) {
 
 const cut = (s, n, cmd) => s.length <= n ? s : `${s.slice(0, Math.max(0, n - 40)).trimEnd()}\n[cut here: run ${cmd} for the rest]`;
 
-/** cb resume, then cb role <role>, as those commands print them; '' when the pane is not bound, or on any failure. */
+/** cb resume, then cb role <role>, as those commands print them; '' when the pane is not bound; null when the board did
+ *  not answer in time or failed. The pane's binding names the actor, as cb does without --as or $CB_ACTOR (the two
+ *  differ only in a bound pane that also exports CB_ACTOR). */
 async function reinject(pane, source, ms) {
   let sql;
   const work = (async () => {
@@ -51,8 +54,8 @@ async function reinject(pane, source, ms) {
     const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, 1500)) : 0;
     return [`Claude Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
       cut(resume, CAP - roleN, '`cb resume`'), role && cut(role, roleN, `\`cb role ${r.role}\``)].filter(Boolean).join('\n\n');
-  })().catch(() => '');
-  const late = new Promise((resolve) => setTimeout(() => resolve(''), ms));
+  })().catch(() => null);
+  const late = new Promise((resolve) => setTimeout(() => resolve(null), ms));
   try { return await Promise.race([work, late]); } finally { sql?.end({ timeout: 0 }).catch(() => {}); }
 }
 
@@ -80,9 +83,14 @@ if (process.env.HERDR_PANE_ID) {
   try {
     let source = '';
     try { source = JSON.parse(await readStdin(Math.min(left(), 1000)))?.source; } catch {}
-    if (source === 'compact' || source === 'resume') {
+    if (source === 'compact' || source === 'resume' || source === 'fork') {
+      // review I1: until the board answers, and if it never does, the hint names the two commands to run by hand (the
+      // role from the pane's CB_ROLE, which squad up sets, when it is one); a pane the board says is not bound: the hint
+      const base = context;
+      const role = ROLES.includes(process.env.CB_ROLE ?? '') ? process.env.CB_ROLE : '<your role>';
+      context += `\nAfter this ${source} the board did not answer in time: if you hold a seat, run \`cb resume\` and \`cb role ${role}\` yourself.`;
       const block = await reinject(process.env.HERDR_PANE_ID, source, left());
-      if (block) context += `\n\n${block}`;
+      if (block !== null) context = block ? `${base}\n\n${block}` : base;
     }
   } catch {}
   clearTimeout(backstop);
