@@ -1,4 +1,4 @@
-# Claude Board for a Linux server (the VPS): the board server, its built UI and the cb CLI.
+# Agents Board for a Linux server (the VPS): the board server, its built UI and the cb CLI.
 # Node 24 runs the .ts files as they are; nothing is compiled but the UI. Multi-arch (amd64 and arm64).
 # Build and run it with deploy/compose.yml, not by hand: that adds Postgres, the env and the ports. docs/ops/deploy.md.
 

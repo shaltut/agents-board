@@ -47,7 +47,7 @@ export function pages(stdout: string): any[] {
 }
 
 /** Someone's text from GitHub, made inert: no control or format characters, no ANSI/OSC escapes, one line, no
- *  brackets (nothing can pass for "[Ahmed asks]" or "[Claude Board]"), no double quote to close ours; capped. */
+ *  brackets (nothing can pass for "[Ahmed asks]", "[Agents Board]" or the old "[Claude Board]"), no double quote to close ours; capped. */
 export function clean(s: unknown, n = 200): string {
   const v = String(s ?? '').normalize('NFKC') // fullwidth look-alikes fold to ASCII first
     .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\|$)/g, '') // OSC ... BEL or ST (titles, hyperlinks)

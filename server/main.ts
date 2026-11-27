@@ -416,7 +416,7 @@ export async function start() {
   const port = Number(process.env.PORT ?? 4747);
   const hostname = process.env.HOST ?? '127.0.0.1';
   loadRelease(ROOT); // built once from this server's own files; a failure only means none is served
-  serve({ fetch: app.fetch, port, hostname }, () => console.log(`Claude Board: http://localhost:${port}`));
+  serve({ fetch: app.fetch, port, hostname }, () => console.log(`Agents Board: http://localhost:${port}`));
   const token = process.env.TELEGRAM_BOT_TOKEN || dotenv('TELEGRAM_BOT_TOKEN');
   void lead(() => {
     if (token) void startBot(token, process.env.TELEGRAM_API || dotenv('TELEGRAM_API') || 'https://api.telegram.org');

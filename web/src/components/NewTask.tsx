@@ -71,7 +71,7 @@ export function NewTask({ open, onOpenChange, project, initial, links, onCreated
               <SelectContent>{PRIORITIES.map(({ p, label }) => <SelectItem key={p} value={p}><Priority p={p} /><span className="text-muted-foreground">{label}</span></SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <Textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} placeholder="Details for Claude, in markdown…" aria-label="Description" />
+          <Textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} placeholder="Details for the agent, in markdown…" aria-label="Description" />
           <DialogFooter><Button type="submit">Create task</Button></DialogFooter>
         </form>
       </DialogContent>

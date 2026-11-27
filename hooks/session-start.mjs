@@ -52,7 +52,7 @@ async function reinject(pane, source, ms) {
     const role = r.role ? await sql`select cb.role_text(${r.role}) as t`.then(([x]) => String(x?.t ?? ''), () => '') : '';
     // the role text is the point; the cards keep at least 1500 characters
     const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, 1500)) : 0;
-    return [`Claude Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
+    return [`Agents Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
       cut(resume, CAP - roleN, '`cb resume`'), role && cut(role, roleN, `\`cb role ${r.role}\``)].filter(Boolean).join('\n\n');
   })().catch(() => null);
   const late = new Promise((resolve) => setTimeout(() => resolve(null), ms));
@@ -68,7 +68,7 @@ function emit(context) {
 }
 
 if (process.env.HERDR_PANE_ID) {
-  let context = 'Claude Board: if this session takes work from the board, run `cb start` first and do what it prints. Manual: `cb help`.';
+  let context = 'Agents Board: if this session takes work from the board, run `cb start` first and do what it prints. Manual: `cb help`.';
   // #4348: a guard nothing runs fails open, silently. A static look at the wiring (no probes: this runs at every start);
   // the fix is Ahmed's (~/.claude is inside the fence, #4345). Never let the check stop the hint.
   try {

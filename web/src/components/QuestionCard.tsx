@@ -31,7 +31,7 @@ function parseAnswer(q: Question): { picked: string[]; text: string } {
   return { picked: [], text: a }
 }
 
-/** An open question from Claude, answerable in place: one click on an option sends it.
+/** An open question from an agent, answerable in place: one click on an option sends it.
  *  Draft text lives here, keyed by question id, so live refetches never wipe what Ahmed is typing.
  *  On success the lamp turns green and the strip leaves; onCleared fires once it has gone.
  *  With onChanged it changes an answer instead: the same card, the current answer picked, no send-back (#1346). */

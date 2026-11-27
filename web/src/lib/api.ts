@@ -83,7 +83,7 @@ export async function get<T>(path: string): Promise<T> {
 
 const NO_ACTOR = new Set(['page_get', 'digest', 'seen', 'goal_opened', 'goal_preview', 'goal_propose']) // functions without an actor argument
 
-/** Every write goes through the same cb.* SQL functions Claude uses. The UI acts as "ahmed". */
+/** Every write goes through the same cb.* SQL functions the agents use. The UI acts as "ahmed". */
 export async function rpc<T = unknown>(fn: string, args: Record<string, unknown>): Promise<T> {
   const r = await fetch(`/api/rpc/${fn}`, {
     method: 'POST', headers: { 'content-type': 'application/json' },

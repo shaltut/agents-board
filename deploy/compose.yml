@@ -1,4 +1,4 @@
-# Claude Board on the VPS: Postgres 16 and the board, always on. docs/ops/deploy.md walks through it.
+# Agents Board on the VPS: Postgres 16 and the board, always on. docs/ops/deploy.md walks through it.
 #   cd deploy && cp env.example .env && chmod 600 .env   (fill it in)
 #   docker compose up -d --build
 # Secrets live in deploy/.env only (git-ignored): never in this file, the image or a log.
