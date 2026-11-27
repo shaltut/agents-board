@@ -39,7 +39,12 @@ CB_TEST_DB=claude_board_test NODE_OPTIONS=--max-old-space-size=4096 pnpm -s test
 ```
 
 - Tests use Postgres on `127.0.0.1:5434` as user `cb`. On Windows the test helper runs `node db/setup.ts --test`, which
-  starts the private cluster in `.pgdata/`; elsewhere start Postgres there yourself.
+  starts the private cluster in `.pgdata/`; elsewhere start Postgres there yourself. A Windows worktree instead gets
+  its own cluster in its own `.pgdata/` on its own port (15435-16453, `db/pg.ts` `testPgPort`), listening on 127.0.0.1
+  only, so parallel worktrees never share connections or a crash (#4413). While it runs, a dev start in that worktree
+  does not get 5434. Stop it before removing the worktree: `node db/setup.ts --test --stop`.
+  A worktree whose cluster already serves 5434 keeps serving it for the main checkout and older branches; stopping it
+  takes 5434 down for them until their next run starts their own.
 - Tests only ever touch databases named `claude_board_test*` (`test/helpers.ts` refuses any other `CB_TEST_DB`), and
   every run truncates all tables. Use a distinct `CB_TEST_DB=claude_board_test_<name>` per worktree.
 - Always `--test-concurrency=1`. Run only the files you changed, not the suite, unless you are about to release.

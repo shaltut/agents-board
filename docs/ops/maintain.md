@@ -407,5 +407,8 @@ squad file (`cb squad set <project> -f <file>`):
 ## Tests
 
 Never on the VPS. The suite truncates whatever database it is given and expects the PC's layout (127.0.0.1:5434);
-run it on the PC or the Mac against their own test databases (`CB_TEST_DB=claude_board_test`). Changing the code is
+run it on the PC or the Mac against their own test databases (`CB_TEST_DB=claude_board_test`). On the PC each worktree
+tests on its own cluster and port (#4413); stop it (`node db/setup.ts --test --stop` in the worktree) before removing
+the worktree, or its Postgres keeps running and holds the folder (a forced delete under it crashes that cluster). Put
+that step in any worktree clean-up a squad or brief runs. Changing the code is
 in [CLAUDE.md](../../CLAUDE.md).

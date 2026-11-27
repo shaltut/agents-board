@@ -1,8 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import postgres from 'postgres';
+import { testDbUrl } from '../db/pg.ts';
 
-// CB_TEST_DB lets parallel worktrees test without wiping each other's data.
-export const TEST_URL = `postgres://cb@127.0.0.1:5434/${process.env.CB_TEST_DB ?? 'claude_board_test'}`;
+// CB_TEST_DB lets parallel worktrees test without wiping each other's data. On Windows a worktree also gets its own
+// cluster and port (#4413: they shared 5434 and its 100 connections); the main checkout and other platforms use 5434.
+export const TEST_URL = testDbUrl();
+process.env.CB_TEST_PG_PORT = new URL(TEST_URL).port; // its db/setup.ts --test child must pick the same port
 // freshDb truncates every table: never anything but a test database (a VPS agent's CB_TEST_DB=claude_board would wipe the board)
 if (!/^claude_board_test\w*$/.test(process.env.CB_TEST_DB ?? 'claude_board_test')) throw new Error(`CB_TEST_DB must start with claude_board_test, not "${process.env.CB_TEST_DB}"`);
 process.env.CB_DATABASE_URL = TEST_URL;
