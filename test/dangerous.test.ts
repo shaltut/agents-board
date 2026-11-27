@@ -325,6 +325,11 @@ const killBlocked = [
   'kill ${A} ${B} $(pgrep node)',
   'kill ${PID} 2>/dev/null $(pgrep node)',
   'kill ${x:-$(pgrep node)}',
+  "bash -c 'kill ${PID} $(pgrep node)'",
+  // ... and so do its options that name the image
+  'taskkill //PID ${PID} //IM node.exe //F',
+  'Stop-Process -Id ${pid} -Name node',
+  'kill -s ${SIG} -1',
   // #3883 n2: options between the shell and -Command / -c / /c, values included
   'powershell -NoProfile -Command "Stop-Process" -Name node',
   'pwsh -NoProfile -c "Stop-Process" -Name node',
@@ -445,6 +450,9 @@ const killPassed = [
   'kill "${arr[@]}"',
   'kill ${PID} ${OTHER:-none}',
   'Stop-Process -Id ${env:MOCK_PID} -ErrorAction SilentlyContinue',
+  'taskkill //PID ${PID} //F //T',
+  'Stop-Process -Id ${pid} -Name node -WhatIf',
+  'kill $(lsof -t -iTCP:${PORT} -sTCP:LISTEN)',
   'Stop-Process -Id ${pid}; Write-Host "${env:TEMP}: $(Get-Process node | Measure-Object | % Count)"',
   // #3883 n3: = 'Terminate' under another key is not a MethodName
   `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
