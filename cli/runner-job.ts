@@ -6,7 +6,7 @@ import {
 } from 'node:fs';
 import { uptime } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
-import { checkParams, expand, jobCwd, jobEnv, type RunnerConfig } from './recipes.ts';
+import { checkParams, expand, jobCwd, jobEnv, missingPaths, recipeFolder, relPaths, type RunnerConfig } from './recipes.ts';
 import { dropLinks } from './slot-links.ts';
 import { cut, logTail, mask, summarize } from './summary.ts';
 
@@ -216,8 +216,9 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
   // a repo name the board let through but this PC lacks is named (the shape of a runner.json name only: it reaches the requester)
   if (proj && !p && typeof repo === 'string' && /^[a-z][a-z0-9-]{0,39}$/.test(repo)) return err(`error: bad job row: no repo ${repo} for ${j.project} on this PC`);
   const recipe = p && typeof j.recipe === 'string' && Object.hasOwn(p.recipes, j.recipe) ? p.recipes[j.recipe]! : undefined;
-  const params = j.params;
-  if (typeof j.sha !== 'string' || !SHA.test(j.sha) || !p || !recipe || !isLists(params)) return err('error: bad job row');
+  if (typeof j.sha !== 'string' || !SHA.test(j.sha) || !p || !recipe || !isLists(j.params)) return err('error: bad job row');
+  // #4338: a path given from the repo root counts as the same path from the recipe's folder
+  const params = relPaths(recipe, j.params);
   const bad = checkParams(recipe, params);
   if (bad) return err(bad);
   // a DB job runs in the lane the claim gave it (its own test stack and ports): without one it could share another's
@@ -334,6 +335,20 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     if (real !== join(root, dirname(f), 'node_modules')) continue;
     rmSync(join(nm, '.cache'), { recursive: true, force: true, maxRetries: 3 });
   }
+
+  // #4338: every path parameter names something in the recipe's folder at this sha (a test tool drops a name it cannot
+  // find and passes on the rest, so a green job would not prove the named tests ran). Before the install: it is cheap.
+  // git's tree at the sha, not the working tree (review M1): exact, case-sensitive, and no node_modules
+  const folder = recipeFolder(recipe, params);
+  let gone: string[] = [];
+  if (Object.values(recipe.params).some((spec) => spec.paths)) {
+    const ls = await git(['ls-tree', '-r', '-z', '--name-only', full, '--', folder], true);
+    if (stop.aborted) return null;
+    if (ls.code !== 0) throw new Error(`git ls-tree exited ${ls.code}`);
+    const prefix = folder === '.' ? '' : `${folder}/`;
+    gone = missingPaths(ls.out.split('\0').filter((f) => f && f.startsWith(prefix)).map((f) => f.slice(prefix.length)), recipe, params);
+  }
+  if (gone.length) return err(`error: not in the repo at ${j.sha.slice(0, 12)}: ${gone.join(', ')} (paths are relative to the recipe's folder, ${folder})`);
 
   // 3. install when the lockfile's blob differs from this slot's last install, when the slot has no install record, and
   // always when the blob cannot be read (a lockfile missing at the sha, a wrong lockfile path)

@@ -5,7 +5,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { runJob } from '../cli/runner-job.ts';
@@ -44,7 +44,7 @@ writeFileSync(join(TMP, 'gitconfig'), '');
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: join(TMP, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (...args: string[]) => execFileSync('git', args, { cwd: WORK, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (msg: string, files: Record<string, string> = {}) => {
-  for (const [f, body] of Object.entries(files)) writeFileSync(join(WORK, f), body);
+  for (const [f, body] of Object.entries(files)) { mkdirSync(dirname(join(WORK, f)), { recursive: true }); writeFileSync(join(WORK, f), body); }
   git('add', '-A'); git('commit', '-q', '--allow-empty', '-m', msg);
   return git('rev-parse', 'HEAD');
 };
@@ -59,6 +59,10 @@ const MAIN = commit('main', {
   // 3 MB, no newline; masking lengthens each address, so only a cut applied last keeps the summary short
   'big.mjs': "process.stdout.write('a@b.co '.repeat(450000)); process.exitCode = 1;\n",
   'lock.txt': 'v1\n',
+  'sub/ok.mjs': "console.log('ok in sub');\n",
+  'sub/pkg/t.mjs': '\n',
+  'sub/pkg/package.json': '{}\n',
+  'sub/deep/t2.mjs': '\n',
 });
 git('push', '-q', 'origin', 'main');
 const PR_ONLY = commit('pr'); git('push', '-q', 'origin', 'HEAD:refs/pull/1/head');
@@ -80,6 +84,8 @@ const recipes = {
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
   cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
+  named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
+  insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 4 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
   multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
@@ -272,6 +278,25 @@ test('bad parameters end the job before any git work', async () => {
   const j = await ended(id);
   assert.equal(j.summary, 'error: bad parameter files: fail.mjs');
   assert.doesNotMatch(logOf(id), /git/);
+});
+
+// #4338: a made-up name in --files used to be dropped by the test tool, and the job passed on the other tests
+test('a file named in a path parameter that is not there at the sha fails the job, naming it', async () => {
+  const id = await add('named', MAIN, { files: ['ok.mjs', 'made-up.mjs'] });
+  const j = await ended(id);
+  assert.equal(j.state, 'error');
+  assert.match(j.summary, new RegExp(`^error: not in the repo at ${MAIN.slice(0, 12)}: made-up\\.mjs \\(paths are relative to the recipe's folder, \\.\\)$`));
+  assert.equal((await ended(await add('named', MAIN, { files: ['ok.mjs'] }))).state, 'passed');
+});
+
+// #4338 review: in a recipe whose folder is sub, a name is read from sub (sub/x from the repo root is taken too) or from a
+// package folder under it (sub/pkg has a package.json, as pnpm --filter ... exec runs there); a tail of a deeper path
+// is not the file (node --test drops it when another name matches, and the job would pass), nor is a file outside sub
+test('a path parameter is checked in the recipe folder at the sha: from the folder, from the root, or from a package folder', async () => {
+  for (const files of [['sub/ok.mjs'], ['ok.mjs'], ['pkg/t.mjs', 't.mjs'], ['deep/t2.mjs']])
+    assert.equal((await ended(await add('insub', MAIN, { files }))).state, 'passed', files.join(' '));
+  const j = await ended(await add('insub', MAIN, { files: ['sub/nope.mjs', 'fail.mjs', 't2.mjs', 'ok.mjs'] }));
+  assert.equal(j.summary, `error: not in the repo at ${MAIN.slice(0, 12)}: nope.mjs, fail.mjs, t2.mjs (paths are relative to the recipe's folder, sub)`);
 });
 
 test('a row written around job_add is refused', async () => {

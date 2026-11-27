@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse, resolve } from 'node:path';
-import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, published } from '../cli/recipes.ts';
+import { loadConfig, checkParams, expand, freeLane, jobCwd, jobEnv, missingPaths, published, relPaths } from '../cli/recipes.ts';
 
 const example = () => loadConfig(readFileSync('docs/ops/runner.example.json', 'utf8'));
 
@@ -72,6 +72,41 @@ test('checkParams refuses flag- and path-shaped values and the pattern', () => {
   assert.equal(checkParams(test_, { app: ['claims-api'], files: ['tests/a.test.ts'] }), null);
   assert.equal(checkParams(test_, { app: ['claims-api'], files: ['tests/a.test.ts'], extra: ['x'] }), 'error: bad parameter extra: unknown');
   assert.equal(checkParams(test_, { app: ['claims-api'] }), 'error: bad parameter files: needs at least 1');
+});
+
+// #4338: a file named in --files that is not there at the sha was dropped by the test tool and the job still passed,
+// so a green job did not prove the named tests ran. A path parameter (files, unless the recipe says paths: false) is
+// checked against the job's folder; a repo-relative path is taken too, as the folder-relative one.
+test('relPaths takes a repo-relative path as relative to the job folder; other params are untouched', () => {
+  const test_ = example().projects.iris!.repos.main!.recipes.test!; // cwd apps/{app}
+  assert.equal(test_.params.files!.paths, true);
+  assert.equal(test_.params.app!.paths, false);
+  const out = relPaths(test_, { app: ['claims-api'], files: ['apps/claims-api/tests/a.test.ts', 'tests/b.test.ts', 'apps/other/tests/c.test.ts'] });
+  assert.deepEqual(out, { app: ['claims-api'], files: ['tests/a.test.ts', 'tests/b.test.ts', 'apps/other/tests/c.test.ts'] });
+  assert.equal(checkParams(test_, out), 'error: bad parameter files: apps/other/tests/c.test.ts', 'another app stays wrong');
+  // no cwd parameter yet (a bad row): nothing is rewritten, checkParams names it
+  assert.deepEqual(relPaths(test_, { files: ['apps/claims-api/tests/a.test.ts'] }), { files: ['apps/claims-api/tests/a.test.ts'] });
+});
+
+test('missingPaths: a name counts from the job folder or from a package folder under it, never as a bare tail; a path parameter can be turned off', () => {
+  const r = { ...example().projects.iris!.repos.main!.recipes.test! };
+  const tracked = ['tests/a.test.ts', 'tests/b.test.tsx', 'apps/web/package.json', 'apps/web/client/src/bell.test.ts', 'e2e/tests/x.test.ts', 'package.json'];
+  const miss = (files: string[]) => missingPaths(tracked, r, { app: ['x'], files });
+  // from the folder (a file or a folder), and from a package folder: vitest under pnpm --filter takes package-relative names
+  assert.deepEqual(miss(['tests/a.test.ts', 'tests', 'tests/', './tests/a.test.ts', 'client/src/bell.test.ts', 'apps/web/client/src/bell.test.ts']), []);
+  // review 2 (I1): a tail of a deeper path is not the file; node --test would drop it and pass on the rest
+  assert.deepEqual(miss(['tests/x.test.ts', 'src/bell.test.ts', 'bell.test.ts', 'tests/made-up.test.ts']), ['tests/x.test.ts', 'src/bell.test.ts', 'bell.test.ts', 'tests/made-up.test.ts']);
+  // whole names only: no partial name, and b.test.ts is not b.test.tsx
+  assert.deepEqual(miss(['ests/a.test.ts', 'tests/b.test.ts', 'a.test']), ['ests/a.test.ts', 'tests/b.test.ts', 'a.test']);
+  // review M1: node_modules is never tracked, and a wrong-case name is not the file
+  assert.deepEqual(miss(['node_modules/x/index.js', 'tests/A.test.ts']), ['node_modules/x/index.js', 'tests/A.test.ts']);
+  const off = { ...r, params: { ...r.params, files: { ...r.params.files!, paths: false } } };
+  assert.deepEqual(missingPaths(tracked, off, { app: ['x'], files: ['tests/made-up.test.ts'] }), []);
+  const withParam = (p: object) => loadConfig(cfgWith({ steps: [['a', '{files}', '{spec}']], params: { files: { pattern: '.', ...p }, spec: { pattern: '.', paths: true } } }));
+  const params = withParam({ paths: false }).projects.p!.repos.main!.recipes.r!.params;
+  assert.equal(params.files!.paths, false);
+  assert.equal(params.spec!.paths, true);
+  assert.throws(() => withParam({ paths: 'yes' }), /paths/);
 });
 
 test('expand repeats an element per value and drops empty params', () => {
