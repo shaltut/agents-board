@@ -1,23 +1,11 @@
-import { BookMarked, CalendarClock,Columns3, History, ListOrdered, Plus, Layers, Radio, MessagesSquare, Milestone, Target, Users } from 'lucide-react'
+import { Plus, Layers, Milestone } from 'lucide-react'
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from '@/components/ui/command'
 import { useEpics, useProjects, useTasks } from '@/lib/api'
-import { go, type View } from '@/lib/route'
+import { go, GROUPS, openPage, type Page } from '@/lib/route'
 import { ProjectDot, StatusDot, TaskId } from './Chips'
+import { PageKeys } from './NavMenus'
 
-const VIEWS: { view: View; label: string; icon: typeof History }[] = [
-  { view: 'today', label: 'Today', icon: CalendarClock },
-  { view: 'board', label: 'Board', icon: Columns3 },
-  { view: 'backlog', label: 'Backlog', icon: ListOrdered },
-  { view: 'sessions', label: 'Sessions', icon: Radio },
-  { view: 'huddles', label: 'Huddles', icon: MessagesSquare },
-  { view: 'history', label: 'History', icon: History },
-  { view: 'people', label: 'Users', icon: Users },
-  { view: 'epics', label: 'Epics', icon: Milestone },
-  { view: 'memory', label: 'Memory', icon: BookMarked },
-  { view: 'goals', label: 'Goals', icon: Target },
-]
-
-export function CommandMenu({ open, onOpenChange, onNewTask }: { open: boolean; onOpenChange: (o: boolean) => void; onNewTask: () => void }) {
+export function CommandMenu({ open, onOpenChange, onNewTask, pages }: { open: boolean; onOpenChange: (o: boolean) => void; onNewTask: () => void; pages: readonly Page[] }) {
   const { data: projects = [] } = useProjects()
   const { data: tasks = [] } = useTasks()
   const { data: epics = [] } = useEpics()
@@ -63,11 +51,17 @@ export function CommandMenu({ open, onOpenChange, onNewTask }: { open: boolean; 
             ))}
           </CommandGroup>
           <CommandGroup heading="Go to">
-            {VIEWS.map(({ view, label, icon: Icon }, i) => (
-              <CommandItem key={view} value={`go ${label}`} onSelect={() => run(() => go({ view, task: undefined, actor: undefined, huddle: undefined, epic: undefined, goal: undefined }))}>
-                <Icon /> {label}<CommandShortcut>{(i + 1) % 10}</CommandShortcut>
-              </CommandItem>
-            ))}
+            {/* the header's order: Today, Board, then each group's pages (only the ones this viewer gets) */}
+            {pages.filter((p) => !p.group).concat(GROUPS.flatMap((g) => pages.filter((p) => p.group === g.id))).map((p) => {
+              const group = GROUPS.find((g) => g.id === p.group)
+              return (
+                <CommandItem key={p.view} value={`go ${p.label} ${group?.label ?? ''}`} onSelect={() => run(() => openPage(p.view))}>
+                  <p.icon /> {p.label}
+                  {group && <span className="text-xs text-muted-foreground">{group.label}</span>}
+                  <CommandShortcut className="tracking-normal"><PageKeys page={p} className="ml-0 pl-0" /></CommandShortcut>
+                </CommandItem>
+              )
+            })}
           </CommandGroup>
         </CommandList>
       </Command>
