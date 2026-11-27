@@ -1,8 +1,12 @@
-// cb triage's judge (#4535): one headless model call on this machine that reads the claude-board code and returns a
+// cb triage's judge (#4535): one headless model call on this machine that reads a copy of the claude-board code
+// (exportTree: tracked files only, so never the board's .env) and returns a
 // verdict per fault group, checked against a JSON schema. It cannot write: Read, Grep and Glob only, no shell, no MCP
 // server, no settings (so no hooks: a Stop hook would report to the board), no board access. Ahmed's Q3000: Claude
 // Opus by default. cb (cli/triage.ts) does every board read and write itself.
 import { spawnSync } from 'node:child_process';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 
 export const DEFAULT_MODEL = 'opus';
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -22,18 +26,50 @@ export function claudeArgs(o: { model: string; budget: number; schema: object; b
     '--setting-sources', '', '--disable-slash-commands'];
 }
 
+// What the judge may read: the code and its docs, never deploy/ (env templates) or anything outside these.
+export const JUDGE_PATHS = ['bin', 'cli', 'db', 'prompts', 'server', 'hooks', 'kit', 'docs', 'CLAUDE.md', 'README.md'];
+const SECRET = /(?:^|[\\/])(?:\.env[^\\/]*|[^\\/]*\.(?:pem|key|p12|pfx|keystore|jks)|id_[a-z0-9]+|[^\\/]*credentials[^\\/]*|\.npmrc|\.netrc)$/i;
+
+/** A temporary copy of the tracked code for the judge to run in (#4535 review I2). A checkout's root holds the board's
+ *  .env, and Read needs no approval inside the working folder, while the prompt carries untrusted card titles. In a
+ *  git checkout only tracked files are copied (git ls-files: no .env, no untracked scratch); a release copy holds only
+ *  release files. Secret-shaped names are skipped either way. The caller removes the folder. */
+export function exportTree(board: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-judge-'));
+  let files: string[] = [];
+  const git = existsSync(join(board, '.git')) ? spawnSync('git', ['-C', board, 'ls-files', '-z', '--', ...JUDGE_PATHS], { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }) : null;
+  if (git?.status === 0) files = git.stdout.split('\0').filter(Boolean);
+  else {
+    const walk = (p: string): void => {
+      let st; try { st = statSync(p); } catch { return; }
+      if (st.isDirectory()) { for (const n of readdirSync(p)) if (n !== 'node_modules' && n !== '.git') walk(join(p, n)); }
+      else if (st.isFile()) files.push(relative(board, p));
+    };
+    for (const p of JUDGE_PATHS) walk(join(board, p));
+  }
+  for (const f of files) {
+    if (SECRET.test(f)) continue;
+    try { mkdirSync(dirname(join(dir, f)), { recursive: true }); copyFileSync(join(board, f), join(dir, f)); } catch {}
+  }
+  return dir;
+}
+
 export type Judged = { ok: true; groups: unknown; cost: number | null; ms: number } | { ok: false; error: string; cost: number | null; ms: number };
 
 /** Runs the judge once. CB_TRIAGE_AGENT_CMD (tests) names a node script to run instead of claude, with the same
  *  arguments and stdin. The prompt goes on stdin, never in an argument (the process list). */
 export function runJudge(o: { prompt: string; schema: object; model: string; budget: number; board: string; timeoutMs?: number }): Judged {
-  const args = claudeArgs(o);
+  const cwd = exportTree(o.board);
+  const args = claudeArgs({ ...o, board: cwd });
   const fake = process.env.CB_TRIAGE_AGENT_CMD;
   const t0 = Date.now();
-  const r = spawnSync(fake ? process.execPath : 'claude', fake ? [fake, ...args] : args, {
-    input: o.prompt, cwd: o.board, env: childEnv(), encoding: 'utf8', windowsHide: true,
-    timeout: o.timeoutMs ?? (Number(process.env.CB_TRIAGE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS), maxBuffer: 16 * 1024 * 1024,
-  });
+  let r;
+  try {
+    r = spawnSync(fake ? process.execPath : 'claude', fake ? [fake, ...args] : args, {
+      input: o.prompt, cwd, env: childEnv(), encoding: 'utf8', windowsHide: true,
+      timeout: o.timeoutMs ?? (Number(process.env.CB_TRIAGE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS), maxBuffer: 16 * 1024 * 1024,
+    });
+  } finally { try { rmSync(cwd, { recursive: true, force: true }); } catch {} }
   const ms = Date.now() - t0;
   if ((r.error as any)?.code === 'ETIMEDOUT') return { ok: false, error: `the judge did not finish within ${Math.round((o.timeoutMs ?? (Number(process.env.CB_TRIAGE_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS)) / 1000)} s`, cost: null, ms };
   if ((r.error as any)?.code === 'ENOENT') return { ok: false, error: 'claude is not installed on this machine (or not on PATH)', cost: null, ms };

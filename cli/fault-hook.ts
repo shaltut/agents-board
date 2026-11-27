@@ -4,7 +4,7 @@
 // run that succeeds writes nothing.
 import { homedir, hostname } from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { writeFault, mask, releaseOf } from '../kit/fault-line.mjs';
+import { writeFault, releaseOf } from '../kit/fault-line.mjs';
 import { databaseUrl, machine } from '../server/db.ts';
 import { neverSent } from './connect-retry.ts';
 import { isNetworkError } from './survive.ts';
@@ -70,7 +70,10 @@ export function faultHook(argv: string[], options: () => Record<string, Opt>, ge
   const rec: Rec = {};
   // what cb printed last on stderr: the early exits (a bad option) print and exit without throwing
   const err = console.error;
-  console.error = (...a: unknown[]) => { rec.stderr = a.map(String).join(' ').slice(0, 4000); return err(...a); };
+  console.error = (...a: unknown[]) => {
+    try { rec.stderr = a.map((x) => String(x)).join(' ').slice(0, 4000); } catch {} // an object with no toString must still print
+    return err(...a);
+  };
   process.on('uncaughtExceptionMonitor', (e: any) => { rec.crash = String(e?.message ?? e).slice(0, 4000); rec.last ??= e; });
   process.on('exit', (code) => {
     try { write(code, performance.now() - t0); } catch {}
@@ -82,10 +85,17 @@ export function faultHook(argv: string[], options: () => Record<string, Opt>, ge
     const shape = argvShape(argv, options());
     const slowMs = Number(process.env.CB_FAULT_SLOW_MS) || SLOW_MS;
     const slow = ms > slowMs && !NOT_SLOW.has(shape.cmd ?? '') && !(shape.cmd === 'run' && shape.flags.includes('wait')) && !(shape.cmd === 'squad' && shape.sub === 'up');
-    const failed = exit !== 0 && !rec.answer;
+    // only these non-zero exits are the command's answer; a daemon, a job or a triage run that fails is a fault
+    const answered = rec.answer && ((shape.cmd === 'lock' && shape.sub === 'take' && exit === 2)
+      || ((shape.cmd === 'update' || shape.cmd === 'doctor') && exit === 1));
+    const failed = exit !== 0 && !answered;
     let kind: string | null = null;
     const printed = (rec.crash ?? rec.stderr ?? String(rec.last?.message ?? rec.first?.message ?? '')).replace(/^cb: /, '');
-    if (failed) kind = rec.crash != null ? 'crash' : kindOf(rec.first, rec.last, printed);
+    // an exit code passed through with nothing printed by cb: the runner or supervisor child, triage's unreachable board
+    // (3), a waited job that failed
+    const passed = !rec.crash && rec.first == null && rec.last == null && !rec.stderr;
+    if (failed && passed) kind = shape.cmd === 'runner' || shape.cmd === 'supervise' ? 'daemon' : shape.cmd === 'triage' && exit === 3 ? 'not_run' : 'refused';
+    else if (failed) kind = rec.crash != null ? 'crash' : kindOf(rec.first, rec.last, printed);
     else if (rec.localStart) kind = 'local_start';
     else if (shape.cmd === 'start' && rec.first) kind = kindOf(rec.first, rec.last, ''); // cb start reports and exits 0
     else if (rec.bridgeError) kind = 'bridge';
@@ -103,7 +113,7 @@ export function faultHook(argv: string[], options: () => Record<string, Opt>, ge
     const agent = process.env.CB_AGENT;
     writeFault({
       machine: machine(), release: releaseOf(), src: 'cb', cmd: shape.cmd, sub: shape.sub, flags: shape.flags, argc: shape.argc,
-      exit, kind, code, msg: failed || kind === 'not_run' || kind === 'lost' ? mask(printed, values) : '',
+      exit, kind, code, msg: failed || kind === 'not_run' || kind === 'lost' ? printed : '', values, // masked by buildLine
       ms, tries: rec.last?.tries ?? rec.first?.tries ?? (retries ? retries + 1 : 0),
       board: local == null ? null : local ? 'local' : 'remote', pane,
       actor: sql?.binding?.actor ?? null, agent: isAgentKind(agent) ? agent : 'claude',

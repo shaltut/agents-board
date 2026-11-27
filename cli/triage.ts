@@ -28,7 +28,7 @@ const BOARD = join(import.meta.dirname, '..');
 const VERDICTS = ['bug', 'misleading', 'user_error', 'infra', 'noise', 'unsure'] as const;
 const FILE = new Set(['bug', 'misleading']);
 // the judge sees these first: a crash or a database error is a likelier real bug than a slow call
-const RANK = ['crash', 'db', 'bridge', 'slow', 'usage', 'refused'];
+const RANK = ['crash', 'db', 'daemon', 'bridge', 'slow', 'usage', 'refused'];
 
 export const markerOf = (tmpl: string) => `fault:${tmpl}`;
 
@@ -174,6 +174,8 @@ async function fileOne(sql: any, d: Decision, actor: string) {
       order by status in ('done', 'cancelled'), id desc limit 1`;
     const seen = `seen ${g.count} more time${g.count === 1 ? '' : 's'} by ${g.seats} session${g.seats === 1 ? '' : 's'} from ${utc(g.first)} to ${utc(g.last)} UTC, release ${g.releases.join(', ') || 'unknown'} (cb triage)`;
     if (hit && !['done', 'cancelled'].includes(hit.status)) {
+      const bad = redactionProblem(seen);
+      if (bad) return { action: 'held', id: Number(hit.id), why: bad };
       await tx`select cb.log(${PROJECT}, ${seen}, ${String(hit.id)}, '{}'::jsonb, ${actor})`;
       return { action: 'noted', id: Number(hit.id) };
     }
@@ -181,6 +183,9 @@ async function fileOne(sql: any, d: Decision, actor: string) {
     if (hit?.status === 'done' && hit.done_at && Date.parse(g.last) <= +new Date(hit.done_at)) return { action: 'fixed', id: Number(hit.id) };
     if (!d.title || !d.body) return { action: 'none', id: hit ? Number(hit.id) : null };
     const body = `${d.body}\n\n${hit ? `Seen again after #${hit.id} was done.\n\n` : ''}${facts(g)}`;
+    // the last gate: board text cannot be edited, and the facts carry the message read back from the log
+    const bad = redactionProblem(`${d.title}\n${body}`);
+    if (bad) return { action: 'held', id: null, why: bad };
     const [{ id }] = await tx`select cb.task_add(project => ${PROJECT}, title => ${d.title}, body => ${body}, status => 'next',
       priority => 'P2', actor => ${actor}, type => 'bug') as id`;
     return { action: 'filed', id: Number(id) };
@@ -191,8 +196,8 @@ function writeMarker(m: Marker) {
   const file = join(faultsHome(), 'triage.json'), tmp = `${file}.${process.pid}.tmp`;
   const cut = Date.now() - KEEP_MS;
   m.groups = Object.fromEntries(Object.entries(m.groups).filter(([, v]) => Date.parse(v.at) >= cut));
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(tmp, JSON.stringify(m, null, 1) + '\n');
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(tmp, JSON.stringify(m, null, 1) + '\n', { mode: 0o600 });
   renameSync(tmp, file);
 }
 
@@ -257,7 +262,8 @@ export async function triageCmd(sql: any, o: TriageOpts) {
       const badWhy = d.why && redactionProblem(d.why);
       if (badWhy) d.why = `(the judge's reason is withheld: it failed the redaction check, ${badWhy})`;
       if (d.held || !FILE.has(d.verdict)) continue;
-      const bad = d.title && (redactionProblem(d.title) ?? redactionProblem(d.body!));
+      // the whole card as it would be filed: the judge's title and body and cb's facts block (the logged message)
+      const bad = d.title ? redactionProblem(`${d.title}\n${d.body}\n\n${facts(d.group)}`) : redactionProblem(facts(d.group));
       if (bad) { d.held = `failed the redaction check (${bad})`; d.title = d.body = undefined; }
     }
   }
@@ -265,9 +271,12 @@ export async function triageCmd(sql: any, o: TriageOpts) {
   if (files) {
     for (const d of sent) {
       if (d.held || !FILE.has(d.verdict)) continue;
-      const r = await fileOne(sql, d, o.actor);
+      const r: any = await fileOne(sql, d, o.actor);
       d.action = r.action;
       d.card = r.id ?? d.card;
+      if (r.action === 'held') { d.held = `failed the redaction check (${r.why})`; continue; }
+      marker.groups[d.group.tmpl] = { verdict: d.verdict, card: d.card ?? null, at: new Date().toISOString(), count: d.group.count, release: d.group.release, by: d.by };
+      writeMarker(marker);
       // the judge named a card without the marker: Q3001 limits writes to marked cards, so nothing is written there
     }
   }

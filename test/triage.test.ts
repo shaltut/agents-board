@@ -5,11 +5,12 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { buildLine } from '../kit/fault-line.mjs';
 import { redactionProblem, ruleFor, PROJECT } from '../cli/triage.ts';
-import { childEnv } from '../cli/triage-agent.ts';
+import { childEnv, exportTree } from '../cli/triage-agent.ts';
+import { mask } from '../kit/fault-line.mjs';
 
 const clients: any[] = [];
 const temps: string[] = [];
@@ -17,10 +18,11 @@ after(async () => { await Promise.all(clients.map((c) => c.end())); for (const t
 const temp = () => { const d = mkdtempSync(join(tmpdir(), 'cb-triage-')); temps.push(d); return d; };
 async function db() { const s = await freshDb(); clients.push(s); await s`select cb.ensure_project(${PROJECT})`; return s; }
 
-const FAKE = `import { readFileSync, writeFileSync } from 'node:fs';
+const FAKE = `import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 const plan = JSON.parse(readFileSync(new URL('./plan.json', import.meta.url), 'utf8'));
 let input = ''; for await (const c of process.stdin) input += c;
-writeFileSync(new URL('./seen.json', import.meta.url), JSON.stringify({ env: Object.keys(process.env), args: process.argv.slice(2), prompt: input }));
+writeFileSync(new URL('./seen.json', import.meta.url), JSON.stringify({ env: Object.keys(process.env), args: process.argv.slice(2), prompt: input,
+  cwd: process.cwd(), envFile: existsSync('.env'), code: existsSync('cli/cb.ts'), git: existsSync('.git') }));
 if (plan.mode === 'hang') await new Promise((r) => setTimeout(r, 60_000));
 if (plan.mode === 'garbage') { console.log('not json'); process.exit(0); }
 if (plan.mode === 'budget') { console.log(JSON.stringify({ is_error: true, subtype: 'error_max_budget_usd', total_cost_usd: 1.01 })); process.exit(1); }
@@ -45,7 +47,7 @@ function seed(home: string, extra: any[] = []) {
   const now = Date.now(), at = (i: number) => new Date(now - 60_000 * (i + 1));
   const l = (o: any, i: number) => buildLine({ machine: 'testbox', src: 'cb', exit: 1, release: 'abcdef1234', at: at(i), ...o });
   const ls = [
-    l({ cmd: 'mine', kind: 'db', code: '40P01', msg: 'deadlock detected', pane: 'p1' }, 0),
+    l({ cmd: 'mine', kind: 'db', code: '40P01', msg: 'cache lookup failed for function N', pane: 'p1' }, 0),
     l({ cmd: 'show', kind: 'usage', msg: 'unknown option ‹v›', pane: 'p1' }, 1),
     ...['p1', 'p2', 'p3', 'p4'].map((p, i) => l({ cmd: 'inbox', kind: 'usage', msg: 'unknown command "‹v›"', pane: p }, 2 + i)),
     l({ cmd: 'show', kind: 'not_run', code: 'CONNECT_TIMEOUT', msg: 'board unreachable', pane: 'p1' }, 7),
@@ -92,6 +94,15 @@ test('rules: one or two sessions\' wrong use is a user error and never sent; fou
   assert.equal(args[args.indexOf('--model') + 1], 'opus');
   assert.equal(args[args.indexOf('--max-budget-usd') + 1], '1.00');
   assert.ok(!seen(dir).env.some((k: string) => /^(HERDR_|CB_)/.test(k) || k === 'CLAUDE_CODE_MESSAGING_SOCKET'), 'the judge got a session or board variable');
+  // review I2: the judge runs in a temporary copy of the tracked code, never the checkout (its .env), and it is removed
+  const s = seen(dir);
+  assert.equal(s.code, true);
+  assert.equal(s.envFile, false);
+  assert.equal(s.git, false);
+  assert.notEqual(resolve(s.cwd).toLowerCase(), resolve('.').toLowerCase());
+  assert.equal(existsSync(s.cwd), false);
+  const slash = (p: string) => resolve(p).replace(/\\/g, '/').toLowerCase();
+  assert.equal(slash(args[args.indexOf('--mcp-config') + 1]), `${slash(s.cwd)}/kit/mcp/none.json`);
   assert.equal(j.cost_usd, 0.12);
   assert.equal(ruleFor({ kind: 'usage', seats: 3 } as any, undefined, false), null);
   assert.ok(!('HERDR_PANE_ID' in childEnv({ HERDR_PANE_ID: 'x', PATH: 'p' } as any)));
@@ -184,7 +195,7 @@ test('filing writes only marked claude-board cards: a named card without the mar
   const sql = await db();
   const { dir, home } = setup();
   const ls = seed(home);
-  const [{ id: plain }] = await sql`select cb.task_add(${PROJECT}, 'deadlock detected in mine', 'a card with the same words, no marker', 'next') as id`;
+  const [{ id: plain }] = await sql`select cb.task_add(${PROJECT}, 'cache lookup failed for function N in mine', 'a card with the same words, no marker', 'next') as id`;
   plan(dir, { verdict: 'bug', card: 'candidate' });
   // the dry run says the same as the filing run: a card without the marker is shown, never noted
   assert.match(cb(['triage', '--dry-run'], dir, home).out, new RegExp(`same as #${plain} `));
@@ -222,4 +233,46 @@ test('two machines triaging the same new fault at once make one card', async () 
   const cards = await bugs(sql);
   assert.equal(cards.length, 1);
   assert.equal((await notes(sql, cards[0].id)).length, 1);
+});
+
+test('the judge\'s folder: tracked files only, never .env, untracked scratch or a secret-shaped tracked file', () => {
+  const repo = temp();
+  const git = (...a: string[]) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
+  git('init', '-q');
+  mkdirSync(join(repo, 'cli'), { recursive: true }); mkdirSync(join(repo, 'deploy'), { recursive: true });
+  writeFileSync(join(repo, 'cli', 'cb.ts'), '// code\n'); writeFileSync(join(repo, 'cli', '.env.example'), 'X=1\n');
+  writeFileSync(join(repo, 'deploy', 'env.template'), 'X=1\n');
+  git('add', 'cli', 'deploy');
+  writeFileSync(join(repo, '.env'), 'DATABASE_URL=secret\n'); writeFileSync(join(repo, 'cli', 'scratch.ts'), '// untracked\n');
+  const out = exportTree(repo);
+  temps.push(out);
+  assert.equal(existsSync(join(out, 'cli', 'cb.ts')), true);
+  for (const f of ['.env', 'cli/scratch.ts', 'cli/.env.example', 'deploy/env.template']) assert.equal(existsSync(join(out, f)), false, f);
+});
+
+test('review I1: the whole card as filed passes the last check; a message that survives masking but names this machine holds the group', async () => {
+  const sql = await db();
+  const { dir, home } = setup();
+  // the reviewer's repro: nothing of it survives masking
+  const m = mask('cannot reach https://board.example.com/release.json for ahmed@example.com at /home/ubuntu/work/board/.env');
+  assert.equal(m, 'cannot reach ‹v› for ‹v› at ‹v›');
+  assert.equal(redactionProblem(m), null);
+  // "macbook" is cb vocabulary, so it survives the mask; on a machine named macbook the facts block would name it
+  seed(home, [{ cmd: 'brief', kind: 'db', code: '42883', msg: 'function missing on macbook', pane: 'p1' }]);
+  plan(dir, { ...BUG, kind: 'db' });
+  const r = cb(['triage'], dir, home, { CB_MACHINE: 'macbook' });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /held +ft-\S+ +db 42883 .*failed the redaction check \(a machine name\)/);
+  assert.equal((await bugs(sql)).filter((b: any) => /42883/.test(b.body)).length, 0);
+});
+
+test('a triage run that cannot reach the board exits 3 and leaves a not_run line in the fault log', async () => {
+  await db();
+  const { dir, home } = setup();
+  seed(home);
+  plan(dir, BUG);
+  const r = cb(['triage', '--dry-run'], dir, home, { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_none', HERDR_PANE_ID: '' });
+  assert.equal(r.code, 3, r.err);
+  const lines = readFileSync(join(home, `${new Date().toISOString().slice(0, 10)}.jsonl`), 'utf8').trim().split('\n').map((x) => JSON.parse(x));
+  assert.ok(lines.some((l) => l.cmd === 'triage' && l.kind === 'not_run' && l.exit === 3));
 });

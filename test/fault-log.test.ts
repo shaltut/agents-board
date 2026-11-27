@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { mask, tmplOf, buildLine, writeFault, readFaults, releaseOf, buildWords, wordsText, literals, CAP_BYTES } from '../kit/fault-line.mjs';
+import { mask, tmplOf, buildLine, writeFault, readFaults, releaseOf, wordsDrift, literals, faultsOn, CAP_BYTES } from '../kit/fault-line.mjs';
 import { argvShape, kindOf } from '../cli/fault-hook.ts';
 
 const clients: any[] = [];
@@ -66,6 +66,59 @@ test('mask: values echoed unquoted, quoted spans and words outside cb\'s source 
   assert.equal(mask('task #4242 not found at zzyzxhost'), 'task #N not found at ‹v›');
   assert.equal(mask('--image C:\\Users\\someone\\shot.png: no such file', ['C:\\Users\\someone\\shot.png']), '--image ‹v›: no such file');
   assert.match(mask('read ECONNRESET at أحمد'), /‹v›$/);
+});
+
+// #4535 review I1(b), M3: shapes that are values whatever their words, lists cb echoes, quotes of every kind
+test('mask: URLs, emails, session names, paths, dotted hosts, echoed lists and unbalanced or curly quotes; idempotent', () => {
+  const cases: [string, string][] = [
+    ['cannot reach https://board.example.com/release.json for ahmed@example.com at /home/ubuntu/work/board/.env', 'cannot reach ‹v› for ‹v› at ‹v›'],
+    ['file:///C:/Users/x_/board/cli/cb.ts failed', '‹v› failed'],
+    ['board-macbook-pro.tail12.ts.net refused', '‹v› refused'],
+    ['SQUAD@macbook holds it', '‹v› holds it'],
+    ['title "patient member refused because', 'title "‹v›'],
+    ['title \u201cpatient member claim\u201d is long', 'title "‹v›" is long'],
+    ['unknown project "iris"; known: iris, board, show', 'unknown project "‹v›"; known: ‹v›'],
+    ['C:\\Users\\someone\\shot.png: no such file', '‹v› no such file'],
+    ['see cli/cb.ts:120 and docs/ops/maintain.md', 'see cli/cb.ts:N and docs/ops/maintain.md'],
+  ];
+  for (const [raw, want] of cases) assert.equal(mask(raw), want, raw);
+  assert.match(mask('"yes" is not one of Q12\'s options: show, next, done'), /options: ‹v›$/);
+  for (const raw of [...cases.map((c) => c[0]), "it doesn't run, it's fine", 'task #42 not found. Run: cb help show'])
+    assert.equal(mask(mask(raw)), mask(raw), `not idempotent: ${raw}`);
+});
+
+// #4535 review M2: every writer is masked by buildLine, and every line read back is re-checked
+test('buildLine masks whatever a writer sent; readFaults re-checks every field of a line read back', () => {
+  const dir = temp(), env = { CB_FAULTS_HOME: dir } as any;
+  writeFault({ src: 'relay', kind: 'db', code: '40P01', msg: 'lost https://h.example/x for SQUAD@macbook', exit: 1 }, env);
+  const day = new Date().toISOString().slice(0, 10);
+  writeFileSync(join(dir, `${day}.jsonl`), JSON.stringify({ v: 1, at: new Date().toISOString(), src: 'cb', cmd: 'Bad Cmd!', sub: 'x y', code: 'lower',
+    kind: 'weird', release: 'not-a-sha', msg: 'see /home/someone/secret and "a title"', tmpl: 'ft-000000000000' }) + '\n', { flag: 'a' });
+  const [a, b] = readFaults(Date.now() - 60_000, env);
+  assert.equal(a.msg, 'lost ‹v› for ‹v›');
+  assert.equal(b.msg, 'see ‹v› and "‹v›"');
+  assert.deepEqual([b.cmd, b.sub, b.code, b.kind, b.release], ['‹other›', null, null, 'crash', null]);
+  assert.notEqual(b.tmpl, 'ft-000000000000');
+  assert.equal(readFileSync(join(dir, `${day}.jsonl`), 'utf8').includes('h.example'), false);
+});
+
+test('minors: the test guard also covers a test file run without --test; fault files are owner-only on POSIX', () => {
+  assert.equal(faultsOn({ CB_DATABASE_URL: 'postgres://cb@127.0.0.1:5434/claude_board_test_x' } as any), false);
+  assert.equal(faultsOn({ CB_DATABASE_URL: 'postgres://cb@127.0.0.1:5434/claude_board_test_x', CB_FAULTS_HOME: 'x' } as any), true);
+  assert.equal(faultsOn({ CB_DATABASE_URL: 'postgres://cb@127.0.0.1:5434/claude_board' } as any), true);
+  if (process.platform === 'win32') return;
+  const dir = join(temp(), 'faults');
+  writeFault({ src: 'cb', kind: 'usage', msg: 'x', exit: 1 }, { CB_FAULTS_HOME: dir } as any);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(statSync(join(dir, readdirSync(dir)[0]!)).mode & 0o777, 0o600);
+});
+
+test('minor: console.error of an object with no toString still prints and exits as before', () => {
+  const script = `import { faultHook } from ${JSON.stringify(new URL('../cli/fault-hook.ts', import.meta.url).href)};
+    faultHook([], () => ({}), () => null); console.error(Object.create(null)); console.log('after');`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, CB_FAULTS_OFF: '1' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /after/);
 });
 
 test('kinds: wrong use, a refusal, a database error, a crash, the board unreachable', async () => {
@@ -144,13 +197,18 @@ test('templates: the same fault with other values is one group; an outage is one
   assert.equal(argvShape(['show', '42'], {}).sub, null);
 });
 
-test('the vocabulary is current and holds no client or person name', () => {
+// review M1: a word missing from the file is only masked (a note, regenerated at release); a word gone from the source
+// must not stay (a removed name), and a denied name never belongs
+test('the vocabulary holds only words still in the source, and no client or person name', (t) => {
   const file = readFileSync('kit/fault-words.json', 'utf8');
-  assert.equal(file, wordsText(buildWords()), 'kit/fault-words.json is stale: run node kit/fault-line.mjs --words');
+  const d = wordsDrift();
+  assert.deepEqual(d.extra, [], 'kit/fault-words.json holds words no longer in the source: run node kit/fault-line.mjs --words');
+  if (d.missing.length) t.diagnostic(`note: ${d.missing.length} new source words are not in kit/fault-words.json yet (only masked); node cli/release.ts reports it at release`);
   // client, product and person names that must never be cb vocabulary, as sha256 prefixes: this repo is public, so the
   // list must not spell them. Add one with: node -e "console.log(require('crypto').createHash('sha256').update('<name>').digest('hex').slice(0, 16))"
   const hashes = new Set(['a2ba597eed6f656e', 'a9a6d86ec5b16639', '5ea83b530ba80969', '6862ed95c7c0bd3d', 'a8a34b63086e2165',
-    '046b3f95f318bb19', '2b54971bb79ed11e', '9eeb1a7fdbdb4f72', '654b0ca8f8f44ffb']);
+    '046b3f95f318bb19', '2b54971bb79ed11e', '9eeb1a7fdbdb4f72', '654b0ca8f8f44ffb',
+    '21297e6e966afbd0', '94e75f5d3b1e2ded', '7314222aaec22193', 'ae9777a110ef32e6', '96a26fc3089e1e70']);
   for (const w of JSON.parse(file)) assert.ok(!hashes.has(createHash('sha256').update(w).digest('hex').slice(0, 16)), 'a denied name is in kit/fault-words.json');
   assert.deepEqual(literals("a('one two'); // it's a comment\nb(`x ${c('three')} four`)"), ['one two', 'x ', 'three', ' four']);
 });

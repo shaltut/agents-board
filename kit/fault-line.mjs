@@ -17,7 +17,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const VERSION = 1;
-export const KINDS = ['usage', 'refused', 'not_run', 'lost', 'db', 'crash', 'retried', 'slow', 'local_start', 'bridge', 'cap'];
+export const KINDS = ['usage', 'refused', 'not_run', 'lost', 'db', 'crash', 'retried', 'slow', 'local_start', 'bridge', 'daemon', 'cap'];
 export const CAP_BYTES = 5 * 1024 * 1024;
 export const KEEP_DAYS = 14;
 export const V = '‹v›';
@@ -32,7 +32,9 @@ export function faultsHome(env = process.env) {
  *  its own CB_FAULTS_HOME: the suite expects errors by the hundred, and triage must never file test noise. */
 export function faultsOn(env = process.env) {
   if (env.CB_FAULTS_OFF === '1') return false;
-  return !(env.NODE_TEST_CONTEXT && !env.CB_FAULTS_HOME);
+  if (env.CB_FAULTS_HOME) return true;
+  // a test file run without --test has no NODE_TEST_CONTEXT, but its board is a test database
+  return !env.NODE_TEST_CONTEXT && !/\/claude_board_test\w*(?:\?|$)/.test(env.CB_DATABASE_URL ?? '');
 }
 
 let WORDS = null;
@@ -47,18 +49,29 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  *  host, user and database, this machine's names), masked wherever they appear, before anything else: cb also echoes
  *  some values unquoted ("<project> has no squad yet"), and a value made of dictionary words would pass the word test. */
 export function mask(s, values = []) {
-  let t = String(s ?? '').slice(0, 4000);
+  const M = '\u0001';
+  // idempotent: an earlier pass's ‹v› stays one, and its N stays N (buildLine masks again whatever a writer sent)
+  let t = String(s ?? '').slice(0, 4000).replaceAll(V, M);
   const vs = [...new Set(values.filter((v) => typeof v === 'string' && v.trim().length >= 3).map((v) => v.trim()))]
     .sort((a, b) => b.length - a.length);
-  for (const v of vs) t = t.replace(new RegExp(esc(v), 'gi'), '\u0001');
-  t = t.replace(/"[^"\n]*"|'[^'\n]*'|`[^`\n]*`/g, '"\u0001"'); // quoted values whole: card titles are ordinary words
+  for (const v of vs) t = t.replace(new RegExp(esc(v), 'gi'), M);
+  // shapes that are values whatever their words: URLs, emails and session names (NAME@machine), paths, dotted hosts
+  t = t.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]*/gi, M)
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*/g, M)
+    .replace(/\b[A-Za-z]:[\\/][^\s"'`]*|\\\\[^\s"'`]+|~[\\/][^\s"'`]*|(?<![\w.\/])\/[\w.-]+(?:\/[\w.-]*)+/g, M)
+    .replace(/\b[\w-]+(?:\.[\w-]+){2,}\b/g, M);
+  // lists cb echoes unquoted: "known: <projects>", "is not one of Q12's options: <labels>"
+  t = t.replace(/\b(known|options)(\s*:\s*)[^.)\n]*/gi, `$1$2${M}`);
+  // quoted values whole (card titles are ordinary words), straight or curly; an opening quote never closed, to the end
+  t = t.replace(/"[^"\n]*"|(?<![A-Za-z0-9])'[^'\n]*'|`[^`\n]*`|“[^”\n]*”|‘[^’\n]*’|«[^»\n]*»/g, '\u0002')
+    .replace(/(?:["`“«]|(?<![A-Za-z0-9])['‘])[^\n]*/g, '\u0003');
   const W = words();
-  t = t.replace(/\u0001|[A-Za-z]+|\d+|[^\sA-Za-z\d]/g, (k) =>
-    k === '\u0001' ? V
+  t = t.replace(/[\u0001-\u0003]|[A-Za-z]+|\d+|[^\sA-Za-z\d]/g, (k) =>
+    k === M ? V : k === '\u0002' ? `"${V}"` : k === '\u0003' ? `"${V}`
     : /^\d/.test(k) ? 'N'
-    : /^[A-Za-z]/.test(k) ? (W.has(k.toLowerCase()) || k === 'a' || k === 'A' || k === 'I' ? k : V)
+    : /^[A-Za-z]/.test(k) ? (W.has(k.toLowerCase()) || k === 'a' || k === 'A' || k === 'I' || k === 'N' ? k : V)
     : /^[\x21-\x7e]$/.test(k) ? k : V); // ASCII punctuation kept; any other character (a name in another script) masked
-  return t.replace(/‹v›(?:[^\sA-Za-z\d‹]{0,3}\s?‹v›)+/g, V).replace(/\s+/g, ' ').trim().slice(0, 300);
+  return t.replace(/‹v›(?:[^\sA-Za-z\d‹"]{0,3}\s?‹v›)+/g, V).replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 // The command is part of the group only where the command is the fault's place (a wrong use, a refusal, a db error, a
@@ -127,19 +140,21 @@ const NAME = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 const pick = (v, re) => (typeof v === 'string' && re.test(v) ? v : null);
 const int = (v) => (Number.isFinite(v) ? Math.max(0, Math.round(v)) : null);
 
-/** One line, every field checked against its pattern: anything else becomes null (or ‹other›). */
+/** One line, every field checked against its pattern: anything else becomes null (or ‹other›). The message is masked
+ *  here (mask is idempotent), so every writer is, and f.values (never stored) names the values it knows of. Also the
+ *  re-check of a line read back from a file (readFaults). */
 export function buildLine(f) {
   const l = {
-    v: VERSION, at: (f.at ?? new Date()).toISOString(), machine: pick(f.machine, NAME) ?? '‹other›', release: f.release ?? null,
+    v: VERSION, at: (f.at ?? new Date()).toISOString(), machine: pick(f.machine, NAME) ?? '‹other›', release: pick(f.release, /^[0-9a-f]{10}$/),
     src: ['cb', 'hook:session-start', 'hook:usage-stop', 'guard', 'relay', 'supervisor'].includes(f.src) ? f.src : 'cb',
     cmd: f.cmd == null ? null : pick(f.cmd, /^[a-z][a-z-]{0,19}$/) ?? '‹other›', sub: pick(f.sub, /^[a-z]{2,12}$/),
     flags: (f.flags ?? []).filter((x) => /^[a-z][a-z0-9-]{0,30}$/.test(x)).slice(0, 20),
     argc: int(f.argc), exit: Number.isInteger(f.exit) ? f.exit : null, kind: KINDS.includes(f.kind) ? f.kind : 'crash',
-    code: pick(f.code, /^[A-Z0-9_]{2,32}$/), msg: f.msg ?? '', tmpl: null,
+    code: pick(f.code, /^[A-Z0-9_]{2,32}$/), msg: f.msg ? mask(f.msg, f.values ?? []) : '', tmpl: null,
     ms: int(f.ms), tries: int(f.tries), n: int(f.n) || 1,
     board: f.board === 'local' || f.board === 'remote' ? f.board : null,
     pane: pick(f.pane, /^[\w:.-]{1,40}$/), actor: pick(f.actor, /^[A-Za-z0-9_-]{1,40}@[a-z0-9.-]{1,40}$/),
-    agent: pick(f.agent, /^[a-z]{2,12}$/) ?? 'claude', node: process.versions.node,
+    agent: pick(f.agent, /^[a-z]{2,12}$/) ?? 'claude', node: pick(f.node, /^\d{1,3}\.\d{1,3}\.\d{1,3}$/) ?? process.versions.node,
   };
   l.tmpl = tmplOf(l);
   return l;
@@ -155,19 +170,20 @@ export function writeFault(fields, env = process.env) {
     try { size = statSync(file).size; } catch {}
     if (size >= CAP_BYTES) {
       if (capped(file, size)) return false;
-      appendFileSync(file, JSON.stringify({ v: VERSION, at: line.at, machine: line.machine, kind: 'cap', msg: 'the day file is full: no more lines today' }) + '\n');
+      appendFileSync(file, JSON.stringify({ v: VERSION, at: line.at, machine: line.machine, kind: 'cap', msg: 'the day file is full: no more lines today' }) + '\n', { mode: 0o600 });
       return false;
     }
     if (size < 0) {
-      try { mkdirSync(dir, { recursive: true }); } catch {}
+      try { mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
       try { rotate(dir, now, env); } catch {}
     }
-    appendFileSync(file, JSON.stringify(line) + '\n');
+    appendFileSync(file, JSON.stringify(line) + '\n', { mode: 0o600 });
     return true;
   } catch { return false; }
 }
 
-/** Every line since `sinceMs` (epoch ms), oldest day first; a line that does not parse (torn by a crash) is skipped. */
+/** Every line since `sinceMs` (epoch ms), oldest day first, each re-checked by buildLine (a hand-edited or older line
+ *  cannot carry a value on to triage); a line that does not parse (torn by a crash) is skipped. */
 export function readFaults(sinceMs, env = process.env) {
   const dir = faultsHome(env), from = day(new Date(sinceMs));
   let names = [];
@@ -176,7 +192,12 @@ export function readFaults(sinceMs, env = process.env) {
   for (const n of names) {
     for (const s of (readText(join(dir, n)) ?? '').split('\n')) {
       if (!s) continue;
-      try { const l = JSON.parse(s); if (l && typeof l === 'object' && Date.parse(l.at) >= sinceMs) out.push(l); } catch {}
+      try {
+        const l = JSON.parse(s);
+        if (!l || typeof l !== 'object' || !(Date.parse(l.at) >= sinceMs)) continue;
+        out.push(l.kind === 'cap' ? { v: VERSION, at: new Date(l.at).toISOString(), machine: pick(l.machine, NAME) ?? '‹other›', kind: 'cap' }
+          : buildLine({ ...l, at: new Date(l.at), values: [] }));
+      } catch {}
     }
   }
   return out;
@@ -244,6 +265,16 @@ export function buildWords(root = ROOT) {
 }
 
 export const wordsText = (list) => '[\n' + list.map((w) => JSON.stringify(w)).join(',\n') + '\n]\n';
+
+/** How far kit/fault-words.json is from the source: missing (in the source, not in the file: only masked more) and
+ *  extra (in the file, gone from the source: the direction that matters, a removed name must not stay). */
+export function wordsDrift(root = ROOT) {
+  const now = new Set(buildWords(root));
+  let file = [];
+  try { file = JSON.parse(readFileSync(join(root, 'kit', 'fault-words.json'), 'utf8')); } catch {}
+  const have = new Set(file);
+  return { missing: [...now].filter((w) => !have.has(w)), extra: file.filter((w) => !now.has(w)) };
+}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href && process.argv[2] === '--words') {
   const list = buildWords();
