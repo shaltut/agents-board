@@ -8,7 +8,8 @@ const proj = (p?: string) => (p ? sql`and project = ${p}` : sql``);
 export const projects = () => sql`
   select p.slug, p.name, p.color, p.repo_path, p.pipeline, p.state, p.state_by, p.state_at,
     (select count(*)::int from cb.tasks t where t.project = p.slug and t.status not in ('done','cancelled','backlog')) as open_count,
-    (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') as question_count
+    -- #4559 (Q3019): a disabled project's questions are out of the lamp until it is enabled
+    case when p.state = 'enabled' then (select count(*)::int from cb.questions q where q.project = p.slug and q.status = 'open') else 0 end as question_count
   from cb.projects p order by p.name`;
 
 /** The board's card list. No descriptions (`body`): no list view shows them, the panel reads them from task(id), and

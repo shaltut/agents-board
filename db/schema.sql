@@ -2461,7 +2461,9 @@ begin
     'silent', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'last_at', l.at) order by l.at nulls first, t.id)
       from cb.tasks t cross join lateral (select max(e.at) as at from cb.events e where e.actor = t.assignee) l
      where t.status = 'in_progress' and (p is null or t.project = p) and not off and cb._live(t.project) and t.assignee is not null and t.assignee <> 'ahmed'
-       and t.assignee not in (select u.name from cb.users u) and (l.at is null or l.at < now() - interval '30 minutes')), '[]'),
+       -- #4559: quiet since the project was enabled, not since the wrap-up before it was disabled
+       and t.assignee not in (select u.name from cb.users u)
+       and coalesce(greatest(l.at, (select pr.state_at from cb.projects pr where pr.slug = t.project)), '-infinity') < now() - interval '30 minutes'), '[]'),
     'blocked', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'since', coalesce(b.at, t.updated_at),
         'note', r.summary, 'question', q.id, 'question_body', q.body, 'question_status', q.status, 'question_for', coalesce(q.assigned_to, 'ahmed'))
         order by coalesce(b.at, t.updated_at))
@@ -2472,7 +2474,8 @@ begin
       -- the reason as cb brief picks it (#4454): a reason restated on a card already blocked is newest; since stays the move
       left join lateral (select e.summary from cb.events e where e.task_id = t.id and e.kind in ('moved', 'note') and e.data ->> 'to' = 'blocked'
                           order by e.id desc limit 1) r on true
-     where t.status = 'blocked' and (p is null or t.project = p) and not off and cb._live(t.project) and coalesce(b.at, t.updated_at) < now() - interval '1 hour'
+     where t.status = 'blocked' and (p is null or t.project = p) and not off and cb._live(t.project)
+       and greatest(coalesce(b.at, t.updated_at), (select pr.state_at from cb.projects pr where pr.slug = t.project)) < now() - interval '1 hour'
        -- waiting on an open task blocker is by design, not stuck (a question it also holds on still shows)
        and (t.blocked_on is not null or cardinality(cb._waits_on(t.id)) = 0)), '[]'),
     'unreviewed', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'pr', t.links ->> 'pr') order by t.id)
@@ -2512,7 +2515,8 @@ begin
     'huddles', coalesce((select jsonb_agg(jsonb_build_object('id', h.id, 'topic', h.topic, 'last_at', l.at) order by l.at)
       from cb.huddles h cross join lateral (select coalesce(max(e.at), h.opened_at) as at from cb.events e
                                              where e.kind = 'huddle' and (e.data ->> 'huddle')::bigint = h.id) l
-     where h.status = 'open' and (p is null or h.project = p) and not off and cb._live(h.project) and l.at < now() - interval '20 minutes'), '[]'),
+     where h.status = 'open' and (p is null or h.project = p) and not off and cb._live(h.project)
+       and greatest(l.at, (select pr.state_at from cb.projects pr where pr.slug = h.project)) < now() - interval '20 minutes'), '[]'),
     'locks', cb.lock_queue(null),
     -- Ahmed's asks to me (#936) still without a reply 15 minutes after delivery
     'late_asks', coalesce((select jsonb_agg(jsonb_build_object('id', a.id, 'body', a.body, 'delivered_at', a.delivered_at, 'from_terminal', a.from_terminal) order by a.id)

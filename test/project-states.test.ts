@@ -347,3 +347,34 @@ test('cb next, cb start, cb add, cb bug, cb brief and cb tick say a project is d
   assert.match(cb(['tick', 'cedar']).out, /^PROJECT DISABLED: Cedar is disabled/);
   assert.equal(cb(['add', 'atlas', 'normal one'], { CB_ACTOR: 'A1@pc' }).out.match(/^#\d+$/)?.length, 1, 'an enabled project prints only the id');
 });
+
+test('tick after an enable: silent, long-blocked and quiet-huddle clocks count from the enable, not from the wrap-up (review M4)', async () => {
+  const { sql, session, set } = await setup();
+  await sql`select cb.task_add(project => 'cedar', title => 'blocked one', status => 'blocked', assignee => 'W2@pc', actor => 'W2@pc')`; // #4
+  const [{ h }] = await session`select cb.huddle_open('sync', '[]', null, 'W1@pc', 'cedar') as h`;
+  await set('disabled');
+  await set('enabled');
+  await sql`update cb.events set at = now() - interval '3 hours'`;
+  await sql`update cb.tasks set updated_at = now() - interval '3 hours'`;
+  await sql`update cb.huddles set opened_at = now() - interval '3 hours' where id = ${h}`;
+  const tick = async () => (await session`select cb.tick('cedar', 'lead@pc') as t`)[0].t;
+  let t = await tick();
+  assert.deepEqual([t.silent.length, t.blocked.length, t.huddles.length], [0, 0, 0], 'just enabled: nothing reads as stuck');
+  await sql`update cb.projects set state_at = now() - interval '2 hours' where slug = 'cedar'`;
+  t = await tick();
+  assert.deepEqual(t.silent.map((x: any) => Number(x.id)), [1]);
+  assert.deepEqual(t.blocked.map((x: any) => Number(x.id)), [4]);
+  assert.equal(t.huddles.length, 1);
+});
+
+test('the per-project lamp count leaves a disabled project\'s questions out (review M5)', async () => {
+  const { session, set } = await setup();
+  await session`select cb.ask(project => 'cedar', body => 'q?', actor => 'W2@pc')`;
+  const count = async () => {
+    const r = await (await app.request('/api/projects')).json();
+    return r.find((p: any) => p.slug === 'cedar').question_count;
+  };
+  assert.equal(await count(), 1);
+  await set('disabled');
+  assert.equal(await count(), 0);
+});

@@ -366,3 +366,27 @@ test('a disabled project: its open questions are not sent; enabling the project 
   await sql`select cb.project_state('demo', 'enabled', 'ahmed')`;
   await until(() => sentFor(Number(id)).length, 'sent on enable');
 });
+
+test('a question already on Telegram when its project is disabled loses its buttons, refuses a tap, and gets them back on enable (#4559, I1)', async () => {
+  const sql = await paired();
+  const id = await ask(sql, 'Which cache?', { options: ['Redis', 'Memory'] });
+  await until(() => sentFor(id).length, 'sent');
+  const msg = await msgOf(sql, id);
+  const edits = () => calls('editMessageText').filter((c) => c.body.message_id === msg);
+  await sql`select cb.project_state('demo', 'disabled', 'ahmed')`;
+  await until(() => edits().length, 'edited on disable');
+  assert.match(edits()[0].body.text, /Waiting: this project is disabled/);
+  assert.deepEqual(edits()[0].body.reply_markup.inline_keyboard, [], 'no buttons');
+  assert.equal((await sql`select state from cb.telegram_messages where question_id = ${id}`)[0].state, 'waiting');
+  press(msg, `o:${id}:0`);
+  await until(() => calls('answerCallbackQuery').some((c) => /waits: its project is disabled/.test(c.body.text)), 'tap refused');
+  text('Redis', AHMED, msg);
+  await until(() => calls('sendMessage').some((c) => /waits: its project is disabled/.test(c.body.text ?? '')), 'reply refused');
+  assert.equal((await status(sql, id)).status, 'open', 'still open, unanswered');
+  await sql`select cb.project_state('demo', 'enabled', 'ahmed')`;
+  await until(() => edits().length === 2, 'restored on enable');
+  assert.ok(edits()[1].body.reply_markup.inline_keyboard.some((r: any) => r[0]?.callback_data === `o:${id}:0`), 'its buttons again');
+  assert.equal(sentFor(id).filter((c) => c.body.reply_markup).length, 1, 'the same message, not a second one');
+  press(msg, `o:${id}:0`);
+  await until(async () => (await status(sql, id)).status === 'answered', 'answered once enabled');
+});
