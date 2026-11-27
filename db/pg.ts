@@ -22,7 +22,8 @@ export function ensurePg(dir = PGDATA, port = 5434): void {
     const i = spawnSync(join(BIN, 'initdb.exe'), ['-D', dir, '-U', 'cb', '--auth=trust', '-E', 'UTF8'], { stdio: 'pipe', encoding: 'utf8' });
     // #4401: an initdb that never started has no output: say why, and where it was looked for
     if (i.status !== 0) {
-      const why = i.error ? `${i.error.message} (no initdb.exe in ${BIN}: set CB_PG_BIN to PostgreSQL's bin folder)` : (i.stderr || i.stdout);
+      const hint = (i.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? ` (no initdb.exe in ${BIN}: set CB_PG_BIN to PostgreSQL's bin folder)` : '';
+      const why = i.error ? `${i.error.message}${hint}` : (i.stderr || i.stdout);
       throw new Error(`could not create Postgres cluster in ${dir}: ${why}`);
     }
   }
