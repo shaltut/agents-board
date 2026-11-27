@@ -102,6 +102,7 @@ export function withConnectRetry(db: any, o: RetryOpts = {}): any {
           if (tries > 1 && typeof e === 'object') Object.assign(e, { tries, triedMs: now() - t0 });
           throw e;
         }
+        wrapped.retries++; // #4535: a success that needed a retry is a fault line too (retried)
         await sleep(delay);
       }
     }
@@ -116,5 +117,6 @@ export function withConnectRetry(db: any, o: RetryOpts = {}): any {
   wrapped.end = (...a: any[]) => db.end(...a);
   wrapped.binding = db.binding;
   wrapped.answered = 0;
+  wrapped.retries = 0;
   return wrapped;
 }
