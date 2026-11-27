@@ -95,23 +95,50 @@ export function processes(): Proc[] {
   if (r.status !== 0) throw new Error(`cannot list processes (${String(r.stderr || r.error?.message || '').trim().slice(0, 200)})`);
   return r.stdout.split(/\r?\n/).map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m![1]), cmd: m![2]! }));
 }
+/** The folder in `lsof -a -p <pid> -d cwd -Fn` output (its n line), or null. */
+export function lsofCwd(out: string): string | null {
+  const n = out.split(/\r?\n/).find((l) => l.startsWith('n/'));
+  return n ? n.slice(1) : null;
+}
+/** A process's working folder (/proc on Linux, lsof on macOS), or null when it cannot be read: another user's
+ *  process, no lsof, or Windows, which does not show another process's folder. Reads only. */
+export function cwdOf(pid: number): string | null {
+  if (win) return null;
+  if (process.platform === 'linux') { try { return readlinkSync(`/proc/${pid}/cwd`); } catch { return null; } }
+  const r = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 10_000 });
+  return typeof r.stdout === 'string' ? lsofCwd(r.stdout) : null;
+}
 /** The processes running code from this copy, by kind: relays restart themselves; a runner or supervisor does not.
- *  A runner or supervisor started by a relative path (node cli/cb.ts runner) names no folder: counted as this copy's. */
-export function runningFrom(L: Layout, procs: Proc[]) {
+ *  A runner or supervisor started by a relative path (node cli/cb.ts runner) names no folder in its command line: it
+ *  counts when its working folder is the copy (or one of its versions; #4572), not when it is another checkout. One
+ *  whose folder cannot be read is `unsure`: it may be this copy's. */
+export function runningFrom(L: Layout, procs: Proc[], folderOf: (pid: number) => string | null = cwdOf) {
   const norm = (s: string) => (win ? s.replace(/\\/g, '/').toLowerCase() : s);
-  const roots = [norm(L.live) + '/', norm(L.home) + '/'];
+  const roots = [...new Set([L.live, L.home, real(L.live), real(L.home)].filter((r): r is string => !!r).map((r) => norm(r) + '/'))];
   const mine = new Set([process.pid, process.ppid]);
   const DAEMON = /(^|[\s"'/])cli\/(runner|supervise)\.ts\b|(^|[\s"'/])(cli\/cb\.ts|bin\/cb)["']?\s+(runner|supervise)\b/;
-  const RELATIVE = /(^|[\s"'])(\.\/)?(cli|bin)\/(runner\.ts|supervise\.ts|cb\.ts|cb)["']?(\s|$)/;
+  const RELATIVE = /(?:^|[\s"'])((?:\.\/)?(?:cli|bin)\/(?:runner\.ts|supervise\.ts|cb\.ts|cb))["']?(?:\s|$)/;
   const kind = (c: string) => /\/cli\/relay\.ts\b/.test(norm(c)) ? 'relay' : DAEMON.test(norm(c)) ? 'daemon' : 'other';
-  const ours = procs.filter((p) => !mine.has(p.pid)
-    && (roots.some((r) => norm(p.cmd).includes(r)) || (kind(p.cmd) === 'daemon' && RELATIVE.test(norm(p.cmd)))));
-  return { relays: ours.filter((p) => kind(p.cmd) === 'relay'), daemons: ours.filter((p) => kind(p.cmd) === 'daemon'), others: ours.filter((p) => kind(p.cmd) === 'other') };
+  const unsure: Proc[] = [];
+  const ours = procs.filter((p) => {
+    if (mine.has(p.pid)) return false;
+    if (roots.some((r) => norm(p.cmd).includes(r))) return true;
+    const rel = kind(p.cmd) === 'daemon' ? RELATIVE.exec(norm(p.cmd))?.[1] : undefined;
+    if (!rel) return false;
+    const dir = folderOf(p.pid);
+    if (!dir) { unsure.push(p); return false; }
+    return roots.some((r) => norm(resolve(dir, rel)).startsWith(r));
+  });
+  return { relays: ours.filter((p) => kind(p.cmd) === 'relay'), daemons: ours.filter((p) => kind(p.cmd) === 'daemon'), others: ours.filter((p) => kind(p.cmd) === 'other'), unsure };
 }
+const unsureSay = (run: ReturnType<typeof runningFrom>) => `pid ${run.unsure.map((p) => p.pid).join(', ')} runs a runner or supervisor by a relative path `
+  + `and its working folder could not be read${win ? ' (Windows does not show it)' : ''}: it may be this copy's or another checkout's`;
 function refuseDaemons(run: ReturnType<typeof runningFrom>, force: boolean) {
-  if (!run.daemons.length || force) return;
-  throw new Error(`the runner or supervisor runs from this copy (pid ${run.daemons.map((p) => p.pid).join(', ')}) and would stay on the old code: `
+  if (force) return;
+  if (run.daemons.length) throw new Error(`the runner or supervisor runs from this copy (pid ${run.daemons.map((p) => p.pid).join(', ')}) and would stay on the old code: `
     + 'stop it by its pid (never by name), update, then start it again; or pass --force (it keeps the old code until it restarts)');
+  if (run.unsure.length) throw new Error(`${unsureSay(run)}. If it is this copy's it would stay on the old code: stop it by its pid (never by name), `
+    + 'update, then start it again; if it is not, pass --force');
 }
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; } };
@@ -330,6 +357,7 @@ function after(run: ReturnType<typeof runningFrom>) {
   const out: string[] = [];
   if (run.relays.length) out.push(`relays: ${run.relays.length} running from this copy restart themselves into the new code within seconds (one that does not: cb relay --restart in its pane)`);
   if (run.daemons.length) out.push(`runner/supervisor: pid ${run.daemons.map((p) => p.pid).join(', ')} still run the old code: restart each by its pid (never by name)`);
+  if (run.unsure.length) out.push(`runner/supervisor: ${unsureSay(run)}; if it is this copy's, restart it by its pid (never by name)`);
   return out;
 }
 
