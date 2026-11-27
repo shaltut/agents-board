@@ -100,12 +100,17 @@ test('checkFirst names the command that shows whether this one landed, and every
     ['move', ['42', 'review'], 'check with cb show 42 before running it again'],
     ['add', ['demo', 'Fix the "month" parse  in rows', 'body'], 'check with cb search demo "Fix the month parse in rows" before running it again'],
     ['bug', ['demo', 'one two three four five six seven eight'], 'check with cb search demo "one two three four five six" before running it again'],
+    // a leading - would exclude the word from the search; a - inside a word stays
+    ['add', ['demo', 'Drop the -v flag from re-runs'], 'check with cb search demo "Drop the v flag from re-runs" before running it again'],
+    ['pass', ['42', 'built'], 'check with cb show 42 --json (its stage; a card in parts: the parts line of cb show 42) before running it again'],
     ['tell', ['W2@test', 'hi'], 'check with cb session W1@test (the messages you sent are in its RECENT list) before running it again'],
-    ['next', [], 'check with cb mine before running it again'],
+    ['broadcast', ['hi all'], 'check with cb session W1@test (the messages you sent are in its RECENT list) before running it again'],
+    ['run', ['test'], 'check with cb jobs (the queued and running jobs) before running it again'],
+    ['next', [], 'check with cb mine (your cards) or cb session W1@test (what the board last recorded from you) before running it again'],
     ['show', ['42'], 'it only reads, so running it again is safe'],
   ] as const) assert.equal(checkFirst(cmd, [...args], me), want, cmd);
   assert.match(checkFirst('ask', ['demo', 'q?'], me), /^send the same cb ask again, unchanged: a question still open is returned, not asked twice \(with pictures it posts again: check cb brief demo first\)$/);
-  for (const cmd of ['done', 'add', 'bug', 'tell', 'ask', 'next', 'iam', 'mem', undefined])
+  for (const cmd of ['done', 'pass', 'add', 'bug', 'tell', 'ask', 'run', 'next', 'iam', 'mem', undefined])
     assert.ok(namesCommand(ranWords(err('ECONNRESET'), 0, checkFirst(cmd, ['42', 'x'], me))!), String(cmd));
   // the old words, and anything else where a plain word follows "cb", no longer count as naming a command
   assert.equal(namesCommand('the call that failed may have reached it, so this command may have run: check with cb before running it again'), false);
@@ -201,14 +206,17 @@ test('cb never resends a write whose connection dropped after it was sent', { sk
   let seen = false;
   const server = await proxy(port, (d) => { if (seen) return true; seen = d.includes('cb.task_add'); return false; });
   try {
-    const r = await cbAsync(['add', 'demo', 'Sent once'], port);
+    const r = await cbAsync(['add', 'demo', 'Sent "once", not -twice'], port);
     assert.equal(r.code, 1, r.out);
     assert.doesNotMatch(r.err, /tried \d+ times|never reached/);
     // #4450: the check is a command the session can run, not "check with cb"
-    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): the call that failed may have reached it, so this command may have run: check with cb search demo "Sent once" before running it again\. Keep working meanwhile\.$/);
+    assert.match(r.err, /lost the board connection at 127\.0\.0\.2 \(ECONNRESET\): the call that failed may have reached it, so this command may have run: check with cb search demo "Sent once, not twice" before running it again\. Keep working meanwhile\.$/);
     // the board ran it (the write reached it before the drop); give it a moment to commit
     let n = 0;
     for (let i = 0; i < 20 && n === 0; i++) { n = (await sql`select count(*)::int as n from cb.tasks`)[0].n; if (!n) await new Promise((x) => setTimeout(x, 100)); }
     assert.equal(n, 1);
+    // and the check it names finds that card (cb search calls cb.task_find with these words and the project)
+    const [{ f }] = await sql`select cb.task_find('Sent once, not twice', 'demo') as f`;
+    assert.equal(f.total, 1);
   } finally { server.close(); }
 });

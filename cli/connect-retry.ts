@@ -43,8 +43,10 @@ export function ranWords(e: unknown, answered: number, check: string): string | 
 // every-error-names-a-command check only because "cb before" looked like a command). Name the one that shows whether
 // this command landed. READS call only selects or stable functions, so running one again changes nothing.
 const READS = new Set(['show', 'search', 'session', 'sessions', 'digest']);
-// the first argument is the card they change: cb show <id> shows the change and its note
-const ON_CARD = new Set(['tag', 'stage', 'pass', 'fail', 'move', 'done', 'edit', 'log', 'block', 'unblock']);
+// the first argument is the card they change. cb show <id> prints its status, labels, fields, notes and done summary;
+// a stage move is an 'updated' event it does not print, so the stage is read from --json (a card in parts: its parts line)
+const ON_CARD = new Set(['tag', 'move', 'done', 'edit', 'log', 'block', 'unblock']);
+const STAGED = new Set(['stage', 'pass', 'fail']);
 
 /** What to do before running again a command that may have run: a blind resend of a write runs it twice (#3331).
  *  me: who this pane acts as. Only a numeric id and the title's first words are echoed back. */
@@ -53,12 +55,15 @@ export function checkFirst(cmd: string | undefined, args: string[], me: string):
   // #3331: an unchanged resend of a question still open returns it; one with pictures always posts
   if (cmd === 'ask') return `send the same cb ask again, unchanged: a question still open is returned, not asked twice (with pictures it posts again: check cb brief ${args[0] ?? '<project>'} first)`;
   const id = /^#?\d{1,15}$/.test(args[0] ?? '') ? args[0]!.replace('#', '') : null;
-  const words = String(args[1] ?? '').replace(/["`$\\]/g, ' ').trim().split(/\s+/).slice(0, 6).join(' ');
+  // cb search reads the words as a web search: a leading - would exclude the word, so it goes with the quotes
+  const words = String(args[1] ?? '').replace(/["`$\\]|(?<!\S)-+/g, '').trim().split(/\s+/).slice(0, 6).join(' ');
   const check = id && ON_CARD.has(cmd ?? '') ? `cb show ${id}`
+    : id && STAGED.has(cmd ?? '') ? `cb show ${id} --json (its stage; a card in parts: the parts line of cb show ${id})`
     : (cmd === 'add' || cmd === 'bug') && args[0] ? `cb search ${args[0]} "${words || '<title words>'}"`
-    // cb.tell records the message as an event of its sender, and cb session lists a name's recent events
-    : cmd === 'tell' ? `cb session ${me} (the messages you sent are in its RECENT list)`
-    : 'cb mine';
+    // cb.tell and cb.broadcast record the message as an event of its sender; cb session lists a name's recent events
+    : cmd === 'tell' || cmd === 'broadcast' ? `cb session ${me} (the messages you sent are in its RECENT list)`
+    : cmd === 'run' ? 'cb jobs (the queued and running jobs)'
+    : `cb mine (your cards) or cb session ${me} (what the board last recorded from you)`;
   return `check with ${check} before running it again`;
 }
 
