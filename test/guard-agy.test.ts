@@ -175,6 +175,14 @@ test('edit fence (#4663 M1): an apply_patch example in the content of an ordinar
   assert.equal(edit({ TargetFile: '.claude/settings.json', CodeContent: 'x' }, undefined, 'write_to_file').decision, 'deny', 'the target itself still counts');
 });
 
+// PR 110 review S1: agy is a Go binary; Go's JSON decoding matches keys in any case, the last one winning. So a second
+// top-level path key in another case is a target too, for the fence (core) and for agy's own .git rule
+test('edit fence (PR 110 S1): a top-level path key in any case is a target', () => {
+  for (const args of [{ TargetFile: 'src/a.ts', targetFile: '.claude/settings.json' }, { TargetFile: 'src/a.ts', TARGETFILE: '.claude/settings.json' },
+    { TargetFile: 'src/a.ts', move_path: '.claude/settings.json' }, { TargetFile: 'src/a.ts', targetfile: '.git/config' }, { TARGETFILE: '.git/config' }])
+    assert.equal(edit(args, undefined, 'write_to_file').decision, 'deny', JSON.stringify(args));
+});
+
 test('edit fence (#4652): the repo-level fence paths are denied for every edit tool and path form; ordinary .claude work passes', () => {
   for (const t of ['.claude/settings.json', '.claude/settings.local.json', 'opencode.json', '.codex/hooks.json', '.codex/config.toml',
     '.opencode/plugins/x.js', join(ws, '.claude', 'settings.json'), 'src/../.claude/settings.json', '.CLAUDE/Settings.json', '.claude./settings.json']) {
