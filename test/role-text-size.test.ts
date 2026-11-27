@@ -22,7 +22,7 @@ test('the hook\'s numbers: the role gets what the cards leave (CAP - RESUME_KEEP
   assert.ok(CAP > 0 && RESUME_KEEP > 0, 'the hook still says const CAP = <n>; and const RESUME_KEEP = <n>;');
   assert.equal(ROLE_ROOM, 6000);
   assert.match(hook, /Math\.min\(role\.length, CAP - Math\.min\(resume\.length, RESUME_KEEP\)\)/);
-  assert.match(hook, /cb\.role_text\(\$\{r\.role\}, \$\{r\.project \?\? null\}\)/, 'the hook reads the text with the seat\'s project, as cb role does');
+  assert.match(hook, /cb\.role_text\(\$\{r\.role\}, \$\{r\.project \?\? null\}, \$\{r\.actor \?\? null\}\)/, 'the hook reads the text with the seat\'s project and name, as cb role does');
 });
 
 test('every role, with the longest project addition and ask-first line, fits what the hook re-injects', async () => {
@@ -30,11 +30,15 @@ test('every role, with the longest project addition and ask-first line, fits wha
   const slug = 'a-rather-long-project-slug-for-sizes';
   await sql`select cb.ensure_project(${slug})`;
   const sizes: string[] = [];
-  for (const who of ['lead', 'ahmed', `${'S'.repeat(55)}@machine`]) {
+  for (const who of ['lead', 'ahmed', `${'S'.repeat(56)}@machine`]) { // the named one at the 64-character cap
     await sql`select cb.project_role_set(${slug}, ${'x'.repeat(1000)}, ${who}, 'ahmed')`;
     for (const r of ROLES) {
+      // read by another seat, and by the one asked first itself
+      for (const actor of [null, who]) {
+        const [{ t }] = await sql`select cb.role_text(${r}, ${slug}, ${actor}) as t`;
+        assert.ok(t.length <= ROLE_ROOM, `${r} with ask first ${who.slice(0, 8)}: ${t.length} > ${ROLE_ROOM}`);
+      }
       const [{ t }] = await sql`select cb.role_text(${r}, ${slug}) as t`;
-      assert.ok(t.length <= ROLE_ROOM, `${r} with ask first ${who.slice(0, 8)}: ${t.length} > ${ROLE_ROOM}`);
       if (who === 'lead') sizes.push(`${r} ${t.length}`);
     }
   }

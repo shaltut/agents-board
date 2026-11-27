@@ -122,6 +122,27 @@ test('the re-injected block is capped near 7500 characters and says which comman
   assert.ok(block.endsWith((await sql`select cb.role_text('builder', 'demo') as t`)[0].t), 'cb role builder printed whole, project block last');
 });
 
+// #4525 review M6: a board whose schema predates the project argument (rolled back, or a copy updated out of order)
+// still hands the role over: the board-wide text alone, never nothing
+test('the project-aware read failing, the hook falls back to the board-wide role text (#4525)', { timeout: 120_000 }, async () => {
+  const sql = await db();
+  const pane = paneOf('old');
+  await sql`select cb.task_add(project => 'demo', title => 'On an older board', status => 'in_progress', assignee => 'W4@testbox')`;
+  await sql`select cb.iam(${M}, ${pane}, 'W4@testbox', 'demo', 'qa')`;
+  const board = (await sql`select cb.role_text('qa') as t`)[0].t;
+  await sql`alter function cb.role_text(text, text, text) rename to role_text_4525`;
+  try {
+    await sql`create function cb.role_text(role text) returns text language sql stable as $$ select cb.role_text_4525(role) $$`;
+    const r = await hook(pane, 'compact');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(contextOf(r).endsWith(`\n\n${board}`), 'the board-wide qa text, whole and last');
+    assert.match(contextOf(r), /what `cb resume` and `cb role qa` print now/);
+  } finally {
+    await sql`drop function if exists cb.role_text(text)`;
+    await sql`alter function cb.role_text_4525(text, text, text) rename to role_text`;
+  }
+});
+
 test('a stdin left open after its JSON does not hold a plain start (#4351)', { timeout: 30_000 }, async () => {
   const down = { CB_DATABASE_URL: 'postgres://nobody@127.0.0.1:1/none' };
   const ended = (await hook(paneOf('open'), 'startup', down)).ms;

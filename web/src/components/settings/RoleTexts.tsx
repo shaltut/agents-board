@@ -6,7 +6,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { get, rpc } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { ROLE_TEXT_CAP, actorLabel, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
+import { ROLE_TEXT_CAP, actorLabel, handEdited, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
 import { Notice } from './bits'
 
 const useRoleTexts = () => useQuery({ queryKey: ['role-texts'], queryFn: () => rpc<RoleTextPage>('role_text_page', {}) })
@@ -24,7 +24,7 @@ function LoadNewTexts({ roles }: { roles: RoleTextPage['roles'] }) {
   const changes = seeds.data ? seedChanges(seeds.data, roles) : []
   if (changes.length === 0) return null
   // a text changed on this page also differs from the release's: say so, so loading never overwrites an edit unseen
-  const edited = changes.filter((k) => roles.find((r) => r.role === k)?.updated_by)
+  const edited = handEdited(changes, roles)
   async function load() {
     setBusy(true); setFailed(null)
     try {

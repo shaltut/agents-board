@@ -4643,6 +4643,9 @@ create table if not exists cb.role_text_edits (
   at     timestamptz not null default now()
 );
 create index if not exists role_text_edits_role on cb.role_text_edits (role, id desc);
+-- 'import' for an edit cb.role_text_import made (#4525 review M1); null for one made on the page, so the page can tell
+-- a text changed by hand after the last load from one the load itself wrote.
+alter table cb.role_text_edits add column if not exists via text;
 -- One project's own rules for its seats (Q2992) and who its stuck seats ask first (Q2994), #4525. The board-wide texts
 -- above never carry either. No row = no addition and the lead first (how squads ran before the setting). Ahmed sets
 -- both on the project settings page (cb.project_role_set); each change is an event with the text before and after.
@@ -4656,8 +4659,9 @@ create table if not exists cb.project_role_settings (
 
 -- What a project adds after the board-wide text: a heading, its addition (if any), then who to ask first as the last
 -- line (the shared text points there). '' for no project: cb role outside a project prints the board-wide text alone;
--- an unknown one is refused (cb.read_project). The lead is told seats ask it, not to ask itself.
-create function cb._role_project_block(role text, project text) returns text language plpgsql stable as $$
+-- an unknown one is refused (cb.read_project). The one asked first (the lead, or the named session reading it as actor)
+-- is told seats ask it, not to ask itself.
+create function cb._role_project_block(role text, project text, actor text default null) returns text language plpgsql stable as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project); s cb.project_role_settings; who text; line text;
 begin
@@ -4665,7 +4669,8 @@ begin
   select * into s from cb.project_role_settings x where x.project = p;
   who := coalesce(s.ask_first, 'lead');
   line := 'Ask first when stuck or a decision is needed: ' || case
-    when who = 'lead' and role = 'lead' then 'seats in this project ask you. Decide from Ahmed''s rulings (`cb mem find`); ask him on the board only what you cannot decide.'
+    when (who = 'lead' and role = 'lead') or (who not in ('lead', 'ahmed') and lower(who) = lower(coalesce(actor, '')))
+      then 'seats in this project ask you. Decide from Ahmed''s rulings (`cb mem find`); ask him on the board only what you cannot decide.'
     when who = 'lead' then 'the lead (`cb tell <name>`; `cb sessions` names it). The lead decides from Ahmed''s rulings or asks him on the board.'
     when who = 'ahmed' then 'Ahmed, on the board (`cb ask`).'
     else format('%s (`cb tell %s`). It decides or asks Ahmed on the board.', who, who) end;
@@ -4673,8 +4678,9 @@ begin
 end $$;
 
 -- What cb role prints: the rules every role follows, a blank line, the role's own text, then (given a project) that
--- project's addition and who its seats ask first. The start hook and cb role both read it, so they print the same.
-create function cb.role_text(role text, project text default null) returns text language plpgsql stable as $$
+-- project's addition and who its seats ask first (actor: who reads it, so the one asked first is not told to ask
+-- itself). The start hook and cb role both read it, so they print the same.
+create function cb.role_text(role text, project text default null, actor text default null) returns text language plpgsql stable as $$
 #variable_conflict use_variable
 declare t text;
 begin
@@ -4683,7 +4689,7 @@ begin
     raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', role;
   end if;
   return coalesce((select c.body || E'\n\n' from cb.role_texts c where c.role = '_common'), '') || t
-    || coalesce(cb._role_project_block(role, project), '');
+    || coalesce(cb._role_project_block(role, project, actor), '');
 end $$;
 
 -- Ahmed replaces one role's text, or _common (the rules every role follows), for every project (#4332, Q2969). Dashboard
@@ -4721,10 +4727,12 @@ end $$;
 
 -- The role texts as stored, for the settings page's editor (cb.role_text joins _common to a role's text, so it can't be
 -- edited from): every role's raw text with when and by whom it last changed (updated_by null = seeded from the files),
--- and the last 20 edits with the text before and after.
+-- whether its last change was made by hand on the page (edited: not seeded, not a Load the new texts), and the last 20
+-- edits with the text before and after.
 create function cb.role_text_page() returns jsonb language sql stable as $$
   select jsonb_build_object(
-    'roles', coalesce((select jsonb_agg(jsonb_build_object('role', r.role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by)
+    'roles', coalesce((select jsonb_agg(jsonb_build_object('role', r.role, 'body', r.body, 'updated_at', r.updated_at, 'updated_by', r.updated_by,
+                                'edited', coalesce((select e.via is null from cb.role_text_edits e where e.role = r.role order by e.id desc limit 1), false))
                                 order by r.role <> '_common', array_position(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'], r.role))
                          from cb.role_texts r), '[]'),
     'edits', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'role', e.role, 'actor', e.actor, 'at', e.at, 'before', e.before, 'after', e.after) order by e.id desc)
@@ -4745,7 +4753,10 @@ begin
   end if;
   for k in select x from jsonb_object_keys(texts) x order by x <> '_common', array_position(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator'], x), x loop
     if jsonb_typeof(texts -> k) is distinct from 'string' then raise exception 'the text for % is not text', k; end if;
-    if (cb.role_text_set(k, texts ->> k, actor) ->> 'changed')::boolean then changed := changed || k; else same := same + 1; end if;
+    if (cb.role_text_set(k, texts ->> k, actor) ->> 'changed')::boolean then
+      changed := changed || k;
+      update cb.role_text_edits e set via = 'import' where e.id = (select max(x.id) from cb.role_text_edits x where x.role = k);
+    else same := same + 1; end if;
   end loop;
   return jsonb_build_object('changed', to_jsonb(changed), 'unchanged', same);
 end $$;

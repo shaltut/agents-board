@@ -588,8 +588,14 @@ test('role texts name the repo rules', () => {
   has('builder', 'A card of several repos: you pass your part.');
   has('reviewer', "A card with parts: only your repo's part goes back.");
   has('qa', '(a card with parts: `--repo <repo>`, only that part goes back)');
-  has('lead', 'Parts: merge in the design\'s order, `--repo <repo>` on each pass.');
+  has('lead', 'Parts: merge in the design\'s order, `--repo <repo>` on each pass (never on a one-repo card); the card goes to QA once every part has passed.');
   has('lead', '`cb stage <id> build --why "<why>"` (`--repo <repo>` with several repos)');
+  // review of PR 76: rules the first rewrite dropped
+  has('lead', '(there is no fail path from merge to build)');
+  has('lead', '(one repo at review; several only at build)');
+  has('lead', 'a lead started by hand has no protected list until restarted');
+  has('qa', 'It does not, or it breaks something next to it:');
+  has('builder', 'The PR body says the same, so it says what you ran and what you did not.');
   has('owner', 'cb edit <id> --repo');
   has('architect', 'cb edit <id> --repo');
   // #3746: an Azure DevOps PR has its own paragraph in each role that handles PRs

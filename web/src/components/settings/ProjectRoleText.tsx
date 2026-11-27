@@ -7,7 +7,7 @@ import { rpc } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
-  ADDITION_CAP, actorLabel, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstValue, saveError, type AskFirst, type ProjectRolePage,
+  ADDITION_CAP, actorLabel, additionState, askFirstLabel, askFirstUnknown, askFirstOf, askFirstOk, askFirstValue, saveError, type AskFirst, type ProjectRolePage,
 } from '@/lib/squad'
 import { NativeSelect, Notice, fieldClass } from './bits'
 
@@ -79,6 +79,9 @@ export function ProjectRoleText({ project, name }: { project: string; name: stri
         )}
       </div>
       {!whoOk && <p className="text-[13px] text-destructive">Name one session: letters, digits and @ . _ - only, at most 64.</p>}
+      {askFirstUnknown(who, data.sessions) && (
+        <p className="text-[13px] text-lamp-ink">No session by that name has worked on this project in the last 14 days. You can still save it: seats will be told to ask it.</p>
+      )}
       <p className="text-[13px] text-muted-foreground">
         {whoChanged ? `After saving, seats ask ${askFirstLabel(askFirstValue(who)) || 'that session'} first.` : `Now: seats ask ${askFirstLabel(data.ask_first)} first.`}
       </p>

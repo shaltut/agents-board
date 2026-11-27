@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstValue, seedChanges,
+  ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstUnknown, askFirstValue, handEdited, seedChanges,
   CLAUDE_MODELS, OWNER_ONLY_MESSAGE, ROLES, ROLE_TEXT_CAP, RX, STALE_PREFIX, agentLabel, checkSquad, diffSquads, historyLines,
   modelLabel, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
   type Seat, type Squad, type SquadPage,
@@ -63,6 +63,12 @@ test('who stuck seats ask first: the lead, Ahmed, or a session name the server t
   assert.equal(askFirstOk({ kind: 'session', name: 'KB1@pc' }), true);
   for (const bad of ['', 'two words', 'x'.repeat(65), 'Lead']) assert.equal(askFirstOk({ kind: 'session', name: bad }), false, bad);
   assert.deepEqual(['lead', 'ahmed', 'KB1@pc'].map(askFirstLabel), ['the lead', 'Ahmed', 'KB1@pc']);
+  // review M2: a name the project has not seen lately is warned about on the page, not refused
+  assert.equal(askFirstUnknown({ kind: 'session', name: 'ghost@pc' }, ['KB1@pc']), true);
+  assert.equal(askFirstUnknown({ kind: 'session', name: ' kb1@PC ' }, ['KB1@pc']), false);
+  assert.equal(askFirstUnknown({ kind: 'lead', name: '' }, []), false);
+  assert.equal(askFirstUnknown({ kind: 'session', name: 'two words' }, []), false, 'a bad name gets the refusal line, not this one');
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'settings', 'ProjectRoleText.tsx'), 'utf8'), /askFirstUnknown\(who, data\.sessions\) && \(/);
 });
 
 test('Load the new texts lists the roles whose saved text differs from the release, shared rules first, in role order', () => {
@@ -70,6 +76,11 @@ test('Load the new texts lists the roles whose saved text differs from the relea
     .map((r) => ({ ...r, updated_at: '', updated_by: null }))
   assert.deepEqual(seedChanges({ qa: 'D', builder: 'c', lead: 'B', _common: 'A', reviewer: 'new' }, roles), ['_common', 'lead', 'reviewer', 'qa']);
   assert.deepEqual(seedChanges({ _common: 'a', lead: 'b' }, roles), []);
+  // review M1: "changed on this page since" is the server's edited flag (a hand edit after the last load), not updated_by
+  const flagged = roles.map((r) => ({ ...r, updated_by: 'ahmed', edited: r.role === 'lead' }))
+  assert.deepEqual(handEdited(['_common', 'lead', 'qa'], flagged), ['lead'])
+  assert.deepEqual(handEdited(['_common', 'lead'], roles), [], 'seeded rows carry no flag')
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleTexts.tsx'), 'utf8'), /const edited = handEdited\(changes, roles\)/);
   const page = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleTexts.tsx'), 'utf8');
   assert.match(page, /rpc<\{ changed: string\[\] \}>\('role_text_import', \{ texts: seeds\.data \}\)/, 'one call: every text or none');
   assert.match(page, /get<Record<string, string>>\('\/api\/role-text-seeds'\)/);
