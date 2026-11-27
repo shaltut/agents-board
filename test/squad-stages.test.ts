@@ -771,6 +771,8 @@ test('cb show and cb mine say the stage in words where brief does; show --json c
   assert.equal(first(held), `#${held} [in_progress] P2 feature: c (B1@mac) · demo · Building`);
   assert.deepEqual([json(atReview).stage, json(atReview).stage_words], ['review', 'In review']);
   assert.equal(cb(['mine']).out, `#${held} [in_progress] P2 feature: c (B1@mac) · demo · Building`);
+  // #4513: cb mine --json rows carry the same words, next to open
+  assert.deepEqual(JSON.parse(cb(['mine', '--json']).out).map((t: any) => [Number(t.id), t.stage_words, t.open]), [[held, 'Building', true]]);
   // an unstaged card: no words, never the "not staged" placeholder
   assert.equal(first(plain), `#${plain} [next] P2 feature: pr · demo`);
   assert.equal(json(plain).stage_words, null);

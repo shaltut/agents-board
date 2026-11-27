@@ -43,7 +43,8 @@ const GROUPS: [string, Record<string, Cmd>][] = [
   ['TAKE WORK', {
     mine: { reads: true, use: 'cb mine', topic: 'work',
       does: 'Your open tasks first; in a pipeline project a staged card ends its line with its stage in words, as cb brief prints it (a part you hold: the stage of that part). Then, under CLOSED OR MOVED OFF YOU IN THE LAST 24H, cards of yours closed or reassigned in the last day (shown so a cancel or a move is seen). Without a relay, run it between steps: a task that left your open tasks was closed or reassigned, stop working on it.',
-      eg: 'cb mine' },
+      eg: 'cb mine',
+      more: '--json gives the task rows, each with stage_words (the stage in words, null when not staged) and open: true (yours to work on) or false (closed or moved off you in the last 24h: not yours to work on).' },
     show: { reads: true, use: 'cb show <id> [--all]', topic: 'work',
       does: 'One task in full: its line (in a pipeline project a staged card ends it with its stage in words, as cb brief prints it), the parts of a parts card and who holds each, the goals it is in, its body, and its last 10 notes (cb log, cb done), newest first; when it has more, the NOTES line says how many are shown of how many, and --all prints every note. --json carries notes_total, and stage and stage_words (stage_words null when the card is unstaged or the pipeline is off). Read-only; works for any project\'s task.',
       eg: 'cb show 42' },
@@ -240,7 +241,8 @@ RULES (all of them: cb help rules)
 TOPICS     cb help <topic>: TOPIC_LIST
 COMMANDS   cb help <command>: syntax, example, pitfalls (e.g. cb help done)
 ACTOR      who you act as: --as <name>, else $CB_ACTOR, else this pane's cb iam name, else <pane>@<host>
-OUTPUT     plain text; --json gives raw JSON. Exit 0 = ok. Exit 1 = error on stderr: "cb: <what went wrong>. <what to run>"
+OUTPUT     plain text; --json prints one JSON value instead (all but help, runner, supervise: cb help json lists each).
+           Exit 0 = ok. Exit 1 = error on stderr, text even with --json: "cb: <what went wrong>. <what to run>"
            Exit 2 = cb lock take queued you (not held). Exit 3 = a board on another machine was unreachable and nothing
            of the command reached it, or the command only reads: safe to run again unchanged (this machine's own board
            never gives 3).
@@ -571,6 +573,48 @@ NEVER
   - Secrets, tokens, passwords, connection strings, emails, phone numbers, ID numbers: refused. Write where the value lives.
   - Client content in a global entry: global reaches every session.
   - A team entry is a teammate's note, not Ahmed's approval. Only (Ahmed) entries carry his authority.`,
+  json: `cb help json: what --json prints
+
+Every command but help, runner and supervise prints one JSON value on stdout instead of its text, with the same exit
+code. An error is still text on stderr ("cb: ..."), never JSON. Ids are numbers.
+
+READS: the rows or the record the text is made from
+  mine          task rows, each with stage_words (null when not staged) and open: true (yours to work on) or false
+                (closed or moved off you in the last 24h)
+  show          the task row plus stage_words (null when not staged), notes and notes_total
+  resume, brief, search, sessions, session, pending, asks, users, goals, epics, huddles, digest, jobs, lock queue, mem
+  find|list|show, github (list), squad show, role, page show, job show|log, tick: their rows or record
+  huddle show   {huddle, lines}: the huddle row and its lines
+  next          the claimed task, with its stage when staged (null: nothing to claim)
+  start         {actor, via, project, relay, text}
+                relay is on, off or unavailable; text is what cb start prints. Board unreachable: {board, error}
+
+WRITES: an object naming what changed
+  add           {id, project, status, stage}                     bug     {id, project, told} (+ stage when staged)
+  move, done    {id, status, released}: released lists the cards it held, each {id, status, blocked_on, waits_on}
+  block, unblock  {id, by, waits, status}: waits true after block, false after unblock
+  edit          {id, changed}: the names of the fields given
+  log           {id, task}: id is the note's event id, task null for a project note
+  stage, pass, fail {id, stage, stage_words, takes_it}
+  tell          {id, to, delivery, last_wrote_mins, waits_hours} (cb help tell)
+  broadcast     {id, project} (project null = every session)
+  ask           {id, duplicate, parent, if_answer, relay_live} (cb help ask)
+  reask         {id, status, assigned_to}                        withdraw  {id, status}
+  delivered     {id, delivered_to}                               reply     {id, closed}
+  asks add      {id, task}                                       assign    {id, kind, assigned_to | assignee}
+  huddle open   {id, members, task}                              huddle close  {id, status}
+  huddle say    {id, huddle}: id is the line's event id
+  page set      {task, area, project, version} (task null for an area page; project only for one)
+  iam           {actor, machine, pane, project, role, area}      relay   {machine, pane, agent, relay}
+  mem add|rule|supersede: the entry         mem retire {id, status}
+  user add      {name, display, role}       user role {name, role}       user password {name, password_set}
+  github add    the watch {to, project, since, ...}              github remove {repo, watched}
+  squad set     the saved squad             squad up {project, dry_run, lines}
+  run           the job (with --wait: the finished job)          job cancel {id, state}
+  lock take     {name, holder, held_at, queue} (exit 2 = queued, not held)
+LISTS AND NAMES, not objects (kept as they were)
+  tag           the card's tags after the change                 huddle add  the names added
+  github mute|unmute  the muted logins                           lock release  who holds it now, or null`,
 };
 
 export const TOPIC_NAMES = Object.keys(TOPICS);
@@ -590,7 +634,7 @@ export const OVERVIEW_TEXT = [
   ...GROUPS.map(([g, c]) => `\n${g}\n${Object.values(c).map(entry).join('\n')}`),
   '\nGLOBAL FLAGS\n  --as <name>                  act as <name> (an orchestrator acting for a worker)\n' +
   '  --reply-to <machine>:<pane>  with --as on cb ask: where the worker\'s answer goes (else it comes back to you)\n' +
-  '  --json                       raw JSON output\n  -h, --help                   help for the command given',
+  '  --json                       one JSON value on stdout instead of the text (cb help json); errors stay text on stderr\n  -h, --help                   help for the command given',
 ].join('\n');
 
 /** cb help [name]: the overview, a topic page, or a command page; null for an unknown name. */
