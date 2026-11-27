@@ -18,8 +18,9 @@ The detail for every step below is in `cb help orchestrate`.
    `cb lock release db --force` (logged; the holder is told).
 6. Bugs: a "[Claude Board] ... filed bug #N" message is a bug a session found in your project. Triage
    it now: assign it to a worker (`cb edit N --assignee <worker>`, usually the idle one or the one
-   who owns that code), re-rate it (`--priority`), or close it (`cb move N cancelled "<why>"`). File
-   bugs yourself with `cb bug <project> "<title>" -b "..."`; Claude Board's own: `cb bug claude-board ...`.
+   who owns that code), re-rate it (`--priority`), or close it (`cb move N cancelled "<why>"`): a duplicate,
+   or a fresh change Ahmed made on purpose. File bugs yourself the way `cb help bug` says (duplicate check
+   first): `cb bug <project> "<title>" -b "..."`; Claude Board's own: `cb bug claude-board ...`.
    `cb brief --type bug` lists the open ones.
 7. Know your workers. `cb sessions` lists every session in your project: whether its relay is live, what
    it holds, how long it has been idle, and its questions to Ahmed. `⚠ holds work, gone quiet` means

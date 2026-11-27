@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
 import { squadShow } from '../cli/squad-show.ts';
-import { ADAPTERS } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
+import { help } from '../cli/help.ts';
+import { readFileSync } from 'node:fs';
 import { opencodeEnv } from '../cli/agents/opencode.ts';
 
 // launchFor reads CB_MCP_GATE_OK from this process (#4429): unset here, so a machine that lifts the gate runs these tests the same
@@ -671,6 +673,28 @@ test('seatSpec resolves per-seat overrides and non-Claude prompt includes --agen
   assert.equal(seatSpec(q, qw('zed-B1@macbook')).model, 'sonnet');
   assert.equal(seatSpec(q, qw('zed-B2@macbook')).model, 'opus');
   assert.equal(seatSpec(q, qw('zed-dashboard-B1@macbook')).model, 'haiku');
+});
+
+// #4380: how to report an issue reaches every seat whatever its agent. An adapter's instructionMapping names only the
+// agent's native files (the repo's AGENTS.md, CLAUDE.md...), never board text: the board's text reaches a seat through
+// its first prompt, cb role <role> (prompts/roles/_common.md + the role file), which points at cb help bug.
+test('every agent kind is told how to report an issue: its first prompt runs cb role, whose shared text points at cb help bug', () => {
+  const models: Record<string, string> = { claude: 'sonnet', codex: 'gpt-6.1-sol', opencode: 'anthropic/claude-opus-5-5', agy: 'gemini-4-neon-xhigh' };
+  for (const agent of AGENT_KINDS) {
+    const s: any = { ...squad, roles: { ...squad.roles, builder: { count: 1, model: models[agent], machine: 'macbook', agent } } };
+    const l = launchFor('demo', s, wantList('demo', s).find((w) => w.role === 'builder')!);
+    assert.equal(l.agent, agent);
+    assert.match(l.prompt, /, then cb role builder, then cb next$/, agent);
+    assert.ok(!/cb help bug|cb search/.test(JSON.stringify(ADAPTERS[agent].instructionMapping(l as any))), `${agent}: the mapping carries no board text`);
+  }
+  assert.match(readFileSync('prompts/roles/_common.md', 'utf8'), /Read `cb help bug` first \(duplicate check, Ahmed's recent changes, which project,/);
+  assert.match(readFileSync('prompts/session.md', 'utf8'), /Read `cb help bug` first/);
+  const bug = help('bug')!;
+  for (const re of [/When +a real fault you saw/, /cb search <project> "<words>"/, /cb session ahmed/, /cb mem find/,
+    /claude-board for a fault in the board itself/, /otherwise the project whose code is at fault/, /always -b/,
+    /how to repeat it; expected vs actual; the card, job or PR ids; the exact\n +command and its output/,
+    /Never member, patient or client identifiers, tokens/, /orchestrator \(a squad's lead\) is told and triages it/])
+    assert.match(bug, re);
 });
 
 test('launchFor (#4429): a non-claude seat carries the launching machine\'s CB_MCP_GATE_OK into its pane env; unset, empty or a Claude seat: none', async () => {
