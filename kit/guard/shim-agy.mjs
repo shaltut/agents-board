@@ -145,7 +145,12 @@ const FS = { resolve, dirname, basename, join, realpathSync };
 export function editPaths(call, input) {
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd
     : Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' ? input.workspacePaths[0] : '.';
-  return [...new Set(core.editTargets(isObject(call.args) ? call.args : {}).flatMap((t) => core.editPathForms(t, cwd, FS)))];
+  // #4663 (PR 109 review M1): the top-level path arguments only, the ones checkPath reads. agy has no patch tool, so a
+  // patch header or a path key inside an edit's content is text, never a target (core.editTargets would read both).
+  // A rename or move tool is denied today (unlisted); one added later must put its destination key in PATH_ARGS (M2)
+  const args = isObject(call.args) ? call.args : {};
+  const targets = PATH_ARGS.map((k) => args[k]).filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim());
+  return [...new Set(targets.flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.

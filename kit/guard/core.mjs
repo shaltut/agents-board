@@ -1074,7 +1074,9 @@ function fenceWriteOne(command) {
 // keys the CLIs use and from patch headers (*** Add/Update/Delete File:, *** Move to:) in any string of the input,
 // recursively (Codex sends apply_patch as {command: "<patch>"} or {command: ["apply_patch", "<patch>"]}). [] when none:
 // evaluate then blocks the edit, never allows an edit whose target it cannot see.
-const PATH_KEYS = new Set(['file_path', 'filepath', 'path', 'targetfile', 'absolutepath', 'notebook_path', 'move_path']);
+// #4663 (PR 109 review M2): a rename's destination too (new_path, new_file_path: names agy's binary holds), so a tool that
+// carries one is judged on it, not only on its source
+const PATH_KEYS = new Set(['file_path', 'filepath', 'path', 'targetfile', 'absolutepath', 'notebook_path', 'move_path', 'new_path', 'new_file_path']);
 // leading whitespace allowed (review 68-M1): an indented header is still read, never skipped
 const PATCH_FILE = /^[ \t]*\*\*\*[ \t]*(?:Add File|Update File|Delete File|Move to)[ \t]*:[ \t]*(.+?)[ \t]*$/gim;
 export function editTargets(input) {
@@ -1115,7 +1117,13 @@ export function editPathForms(path, cwd, fs) {
     out.add(abs);
     const rest = [];
     for (let dir = abs, i = 0; i < 64; i++) {
-      try { out.add(fs.join(fs.realpathSync(dir), ...rest)); break; } catch { /* not there yet: one folder up */ }
+      try {
+        out.add(fs.join(fs.realpathSync(dir), ...rest));
+        // #4663: Node's JS realpath keeps a Windows 8.3 short name (.claude\SETTIN~1.JSO); the native one expands it to the
+        // file it writes (settings.json)
+        if (typeof fs.realpathSync.native === 'function') try { out.add(fs.join(fs.realpathSync.native(dir), ...rest)); } catch {}
+        break;
+      } catch { /* not there yet: one folder up */ }
       const up = fs.dirname(dir);
       if (up === dir) break;
       rest.unshift(fs.basename(dir));

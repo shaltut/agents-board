@@ -167,6 +167,14 @@ test('edit confinement: .git, .agents, .gemini and kit/guard are denied, at any 
 
 // #4652: core's fence (editFence) runs on agy's edit targets too, as on Codex apply_patch and OpenCode write. Before, only
 // the shim's own segments were denied, so a repo's Claude settings, opencode.json or .codex config were writable.
+// #4663 (PR 109 review M1): agy has no patch tool, so a patch header in an edit's content is text, never a target
+test('edit fence (#4663 M1): an apply_patch example in the content of an ordinary file is not a target', () => {
+  assert.deepEqual(edit({ TargetFile: 'test/x.test.ts', CodeContent: '*** Begin Patch\n*** Add File: .codex/hooks.json\n+{}\n*** End Patch\n' }, undefined, 'write_to_file'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/x.md', ReplacementContent: '*** Update File: .claude/settings.json\n' }, undefined, 'replace_file_content'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/y.md', Content: { path: '.claude/settings.json' } }), { decision: 'allow' }, 'a path key inside content is text too');
+  assert.equal(edit({ TargetFile: '.claude/settings.json', CodeContent: 'x' }, undefined, 'write_to_file').decision, 'deny', 'the target itself still counts');
+});
+
 test('edit fence (#4652): the repo-level fence paths are denied for every edit tool and path form; ordinary .claude work passes', () => {
   for (const t of ['.claude/settings.json', '.claude/settings.local.json', 'opencode.json', '.codex/hooks.json', '.codex/config.toml',
     '.opencode/plugins/x.js', join(ws, '.claude', 'settings.json'), 'src/../.claude/settings.json', '.CLAUDE/Settings.json', '.claude./settings.json']) {
