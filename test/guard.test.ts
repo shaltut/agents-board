@@ -406,8 +406,9 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
 // #4402: the budget is this machine's. A fixed piece of plain JS work (no guard code: a guard regression must not raise
 // its own budget) sets the pace: 25 times its best of 5, never under 1 s. A machine that runs it in under 40 ms (the PC)
-// keeps the 1 s budget; the VPS's slower cores (about 70 ms) get about 1.7 s. A quadratic case is still seconds to
-// minutes past it (an unbounded open( scan took 11 s on 200 KB), so the test still catches what it is for.
+// keeps the 1 s budget; the VPS's slower cores (about 70 ms) get about 1.7 s. The margin is thin: with review #5's
+// unbounded open( scan put back, its case took 1.9 s on the PC against the 1 s budget (the review of #4402). So the
+// multiplier must not be raised: a slower machine gets more time only through the reference.
 function machineBudget() {
   const s = 'a line of notes\n'.repeat(37500);
   let best = Infinity, n = 0;
