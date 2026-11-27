@@ -115,19 +115,38 @@ async function pairedChat(): Promise<number | null> {
 
 // One reconcile at a time; a change that lands meanwhile runs it once more.
 let running: Promise<void> | null = null, again = false;
+// #4591: a pass that could not send a question (or failed outright) tries again on its own, after a gap that doubles
+// from RETRY_MIN to RETRY_MAX and resets after a clean pass. Before, it waited for the next board change, and on a quiet
+// board none came: Ahmed never saw the question. A change that lands first reconciles at once and takes over.
+const RETRY_MIN = 1000, RETRY_MAX = 5 * 60_000;
+let retry: ReturnType<typeof setTimeout> | null = null, retryWait = RETRY_MIN;
+const clearRetry = () => { if (retry) clearTimeout(retry); retry = null; };
 /** Brings Telegram in line with the board: close messages whose question moved on, send questions newly open for Ahmed. */
 export function reconcile(): Promise<void> {
   if (!cfg) return Promise.resolve();
   if (running) { again = true; return running; }
+  clearRetry();
   running = (async () => {
-    do { again = false; await pass().catch((e) => console.error(`telegram: ${e.message}`)); } while (again);
+    let unsent = 0;
+    do {
+      again = false;
+      unsent = await pass().catch((e) => { console.error(`telegram: ${e.message}`); return 1; });
+    } while (again);
+    if (!unsent) { retryWait = RETRY_MIN; return; }
+    if (!cfg) return; // stopped meanwhile
+    console.error(`telegram: ${unsent} question(s) not sent; trying again in ${Math.round(retryWait / 1000)}s`);
+    retry = setTimeout(() => { retry = null; void reconcile(); }, retryWait);
+    retry.unref?.(); // never what keeps the process alive
+    retryWait = Math.min(retryWait * 2, RETRY_MAX);
   })().finally(() => { running = null; });
   return running;
 }
 
-async function pass() {
+/** One reconcile pass; returns how many open questions it could not send (a failed edit is not retried here). */
+async function pass(): Promise<number> {
+  let unsent = 0;
   const chat = await pairedChat();
-  if (!chat) return;
+  if (!chat) return 0;
   // 1. messages whose question is no longer open for Ahmed as sent (or whose answer changed): show the outcome
   const moved = await sql`select q.*, ${HANDS()}, ${PICS()}, cb._live(q.project) as live, m.message_id, m.chat_id as m_chat, m.state, m.desired from (
       -- waiting: its project is disabled (#4559, Q3019): the buttons come off until it is enabled, then 'open' restores them
@@ -163,8 +182,9 @@ async function pass() {
                 values (${q.id}, ${chat}, ${m.message_id}, ${q.asked_at}::text::timestamptz) -- text first: a timestamptz param goes through a JS Date
                 on conflict (question_id) do update set chat_id = excluded.chat_id, message_id = excluded.message_id,
                   asked_at = excluded.asked_at, state = 'open', picked = '[]', awaiting = null, prompt_id = null`;
-    } catch (e: any) { console.error(`telegram: sending Q${q.id}: ${e.message}`); } // ponytail: retried on the next change, no timer
+    } catch (e: any) { console.error(`telegram: sending Q${q.id}: ${e.message}`); unsent++; } // retried by reconcile (#4591)
   }
+  return unsent;
 }
 
 /** Answer or send back as Ahmed's dashboard, once: refused if it is no longer open for him. */
@@ -315,9 +335,11 @@ export function startTelegram(o: { token: string; api: string }) {
 }
 export async function stopTelegram() {
   stop?.abort();
+  clearRetry();
   await loop;
   await running;
-  cfg = null; bot = null; loop = null;
+  clearRetry(); // a pass that was running when stop came may have set one
+  cfg = null; bot = null; loop = null; retryWait = RETRY_MIN;
 }
 
 // The dashboard's side (server/main.ts routes, page-only).
