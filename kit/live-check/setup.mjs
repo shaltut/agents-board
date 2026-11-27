@@ -46,8 +46,13 @@ export function squadFile({ machine, repo, board, herdr = null, workspace, model
   };
 }
 
+// The repo-locating variables an operator's terminal may export: they would point git at another repo, so a check would
+// answer for it and an init, config or commit would write into it (#4683). Every git call here runs without them.
+const GIT_REPO_VARS = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)$/i;
+const cleanGitEnv = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !GIT_REPO_VARS.test(k)));
+
 function git(dir, args, bin = 'git', env = process.env) {
-  const r = spawnSync(bin, ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, env });
+  const r = spawnSync(bin, ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, env: cleanGitEnv(env) });
   if (r.error || r.status !== 0) throw new Error(`git ${args.join(' ')}: ${(r.error?.message || r.stderr || r.stdout || '').trim()}`);
   return r.stdout;
 }
@@ -72,8 +77,7 @@ export function placeProblem(dir, env = process.env, platform = process.platform
   let near = p;
   while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
   // the repo's own variables would answer for another repo
-  const gitEnv = { ...env };
-  for (const k of Object.keys(gitEnv)) if (/^GIT_(?:DIR|WORK_TREE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM)$/i.test(k)) delete gitEnv[k];
+  const gitEnv = cleanGitEnv(env);
   // safe.directory=*: a repo another user owns still answers (r2 R3), instead of failing as if it were none
   const top = spawnSync(gitBin, ['-c', 'safe.directory=*', '-C', near, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', windowsHide: true, env: gitEnv });
   if (top.error) return `could not ask git whether ${p} is inside a repo (${top.error.code ?? top.error.message}): install git or put it on PATH`;
