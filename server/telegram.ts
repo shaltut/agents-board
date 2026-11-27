@@ -131,9 +131,10 @@ let retry: ReturnType<typeof setTimeout> | null = null, failWait = RETRY_MIN; //
 let refusedLogged = 0;
 const clearRetry = () => { if (retry) clearTimeout(retry); retry = null; };
 const forget = () => { tries.clear(); hold = 0; refusedLogged = 0; };
-/** Brings Telegram in line with the board: close messages whose question moved on, send questions newly open for Ahmed.
- *  timer: the retry timer's own run, which tries only the questions whose gap is up. */
-export function reconcile(timer = false): Promise<void> {
+/** Brings Telegram in line with the board: close messages whose question moved on, send questions newly open for Ahmed. */
+export const reconcile = (): Promise<void> => run(false);
+/** timer: the retry timer's own run, which tries only the questions whose gap is up. */
+function run(timer: boolean): Promise<void> {
   if (!cfg) return Promise.resolve();
   if (!timer) everyone = true;
   if (running) { again = true; return running; }
@@ -146,13 +147,15 @@ export function reconcile(timer = false): Promise<void> {
       threw = await pass(all).then(() => false, (e) => { console.error(`telegram: ${e.message}`); return true; });
     } while (again);
     if (!cfg) return; // stopped meanwhile
-    let at = threw ? Date.now() + failWait : Infinity, unsent = 0, unrecorded = 0, refused = 0;
-    failWait = threw ? Math.min(failWait * 2, RETRY_MAX) : RETRY_MIN;
+    let at = Infinity, unsent = 0, unrecorded = 0, refused = 0;
     for (const t of tries.values()) {
       if (t.refused) { refused++; continue; }
       if (t.sent === undefined) unsent++; else unrecorded++;
       at = Math.min(at, t.sent === undefined ? Math.max(t.due, hold) : t.due);
     }
+    // a pass that threw (the database, say) left its tries untouched, some past due: its own doubling gap, never a spin
+    if (threw) at = Date.now() + failWait;
+    failWait = threw ? Math.min(failWait * 2, RETRY_MAX) : RETRY_MIN;
     const ms = Math.max(at - Date.now(), 100);
     // counts only: the token and the chat id never reach a log line
     if (unsent || unrecorded || threw || refused > refusedLogged) {
@@ -162,7 +165,7 @@ export function reconcile(timer = false): Promise<void> {
     }
     refusedLogged = refused;
     if (at === Infinity) return;
-    retry = setTimeout(() => { retry = null; void reconcile(true); }, ms);
+    retry = setTimeout(() => { retry = null; void run(true); }, ms);
     retry.unref?.(); // never what keeps the process alive
   })().finally(() => { running = null; });
   return running;

@@ -500,12 +500,18 @@ test('one question that keeps failing does not slow a new one: each question has
     const stuck = await ask(sql, 'Stuck?');
     // let its gap grow to 4 s (a shared gap would now be 8 s)
     await until(() => { const t = triesFor(stuck); return t.length >= 2 && t.at(-1)!.at - t.at(-2)!.at >= 3500; }, 'a 4 s gap', 15000);
+    const before = triesFor(stuck).length;
     const brief = await ask(sql, 'Brief?');
     await until(() => triesFor(brief).length, 'its first send dropped');
     await pause(400); // the board is quiet: only a retry sends it now
+    assert.ok(triesFor(stuck).length > before, 'a board change still tries every waiting question at once, inside its gap');
     briefOk = true;
-    await until(() => sentFor(brief).length, 'retried on its own 1 s gap, not the stuck one\'s', 3000);
-  } finally { fake.hook.send = null; }
+    await until(() => sentFor(brief).length, 'retried on its own 1 s gap, not the stuck one\'s (8 s by now)', 5000);
+  } finally { // no retry timer left for the next test (a pass during its wipe can deadlock): restart and let it go
+    fake.hook.send = null;
+    await tg.stopTelegram(); tg.startTelegram({ token: '123:test', api: fake.url });
+    await until(() => calls('sendMessage').some((c) => /Stuck\?/.test(c.body.text)), 'the stuck one sent after the restart');
+  }
 });
 
 test('a 429 waits at least its retry_after, even over 30 s, and holds the other sends meanwhile (#4629 m4)', async () => {
@@ -515,8 +521,8 @@ test('a 429 waits at least its retry_after, even over 30 s, and holds the other 
   try {
     const id = await ask(sql, 'Flood?');
     await until(() => triesFor(id).length, 'tried');
-    const wait = await until(() => logged.map((l) => /not sent; trying again in (\d+)s/.exec(l)?.[1]).filter(Boolean).at(-1), 'the retry logged');
-    assert.ok(Number(wait) >= 40, `the wait is the retry_after (45 s), not the 1 s backoff: ${wait}s`);
+    // the wait is the retry_after (45 s), not the 1 s backoff (main logged 1s)
+    await until(() => logged.some((l) => Number(/not sent; trying again in (\d+)s/.exec(l)?.[1]) >= 40), 'a retry logged at the retry_after');
     const other = await ask(sql, 'Meanwhile?'); // a board change inside the window
     await pause(2500);
     assert.equal(triesFor(id).length, 1, 'not tried again inside the window');
@@ -529,5 +535,27 @@ test('a 429 waits at least its retry_after, even over 30 s, and holds the other 
   } finally {
     restore(); fake.hook.send = null;
     if (!(await tg.telegramStatus()).configured) tg.startTelegram({ token: '123:test', api: fake.url });
+  }
+});
+
+test('a pass that fails outright (the database) waits its own growing gap, never every 100 ms (#4629)', async () => {
+  const sql = await paired();
+  const { logged, restore } = capture();
+  fake.hook.send = (b) => /Down\?/.test(b.text) ? 'drop' : null;
+  try {
+    const id = await ask(sql, 'Down?'); // a send that keeps failing: its try falls due while the database is away
+    await until(() => triesFor(id).length, 'its first send dropped');
+    await pause(400);
+    await sql`alter table cb.telegram_messages rename to telegram_messages_away`;
+    const from = logged.length;
+    await pause(2500);
+    const retries = logged.slice(from).filter((l) => /trying again in/.test(l)).length;
+    assert.ok(retries <= 4, `${retries} retries in 2.5 s`);
+  } finally {
+    restore(); fake.hook.send = null;
+    await sql`alter table if exists cb.telegram_messages_away rename to telegram_messages`;
+    // nothing left unsent: the next run's first pass would send it during that run's first wipe (a deadlock)
+    await tg.stopTelegram(); tg.startTelegram({ token: '123:test', api: fake.url });
+    await until(async () => (await sql`select 1 from cb.telegram_messages m join cb.questions q on q.id = m.question_id where q.body = 'Down?'`).length, 'Down? sent and recorded');
   }
 });
