@@ -3,7 +3,8 @@
 // folder-trust dialog, and no seat ever answers one. Squad seats may not run it: the guard blocks it and so does this file.
 import { existsSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { machine as thisMachine } from '../server/db.ts';
 import { ADAPTERS, type AgentKind } from './agents/index.ts';
 import { reposOf, type Launch, type Squad } from './squad-up.ts';
 
@@ -35,8 +36,11 @@ export function homeTrust(home = homedir(), platform: NodeJS.Platform = process.
     if (!p || !l.cwd) return null;
     const file = join(home, p.file);
     let state: ReturnType<typeof p.state>;
-    try { state = p.state(readFileSync(file, 'utf8'), l.cwd); } catch { return null; }
-    if (state === 'trusted') return null;
+    // the real folder, as cb squad trust writes it (review 89 L2); a folder not there yet: the path as given
+    let cwd = l.cwd;
+    try { cwd = realpathSync.native(l.cwd); } catch {}
+    try { state = p.state(readFileSync(file, 'utf8'), cwd); } catch { return null; }
+    if (state === 'trusted' || state === 'other') return null; // 'other': set by hand, no claim
     if (state === 'untrusted') return `${l.cwd} is marked untrusted for ${l.agent} (${file}): change it there by hand`;
     return `${l.cwd} is not trusted for ${l.agent} yet (${file}): run once in your own terminal: cb squad trust ${project}`;
   };
@@ -70,8 +74,32 @@ export function editFile(file: string, edit: (text: string) => string): string {
   }
 }
 
+// a share's root: \\server\share or //server/share, or the \\?\UNC\server\share form realpath can return
+const UNC_ROOT = /^(?:[\\/]{2}|\\\\\?\\UNC\\)[^\\/]+[\\/][^\\/]+[\\/]?$/i;
+/** Why this squad-file path may not be trusted, or its real folder (review 89 M2). The squad file can be saved by the lead
+ *  (or a seat naming the lead), and Claude Code takes a trusted folder's parent as trust for everything under it outside
+ *  git, so only a real seat folder qualifies: an existing directory, no . or .. part, resolved to its real path, and
+ *  never a root, a share's root, the home folder or a folder holding it. */
+export function seatFolder(path: string, home: string, platform: NodeJS.Platform): { real: string } | { why: string } {
+  if (path.split(/[\\/]+/).some((s) => s === '.' || s === '..')) return { why: 'it holds a . or .. part: give the folder itself' };
+  let real: string;
+  try {
+    if (!statSync(path).isDirectory()) return { why: 'it is not a folder' };
+    real = realpathSync.native(path);
+  } catch { return { why: 'no such folder on this machine' }; }
+  const win = platform === 'win32';
+  const norm = (p: string) => { const n = (win ? p.replace(/\//g, '\\') : p).replace(/[\\/]+$/, ''); return win ? n.toLowerCase() : n; };
+  if (dirname(real) === real || UNC_ROOT.test(real))
+    return { why: 'it is a drive, file-system or share root' };
+  let h = home;
+  try { h = realpathSync.native(home); } catch {}
+  const r = norm(real), hn = norm(h), sep = win ? '\\' : '/';
+  if (hn === r || hn.startsWith(r + sep)) return { why: 'it is the home folder or holds it' };
+  return { real };
+}
+
 export type TrustOpts = { machine?: string; dryRun?: boolean; home?: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
-  callFn: (fn: string, a: any) => Promise<unknown> };
+  thisMachine?: string; callFn: (fn: string, a: any) => Promise<unknown> };
 
 export async function squadTrust(project: string, o: TrustOpts): Promise<string> {
   const env = o.env ?? process.env;
@@ -80,12 +108,20 @@ export async function squadTrust(project: string, o: TrustOpts): Promise<string>
   const squad = await o.callFn('squad_get', { project }) as Squad | null;
   if (!squad) throw new Error(`${project} has no squad yet: write one with cb squad set ${project} -f <file>`);
   const keys = Object.keys(squad.machines), local = keys.filter((k) => squad.machines[k]!.herdr === null);
-  const machine = o.machine ?? (local.length === 1 ? local[0]! : undefined);
+  // this machine by name when the squad names it, else its one machine with no herdr label (review 89 L4: on a machine the
+  // squad names, --machine may not name another, whose paths would be trusted here)
+  const me = (o.thisMachine ?? thisMachine()).toLowerCase(), named = keys.find((k) => k.toLowerCase() === me);
+  if (o.machine && named && o.machine.toLowerCase() !== me) throw new Error(`--machine ${o.machine} is not this machine (${me}): run cb squad trust ${project} on ${o.machine} itself`);
+  const machine = o.machine ?? named ?? (local.length === 1 ? local[0]! : undefined);
   if (!machine) throw new Error(`name the machine this is: cb squad trust ${project} --machine <one of ${keys.join(', ')}>`);
   if (!squad.machines[machine]) throw new Error(`no machine ${machine} in ${project}'s squad: one of ${keys.join(', ')}`);
   const home = o.home ?? homedir(), platform = o.platform ?? process.platform;
-  const { paths, agents } = trustTargets(squad, machine);
-  const lines = [`${project} on ${machine}: ${paths.join(', ') || 'no seat folders'}`];
+  const t = trustTargets(squad, machine), agents = t.agents, paths: string[] = [];
+  const lines = [`${project} on ${machine}: ${t.paths.join(', ') || 'no seat folders'}`];
+  for (const p of t.paths) {
+    const f = seatFolder(p, home, platform);
+    if ('why' in f) lines.push(`refused ${p}: ${f.why}`); else if (!paths.includes(f.real)) paths.push(f.real);
+  }
   for (const agent of agents) {
     const p = ADAPTERS[agent].trustSpec(paths, platform).preseed;
     if (!p || !paths.length) continue; // no folder-trust dialog (OpenCode)
@@ -99,6 +135,7 @@ export async function squadTrust(project: string, o: TrustOpts): Promise<string>
         for (const path of paths) {
           const s = p.state(text, path);
           if (s === 'trusted') mine.push(`already ${agent}: ${path}`);
+          else if (s === 'other') mine.push(`left ${agent}: ${path} is set by hand in ${file} in another form: left as it is`);
           else if (s === 'untrusted') mine.push(`left ${agent}: ${path} is marked untrusted in ${file}: change it there by hand`);
           else { text = p.add(text, path); mine.push(`${o.dryRun ? 'would add' : 'added'} ${agent}: ${path} (${file})`); }
         }

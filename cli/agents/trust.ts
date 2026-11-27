@@ -16,6 +16,8 @@ export const claudePreseed: TrustPreseed = {
   add(text, path) {
     const j = JSON.parse(text), key = noTrailing(path.replace(/\\/g, '/'), '/');
     j.projects ??= {};
+    // an array or a value would take the key and drop it on save: "added" with nothing trusted (review 89 L3)
+    if (typeof j.projects !== 'object' || Array.isArray(j.projects)) throw new Error('projects in .claude.json is not an object: fix it by hand');
     j.projects[key] = { ...j.projects[key], hasTrustDialogAccepted: true };
     return keep(text, JSON.stringify(j, null, 2));
   },
@@ -23,7 +25,8 @@ export const claudePreseed: TrustPreseed = {
 
 // [projects.'<path>'] or [projects."<path>"] alone on a line; the next [ starts another table
 const CODEX_HEADER = /^[ \t]*\[[ \t]*projects[ \t]*\.[ \t]*(?:'([^'\r\n]*)'|"((?:[^"\\\r\n]|\\.)*)")[ \t]*\][ \t]*(?:#.*)?\r?$/;
-const CODEX_LEVEL = /^[ \t]*trust_level[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/;
+const CODEX_QUOTED = /'([^'\r\n]*)'|"((?:[^"\\\r\n]|\\.)*)"/g;
+const CODEX_LEVEL =/^[ \t]*trust_level[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)')/;
 /** Codex: ~/.codex/config.toml [projects.'<path>'] trust_level = "trusted". On Windows Codex writes the path lower case
  *  with backslashes and matches it without case. Lines are added, never rewritten: no TOML library, no lost comments. */
 export function codexPreseed(platform: NodeJS.Platform): TrustPreseed {
@@ -45,17 +48,26 @@ export function codexPreseed(platform: NodeJS.Platform): TrustPreseed {
     }
     return null;
   };
+  /** The folder named anywhere else as a quoted key (an inline [projects] entry, a dotted projects.'<path>'.trust_level):
+   *  a second [projects.'<path>'] table beside it is a duplicate key, and Codex then refuses to start (review 89 L1). */
+  const elsewhere = (text: string, path: string) => {
+    const want = key(path);
+    for (const m of text.matchAll(CODEX_QUOTED)) if (key(m[1] ?? m[2]!.replace(/\\(["\\])/g, '$1')) === want) return true;
+    return false;
+  };
   return {
     file: '.codex/config.toml',
     state(text, path) {
       const f = find(text.split('\n'), path);
-      return !f || f.level === undefined ? 'absent' : f.level === 'trusted' ? 'trusted' : 'untrusted';
+      if (!f) return elsewhere(text, path) ? 'other' : 'absent';
+      return f.level === undefined ? 'absent' : f.level === 'trusted' ? 'trusted' : 'untrusted';
     },
     add(text, path) {
       const k = key(path);
       if (/['\r\n]/.test(k)) throw new Error(`${path} holds a quote or line break, which cb squad trust does not write into config.toml: trust it in Codex by hand`);
       const lines = text.split('\n'), f = find(lines, path), eol = text.includes('\r\n') ? '\r\n' : '\n';
       if (f?.level === 'trusted') return text;
+      if (!f && elsewhere(text, path)) throw new Error(`${path} is set by hand in config.toml in another form: leave it, or trust it there by hand`);
       if (f?.level !== undefined) throw new Error(`${path} is marked ${f!.level} in config.toml: change it by hand`);
       if (f) { lines.splice(f.at + 1, 0, `trust_level = "trusted"${eol === '\r\n' ? '\r' : ''}`); return lines.join('\n'); }
       const head = text === '' ? '' : text.endsWith('\n') ? text + eol : text + eol + eol;
