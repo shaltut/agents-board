@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea'
 
 export interface SessionRow {
   actor: string; project: string | null; machine: string | null; pane: string | null; last_seen: string | null; live: boolean
+  lead?: boolean // leads its project (by role, #3746, #3771)
   doing: { id: number; title: string; priority: Task['priority']; status: Task['status'] }[]
   queued: number; done_24h: number; open_questions: number
   last: { at: string; kind: string; summary: string; task_id: number | null } | null

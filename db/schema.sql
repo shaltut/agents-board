@@ -1904,6 +1904,7 @@ begin
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
       'agent', s.agent,  -- #4002; null for a worker with no session row
+      'lead', cb._is_lead(a.actor, s.project),  -- #3771: the dashboard's lead is the board's (by role, #3746), not an orch@ name
       'doing', coalesce((select jsonb_agg(d.j order by d.at desc) from (
                            select jsonb_build_object('id', t.id, 'title', t.title, 'priority', t.priority, 'status', t.status) as j, t.updated_at as at
                              from cb.tasks t where t.assignee = a.actor and t.status in ('in_progress', 'blocked', 'review') and (p is null or t.project = p)
