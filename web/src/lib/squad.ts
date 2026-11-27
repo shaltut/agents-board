@@ -39,6 +39,10 @@ export interface RoleTextPage {
   roles: { role: string; body: string; updated_at: string; updated_by: string | null }[]
   edits: { id: number; role: string; actor: string; at: string; before: string | null; after: string }[]
 }
+/** cb.project_role_page: one project's addition to the role texts and who its stuck seats ask first (#4525). */
+export interface ProjectRolePage {
+  project: string; addition: string; ask_first: string; updated_at: string | null; updated_by: string | null; cap: number; sessions: string[]
+}
 export interface Watch {
   repo: string; to: string | null; project: string | null; card_projects?: string[]; since: string | null
   last_ok: string | null; last_error: string | null
@@ -451,6 +455,30 @@ export function roleTextState(body: string, saved: string) {
   const count = [...t].length
   const over = count > ROLE_TEXT_CAP, empty = count === 0, changed = t !== saved
   return { count, over, empty, changed, canSave: changed && !over && !empty }
+}
+
+/** A project's addition (#4525): trimmed as cb.project_role_set stores it, against its 1000 cap. Empty is allowed: it
+ *  removes the addition. */
+export const ADDITION_CAP = 1000
+export function additionState(body: string, saved: string) {
+  const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
+  const count = [...t].length
+  const over = count > ADDITION_CAP, changed = t !== saved
+  return { count, over, changed, canSave: changed && !over }
+}
+/** Who stuck seats ask first, as cb.project_role_set takes it: lead, ahmed, or a session name. */
+export const SESSION_NAME = /^[A-Za-z0-9@._-]{1,64}$/
+export type AskFirst = { kind: 'lead' | 'ahmed' | 'session'; name: string }
+export const askFirstOf = (v: string): AskFirst => (v === 'lead' || v === 'ahmed' ? { kind: v, name: '' } : { kind: 'session', name: v })
+export const askFirstValue = (a: AskFirst) => (a.kind === 'session' ? a.name.trim() : a.kind)
+export const askFirstOk = (a: AskFirst) => a.kind !== 'session' || (SESSION_NAME.test(a.name.trim()) && !['lead', 'ahmed'].includes(a.name.trim().toLowerCase()))
+/** Mid-sentence: "seats ask the lead first". */
+export const askFirstLabel = (v: string) => (v === 'lead' ? 'the lead' : v === 'ahmed' ? 'Ahmed' : v)
+/** The roles whose stored text differs from the one this release ships: what "Load the new texts" would change. */
+export function seedChanges(seeds: Record<string, string>, roles: RoleTextPage['roles']): string[] {
+  const stored = new Map(roles.map((r) => [r.role, r.body]))
+  return Object.keys(seeds).filter((k) => seeds[k] !== stored.get(k))
+    .sort((a, b) => (a === '_common' ? -1 : b === '_common' ? 1 : ROLES.indexOf(a as Role) - ROLES.indexOf(b as Role)))
 }
 
 /** squad_set's stale refusal opens with these words (db/schema.sql; test/settings-web.test.ts pins them). */

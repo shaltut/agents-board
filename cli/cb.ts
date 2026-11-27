@@ -854,9 +854,11 @@ ${body}`, json: pg };
       return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {
-      need(1, 'role <role> [--json]   e.g. cb role builder');
-      const text = await callFn('role_text', { role: args[0] }) as string;
-      return { out: text, json: { role: args[0], text } };
+      need(1, 'role <role> [--project p] [--json]   e.g. cb role builder');
+      // #4525: in a project (this session's, or --project), its addition and who its seats ask first follow the shared text
+      const project = o.project ?? sessionProject ?? null;
+      const text = await callFn('role_text', { role: args[0], project }) as string;
+      return { out: text, json: { role: args[0], project, text } };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');

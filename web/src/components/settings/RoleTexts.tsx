@@ -3,13 +3,51 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { rpc } from '@/lib/api'
+import { get, rpc } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { ROLE_TEXT_CAP, actorLabel, roleTextLabel, roleTextState, saveError, type RoleTextPage } from '@/lib/squad'
+import { ROLE_TEXT_CAP, actorLabel, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
 import { Notice } from './bits'
 
 const useRoleTexts = () => useQuery({ queryKey: ['role-texts'], queryFn: () => rpc<RoleTextPage>('role_text_page', {}) })
+const useSeeds = () => useQuery({ queryKey: ['role-text-seeds'], queryFn: () => get<Record<string, string>>('/api/role-text-seeds') })
+
+/** #4525: setup never replaces a stored text (Q2969), so a release's new texts wait here until Ahmed loads them. All at
+ *  once (cb.role_text_import: one transaction), each change kept under Last edits with the text before. */
+function LoadNewTexts({ roles }: { roles: RoleTextPage['roles'] }) {
+  const qc = useQueryClient()
+  const seeds = useSeeds()
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState<string | null>(null)
+  if (seeds.isError) console.error('release role texts did not load', seeds.error)
+  const changes = seeds.data ? seedChanges(seeds.data, roles) : []
+  if (changes.length === 0) return null
+  async function load() {
+    setBusy(true); setFailed(null)
+    try {
+      const r = await rpc<{ changed: string[] }>('role_text_import', { texts: seeds.data })
+      await qc.invalidateQueries({ queryKey: ['role-texts'] })
+      setAsking(false)
+      toast.success(`Loaded ${plural(r.changed.length, 'new text')}`, { description: 'Seats read them the next time they read their role.' })
+    } catch (e) {
+      console.error('loading the release role texts failed', e)
+      setFailed(saveError(e, 'The new texts were not loaded. Nothing changed; try again.').text)
+    } finally { setBusy(false) }
+  }
+  return (
+    <Notice action={asking ? (
+      <span className="flex gap-2">
+        <Button variant="ghost" size="sm" onClick={() => { setAsking(false); setFailed(null) }}>Cancel</Button>
+        <Button size="sm" disabled={busy} onClick={load}>{busy ? 'Loading…' : `Replace ${plural(changes.length, 'text')}`}</Button>
+      </span>
+    ) : <Button size="sm" variant="outline" onClick={() => setAsking(true)}>Load the new texts</Button>}>
+      This version of the board comes with new wording for {changes.map(roleTextLabel).join(', ')}.
+      {asking ? ' Loading replaces what is saved below, edits included; each old text stays under Last edits.' : ' Nothing changes until you load it.'}
+      {failed && <span className="mt-1 block text-destructive" role="alert">{failed}</span>}
+    </Notice>
+  )
+}
 
 /** The eight board-wide texts (Q2969: the database owns them; the repo files only seed a missing one). Seats read a new
  *  text the next time they read their role. */
@@ -20,6 +58,7 @@ export function RoleTexts() {
   if (!data) return <Notice tone="error">The role texts did not load. Reload the page to try again.</Notice>
   return (
     <div className="space-y-6">
+      <LoadNewTexts roles={data.roles} />
       <ul className="grid gap-3 lg:grid-cols-2">
         {data.roles.map((r) => <RoleText key={r.role} row={r} />)}
       </ul>

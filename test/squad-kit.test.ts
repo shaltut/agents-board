@@ -93,6 +93,24 @@ test('cb role prints the text; cb iam ends with the role line', async () => {
   assert.equal(i.out.split('\n').at(-1), 'Your role: cb role reviewer');
 });
 
+// #4525 (Q2992, Q2994): in a project, cb role prints the board-wide text, then the project's addition, then who to ask first
+test('cb role in a project: its addition and the ask-first line follow the board-wide text; --project names another', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.ensure_project('other')`;
+  await sql`select cb.project_role_set('demo', 'Run the twin test too.', 'ahmed', 'ahmed')`;
+  const board = (await sql`select cb.role_text('builder') as t`)[0].t;
+  const pane = `p-role-${process.pid}`;
+  assert.equal(cb(['iam', 'B9@mac', 'demo', '--role', 'builder'], { HERDR_PANE_ID: pane, CB_ACTOR: '' }).code, 0);
+  const r = cb(['role', 'builder'], { HERDR_PANE_ID: pane, CB_ACTOR: '' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, `${board}\n\n# This project: demo\n\nRun the twin test too.\n\nAsk first when stuck or a decision is needed: Ahmed, on the board (\`cb ask\`).`);
+  assert.equal(JSON.parse(cb(['role', 'builder', '--json'], { HERDR_PANE_ID: pane, CB_ACTOR: '' }).out).project, 'demo');
+  // another project by name: no addition there, the lead first
+  assert.match(cb(['role', 'builder', '--project', 'other']).out, /\n\n# This project: other\n\nAsk first when stuck or a decision is needed: the lead /);
+  assert.match(cb(['role', 'builder', '--project', 'nowhere']).err, /unknown project "nowhere"/);
+});
+
 test('cb resume ends with the role line in a pipeline project', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;
@@ -566,16 +584,16 @@ test('stage_stalls_due: a builder at build with a PR linked keeps a quiet card f
 test('role texts name the repo rules', () => {
   const role = (r: string) => readFileSync(`prompts/roles/${r}.md`, 'utf8');
   const has = (r: string, s: string) => assert.ok(role(r).includes(s), `${r} lacks: ${s}`);
-  has('builder', 'cb next gives you cards of your repo');
-  has('builder', 'for a card with parts, cb pass passes your part');
-  has('reviewer', "you review your repo's part");
-  has('qa', 'cb fail <id> --repo <repo>');
-  has('lead', '--repo <repo> --commit <sha>');
-  has('lead', 'cb stage <id> build --repo');
+  // #4525: the same rules in the shorter texts
+  has('builder', 'A card of several repos: you pass your part.');
+  has('reviewer', "A card with parts: only your repo's part goes back.");
+  has('qa', '(a card with parts: `--repo <repo>`, only that part goes back)');
+  has('lead', 'Parts: merge in the design\'s order, `--repo <repo>` on each pass.');
+  has('lead', '`cb stage <id> build --why "<why>"` (`--repo <repo>` with several repos)');
   has('owner', 'cb edit <id> --repo');
   has('architect', 'cb edit <id> --repo');
-  // #3746: an Azure DevOps PR has its own block in each role that handles PRs
-  for (const r of ['builder', 'reviewer', 'lead']) has(r, '## On Azure DevOps (a dev.azure.com PR link)');
+  // #3746: an Azure DevOps PR has its own paragraph in each role that handles PRs
+  for (const r of ['builder', 'reviewer', 'lead']) has(r, '\nAzure DevOps: ');
   has('builder', 'az repos pr create --repository <repo> --source-branch <branch> --target-branch <base>');
   has('reviewer', 'az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798');
   has('reviewer', 'git rev-parse pr/<n>^2');

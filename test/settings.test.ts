@@ -3,7 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
@@ -237,6 +237,61 @@ test('role_text_set: Ahmed only, plain refusals, a cap, history with before and 
   assert.deepEqual(pg.edits.map((e: any) => e.role), ['builder', '_common', 'builder'], 'newest first');
 });
 
+// #4525 (Q2992, Q2994): one project's own rules and who its stuck seats ask first, after the board-wide text
+test('project_role_set: Ahmed only, a 1000 cap, lead/ahmed/a session; cb.role_text adds the addition and the ask-first line last', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const board = (await sql`select cb.role_text('builder') as t`)[0].t;
+  // no row: no addition, and the lead first (how squads ran before the setting); the lead is told seats ask it
+  assert.equal((await sql`select cb.role_text('builder', 'demo') as t`)[0].t,
+    `${board}\n\n# This project: demo\n\nAsk first when stuck or a decision is needed: the lead (\`cb tell <name>\`; \`cb sessions\` names it). The lead decides from Ahmed's rulings or asks him on the board.`);
+  assert.match((await sql`select cb.role_text('lead', 'demo') as t`)[0].t, /\nAsk first when stuck or a decision is needed: seats in this project ask you\. /);
+  assert.equal((await sql`select cb.role_text('builder', null) as t`)[0].t, board, 'no project: the board-wide text alone');
+  await assert.rejects(sql`select cb.role_text('builder', 'nowhere')`, /unknown project "nowhere"/);
+
+  await assert.rejects(session()`select cb.project_role_set('demo', 'x', null, 'W1@pc')`, /only Ahmed can do this, on the Project settings page of the dashboard/);
+  await assert.rejects(sql`select cb.project_role_set('demo', ${'x'.repeat(1001)}, null, 'ahmed')`, /the addition for demo is 1001 characters; the most is 1000/);
+  await assert.rejects(sql`select cb.project_role_set('demo', null, 'two words', 'ahmed')`, /ask first must be lead, ahmed or a session name/);
+  await assert.rejects(sql`select cb.project_role_set('nowhere', 'x', null, 'ahmed')`, /unknown project "nowhere"/);
+  assert.equal((await sql`select count(*)::int as n from cb.project_role_settings`)[0].n, 0);
+
+  const r = (await sql`select cb.project_role_set('demo', ${'\nNo internal codes on any screen.\n'}, 'KB1@pc', 'ahmed') as r`)[0].r;
+  assert.deepEqual([r.addition, r.ask_first, r.updated_by, r.changed], ['No internal codes on any screen.', 'KB1@pc', 'ahmed', true]);
+  assert.equal((await sql`select cb.role_text('qa', 'demo') as t`)[0].t.slice((await sql`select cb.role_text('qa') as t`)[0].t.length),
+    '\n\n# This project: demo\n\nNo internal codes on any screen.\n\nAsk first when stuck or a decision is needed: KB1@pc (`cb tell KB1@pc`). It decides or asks Ahmed on the board.');
+  // null keeps a part; the same values write nothing; Ahmed, any case
+  assert.equal((await sql`select cb.project_role_set('demo', null, null, 'ahmed') as r`)[0].r.changed, false);
+  const a = (await sql`select cb.project_role_set('demo', null, 'Ahmed', 'ahmed') as r`)[0].r;
+  assert.deepEqual([a.addition, a.ask_first], ['No internal codes on any screen.', 'ahmed']);
+  assert.match((await sql`select cb.role_text('builder', 'demo') as t`)[0].t, /\n\nAsk first when stuck or a decision is needed: Ahmed, on the board \(`cb ask`\)\.$/);
+  // an empty addition removes it; the cap itself passes
+  await sql`select cb.project_role_set('demo', ${'y'.repeat(1000)}, null, 'ahmed')`;
+  await sql`select cb.project_role_set('demo', '', 'lead', 'ahmed')`;
+  assert.equal((await sql`select cb.role_text('builder', 'demo') as t`)[0].t.includes('\n\n\n'), false);
+  const ev = await sql`select actor, project, data from cb.events where summary = 'project role text updated' order by id`;
+  assert.deepEqual(ev.map((e: any) => [e.actor, e.project, e.data.ask_first_before, e.data.ask_first, e.data.addition.length]),
+    [['ahmed', 'demo', 'lead', 'KB1@pc', 32], ['ahmed', 'demo', 'KB1@pc', 'ahmed', 32], ['ahmed', 'demo', 'ahmed', 'ahmed', 1000], ['ahmed', 'demo', 'ahmed', 'lead', 0]]);
+
+  await sql`select cb.iam('pc', 'p-prs', 'B4@pc', 'demo', 'builder')`;
+  const [{ pg }] = await sql`select cb.project_role_page('demo') as pg`;
+  assert.deepEqual([pg.project, pg.addition, pg.ask_first, pg.updated_by, pg.cap, pg.sessions], ['demo', '', 'lead', 'ahmed', 1000, ['B4@pc']]);
+});
+
+test('role_text_import: Ahmed only, every text or none, each change kept with its text before', async () => {
+  const sql = await db();
+  const old = (await sql`select role, body from cb.role_texts order by role`).map((r: any) => [r.role, r.body]);
+  await assert.rejects(session()`select cb.role_text_import(${sql.json({ builder: "x" })}::jsonb, 'W1@pc')`, /only Ahmed can do this/);
+  await assert.rejects(sql`select cb.role_text_import('{}'::jsonb, 'ahmed')`, /no texts to load/);
+  // a bad text anywhere loads nothing, not even the good ones before it
+  await assert.rejects(sql`select cb.role_text_import(${sql.json({ _common: "New rules.", builder: "New builder.", wizard: "x" })}::jsonb, 'ahmed')`, /unknown role wizard/);
+  assert.deepEqual((await sql`select role, body from cb.role_texts order by role`).map((r: any) => [r.role, r.body]), old);
+  const qa = old.find(([r]: any) => r === 'qa')[1];
+  const r = (await sql`select cb.role_text_import(${sql.json({ builder: "New builder.", _common: "New rules.", qa })}::jsonb, 'ahmed') as r`)[0].r;
+  assert.deepEqual(r, { changed: ['_common', 'builder'], unchanged: 1 });
+  assert.equal((await sql`select cb.role_text('builder') as t`)[0].t, 'New rules.\n\nNew builder.');
+  assert.deepEqual((await sql`select role, actor from cb.role_text_edits order by id`).map((e: any) => [e.role, e.actor]), [['_common', 'ahmed'], ['builder', 'ahmed']]);
+});
+
 test('github_watches: one project\'s watches (its own and those that log on its cards) and the muted logins', async () => {
   const sql = await db();
   for (const p of ['demo', 'iris', 'other']) await sql`select cb.ensure_project(${p})`;
@@ -279,6 +334,8 @@ test('the server: only Ahmed saves project settings; another admin reads them an
   const writes: [string, object][] = [
     ['squad_set', { project: 'demo', squad: SQUAD, base: 0 }],
     ['role_text_set', { role: 'builder', body: 'x' }],
+    ['role_text_import', { texts: { qa: 'Check it on dev.' } }],
+    ['project_role_set', { project: 'demo', addition: 'Plain words on screens.', ask_first: 'ahmed' }],
     ['github_watch_add', { repo: 'acme/one', project: 'demo', tell: 'orch@pc' }],
     ['github_mute', { login: 'someone' }],
     ['github_watch_remove', { repo: 'acme/one' }],
@@ -289,7 +346,8 @@ test('the server: only Ahmed saves project settings; another admin reads them an
     assert.deepEqual(await r.json(), { ok: false, error: 'Only Ahmed changes project settings.' }, fn);
   }
   assert.equal((await sql`select squad from cb.projects where slug = 'demo'`)[0].squad, null);
-  for (const [fn, body] of [['squad_page', { project: 'demo' }], ['squad_options', {}], ['role_text_page', {}], ['github_watches', { project: 'demo' }],
+  assert.equal((await sql`select count(*)::int as n from cb.project_role_settings`)[0].n, 0);
+  for (const [fn, body] of [['squad_page', { project: 'demo' }], ['squad_options', {}], ['role_text_page', {}], ['project_role_page', { project: 'demo' }], ['github_watches', { project: 'demo' }],
     ['project_pipeline', { project: 'demo', enabled: true }], ['task_ping_bulk', { project: 'demo', enabled: true }]] as [string, object][]) {
     const r = await web(`/api/rpc/${fn}`, { cookie: cai, body });
     assert.equal(r.status, 200, `${fn}: ${await r.clone().text()}`);
@@ -300,6 +358,16 @@ test('the server: only Ahmed saves project settings; another admin reads them an
   }
   assert.equal((await sql`select squad_version as v from cb.projects where slug = 'demo'`)[0].v, 1);
   assert.equal((await sql`select updated_by from cb.role_texts where role = 'builder'`)[0].updated_by, 'ahmed');
+  const [pr] = await sql`select addition, ask_first, updated_by from cb.project_role_settings where project = 'demo'`;
+  assert.deepEqual([pr?.addition, pr?.ask_first, pr?.updated_by], ['Plain words on screens.', 'ahmed', 'ahmed']);
+  assert.equal((await sql`select body from cb.role_texts where role = 'qa'`)[0].body, 'Check it on dev.');
+  // #4525: the texts this release ships, for "Load the new texts": the repo's files, to any admin; never to a guest
+  const seeds = await web('/api/role-text-seeds', { cookie: cai });
+  assert.equal(seeds.status, 200);
+  const shipped = await seeds.json();
+  assert.deepEqual(Object.keys(shipped).sort(), ['_common', 'architect', 'builder', 'investigator', 'lead', 'owner', 'qa', 'reviewer']);
+  assert.equal(shipped.builder, readFileSync('prompts/roles/builder.md', 'utf8').trim());
+  assert.equal((await web('/api/role-text-seeds')).status, 401, 'not signed in');
   // the local dashboard is Ahmed
   const local = await app.request('/api/rpc/role_text_set', { method: 'POST', headers: { 'content-type': 'application/json', host: 'localhost:4747', origin: 'http://localhost:4747' },
     body: JSON.stringify({ role: 'builder', body: 'from the local dashboard', actor: 'ahmed' }) });

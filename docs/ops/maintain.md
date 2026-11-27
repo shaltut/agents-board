@@ -532,7 +532,13 @@ squad file (`cb squad set <project> -f <file>`):
   one or the other.
 - Role texts live in the database (`cb.role_texts`), and Ahmed edits them on the project settings page. Every edit is
   kept in `cb.role_text_edits`. Setup seeds only a role that has no row from `prompts/roles/*.md`. It never overwrites or
-  deletes a row, so a change to those files after a board's first setup has to be pasted on the page.
+  deletes a row, so a change to those files after a board's first setup reaches the board only when Ahmed presses "Load
+  the new texts" on the page (Role text section; it shows when the release's files differ from the stored texts). That
+  loads every text in one transaction through `cb.role_text_import`, each change kept in `cb.role_text_edits` (#4525).
+- Each project also has its own addition (at most 1000 characters) and who its stuck seats ask first (the lead, Ahmed or
+  a named session; the lead until set), in `cb.project_role_settings`, set on the same page. `cb role` and the start hook
+  print them after the board-wide text. The start hook's re-injection limits are in `hooks/limits.mjs`;
+  `test/role-text-size.test.ts` checks every text, with the longest addition, fits them uncut.
 
 ## Tests
 

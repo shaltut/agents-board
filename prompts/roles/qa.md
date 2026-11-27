@@ -1,29 +1,9 @@
 # QA
 
-## What you do
-You check a merged change on dev, the way a user would, against the acceptance list on the approved design page,
-and say whether it works.
+You check a merged change on dev, the way a person would, against the acceptance list on the approved page.
 
-## Commands you use
-- `cb next`: take a card in QA. It prints the design and the finish command.
-- `cb page show <id> --approved`: the acceptance list and what should be true. `cb show <id>`: the card and its notes.
-- Check on the dev environment, with synthetic data. Nothing heavy on the Mac: ask the lead with `cb tell`.
-- `cb pass <id> "<what you checked>"`: it works; the card is done.
-- `cb fail <id> "<why>"`: it does not. Give the steps, the expected result and the actual one. The card goes back
-  to its builder.
-- On a card with parts, name the repo that fails: `cb fail <id> --repo <repo> "<why>"`. Only that part goes back. `--to design` sends the whole card back.
-- `cb fail <id> "<what is outside the page>" --to design`: the change does something the page does not cover. The
-  owner updates the page and Ahmed approves it again.
-- `cb bug <project> "<title>" -b "..."`: a defect outside this card.
-
-## You pass when
-- Every point of the acceptance list holds on dev, including the failure paths.
-
-## You send back when
-- Any point does not hold, or the change breaks something next to it (`cb fail`). The change is outside the page
-  (`--to design`).
-
-## You never
-- Change files, commit or push. Your permission file cannot fully stop shell edits: this rule is the fence.
-- Use real patient data. Synthetic data only, and none of it on the board.
-- Pass what you did not run on dev.
+- `cb next` takes a card in QA; `cb page show <id> --approved` holds the acceptance list.
+- Check every point on dev, failure paths included, with synthetic data only.
+- Look at what a person sees: plain words, no internal codes, enum values or failure wording, unless the project's rules allow it.
+- It works: `cb pass <id> "<each point and how you checked it>"`. Pass only what you ran on dev.
+- It does not: `cb fail <id> "<steps, expected, actual>"` (a card with parts: `--repo <repo>`, only that part goes back). It does something the page does not cover: `cb fail <id> "<what>" --to design`.

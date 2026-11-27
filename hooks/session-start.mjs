@@ -6,10 +6,10 @@
 // holds Claude's pipe (#4482), and an unreachable board costs at most BUDGET_MS, then the hook prints the hint alone.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { CAP, RESUME_KEEP } from './limits.mjs'; // the re-injected block's size; the hint and the guard line always print whole
 
 const BUDGET_MS = 2000; // everything after node's own start: stdin, the board, the write
 const ROLES = ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']; // cb.role_text's list
-const CAP = 6000; // the re-injected block; the hint and the guard line always print whole
 const started = Date.now();
 const left = () => Math.max(0, BUDGET_MS - (Date.now() - started));
 
@@ -49,9 +49,10 @@ async function reinject(pane, source, ms) {
     if (!row?.r) return '';
     const r = row.r;
     const resume = resumeText(r);
-    const role = r.role ? await sql`select cb.role_text(${r.role}) as t`.then(([x]) => String(x?.t ?? ''), () => '') : '';
-    // the role text is the point; the cards keep at least 1500 characters
-    const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, 1500)) : 0;
+    // with the seat's project: its addition and who it asks first, as cb role prints them (#4525)
+    const role = r.role ? await sql`select cb.role_text(${r.role}, ${r.project ?? null}) as t`.then(([x]) => String(x?.t ?? ''), () => '') : '';
+    // the role text is the point; the cards keep at least RESUME_KEEP characters (the size test fits the texts in the rest)
+    const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, RESUME_KEEP)) : 0;
     return [`Agents Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
       cut(resume, CAP - roleN, '`cb resume`'), role && cut(role, roleN, `\`cb role ${r.role}\``)].filter(Boolean).join('\n\n');
   })().catch(() => null);
