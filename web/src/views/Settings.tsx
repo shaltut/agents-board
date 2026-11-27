@@ -14,6 +14,7 @@ import { RoleCard } from '@/components/settings/RoleCard'
 import { Areas, Machines, Repos } from '@/components/settings/Machines'
 import { SquadHistory } from '@/components/settings/SquadHistory'
 import { RoleTexts } from '@/components/settings/RoleTexts'
+import { ProjectRoleText } from '@/components/settings/ProjectRoleText'
 import { GitHub } from '@/components/settings/GitHub'
 
 /** Project settings (#4332): one project's squad, switches, reminders and GitHub watches, and the board-wide role texts.
@@ -184,8 +185,11 @@ function ProjectSettings({ project }: { project: string }) {
       </Section>
       <Switches project={project} page={data} squad={squad} edit={edit} />
       <Section id="role-text" title="Role text" who="owner"
-        intro="What each role is told when its seat starts, for every project. Seats already running read a change the next time they read their role.">
-        <RoleTexts />
+        intro="What each role is told when its seat starts: this project's own rules and who its seats ask first, then the texts every project shares. Seats already running read a change the next time they read their role.">
+        <div className="space-y-6">
+          <ProjectRoleText project={project} name={name} />
+          <RoleTexts />
+        </div>
       </Section>
       <Section id="github" title="GitHub watches" who="owner" intro="Repos whose pull requests come to this project as cards, and logins the board ignores.">
         <GitHub project={project} />
