@@ -78,7 +78,7 @@ test('checkParams refuses flag- and path-shaped values and the pattern', () => {
 // so a green job did not prove the named tests ran. A path parameter (files, unless the recipe says paths: false) is
 // checked against the job's folder; a repo-relative path is taken too, as the folder-relative one.
 test('relPaths takes a repo-relative path as relative to the job folder; other params are untouched', () => {
-  const test_ = example().projects.ihop!.repos.main!.recipes.test!; // cwd apps/{app}
+  const test_ = example().projects.iris!.repos.main!.recipes.test!; // cwd apps/{app}
   assert.equal(test_.params.files!.paths, true);
   assert.equal(test_.params.app!.paths, false);
   const out = relPaths(test_, { app: ['claims-api'], files: ['apps/claims-api/tests/a.test.ts', 'tests/b.test.ts', 'apps/other/tests/c.test.ts'] });
@@ -89,11 +89,11 @@ test('relPaths takes a repo-relative path as relative to the job folder; other p
 });
 
 test('missingPaths: a name counts from the job folder or from a package folder under it, never as a bare tail; a path parameter can be turned off', () => {
-  const r = { ...example().projects.ihop!.repos.main!.recipes.test! };
-  const tracked = ['tests/a.test.ts', 'tests/b.test.tsx', 'apps/fwa/package.json', 'apps/fwa/client/src/bell.test.ts', 'e2e/tests/x.test.ts', 'package.json'];
+  const r = { ...example().projects.iris!.repos.main!.recipes.test! };
+  const tracked = ['tests/a.test.ts', 'tests/b.test.tsx', 'apps/web/package.json', 'apps/web/client/src/bell.test.ts', 'e2e/tests/x.test.ts', 'package.json'];
   const miss = (files: string[]) => missingPaths(tracked, r, { app: ['x'], files });
   // from the folder (a file or a folder), and from a package folder: vitest under pnpm --filter takes package-relative names
-  assert.deepEqual(miss(['tests/a.test.ts', 'tests', 'tests/', './tests/a.test.ts', 'client/src/bell.test.ts', 'apps/fwa/client/src/bell.test.ts']), []);
+  assert.deepEqual(miss(['tests/a.test.ts', 'tests', 'tests/', './tests/a.test.ts', 'client/src/bell.test.ts', 'apps/web/client/src/bell.test.ts']), []);
   // review 2 (I1): a tail of a deeper path is not the file; node --test would drop it and pass on the rest
   assert.deepEqual(miss(['tests/x.test.ts', 'src/bell.test.ts', 'bell.test.ts', 'tests/made-up.test.ts']), ['tests/x.test.ts', 'src/bell.test.ts', 'bell.test.ts', 'tests/made-up.test.ts']);
   // whole names only: no partial name, and b.test.ts is not b.test.tsx
