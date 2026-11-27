@@ -8,6 +8,7 @@ import { statSync } from 'node:fs';
 import { ensurePg, ensureTestPg, ownsPg, stopTestPg, testDbUrl } from './pg.ts';
 import { databaseUrl } from '../server/db.ts';
 import { loadRoleTexts } from './roles.ts';
+import { recordSchema, schemaSha } from './schema-applied.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const isTest = process.argv.includes('--test');
@@ -32,6 +33,7 @@ await admin.end();
 
 const sql = postgres(url.toString(), { onnotice: () => {} });
 await sql.file(join(ROOT, 'db', 'schema.sql'));
+await recordSchema(sql, schemaSha(join(ROOT, 'db', 'schema.sql'))); // after the whole file applied (#4352)
 await loadRoleTexts(sql, join(ROOT, 'prompts', 'roles'));
 await sql.end();
 

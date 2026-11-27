@@ -31,6 +31,8 @@ export function loadRelease(root: string) {
 export function setRelease(r: Release | null, reason = 'none') { current = r; why = r ? '' : reason; }
 /** Why none is served (the log's words; tests read it). Never sent to a client: it holds paths and git's errors. */
 export const releaseWhy = () => why;
+/** The commit this board serves as its release, or null when it serves none (Today's seat line, #4352). */
+export const servedSha = () => current?.manifest.sha ?? null;
 
 const none = (c: any) => c.json({ ok: false, error: "this board serves no release: its log says why (release: none served)" }, 404);
 
