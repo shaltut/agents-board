@@ -14,6 +14,7 @@ import { releaseApp, setRelease } from '../server/release.ts';
 import { releaseAt } from '../cli/release-archive.ts';
 import { startedAs } from '../cli/started-as.ts';
 import { layout, runningFrom } from '../cli/update-install.ts';
+import { recordSchema, schemaSha } from '../db/schema-applied.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-upd-${process.pid}-`));
 const server = serve({ fetch: releaseApp.fetch, port: 0, hostname: '127.0.0.1' });
@@ -267,4 +268,48 @@ test('a relay or cb started through the copy path watches and relaunches through
   assert.equal(startedAs('/t/test-runner.mjs', '/r/cli/relay.ts'), '/r/cli/relay.ts'); // imported, not run: its own path
   const src = readFileSync('cli/relay.ts', 'utf8');
   assert.doesNotMatch(src.replace(/startedAs\(process\.argv\[1\], import\.meta\.filename\)/, ''), /import\.meta\.(filename|dirname)/, 'relay.ts watches or relaunches by its real path');
+});
+
+// last: it serves releases whose schema the test board lacks, and moves the board's noted schema (put back at the end)
+test('schema gate: cb update refuses, writing nothing, a release whose schema the board\'s database does not have; it names what to deploy', { timeout: 300_000 }, async () => {
+  const sql = clients[0];
+  const ours = schemaSha('db/schema.sql'); // what the test board applied (this checkout's schema)
+  const where = realpathSync(live), st = readFileSync(join(home, 'versions', 'state.json'), 'utf8'), vs = readdirSync(join(home, 'versions')).sort();
+  const untouched = () => {
+    assert.equal(realpathSync(live), where, 'the link moved');
+    assert.equal(readFileSync(join(home, 'versions', 'state.json'), 'utf8'), st, 'state.json changed');
+    assert.deepEqual(readdirSync(join(home, 'versions')).sort(), vs, 'something was staged');
+    assert.ok(!existsSync(`${live}.update.lock`), 'a lock was left');
+  };
+  edit('db/schema.sql', '\n-- a schema the board has not applied\n');
+  const S = commit('S: new schema');
+  const need = sha(readFileSync(join(repo, 'db', 'schema.sql')));
+  try {
+    const r = await cb(['update', '--from', base, '--root', live]);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.err, new RegExp(`the board's database runs an older schema than release ${S.slice(0, 7)} needs \\(the release's db/schema\\.sql ${need.slice(0, 8)}, the board's ${ours.slice(0, 8)}\\): `
+      + `deploy release ${S.slice(0, 7)} to the board first \\(docs/ops/maintain\\.md, Upgrade: the board and its schema go first\\), then cb update again`));
+    untouched();
+
+    // the order: a schema first applied before the current one is covered (forward only); one first applied after it
+    // (the board rolled back since) or never applied is not
+    assert.equal((await sql`select cb.schema_covers(${ours}) as c`)[0].c, true);
+    await recordSchema(sql, need); // the board deployed S
+    assert.deepEqual((await sql`select cb.schema_covers(${need}) as n, cb.schema_covers(${ours}) as o, cb.schema_covers(${'f'.repeat(64)}) as x`)[0], { n: true, o: true, x: false });
+    await recordSchema(sql, ours); // and was rolled back
+    assert.deepEqual((await sql`select cb.schema_covers(${need}) as n, cb.schema_covers(${ours}) as o`)[0], { n: false, o: true });
+    assert.deepEqual((await sql`select cb.schema_applied() as a`)[0].a.seen.slice(-2), [ours, need], 'each schema once, in the order first applied');
+
+    // a board from before the gate (no cb.schema_applied): refused the same way
+    await sql`alter function cb.schema_applied() rename to schema_applied_gone`;
+    try {
+      const o = await cb(['update', '--from', base, '--root', live]);
+      assert.equal(o.code, 1, o.out);
+      assert.match(o.err, new RegExp(`the board's database does not say which schema it runs \\(it runs a board from before cb update's schema check\\): deploy release ${S.slice(0, 7)} to the board first`));
+      untouched();
+    } finally { await sql`alter function cb.schema_applied_gone() rename to schema_applied`; }
+  } finally {
+    await recordSchema(sql, ours);
+    git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
+  }
 });

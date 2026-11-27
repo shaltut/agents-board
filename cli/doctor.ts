@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { GUARD_FILES, installGuard, checkWiring } from '../kit/guard/install.mjs';
-import { compareManifest, headSha, readManifest, type Manifest } from './release.ts';
+import { buildManifest, compareManifest, headSha, readManifest, type Manifest } from './release.ts';
 
 export type DoctorOptions = {
   root: string; // the checkout to check
@@ -49,7 +49,22 @@ export function doctor(o: DoctorOptions) {
 
   // 1. the files against the release
   const manifestFile = o.manifest ? resolve(o.manifest) : existsSync(join(root, 'release.json')) ? join(root, 'release.json') : null;
-  if (!manifestFile) {
+  if (!manifestFile && here) {
+    // a git checkout (the PC) with no release.json: git is its record. Its release files committed and nothing on disk
+    // that git does not have is a pass; the release it serves is its own commit
+    try {
+      const f = filesReport(root, buildManifest(root), here);
+      json.release = here;
+      json.files = f.files;
+      if (!f.ok) problems++;
+      lines.push(...(f.ok ? [`files: a git checkout at ${short(here)}, all ${f.files.total} release files committed`] : f.lines));
+    } catch (e: any) {
+      problems++;
+      json.files = null;
+      json.files_error = String(e?.message ?? e);
+      lines.push(`files: a git checkout at ${short(here)}: ${json.files_error}`);
+    }
+  } else if (!manifestFile) {
     problems++;
     json.files = null;
     lines.push(`files: not compared: no release.json in ${root}. Pass --manifest <file> (build one in an up-to-date clone with node cli/release.ts)`);

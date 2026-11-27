@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { get, qs, rpc, useGoals, useMemStats, useQuestions, useUsers, type CbEvent, type Question } from '@/lib/api'
 import { ago, clock, day } from '@/lib/format'
 import { go, href, type Route } from '@/lib/route'
+import { seatsCodeLine, type SeatsCode } from '@/lib/seats-code'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -76,7 +77,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
   if (!initial.current && !isLoading) initial.current = new Set(allOpen.map((q) => q.id))
   const today = useQuery({
     queryKey: ['today', route.project, anchor], enabled: !!anchor,
-    queryFn: () => get<{ counts: { done: number; active: number; blocked: number }; events: CbEvent[] }>(
+    queryFn: () => get<{ counts: { done: number; active: number; blocked: number }; events: CbEvent[]; code?: SeatsCode | null }>(
       `/api/today${qs({ project: route.project, since: anchor ?? undefined })}`),
   })
 
@@ -88,6 +89,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
 
   const c = today.data?.counts
   const events = today.data?.events ?? []
+  const seatsLine = seatsCodeLine(today.data?.code)
   const blocking = open.filter((q) => q.blocking).length
 
   return (
@@ -178,6 +180,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
             <Count n={c.blocked} label="blocked" tone="text-st-blocked" /> right now.
           </p>
         )}
+        {seatsLine && <p className="-mt-4 mb-6 text-sm text-muted-foreground">{seatsLine}</p>}
 
         {today.isLoading || !anchor ? (
           <p className="text-sm text-muted-foreground">Loading the shift log…</p>
