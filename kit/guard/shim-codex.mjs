@@ -1,5 +1,5 @@
-// Codex PreToolUse hook (#4002 phase 2), wired in ~/.codex/hooks.json with a matcher on Bash, apply_patch and
-// request_user_input. Reads the hook input on stdin and CB_ROLE, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env,
+// Codex PreToolUse hook (#4002 phase 2), wired in ~/.codex/hooks.json by node kit/guard/install.mjs --agents codex with a
+// catch-all matcher (#4609): every tool reaches this file, and one it does not judge is denied. Reads the hook input on stdin and CB_ROLE, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env,
 // asks core.mjs, and prints {} (allow: Codex rejects an explicit permissionDecision:allow) or Codex's deny object, exit 0:
 //   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}
 // Fails closed exactly like shim-claude.mjs: empty or unreadable input, a hook event other than PreToolUse, an unknown tool
@@ -24,7 +24,7 @@ try {
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const EDIT_TOOLS = new Set(['apply_patch', 'Edit', 'Write']);
 const ASK_TOOLS = new Set(['request_user_input']);
-/** Every tool name this shim judges: the installer's hook matcher must name exactly these (an unmatched tool is never guarded). */
+/** Every tool name this shim judges; any other tool is denied (the installer's matcher is a catch-all, #4609). */
 export const HANDLED_TOOLS = [...SHELL_TOOLS, ...EDIT_TOOLS, ...ASK_TOOLS];
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const detail = (e) => String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 200);

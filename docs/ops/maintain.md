@@ -190,6 +190,39 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
 
+### Codex, agy and OpenCode seats (#4609)
+
+Also only with Ahmed's yes, on each machine that runs those seats. A seat whose guard is not wired is refused by
+the seat prestart, so until this runs those seats do not start.
+
+```
+node kit/guard/install.mjs --agents codex,opencode                         # per machine
+node kit/guard/install.mjs --agents agy --seat <seat folder> [--seat ...]   # per agy seat folder
+node kit/guard/install.mjs --check --agents codex,agy,opencode --seat <seat folder>
+```
+
+Each agent's shim is copied into the installed guard folder beside `core.mjs` and probed there (ls passes;
+`git reset --hard`, a tool the shim does not know, and malformed input block) before anything is swapped in. The hooks
+run that installed copy, never the checkout, so a `git pull` does not change a live guard unprobed.
+
+- **Codex**: one `PreToolUse` entry in `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`), matcher `.*`, command
+  `<absolute node> <guard>/shim-codex.mjs`. Every other entry stays as it was, herdr's `SessionStart` included; an older
+  guard entry (one pointing at a checkout) is replaced. `config.toml` gets `hooks = true` under `[features]`. A
+  `hooks = false` there, or an inline `features = { ... }`, is refused: change it by hand. The matcher is a catch-all
+  because Codex 0.160 also has `exec_command`, `unified_exec` and `write_stdin`, which the old named list let through
+  unguarded. shim-codex denies every tool it does not judge, so those are now refused until it learns them.
+- **agy**: group `cb-guard` in `<seat>/.agents/hooks.json`, matcher `.*`, command `node <guard>/shim-agy.mjs`
+  (forward slashes, no quotes: agy runs hooks through `cmd /c` on Windows, so a guard path with a space is refused;
+  install it elsewhere with `--target`). Other groups stay. `/.agents/` goes into that repo's `info/exclude` (a worktree's
+  shared one). agy loads a folder's hooks only once agy trusts the folder: trust each seat folder in agy.
+- **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
+  `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
+  call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+
+A second run changes nothing. `--check` with `--agents` also checks each wiring and runs the probes through its own
+command (for OpenCode: the plugin is exactly what this checkout writes). Seats never write these files: the fence keeps
+them out.
+
 ## Usage ledger
 
 `hooks/usage-stop.mjs` (#4349) is a Claude Code **Stop** hook. At each Stop it sums the token usage of every assistant
