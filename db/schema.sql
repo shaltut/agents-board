@@ -5594,9 +5594,10 @@ declare a text := cb.set_actor(actor); j cb.jobs;
 begin
   select * into j from cb.jobs x where x.id = id for update;
   if not found then raise exception 'no job #%', id; end if;
-  -- #4527: from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this function)
+  -- #4527 (Q2982): from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this
+  -- function); the lead of the job's project by its session's role, not by the name orch (cb._lead_by_role, below)
   if not (cb._is_dashboard() and a = 'ahmed') and j.requester <> a
-     and not cb._is_lead(a, j.project) then  -- the lead of the job's project
+     and not cb._lead_by_role(a, j.project) then
     raise exception 'only the requester, the project''s lead or Ahmed can cancel job #%', id;
   end if;
   if j.state not in ('queued','running') then raise exception 'job #% already ended', id; end if;
