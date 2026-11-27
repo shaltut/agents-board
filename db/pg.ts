@@ -56,13 +56,15 @@ export function testPortStart(root: string): number {
 }
 
 // Any program that accepts a TCP connection on 127.0.0.1 holds the port (pg_isready reports "no response" for a
-// non-Postgres listener exactly as for an empty port); only a refused connection is free. One child checks the window.
+// non-Postgres listener exactly as for an empty port); only a refused connection is free. A refused port must also bind:
+// one in a Windows excluded range refuses connections but cannot be listened on. One child checks the window.
 const FIRST_FREE = `const net = require('node:net'); const [s, n] = process.argv.slice(1).map(Number);
+const binds = (p) => new Promise((r) => { const v = net.createServer(); v.once('error', () => r(false)); v.listen(p, '127.0.0.1', () => v.close(() => r(true))); });
 (async () => { for (let p = s; p < s + n; p++) {
   const taken = await new Promise((r) => { const c = net.connect({ host: '127.0.0.1', port: p }); c.setTimeout(3000);
     c.once('connect', () => { c.destroy(); r(true); }); c.once('timeout', () => { c.destroy(); r(true); });
     c.once('error', (e) => r(e.code !== 'ECONNREFUSED')); });
-  if (!taken) { console.log(p); return; } } })();`;
+  if (!taken && await binds(p)) { console.log(p); return; } } })();`;
 
 /** The port a test run on this checkout uses: 5434; for a worktree, the port its running cluster listens on, else
  *  CB_TEST_PG_PORT (test/helpers.ts sets it, so its db/setup.ts --test child picks the same port), else the first free
@@ -93,8 +95,10 @@ export function ensureTestPg(url: string, root = ROOT): void {
 }
 
 /** Stops a worktree's test cluster: run it before removing the worktree (a running Postgres holds the folder). */
-export function stopTestPg(root = ROOT): string {
-  if (!ownTestPg(root)) return 'no test cluster of its own here (not a Windows worktree)';
-  const r = spawnSync(pgCtl, ['-D', join(root, '.pgdata'), 'stop', '-w'], { encoding: 'utf8' });
-  return (r.stdout || r.stderr || '').trim();
+export function stopTestPg(root = ROOT): { ok: boolean; message: string } {
+  if (!ownTestPg(root)) return { ok: true, message: 'no test cluster of its own here (not a Windows worktree)' };
+  const dir = join(root, '.pgdata');
+  if (spawnSync(pgCtl, ['-D', dir, 'status'], { stdio: 'ignore' }).status !== 0) return { ok: true, message: `no test cluster running in ${dir}` };
+  const r = spawnSync(pgCtl, ['-D', dir, 'stop', '-w'], { encoding: 'utf8' });
+  return { ok: r.status === 0, message: (r.stdout || r.stderr || r.error?.message || '').trim() };
 }

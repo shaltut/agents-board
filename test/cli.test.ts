@@ -117,6 +117,15 @@ test('unreachable remote board fails within its retry budget with a clear messag
   assert.ok(Date.now() - t0 < 25_000, `took ${Date.now() - t0}ms`);
 });
 
+// #4413 review: a refused 'localhost' (not the board's own 5434) is an AggregateError with an empty message: it printed
+// "cb: . Run: cb help". Say what was refused.
+test('a refused local board that is not the board cluster says so in words', () => {
+  const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@localhost:1/claude_board_test_refused' });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /board refused the connection at localhost:1 \(ECONNREFUSED\): the call that failed never reached it/);
+  assert.match(r.err, /Is Postgres running there\?/);
+});
+
 test('unknown flag fails with a readable message, no stack', async () => {
   await db();
   const r = cb(['add', 'demo', 'x', '--label', 'foo']);
