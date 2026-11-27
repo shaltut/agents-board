@@ -65,14 +65,15 @@ test('done records links', async () => {
   assert.deepEqual(e.data.links, { pr: '#412', commit: 'abc123' });
 });
 
-test('unreachable remote board fails fast with a clear message', () => {
+test('unreachable remote board fails within its retry budget with a clear message', () => {
   const t0 = Date.now();
-  // 10.255.255.1 is a non-routable address: connections hang rather than refuse.
+  // 10.255.255.1 is a non-routable address: connections usually hang rather than refuse. A hung try waits 5 s, so two fit
+  // the ~10 s budget (#4337); the rest is node starting up on a busy machine.
   const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@10.255.255.1:5434/claude_board' });
   assert.equal(r.code, 1);
-  assert.match(r.err, /board unreachable at 10\.255\.255\.1/);
+  assert.match(r.err, /board unreachable at 10\.255\.255\.1 \([A-Z_]+, tried \d+ times over \d+ s\): the call that failed never reached it/);
   assert.match(r.err, /keep working/);
-  assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0}ms`);
+  assert.ok(Date.now() - t0 < 25_000, `took ${Date.now() - t0}ms`);
 });
 
 test('unknown flag fails with a readable message, no stack', async () => {
