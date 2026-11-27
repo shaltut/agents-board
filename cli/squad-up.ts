@@ -204,7 +204,7 @@ export function launchSpec(l: Launch, gate: AdapterGate = {}): { adapter: AgentA
   return { adapter, spec: adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, board: l.board, cwd: l.cwd, env: l.env }) };
 }
 
-const PRESTART_WORD = /^[A-Za-z0-9._:-]{1,64}$/;
+const PRESTART_WORD = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,63}$/; // never a leading -: pwsh would read it as a parameter name
 /** The pane's shell as prestart needs it: 'pwsh', 'posix' (bash, zsh), another name, or '' while the pane is starting. */
 export function paneShell(info: unknown): string {
   const p = find(info, 'foreground_processes')?.[0];
@@ -214,7 +214,8 @@ export function paneShell(info: unknown): string {
 /** The line that dot-sources the seat prestart in this shell: plain words only, the board path single-quoted. */
 export function prestartLine(shell: 'pwsh' | 'posix', board: string, words: string[]): string {
   const b = board.replace(/[\\/]+$/, '');
-  if (!b || /['\r\n]/.test(b)) throw new Error('prestart: the board path is empty or holds a quote or line break');
+  // pwsh also reads the curly single quotes as quotes
+  if (!b || /['‘’‚‛\r\n]/.test(b)) throw new Error('prestart: the board path is empty or holds a quote or line break');
   const bad = words.find((w) => !PRESTART_WORD.test(w));
   if (bad !== undefined) throw new Error(`prestart: ${JSON.stringify(bad)} is not a plain word`);
   const [agent, machine, pane, nonce, port] = words;

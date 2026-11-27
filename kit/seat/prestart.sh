@@ -4,11 +4,13 @@
 # Dot-sourced, never run: it drops every Claude-only name (the list in cli/agents/env.ts) from this shell, sets OpenCode's
 # server password from a fresh 0600 endpoint file (never on argv), then cli/agents/seat-prestart.ts checks, from a child of
 # this shell, and prints cb-seat-ready:<nonce> or cb-seat-refused:<nonce>: <why>.
-for __cb_v in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -iE '^(CLAUDE_CODE_|ANTHROPIC_)|^(CLAUDECODE|GITHUB_PERSONAL_ACCESS_TOKEN)$'); do
-  unset "$__cb_v"
+# It runs in the user's interactive shell, where an alias or a function can stand in for any command (alias grep="rg",
+# an nvm node function): so every command goes through `command` or `builtin`, never by its bare name (review 70-I1).
+for __cb_v in $(command env | command sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | command grep -iE '^(CLAUDE_CODE_|ANTHROPIC_)|^(CLAUDECODE|GITHUB_PERSONAL_ACCESS_TOKEN)$'); do
+  builtin unset "$__cb_v"
 done
-unset __cb_v
-if [ "$2" = opencode ]; then
-  OPENCODE_SERVER_PASSWORD="$(node "$1/cli/agents/seat-prestart.ts" secret "$3" "$4" "$6")" && export OPENCODE_SERVER_PASSWORD || unset OPENCODE_SERVER_PASSWORD
-fi
-node "$1/cli/agents/seat-prestart.ts" check "$2" "$3" "$4" "$5"
+builtin unset __cb_v
+case "$2" in
+  opencode) OPENCODE_SERVER_PASSWORD="$(command node "$1/cli/agents/seat-prestart.ts" secret "$3" "$4" "$6")" && builtin export OPENCODE_SERVER_PASSWORD || builtin unset OPENCODE_SERVER_PASSWORD ;;
+esac
+command node "$1/cli/agents/seat-prestart.ts" check "$2" "$3" "$4" "$5"

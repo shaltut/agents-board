@@ -32,8 +32,9 @@ const RATE = /exceeded retry limit, last status: 429|Automatically switched to [
 const RETRY_IN = /try again in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\b\s*,?\s*(?:and\s+)?)+)/i;
 const UNIT_SEC: Record<string, number> = { d: 86400, h: 3600, m: 60 };
 /** #4002: Codex opens its skill ($) or mention (@) popup while the last word starts with one, and the Enter that submits
- *  then picks from the popup: the message sits unsent while herdr reports it sent. A trailing space ends the word first. */
-export const codexPromptText = (text: string) => (/(?:^|\s)[$@]\S*$/.test(text) ? `${text} ` : text);
+ *  then picks from the popup: the message sits unsent while herdr reports it sent. A trailing space ends the word first.
+ *  Trailing whitespace is trimmed before the test: a final newline would otherwise hide the word from `$`. */
+export const codexPromptText = (text: string) => { const t = text.replace(/\s+$/, ''); return /(?:^|\s)[$@]\S*$/.test(t) ? `${t} ` : text; };
 
 /** "try again in 2 hours 5 minutes" in seconds; undefined when the text names a clock time or nothing. */
 function retryAfterSec(text: string): number | undefined {
