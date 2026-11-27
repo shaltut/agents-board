@@ -103,6 +103,14 @@ test('cb bug files an unassigned P2 bug in Next and says who is told', async () 
   assert.equal(nobody.out, '#7 bug filed in newproj; no session works in newproj yet: it waits in Next');
   const own = cb(['bug', 'iris', 'orch found one', '-b', 'z'], { CB_ACTOR: 'orch@shaltoot' });
   assert.equal(own.out, '#8 bug filed in iris; you triage it: cb edit 8 --assignee <worker>');
+  // #4447: the body as a second quoted argument, no -b; both ways at once is refused
+  const two = cb(['bug', 'iris', 'claims page blank again', 'Open /claims as payer. Expected list, got blank.'], env);
+  assert.equal(two.code, 0, two.err);
+  const [b2] = await sql`select title, body from cb.tasks where id = ${Number(/^#(\d+)/.exec(two.out)![1])}`;
+  assert.deepEqual({ ...b2 }, { title: 'claims page blank again', body: 'Open /claims as payer. Expected list, got blank.' });
+  const twice = cb(['bug', 'iris', 'claims page blank', 'a body', '-b', 'another'], env);
+  assert.equal(twice.code, 1);
+  assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb bug <project> "<title>" -b "<body>"/);
 });
 
 test('cb bug: a lead-role session not named orch is the orchestrator it tells (#3746)', async () => {

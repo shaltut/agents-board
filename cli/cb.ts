@@ -15,6 +15,7 @@ import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
+import { titleBody } from './title-body.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat } from './help.ts';
 
@@ -647,9 +648,10 @@ async function run(): Promise<unknown> {
     case 'mem':
       return await mem();
     case 'add': {
-      need(2, 'add <project> "<title>" [-s next] [-p P1]   e.g. cb add iris "Fix month parse" -s next');
+      need(2, 'add <project> "<title>" ["<body>"] [-s next] [-p P1]   e.g. cb add iris "Fix month parse" "row 8812 reads 1900" -s next');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb add <project> "<title>" --stage build --why "<why>"');
-      const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body ?? '',
+      const tb = titleBody('add', args.slice(1), o.body);
+      const id = await callFn('task_add', { project: args[0], title: tb.title, body: tb.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
@@ -657,10 +659,11 @@ async function run(): Promise<unknown> {
     }
     case 'bug': {
       need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual" [--stage build --why "<why>"] [--repo <repo,repo>]');
-      if (!o.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
+      const tb = titleBody('bug', args.slice(1), o.body);
+      if (!tb.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb bug <project> "<title>" -b "<what happened>" --stage build --why "<why>"');
       await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
-      const id = await callFn('task_add', { project: args[0], title: args.slice(1).join(' '), body: o.body, status: 'next',
+      const id = await callFn('task_add', { project: args[0], title: tb.title, body: tb.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       // orch: one of those told is the project's lead (the lead role, whatever its name; #3746)

@@ -20,6 +20,29 @@ function cb(args: string[], env: Record<string, string> = {}) {
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
 
+test('cb add: a second quoted argument is the body; bare words stay one title; a body given twice is refused (#4447)', async () => {
+  const sql = await db();
+  const row = async (out: string) => (await sql`select title, body from cb.tasks where id = ${Number(out.slice(1))}`)[0];
+  const two = cb(['add', 'demo', 'Fix month parse', 'Row 8812 reads 1969 as 1900. Expected 1969.', '-s', 'next']);
+  assert.equal(two.code, 0, two.err);
+  assert.deepEqual({ ...(await row(two.out)) }, { title: 'Fix month parse', body: 'Row 8812 reads 1969 as 1900. Expected 1969.' });
+  const flag = cb(['add', 'demo', 'Fix day parse', '-b', 'the -b body']);
+  assert.deepEqual({ ...(await row(flag.out)) }, { title: 'Fix day parse', body: 'the -b body' });
+  // unquoted: the shell hands over one word per argument, none holding a space: all title, as before
+  const bare2 = cb(['add', 'demo', 'Fix', 'parse']);
+  assert.deepEqual({ ...(await row(bare2.out)) }, { title: 'Fix parse', body: '' });
+  const bare3 = cb(['add', 'demo', 'Fix', 'year', 'parse', '-b', 'still the -b body']);
+  assert.deepEqual({ ...(await row(bare3.out)) }, { title: 'Fix year parse', body: 'still the -b body' });
+  const n = (await sql`select count(*)::int as n from cb.tasks`)[0].n;
+  const twice = cb(['add', 'demo', 'Fix hour parse', 'a body', '-b', 'another body']);
+  assert.equal(twice.code, 1);
+  assert.match(twice.err, /the body is given twice \(a second argument and -b\)\. Use one: cb add <project> "<title>" -b "<body>"/);
+  const three = cb(['add', 'demo', 'Fix minute parse', 'part one', 'part two']);
+  assert.equal(three.code, 1);
+  assert.match(three.err, /got 3 arguments after the project\. Give the body with -b: cb add <project> "<title>" -b "<body>"/);
+  assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, n, 'a refused add creates no card');
+});
+
 test('add prints id', async () => {
   await db();
   const r = cb(['add', 'demo', 'Fix RI grading', '-p', 'P1']);
