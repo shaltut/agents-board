@@ -7,7 +7,7 @@
 // each transcript incrementally (an offset per file in a small state file in the OS temp folder) and at most
 // BYTES_PER_RUN bytes or PARSE_MS of parsing per Stop: a long transcript (tens of MB) is caught up over a few Stops.
 // Not wired anywhere by default: docs/ops/maintain.md, "Usage ledger", says how to switch it on.
-import { closeSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -22,7 +22,13 @@ const RECENT = 32;
 const SETTLED_MS = 10 * 60_000;
 // the status line's cost counts as this Stop's when it was written this recently
 const COST_FRESH_MS = 10 * 60_000;
+// after a send that did not succeed, the next one waits this long
+export const RETRY_MS = 5 * 60_000;
+// state files of sessions untouched this long are deleted; at most this many are looked at per run
+const STATE_KEEP_MS = 7 * 24 * 3600_000;
+const CLEAN_MAX = 500;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const MODEL_ID = /^[A-Za-z0-9._:@/\[\]-]{1,100}$/; // the same pattern cb.usage_report checks
 const FIELDS = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
 
 const count = (v) => (Number.isSafeInteger(v) && v > 0 ? v : 0);
@@ -122,7 +128,9 @@ export function statuslineCost(sessionId, now = Date.now(), configDir = process.
   } catch { return null; }
 }
 
-const stateFile = (dir, sid) => join(dir, `cb-usage-${sid}.json`);
+// state files live in their own folder, so the cleanup below lists only them, never the whole temp folder
+export const stateDir = (dir) => join(dir, 'cb-usage');
+const stateFile = (dir, sid) => join(stateDir(dir), `${sid}.json`);
 export function loadState(dir, sid) {
   try {
     const s = JSON.parse(readFileSync(stateFile(dir, sid), 'utf8'));
@@ -132,13 +140,24 @@ export function loadState(dir, sid) {
 }
 export function saveState(dir, sid, state) {
   const f = stateFile(dir, sid), tmp = `${f}.${process.pid}.tmp`;
-  try { writeFileSync(tmp, JSON.stringify(state)); renameSync(tmp, f); } catch {}
+  try { mkdirSync(stateDir(dir), { recursive: true }); writeFileSync(tmp, JSON.stringify(state)); renameSync(tmp, f); } catch {}
 }
+/** Deletes state files untouched for STATE_KEEP_MS (sessions long gone), looking at most at CLEAN_MAX files a run. */
+export function cleanStates(dir, now = Date.now()) {
+  let names = [];
+  try { names = readdirSync(stateDir(dir)).slice(0, CLEAN_MAX); } catch { return; }
+  for (const n of names) {
+    const f = join(stateDir(dir), n);
+    try { if (now - statSync(f).mtimeMs > STATE_KEEP_MS) unlinkSync(f); } catch {}
+  }
+}
+/** A model id as the board accepts it, else 'unknown': a broken transcript's text never leaves the machine. */
+export const modelId = (m) => (m == null ? null : MODEL_ID.test(m) ? m : 'unknown');
 
 /** What goes to the board: numbers, the model id and the session's place, nothing else. */
 export function report(state, cost) {
   const [input, output, cacheRead, cacheWrite] = state.totals;
-  return { model: state.model, input, output, cacheRead, cacheWrite, cost };
+  return { model: modelId(state.model), input, output, cacheRead, cacheWrite, cost };
 }
 
 async function readStdin(ms) {
@@ -162,11 +181,17 @@ async function main() {
   const sid = input?.session_id, transcript = input?.transcript_path;
   if (typeof sid !== 'string' || !SESSION_ID.test(sid) || typeof transcript !== 'string' || !transcript.endsWith('.jsonl')) return;
   const dir = process.env.CB_USAGE_STATE_DIR || tmpdir();
+  cleanStates(dir);
   const state = scanSession(transcript, loadState(dir, sid), { until: t0 + PARSE_MS });
   const r = report(state, statuslineCost(sid));
   const unchanged = state.sent && JSON.stringify(state.sent) === JSON.stringify(r);
+  // an attempt that did not succeed (a board down or not answering cost it the whole deadline): no new one for
+  // RETRY_MS, so every Stop meanwhile stays fast. The totals are cumulative: the next send carries everything.
+  const backingOff = typeof state.tried_at === 'number' && Date.now() - state.tried_at < RETRY_MS;
+  const send = !unchanged && !backingOff && r.input + r.output + r.cacheRead + r.cacheWrite > 0;
+  if (send) state.tried_at = Date.now(); // before connecting: a run the deadline ends counts as a failed attempt
   saveState(dir, sid, state);
-  if (unchanged || r.input + r.output + r.cacheRead + r.cacheWrite === 0) return;
+  if (!send) return;
 
   const { connect, databaseUrl, machine } = await import('../server/db.ts');
   const { openBridge, seatKey } = await import('../cli/bridge.ts');
@@ -179,6 +204,7 @@ async function main() {
     input_tokens => ${r.input}::bigint, output_tokens => ${r.output}::bigint, cache_read_tokens => ${r.cacheRead}::bigint,
     cache_write_tokens => ${r.cacheWrite}::bigint, cost_usd => ${r.cost}::numeric) as result`;
   state.sent = r;
+  delete state.tried_at;
   saveState(dir, sid, state);
 }
 

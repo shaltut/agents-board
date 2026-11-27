@@ -5488,6 +5488,8 @@ drop function if exists cb.usage_summary cascade;
 -- The hook's write. Idempotent and monotonic: each counter keeps the larger of the stored and the sent value (a hook
 -- that lost its state and is still catching up never lowers a row), cost keeps the last one given, and a report that
 -- changes nothing leaves the row untouched (updated_at too). The pane's board binding names the actor and project.
+-- The first report places the row: its machine and pane stay, and actor and project are only filled in while empty, so
+-- a later caller can never move a session's row to another seat; a report from another machine is refused.
 -- An all-zero report is ignored: a ledger of zero rows reads as "free" (the zero-fill trap the card names).
 -- Returns 'new', 'updated', 'same' or 'ignored'.
 create function cb.usage_report(machine text, pane text, session_id text, model text, input_tokens bigint, output_tokens bigint,
@@ -5499,6 +5501,7 @@ declare
   mo text := nullif(trim(coalesce(model, '')), ''); ba text; bp text; n int; existed boolean;
 begin
   if m = '' or sid !~ '^[A-Za-z0-9_-]{1,100}$' then raise exception 'usage_report needs a machine and a session id (letters, digits, - and _)'; end if;
+  if length(m) > 100 or length(p) > 100 then raise exception 'usage_report: machine and pane are names of at most 100 characters'; end if;
   -- a model id only: anything else (text from a broken transcript) is stored as unknown, never as given
   if mo is not null and mo !~ '^[A-Za-z0-9._:@/\[\]-]{1,100}$' then mo := 'unknown'; end if;
   if least(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) < 0 or cost_usd < 0 then
@@ -5510,13 +5513,15 @@ begin
   end if;
   if p <> '' then select s.actor, s.project into ba, bp from cb.sessions s where s.machine = m and s.pane = p; end if;
   existed := exists (select 1 from cb.session_usage u where u.session_id = sid);
+  if exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
+    raise exception 'usage_report: session % is recorded from another machine', sid;
+  end if;
   insert into cb.session_usage as u (session_id, machine, pane, actor, project, model, input_tokens, output_tokens,
                                      cache_read_tokens, cache_write_tokens, cost_usd)
   values (sid, m, p, ba, bp, mo, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
           coalesce(cache_read_tokens, 0), coalesce(cache_write_tokens, 0), cost_usd)
   on conflict on constraint session_usage_pkey do update
-    set machine = excluded.machine, pane = excluded.pane,
-        actor = coalesce(excluded.actor, u.actor), project = coalesce(excluded.project, u.project),
+    set actor = coalesce(u.actor, excluded.actor), project = coalesce(u.project, excluded.project),
         model = coalesce(excluded.model, u.model),
         input_tokens = greatest(u.input_tokens, excluded.input_tokens),
         output_tokens = greatest(u.output_tokens, excluded.output_tokens),
@@ -5524,10 +5529,10 @@ begin
         cache_write_tokens = greatest(u.cache_write_tokens, excluded.cache_write_tokens),
         cost_usd = coalesce(excluded.cost_usd, u.cost_usd),
         updated_at = now()
-    where (u.machine, u.pane, u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+    where (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
            u.cache_write_tokens, u.cost_usd)
           is distinct from
-          (excluded.machine, excluded.pane, coalesce(excluded.actor, u.actor), coalesce(excluded.project, u.project),
+          (coalesce(u.actor, excluded.actor), coalesce(u.project, excluded.project),
            coalesce(excluded.model, u.model), greatest(u.input_tokens, excluded.input_tokens),
            greatest(u.output_tokens, excluded.output_tokens), greatest(u.cache_read_tokens, excluded.cache_read_tokens),
            greatest(u.cache_write_tokens, excluded.cache_write_tokens), coalesce(excluded.cost_usd, u.cost_usd));
@@ -5547,6 +5552,7 @@ begin
     select u.* from cb.session_usage u where u.updated_at >= now() - w and (p is null or u.project = p))
   select jsonb_build_object(
     'project', p, 'since', w::text,
+    'note', 'model is the main session''s last model; the counts include its subagents, which may run other models',
     'totals', (select jsonb_build_object('sessions', count(*), 'input_tokens', coalesce(sum(r.input_tokens), 0),
                  'output_tokens', coalesce(sum(r.output_tokens), 0), 'cache_read_tokens', coalesce(sum(r.cache_read_tokens), 0),
                  'cache_write_tokens', coalesce(sum(r.cache_write_tokens), 0), 'cost_usd', sum(r.cost_usd),

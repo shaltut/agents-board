@@ -207,7 +207,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'Everyone who can sign in (admins marked), with their open questions and tasks.',
       eg: 'cb users' },
     usage: { reads: true, use: 'cb usage [project] [--all] [--since 24h] [--json]', topic: 'orchestrate',
-      does: "Tokens (input, output, cache read, cache write) and cost per session, from each session's Stop hook: the sessions whose numbers changed within --since (m, h, d or w; default 24h), each with its total so far (not only the window), largest first. No project: this pane's project; --all every project. Cost only where the status line reported one (never priced from a table). Read-only.",
+      does: "Tokens (input, output, cache read, cache write) and cost per session, from each session's Stop hook: the sessions whose numbers changed within --since (m, h, d or w; default 24h), each with its total so far (not only the window), largest first. No project: this pane's project; --all every project. The counts include the session's subagents, but the model shown is the main session's last one (subagents may run other models). Cost only where the status line reported one (never priced from a table). Read-only.",
       eg: 'cb usage iris --since 7d',
       more: 'Nothing listed: the usage hook is off on those machines (switch-on: docs/ops/maintain.md, "Usage ledger").' },
     github: { reads: [''], use: 'cb github\ncb github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]\ncb github remove <owner/repo>\ncb github mute|unmute <login>', topic: 'orchestrate',

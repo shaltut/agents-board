@@ -153,25 +153,44 @@ turn in the session's transcript, and in its subagents' transcripts. It then sen
   one (today the claude-hud status line, and only with its daily or weekly cost display on). Nothing is priced from a
   table.
 - **Cost to a session:** it prints nothing and starts no child process. It always exits 0 and gives up after 1.9 s.
-- **How it reads transcripts:** incrementally, keeping an offset per file in `cb-usage-<session>.json` in the OS temp
-  folder. Each Stop reads at most 32 MB, so a long transcript catches up over a few Stops.
+- **How it reads transcripts:** incrementally, keeping an offset per file in `cb-usage/<session>.json` in the OS temp
+  folder. Each Stop reads at most 32 MB, so a long transcript catches up over a few Stops. State files untouched for
+  7 days are deleted.
+- **When the board is down:** a send that did not succeed (refused, or the 1.9 s deadline) is not tried again for
+  5 minutes, so the Stops in between stay fast. The totals are cumulative: the next send catches up.
 - **Where it runs:** only in herdr panes. `CB_USAGE_OFF=1` switches it off.
 
 Switching it on changes `~/.claude`, which every Claude session on the machine reads: **only with Ahmed's yes**. The
 board's schema must already have `cb.session_usage` (the board applies it on start, after a backup).
 
-1. **Add the hook.** In `~/.claude/settings.json`, add a `Stop` entry that runs the checkout's hook. Write node and the
-   checkout as absolute paths (a bare `node` missing from the hook shell's PATH just fails, silently):
+1. **Find the real node.** Use the node executable itself, not a version-manager shim: a shim (Volta's
+   `C:/Program Files/Volta/node.exe`, for one) starts another process on every Stop. Absolute paths only: a bare
+   `node` missing from the hook shell's PATH just fails, silently.
+   - **PC:** `C:/Program Files/nodejs/node.exe` when Node came from the installer. Check it with
+     `"C:/Program Files/nodejs/node.exe" --version` (24.x).
+   - **Mac:** `command -v node` in a login shell, then `realpath` of it if it is a link (Homebrew on Apple silicon:
+     `/opt/homebrew/bin/node`).
+2. **Add the hook.** In `~/.claude/settings.json`, add a `Stop` entry that runs the checkout's hook. Write Windows
+   paths with forward slashes.
+   - **PC** (checkout `C:/work/claude-board`):
 
-   ```json
-   "Stop": [{ "hooks": [{ "type": "command", "command": "\"<abs node>\" \"<checkout>/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
-   ```
+     ```json
+     "Stop": [{ "hooks": [{ "type": "command", "command": "\"C:/Program Files/nodejs/node.exe\" \"C:/work/claude-board/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
+     ```
+
+   - **Mac** (checkout `~/Work/claude-board`, written out in full, since `~` is not expanded inside the quotes):
+
+     ```json
+     "Stop": [{ "hooks": [{ "type": "command", "command": "\"/opt/homebrew/bin/node\" \"/Users/<you>/Work/claude-board/hooks/usage-stop.mjs\"", "timeout": 5 }] }]
+     ```
 
    If `Stop` already has entries, add this one beside them. Existing hooks in `hooks/` are wired the same way: they run
-   from the checkout, and only the guard is copied out (`kit/guard/install.mjs`).
-2. **Check it.** After the session's next reply, `cb usage --all --since 1h` lists that session. Its numbers grow at
-   each Stop.
-3. **Mac.** The tar step above already ships `hooks/`, so the Mac needs only the same settings entry.
+   from the checkout, and only the guard is copied out (`kit/guard/install.mjs`). The tar step above already ships
+   `hooks/` to the Mac.
+3. **Check it.** Test the exact command first, with a made-up session:
+   `echo '{"session_id":"probe","transcript_path":"/nonexistent.jsonl"}' | HERDR_PANE_ID=probe <the command>`
+   prints nothing and exits 0. Then, after a live session's next reply, `cb usage --all --since 1h` lists that session,
+   and its numbers grow at each Stop.
 4. **Switch it off.** Remove that entry, or set `CB_USAGE_OFF=1` in the session's environment.
 
 ## Backups

@@ -3,14 +3,14 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from '../server/db.ts';
 import { serveBridge, seatKey } from '../cli/bridge.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { BYTES_PER_RUN, loadState, scanSession, statuslineCost, turn } from '../hooks/usage-stop.mjs';
+import { BYTES_PER_RUN, cleanStates, loadState, modelId, report, saveState, scanSession, stateDir, statuslineCost, turn } from '../hooks/usage-stop.mjs';
 
 const clients: any[] = [];
 const dirs: string[] = [];
@@ -147,6 +147,19 @@ test('cb.usage_report: one cumulative row per session; the same totals again cha
   assert.equal((await row('sid-3')).model, 'unknown');
   await assert.rejects(rep('bad id!', [1, 1, 1, 1]), /session id/);
   await assert.rejects(rep('sid-4', [-1, 1, 1, 1]), /negative/);
+  await assert.rejects(rep('sid-5', [1, 1, 1, 1], null, 'm', 'p'.repeat(101)), /at most 100 characters/);
+  // the first report places the row: a later report from another pane cannot move it; another machine is refused
+  await sql`select cb.iam('pc', 'w2:p1', 'W2@pc', 'other', 'builder')`;
+  assert.equal(await rep('sid-1', [9, 9, 9, 9], null, 'claude-test-1', 'w2:p1'), 'updated');
+  const r3 = await row('sid-1');
+  assert.deepEqual([r3.machine, r3.pane, r3.actor, r3.project, r3.output_tokens], ['pc', 'w1:p1', 'W1@pc', 'demo', '9']);
+  await assert.rejects(sql`select cb.usage_report('other-box', 'w1:p1', 'sid-1', 'm', 10, 10, 10, 10)`, /another machine/);
+  // a pane not bound yet: actor and project are filled in once it is
+  assert.equal(await rep('sid-6', [1, 1, 1, 1], null, 'claude-test-1', 'w3:p1'), 'new');
+  assert.equal((await row('sid-6')).actor, null);
+  await sql`select cb.iam('pc', 'w3:p1', 'W3@pc', 'demo', 'builder')`;
+  assert.equal(await rep('sid-6', [1, 1, 1, 1], null, 'claude-test-1', 'w3:p1'), 'updated');
+  assert.deepEqual([(await row('sid-6')).actor, (await row('sid-6')).project], ['W3@pc', 'demo']);
 });
 
 const cb = (args: string[], env: Record<string, string> = {}) => {
@@ -170,6 +183,7 @@ test('cb.usage_summary and cb usage: one project or all, the sessions active in 
   assert.equal(s.totals.output_tokens, 20020);
   assert.equal(Number(s.totals.cost_usd), 1.5);
   assert.equal(s.totals.costed, 1);
+  assert.match(s.note, /main session's last model.*subagents/);
   assert.deepEqual(s.sessions.map((r: any) => r.session_id), ['sid-a', 'sid-b']);
   const [{ all }] = await sql`select cb.usage_summary(null, '7 days') as all`;
   assert.equal(all.totals.sessions, 4);
@@ -224,9 +238,10 @@ test('the Stop hook: sends numbers only, prints nothing, exits 0; no herdr pane 
   assert.deepEqual([row.machine, row.actor, row.project, row.model, row.cost_usd], ['testbox', 'W1@test', 'demo', 'claude-test-1', null]);
   assert.doesNotMatch(JSON.stringify(row), new RegExp(MARK));
   assert.doesNotMatch(JSON.stringify(row), /sess\.jsonl/);
-  const state = JSON.parse(readFileSync(join(d, 'cb-usage-syn-session-1.json'), 'utf8'));
+  const state = JSON.parse(readFileSync(join(d, 'cb-usage', 'syn-session-1.json'), 'utf8'));
   assert.deepEqual(state.sent, { model: 'claude-test-1', input: want[0], output: want[1], cacheRead: want[2], cacheWrite: want[3], cost: null });
   assert.doesNotMatch(JSON.stringify(state), new RegExp(MARK));
+  assert.equal(state.tried_at, undefined, 'a send that succeeded leaves no back-off');
 
   // the status line's fresh cost rides along
   const cfg = temp('cb-usage-cfg2-');
@@ -239,7 +254,7 @@ test('the Stop hook: sends numbers only, prints nothing, exits 0; no herdr pane 
   const d2 = temp('cb-usage-nopane-');
   const n = hook({ ...stdin, session_id: 'syn-session-2' }, { HERDR_PANE_ID: '', CB_USAGE_STATE_DIR: d2 });
   assert.equal(n.code, 0);
-  assert.equal(existsSync(join(d2, 'cb-usage-syn-session-2.json')), false);
+  assert.equal(existsSync(join(d2, 'cb-usage', 'syn-session-2.json')), false);
   // garbage on stdin, a bad session id: exit 0, silent
   for (const bad of ['not json', { session_id: '../../etc', transcript_path: f }]) {
     const b = hook(bad, { ...env, CB_USAGE_STATE_DIR: d2 });
@@ -256,6 +271,16 @@ test('the Stop hook: sends numbers only, prints nothing, exits 0; no herdr pane 
     const h = await hookAsync({ ...stdin, session_id: 'syn-session-4' }, { ...env, CB_DATABASE_URL: `postgres://cb@127.0.0.1:${port}/claude_board` });
     assert.deepEqual([h.code, h.out, h.err], [0, '', '']);
     assert.ok(h.ms > 1000 && h.ms < 10_000, `${h.ms} ms: the deadline, not an early exit, ended it (slack for a loaded machine)`);
+    // the next Stop, the board still silent: no new attempt for RETRY_MS, so it is fast (and the attempt mark stays)
+    const st4 = () => JSON.parse(readFileSync(join(d, 'cb-usage', 'syn-session-4.json'), 'utf8'));
+    const tried = st4().tried_at;
+    assert.equal(typeof tried, 'number');
+    appendFileSync(f, transcript(1, { from: 500 }).text);
+    const again = await hookAsync({ ...stdin, session_id: 'syn-session-4' }, { ...env, CB_DATABASE_URL: `postgres://cb@127.0.0.1:${port}/claude_board` });
+    assert.deepEqual([again.code, again.out, again.err], [0, '', '']);
+    assert.equal(st4().tried_at, tried, 'no new attempt while backing off');
+    assert.ok(again.ms < 1000, `${again.ms} ms`);
+    console.log(`# board silent: first Stop ${h.ms} ms, the next ${again.ms} ms`);
   } finally { hung.close(); }
 });
 
@@ -296,10 +321,25 @@ test('the Stop hook on a large transcript reads at most BYTES_PER_RUN a Stop and
   const env = { HERDR_PANE_ID: `p-big-${process.pid}`, CB_USAGE_STATE_DIR: d };
   const first = hook(stdin, env);
   assert.equal(first.code, 0, first.err);
-  const offset = JSON.parse(readFileSync(join(d, 'cb-usage-syn-big.json'), 'utf8')).files.main.offset;
+  const offset = JSON.parse(readFileSync(join(d, 'cb-usage', 'syn-big.json'), 'utf8')).files.main.offset;
   assert.ok(offset > 0 && offset <= BYTES_PER_RUN, `read ${offset} bytes`);
-  for (let k = 0; k < 20 && JSON.parse(readFileSync(join(d, 'cb-usage-syn-big.json'), 'utf8')).files.main.offset < statSync(f).size; k++)
+  for (let k = 0; k < 20 && JSON.parse(readFileSync(join(d, 'cb-usage', 'syn-big.json'), 'utf8')).files.main.offset < statSync(f).size; k++)
     assert.equal(hook(stdin, env).code, 0);
   const [row] = await sql`select * from cb.session_usage where session_id = 'syn-big'`;
   assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens].map(Number), want);
+});
+
+test('the hook sends only a model id, and deletes state files untouched for 7 days', () => {
+  assert.equal(modelId('claude-test-1'), 'claude-test-1');
+  assert.equal(modelId('some words with spaces'), 'unknown');
+  assert.equal(modelId(null), null);
+  assert.equal(report({ totals: [1, 2, 3, 4], model: 'x'.repeat(101) }, null).model, 'unknown');
+  const d = temp('cb-usage-clean-');
+  saveState(d, 'old-one', loadState(d, 'old-one'));
+  saveState(d, 'new-one', loadState(d, 'new-one'));
+  const eightDays = Date.now() - 8 * 24 * 3600_000;
+  utimesSync(join(stateDir(d), 'old-one.json'), new Date(eightDays), new Date(eightDays));
+  cleanStates(d);
+  assert.equal(existsSync(join(stateDir(d), 'old-one.json')), false);
+  assert.equal(existsSync(join(stateDir(d), 'new-one.json')), true);
 });
