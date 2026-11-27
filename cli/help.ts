@@ -234,6 +234,9 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     doctor: { use: 'cb doctor [--root <dir>] [--manifest <file>] [--json]',
       does: "Is this machine's cb what the release says? Compares the release files (bin cli db prompts server hooks kit) under <dir> (default: this cb's checkout) with a release manifest: --manifest, else release.json in <dir>; build one in an up-to-date clone with node cli/release.ts. Then checks that the installed guard (~/.claude-board/guard) matches <dir>'s kit/guard and that the PreToolUse hook in ~/.claude/settings.json runs it (6 probes), as node kit/guard/install.mjs --check does. Prints each missing or changed file, the release and this checkout's commit, and exits 1 when any check fails or could not run (no manifest included). Writes nothing and never connects to the board, so it works while the board is down. Fixing the guard or the hook is Ahmed's: ask him.",
       eg: 'cb doctor --manifest ~/release.json' },
+    update: { use: 'cb update --check [--from <url>] [--root <dir>] [--json]',
+      does: "Is this machine's copy the release the board serves? Fetches <url>/release/current.json (the board's commit and every release file's sha256) and the archive it names, checks that archive against its hash and the manifest in memory, then compares the files under <dir> (default: this cb's checkout) as cb doctor does: each missing, changed, extra or outside file. <url> is the board's web address: --from, else $CB_PUBLIC_URL, else PUBLIC_URL in this checkout's .env. Exits 0 only when the archive is sound and every file matches. Writes nothing and never connects to the board's database. Without --check it refuses: installing a release comes later; until then update as docs/ops/maintain.md (Upgrade) says.",
+      eg: 'cb update --check --from https://board.example.com' },
   }],
 ];
 

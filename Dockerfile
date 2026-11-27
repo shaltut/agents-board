@@ -31,6 +31,9 @@ COPY hooks ./hooks
 # the agent adapters import kit/guard at load, so cb in the container needs it (#4415); test/image-files.test.ts checks
 # that every relative import of bin, cli, db, server and hooks lands in a folder copied here
 COPY kit ./kit
+# #4352: the release this board serves (server/release.ts), made at deploy with git archive (the image has no .git).
+# The glob lets the build go on without it: the board then serves no release and says why. package.json only anchors it.
+COPY package.json release.tg[z] ./
 COPY --from=web /app/web/dist ./web/dist
 # `cb` inside the container: docker compose exec board cb ... (a wrapper, not a symlink: bin/cb finds the repo from $0)
 RUN printf '#!/bin/sh\nexec node /app/cli/cb.ts "$@"\n' > /usr/local/bin/cb && chmod +x /usr/local/bin/cb

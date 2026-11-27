@@ -48,23 +48,34 @@ export function buildManifest(root: string): Manifest {
   return { format: FORMAT, sha, files: Object.fromEntries(paths.map((p) => [p, sha256(join(root, p))])) };
 }
 
-/** A manifest read from a file, checked: the right format, a commit, and only relative paths inside the release
- *  folders (a manifest may come from elsewhere later: a path must never reach outside the checkout). */
+/** A relative path inside the release folders: no absolute path, backslash, empty, . or .. part. */
+export function releasePath(p: string) {
+  const parts = p.split('/');
+  return !isAbsolute(p) && !p.includes('\\') && !parts.some((s) => s === '' || s === '.' || s === '..') && RELEASE_DIRS.includes(parts[0]!);
+}
+/** A file a release must never carry, whatever git tracks: an env file (secrets) or anything installed. */
+export const neverReleased = (p: string) => p.split('/').some((s) => s === 'node_modules' || s === '.env' || s.startsWith('.env.'));
+
+/** A manifest checked: the right format, a commit, and only relative paths inside the release folders (a manifest from
+ *  the board or a file must never make a path reach outside the checkout). `from` names it in errors. */
+export function checkManifest(m: any, from: string): Manifest {
+  if (m?.format !== FORMAT) throw new Error(`${from} is not a release manifest (format ${JSON.stringify(m?.format)}, want ${FORMAT})`);
+  if (typeof m.sha !== 'string' || !/^[0-9a-f]{40}$/.test(m.sha)) throw new Error(`${from} has no commit sha`);
+  if (!m.files || typeof m.files !== 'object' || Array.isArray(m.files)) throw new Error(`${from} has no file list`);
+  for (const [p, h] of Object.entries(m.files)) {
+    if (!releasePath(p)) throw new Error(`${from} lists a path outside the release folders: ${JSON.stringify(p)}`);
+    if (typeof h !== 'string' || !/^[0-9a-f]{64}$/.test(h)) throw new Error(`${from} has a bad hash for ${p}`);
+  }
+  return { format: FORMAT, sha: m.sha, files: m.files };
+}
+
+/** A manifest read from a file, checked (checkManifest). */
 export function readManifest(file: string): Manifest {
   let m: any;
   try { m = JSON.parse(readFileSync(file, 'utf8')); } catch (e: any) {
     throw new Error(`cannot read the manifest ${file}: ${e?.code ?? e?.message ?? e}`);
   }
-  if (m?.format !== FORMAT) throw new Error(`${file} is not a release manifest (format ${JSON.stringify(m?.format)}, want ${FORMAT})`);
-  if (typeof m.sha !== 'string' || !/^[0-9a-f]{40}$/.test(m.sha)) throw new Error(`${file} has no commit sha`);
-  if (!m.files || typeof m.files !== 'object' || Array.isArray(m.files)) throw new Error(`${file} has no file list`);
-  for (const [p, h] of Object.entries(m.files)) {
-    const parts = p.split('/');
-    if (isAbsolute(p) || p.includes('\\') || parts.some((s) => s === '' || s === '.' || s === '..') || !RELEASE_DIRS.includes(parts[0]!))
-      throw new Error(`${file} lists a path outside the release folders: ${JSON.stringify(p)}`);
-    if (typeof h !== 'string' || !/^[0-9a-f]{64}$/.test(h)) throw new Error(`${file} has a bad hash for ${p}`);
-  }
-  return m;
+  return checkManifest(m, file);
 }
 
 // folders under the release folders that are never part of a release (installed or built), left out of the extras
@@ -78,7 +89,9 @@ function onDisk(root: string): string[] {
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch (e: any) { if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return; throw e; }
     for (const e of entries) {
       const full = join(dir, e.name);
-      if (e.isDirectory()) { if (!NOT_RELEASED.has(e.name)) walk(full); } else out.push(relative(root, full).split(sep).join('/'));
+      const rel = relative(root, full).split(sep).join('/');
+      if (neverReleased(rel)) continue; // an env file is never part of a release, so never an extra either
+      if (e.isDirectory()) { if (!NOT_RELEASED.has(e.name)) walk(full); } else out.push(rel);
     }
   };
   for (const d of RELEASE_DIRS) walk(join(root, d));
