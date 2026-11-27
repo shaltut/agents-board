@@ -19,6 +19,7 @@ import { titleBody } from './title-body.ts';
 import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { doctorCmd } from './doctor.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -34,6 +35,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' },
+  root: { type: 'string' }, manifest: { type: 'string' },
 } as const;
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
@@ -76,7 +78,7 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
 const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
 let sql: any = direct;
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !o.help)
+if (pane && !process.env.PGAPPNAME && cmd !== 'help' && cmd !== 'doctor' && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
     if (bridged) { sql = bridged; break; }
@@ -434,7 +436,8 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
 }
 
 async function run(): Promise<unknown> {
-  await resolveActor();
+  // cb doctor looks at this machine only, never the board: it must work on a stale worker and while the board is down
+  if (cmd !== 'doctor') await resolveActor();
   if ('answered' in sql) sql.answered = 0; // who this pane is was only read: the command's own steps count (ranWords)
   switch (cmd) {
     case 'start':
@@ -869,6 +872,8 @@ ${body}`, json: pg };
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'supervise.ts'), ...flags], { stdio: 'inherit' });
       return { code: r.status ?? 1 };
     }
+    case 'doctor':
+      return doctorCmd({ root: o.root, manifest: o.manifest });
     case 'role': {
       need(1, 'role <role> [--json]   e.g. cb role builder');
       const text = await callFn('role_text', { role: args[0] }) as string;
