@@ -1,11 +1,13 @@
 // The OpenCode adapter (#4002 phase 3). Pure: no database. OpenCode runs its TUI and a loopback HTTP server in one process
 // (`opencode <dir> --port <p>`); the relay (on the seat's own machine) reaches it through an endpoint file written before
-// the pane starts the agent, like Claude's. The password lives only in that file and the pane env: never logged, never in argv.
+// the pane starts the agent, like Claude's. The password lives only in that file and the pane env: never logged, never in argv
+// (#4002: the pane prestart makes it on the seat's machine; buildLaunch refuses one in the launch env, which herdr's --env puts on argv).
 import { spawnSync } from 'node:child_process';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { seatKey } from '../bridge.ts';
+import { stripClaudeOnly } from './env.ts';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 
 export type OpencodeEndpoint = { port: number; password: string; username?: string; updatedAt: number };
@@ -114,15 +116,8 @@ export function freellmRefusal(cwd: string, rule: FreellmRule | null = loadFreel
   return null;
 }
 
-/** The env the caller gave, minus Claude-only secrets (a non-Claude seat never inherits them). */
-export function opencodeEnv(env: Record<string, string> = {}): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (k.toUpperCase() === 'GITHUB_PERSONAL_ACCESS_TOKEN' || k.toUpperCase().startsWith('CLAUDE_CODE_')) continue;
-    out[k] = v;
-  }
-  return out;
-}
+/** The env the caller gave, minus Claude-only secrets (a non-Claude seat never inherits them; the list in env.ts). */
+export const opencodeEnv = (env: Record<string, string> = {}): Record<string, string> => stripClaudeOnly(env);
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 // Only the last TAIL_LINES lines are read, and a bare "429" or "rate limit" is not enough: a banner needs error wording around it.
@@ -161,8 +156,9 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
     // Through `herdr agent start <name> --kind opencode --pane <p> -- <args>`: herdr runs the bare `opencode` executable, so the
     // freellm wrapper (folder guard) is NOT in this path; freellmRefusal() re-applies its folder rule here (read from this
     // machine's rule file at each launch unless one was injected), and the env
-    // sets what the wrapper sets. The caller must supply CB_OPENCODE_PORT and OPENCODE_SERVER_PASSWORD in `env` (the same
-    // pair it wrote with writeOpencodeEndpoint): a seat nobody can reach is not started.
+    // sets what the wrapper sets. The caller must supply CB_OPENCODE_PORT in `env`; the password is made in the pane by the
+    // prestart (cli/agents/seat-prestart.ts secret), which writes the endpoint file on the seat's machine. A password in `env`
+    // is refused: squad up passes the launch env as herdr --env arguments, visible in any process listing.
     // FREELLMAPI_URL and FREELLMAPI_API_KEY come from the pane's own env and are never copied into a LaunchSpec. The folder rule
     // applies to a freellmapi/* model and to no model at all (OpenCode then takes its config default, freellmapi/auto).
     buildLaunch(l: LaunchInput) {
@@ -174,11 +170,12 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
       const env = opencodeEnv(l.env);
       const port = Number(env.CB_OPENCODE_PORT);
       if (!validPort(port)) throw new Error('opencode launch needs env CB_OPENCODE_PORT (1024-65535)');
-      if (!env.OPENCODE_SERVER_PASSWORD) throw new Error('opencode launch needs env OPENCODE_SERVER_PASSWORD');
+      if (Object.keys(env).some((k) => k.toUpperCase() === 'OPENCODE_SERVER_PASSWORD')) throw new Error('opencode launch refuses OPENCODE_SERVER_PASSWORD in its env: the launch env goes on herdr\'s argv; the pane prestart makes the password');
       return {
         kind: 'opencode',
         args: [cwd, '--hostname', '127.0.0.1', '--port', String(port), ...(model ? ['-m', model] : []), '--auto'],
         env: { ...env, OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1', OPENCODE_DISABLE_AUTOUPDATE: '1' },
+        prestart: { args: [String(port)] },
       };
     },
 

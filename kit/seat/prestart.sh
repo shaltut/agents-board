@@ -1,0 +1,14 @@
+# Seat prestart for bash and zsh (#4002 install gates). cb squad up types this into a non-Claude seat's pane before herdr
+# starts the agent, so it runs in the pane's own shell and the agent inherits what it leaves:
+#   . '<board>/kit/seat/prestart.sh' '<board>' <agent> <machine> <pane> <nonce> [<opencode port>]
+# Dot-sourced, never run: it drops every Claude-only name (the list in cli/agents/env.ts) from this shell, sets OpenCode's
+# server password from a fresh 0600 endpoint file (never on argv), then cli/agents/seat-prestart.ts checks, from a child of
+# this shell, and prints cb-seat-ready:<nonce> or cb-seat-refused:<nonce>: <why>.
+for __cb_v in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | grep -iE '^(CLAUDE_CODE_|ANTHROPIC_)|^(CLAUDECODE|GITHUB_PERSONAL_ACCESS_TOKEN)$'); do
+  unset "$__cb_v"
+done
+unset __cb_v
+if [ "$2" = opencode ]; then
+  OPENCODE_SERVER_PASSWORD="$(node "$1/cli/agents/seat-prestart.ts" secret "$3" "$4" "$6")" && export OPENCODE_SERVER_PASSWORD || unset OPENCODE_SERVER_PASSWORD
+fi
+node "$1/cli/agents/seat-prestart.ts" check "$2" "$3" "$4" "$5"

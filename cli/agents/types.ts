@@ -6,7 +6,10 @@ export type AgentKind = 'claude' | 'codex' | 'opencode' | 'agy';
 export type AgentState = 'idle' | 'working' | 'blocked' | 'done' | 'unknown';
 export type SeatHandle = { machine: string; pane: string; actor?: string; herdr?: string | null; herdrName?: string; agent: AgentKind };
 /** `args` are what follows `--` in `herdr agent start <name> --kind <kind> --pane <pane> -- <args>`. */
-export type LaunchSpec = { kind: string; args: string[]; env: Record<string, string> };
+/** `prestart` (#4002): run kit/seat/prestart.{sh,ps1} in the pane before the agent starts; squad up adds board, agent,
+ *  machine and pane, then these plain words. It strips the Claude-only env from the pane's real shell and checks the guard
+ *  will run; the seat is refused unless it prints cb-seat-ready. Absent (Claude): the launch is exactly as before. */
+export type LaunchSpec = { kind: string; args: string[]; env: Record<string, string>; prestart?: { args: string[] } };
 export type AgentStatus = { state: AgentState; safeToClose: boolean; detail?: string };
 export type QuotaSignal = { kind: 'quota' | 'rate_limit'; retryAfterSec?: number; raw: string };
 export type GuardInstallSpec = { targetPath: string; shimFile: string; matchers: Record<'win32' | 'darwin' | 'linux', string>; notes: string };
@@ -23,6 +26,9 @@ export interface AgentAdapter {
   readonly relayStart: 'session-hook' | 'pane-prestart';
   buildLaunch(launch: LaunchInput): LaunchSpec;
   deliver(seat: SeatHandle, text: string, opts?: { raw?: boolean }): Promise<void>;
+  /** The text as this agent's input box must receive it to submit (#4002: Codex opens a popup on a trailing $word or
+   *  @word and Enter picks from it). deliver and squad up's first prompt both use it. Absent: the text as given. */
+  promptText?(text: string): string;
   isAlive(seat: SeatHandle): Promise<boolean>;
   /** The agent session serving the seat now (#4379), handed to cb.inbox: another id than the pane's row has means a new
    *  session in a reused pane, and the row starts again. Optional: an agent without one keeps the row as it is. */
