@@ -17,7 +17,9 @@ import { neverSent } from './connect-retry.ts';
 import { isNetworkError } from './survive.ts';
 
 export const PROJECT = 'claude-board';
-export const DEFAULT_MAX = 8; // Opus (Q3000): about 5x Sonnet per call, so fewer groups per run than the design's 12
+// Opus (Q3000): one group measured at about USD 0.12 and two at 0.28 on the PC, so 4 stays well inside the 1.00 cap
+// (a capped run files nothing and caches nothing, and would trip again)
+export const DEFAULT_MAX = 4;
 export const DEFAULT_BUDGET_USD = 1;
 export const COOLDOWN_MS = 6 * 3600_000;
 export const MANY_SEATS = 3;
@@ -31,7 +33,7 @@ const RANK = ['crash', 'db', 'bridge', 'slow', 'usage', 'refused'];
 export const markerOf = (tmpl: string) => `fault:${tmpl}`;
 
 type Decision = { group: Group; verdict: string; why: string; by: 'rule' | 'agent'; card?: number | null; title?: string; body?: string;
-  candidates?: any[]; action?: string; held?: string };
+  candidates?: any[]; marked?: Set<number>; action?: string; held?: string };
 
 /** The verdict cb gives without a model, or null (the judge decides). */
 export function ruleFor(g: Group, judged: Marker['groups'][string] | undefined, infraHeavy: boolean): { verdict: string; why: string } | 'judged' | null {
@@ -53,9 +55,11 @@ async function candidates(sql: any, g: Group) {
   const seen = new Map<number, any>();
   // a wrong use names its command only in the cmd field (the message masks it): cards about it say "cb <command>"
   const byCmd = (g.kind === 'usage' || g.kind === 'refused') && g.cmds.length === 1 ? await find(`cb ${g.cmds[0]}`) : [];
-  for (const c of [...await find(markerOf(g.tmpl)), ...byCmd, ...await find(searchWords(g.msg))])
+  const marked = await find(markerOf(g.tmpl));
+  for (const c of [...marked, ...byCmd, ...await find(searchWords(g.msg))])
     if (seen.size < 5 && !seen.has(Number(c.id))) seen.set(Number(c.id), { id: Number(c.id), title: c.title, type: c.type, status: c.status, stage: c.stage ?? null });
-  return [...seen.values()];
+  // the cards that carry this fault's marker: the only ones a filing run may note (the filing run checks again)
+  return { cards: [...seen.values()], marked: new Set<number>(marked.map((c: any) => Number(c.id))) };
 }
 
 export function schemaFor(max: number) {
@@ -238,7 +242,7 @@ export async function triageCmd(sql: any, o: TriageOpts) {
 
   let cost: number | null = null, secs: number | null = null;
   if (sent.length && agent !== 'none') {
-    try { for (const d of sent) d.candidates = await candidates(sql, d.group); }
+    try { for (const d of sent) { const c = await candidates(sql, d.group); d.candidates = c.cards; d.marked = c.marked; } }
     catch (e: any) {
       if (!neverSent(e) && !isNetworkError(e) && e?.code !== 'RELAY_LOST') throw e;
       return { out: [head, ...lines(ds), `board unreachable (${e.code}): nothing was sent to the judge and nothing filed. Run cb triage again once the board answers`].join('\n'),
@@ -246,9 +250,12 @@ export async function triageCmd(sql: any, o: TriageOpts) {
     }
     const j = runJudge({ prompt: promptFor(sent, releaseOf()), schema: schemaFor(sent.length), model, budget, board: BOARD });
     cost = j.cost; secs = Math.round(j.ms / 1000);
-    if (!j.ok) throw new Error(`${j.error}${j.cost != null ? ` after USD ${j.cost.toFixed(2)}` : ''}: nothing was filed and triage.json is unchanged. Try again later, or raise --budget (now ${budget.toFixed(2)})`);
+    if (!j.ok) throw new Error(`${j.error}${j.cost != null ? ` after USD ${j.cost.toFixed(2)}` : ''}: nothing was filed and triage.json is unchanged. Try again later, send fewer groups with --max (now ${sent.length}), or raise --budget (now ${budget.toFixed(2)})`);
     validate(j.groups, sent);
     for (const d of sent) {
+      // the judge's reason is printed too (stdout, --json): it passes the same check, or is withheld
+      const badWhy = d.why && redactionProblem(d.why);
+      if (badWhy) d.why = `(the judge's reason is withheld: it failed the redaction check, ${badWhy})`;
       if (d.held || !FILE.has(d.verdict)) continue;
       const bad = d.title && (redactionProblem(d.title) ?? redactionProblem(d.body!));
       if (bad) { d.held = `failed the redaction check (${bad})`; d.title = d.body = undefined; }
@@ -288,7 +295,8 @@ function lines(ds: Decision[], files = false) {
     if (d.action === 'noted') return `noted #${d.card}`;
     if (d.action === 'cancelled') return `noise (#${d.card} cancelled)`;
     if (d.action === 'fixed') return `fixed (#${d.card} done)`;
-    if (FILE.has(d.verdict)) return d.card != null ? (files ? `same as #${d.card}` : `would note #${d.card}`) : files ? 'not filed' : 'would file';
+    // a note goes only on a card carrying this fault's marker (Q3001); any other card the judge names is only shown
+    if (FILE.has(d.verdict)) return d.card != null ? (!files && d.marked?.has(d.card) ? `would note #${d.card}` : `same as #${d.card}`) : files ? 'not filed' : 'would file';
     return d.by === 'agent' && d.verdict === 'unsure' && !d.why ? 'to judge' : d.verdict;
   };
   return ds.slice(0, 40).map((d) => {

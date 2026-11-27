@@ -26,7 +26,7 @@ if (plan.mode === 'garbage') { console.log('not json'); process.exit(0); }
 if (plan.mode === 'budget') { console.log(JSON.stringify({ is_error: true, subtype: 'error_max_budget_usd', total_cost_usd: 1.01 })); process.exit(1); }
 const groups = JSON.parse(input.slice(input.indexOf('GROUPS') + 6));
 // the plan's verdict for the groups of its kind (db by default); every other group is a user error
-const out = groups.map((g) => g.kind !== (plan.kind ?? 'db') ? { tmpl: g.tmpl, verdict: 'user_error', why: 'the message says what to do' } : ({ tmpl: plan.tmpl ?? g.tmpl, verdict: plan.verdict, why: 'cli/cb.ts:1 makes it',
+const out = groups.map((g) => g.kind !== (plan.kind ?? 'db') ? { tmpl: g.tmpl, verdict: 'user_error', why: 'the message says what to do' } : ({ tmpl: plan.tmpl ?? g.tmpl, verdict: plan.verdict, why: plan.why ?? 'cli/cb.ts:1 makes it',
   ...(plan.card === 'candidate' ? { existing_card: g.candidates[0]?.id ?? null } : plan.card != null ? { existing_card: plan.card } : {}),
   ...(plan.title ? { title: plan.title, body: plan.body } : {}) }));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.12, structured_output: { groups: out } }));`;
@@ -127,10 +127,15 @@ test('the judge\'s answer is checked: garbage, a hang and a spent budget file no
   assert.match(hung.err, /did not finish within 2 s/);
   plan(dir, { ...BUG, card: 999999 });
   assert.match(cb(['triage', '--dry-run'], dir, home).out, /held +ft-\S+ +db .*card #999999 was not one of its candidates/);
-  plan(dir, { ...BUG, body: 'It reads from 10.0.0.7 and fails.' });
+  plan(dir, { ...BUG, body: 'It reads from 10.0.0.7 and fails.', why: 'it read the URL https://example.invalid/x' });
   const held = cb(['triage'], dir, home);
   assert.equal(held.code, 0, held.err);
   assert.match(held.out, /held .*failed the redaction check \(an IPv4 address\)/);
+  // the judge's reason is printed too: checked the same way, withheld on a hit
+  const why = cb(['triage', '--dry-run', '--json'], dir, home);
+  assert.equal(why.code, 0, why.err);
+  assert.match(why.out, /the judge's reason is withheld: it failed the redaction check, a URL/);
+  assert.doesNotMatch(why.out, /example\.invalid/);
   assert.equal((await bugs(sql)).length, 0);
   assert.equal(redactionProblem('see C:\\Users\\x\\y'), 'a path outside the repo');
   assert.equal(redactionProblem('W1@macbook said so'), 'a session name');
@@ -181,6 +186,8 @@ test('filing writes only marked claude-board cards: a named card without the mar
   const ls = seed(home);
   const [{ id: plain }] = await sql`select cb.task_add(${PROJECT}, 'deadlock detected in mine', 'a card with the same words, no marker', 'next') as id`;
   plan(dir, { verdict: 'bug', card: 'candidate' });
+  // the dry run says the same as the filing run: a card without the marker is shown, never noted
+  assert.match(cb(['triage', '--dry-run'], dir, home).out, new RegExp(`same as #${plain} `));
   const r = cb(['triage'], dir, home);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, new RegExp(`same as #${plain}`));

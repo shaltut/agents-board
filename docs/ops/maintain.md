@@ -255,7 +255,7 @@ or an environment value.
   servers, no settings or hooks, an allow-listed environment) in this checkout. Bugs and misleading messages pass a
   redaction check and are filed as P2 bugs on claude-board ending `fault:ft-…`, or noted on the open card that carries
   that marker, under `pg_advisory_xact_lock` on the template: two machines never file one fault twice. Nothing else is
-  ever written (Q3001). Bounds: `--max 8` groups per run, `--budget 1.00` USD (`CB_TRIAGE_BUDGET_USD`), a 10-minute
+  ever written (Q3001). Bounds: `--max 4` groups per run (one Opus run with 2 groups measured USD 0.28), `--budget 1.00` USD (`CB_TRIAGE_BUDGET_USD`), a 10-minute
   timeout (`CB_TRIAGE_TIMEOUT_MS`), one filing run per machine per 6 hours (`--force`). `triage.json` in the fault
   folder remembers every verdict, so a group is judged again only when its count triples or a new release shows it.
 - **Not covered yet:** the hooks (session-start, usage-stop), the relay and the supervisor still log only to their own
