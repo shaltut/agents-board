@@ -35,6 +35,23 @@ test('a card change re-fetches the lists that show cards; a question change, the
   for (const k of ['questions', 'me', 'task', 'projects']) assert.ok(q.includes(k), k);
 });
 
+test('a queue event (#4527, cb_queue) re-reads the Runners page only; a hidden tab waits for it', (t) => {
+  assert.deepEqual(keysFor(tables('jobs')), ['runners']);
+  const schema = readFileSync(join(import.meta.dirname, '..', 'db', 'schema.sql'), 'utf8');
+  assert.doesNotMatch(schema, /on cb\.(jobs|runners|job_holds)\s+for each statement execute function cb\.notify\(\)/, 'no job change wakes every page');
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const calls: (string[] | 'all')[] = [];
+  let hidden = true;
+  const r = refresher({ invalidate: (k) => calls.push(k), hidden: () => hidden });
+  r.change('jobs');
+  t.mock.timers.tick(10_000);
+  assert.deepEqual(calls, [], 'the queue does not ring');
+  hidden = false;
+  r.visible();
+  t.mock.timers.tick(2000);
+  assert.deepEqual(calls, [['runners']]);
+});
+
 test('a reconnect or a table nobody mapped re-fetches everything', () => {
   assert.equal(keysFor(tables('listen')), 'all');
   assert.equal(keysFor(tables('events', 'brand_new_table')), 'all');

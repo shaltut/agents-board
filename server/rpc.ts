@@ -12,6 +12,10 @@ export const RPC_FUNCTIONS = [
   'page_set', 'page_get', 'stage_set', 'stage_pass', 'stage_fail', 'digest', 'resume', 'next_step', 'task_queue', 'project_pipeline', 'role_text', 'squad_set', 'squad_get',
   // the project settings page (#4332); the github_* writes are cb github's too
   'squad_options', 'squad_page', 'role_text_set', 'role_text_page', 'github_watch_add', 'github_watch_remove', 'github_mute', 'github_watches',
+  // the Runners page (#4527): Ahmed only from the web (server/main.ts QUEUE_OWNER); the read is GET /api/runners
+  'job_cancel', 'job_retry', 'job_move', 'job_hold', 'runner_set', 'runner_limits_set',
+  // one project's addition and who its seats ask first; loading the release's role texts (#4525)
+  'project_role_set', 'project_role_page', 'role_text_import',
 ];
 const SETOF = new Set(['task_claim', 'mine', 'answers_pending', 'task_queue']);
 

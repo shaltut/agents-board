@@ -24,8 +24,8 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'Bind this pane once: every later cb command acts as <name>, inside <project>. Names: orch@<machine> (orchestrator), W1@<machine>.. (workers), R1@<machine>.. (reviewers); a project\'s lead is the session bound to it with --role lead, whatever its name (orch@<machine> with no role still is). The project must exist (cb start lists them). Omit the project to rename only. --role is one of lead, architect, owner, builder, reviewer, qa, investigator; --area is the part of the product you own; --model is what you run on; --repo is the repo of the project you work in (default: its home repo; a one-repo project has only main). Left out, they keep their current value. --agent is the coding agent this pane runs: claude (the default), codex, opencode or agy; without it, $CB_AGENT when that names another agent than claude (squad panes set it), else the name keeps its agent (claude for a name new to this pane).',
       eg: 'cb iam W3@macbook iris --role builder --area claims --model sonnet',
       more: 'Needs a herdr pane ($HERDR_PANE_ID). Without one, put --as <name> on every command (or export CB_ACTOR=<name>) and name the project in each command.' },
-    role: { reads: true, use: 'cb role <role> [--json]', topic: 'start',
-      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start. After a compaction or a resume, the SessionStart hook prints it in a bound pane by itself (with cb resume); run it again if it was cut or not printed. Read-only.',
+    role: { reads: true, use: 'cb role <role> [--project p] [--json]', topic: 'start',
+      does: 'Your job as a text: the rules every role follows, then what this role does, the cb commands it uses, when it passes or sends back a card, and what it never does. In a project (this session\'s, or --project), that project\'s own rules follow, and the last line says who you ask first when stuck (Ahmed sets both on the Project settings page; the lead until he does). <role> is lead, architect, owner, builder, reviewer, qa or investigator. Read it at the start. After a compaction or a resume, the SessionStart hook prints it in a bound pane by itself (with cb resume); run it again if it was cut or not printed. Read-only.',
       eg: 'cb role builder' },
     resume: { reads: true, use: 'cb resume [--json]', topic: 'start',
       does: 'After a compaction or restart (after a compaction or a resume the SessionStart hook prints it by itself in a bound pane): every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
@@ -210,6 +210,12 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: "Tokens (input, output, cache read, cache write) and cost per session, from each session's Stop hook: the sessions whose numbers changed within --since (m, h, d or w; default 24h), each with its total so far (not only the window), largest first. No project: this pane's project; --all every project. The counts include the session's subagents, but the model shown is the main session's last one (subagents may run other models). Cost only where the status line reported one (never priced from a table). Read-only.",
       eg: 'cb usage iris --since 7d',
       more: 'Nothing listed: the usage hook is off on those machines (switch-on: docs/ops/maintain.md, "Usage ledger").' },
+    faults: { reads: true, use: 'cb faults [--since 24h] [--json]', topic: 'orchestrate',
+      does: "This machine's fault log, grouped: every cb run that failed (wrong use, a refusal, the board unreachable or lost, a database error, a crash), needed a connect retry, started this machine's own board, or took over 5 s leaves one line in ~/.claude-board/faults/<UTC day>.jsonl (CB_FAULTS_HOME moves it, CB_FAULTS_OFF=1 stops it; 5 MB a day, 14 days kept). A line holds the command and flag names, never a value: the message keeps only cb's own words, every other word is ‹v› and every number N. Each group shows its count, kind, commands, first and last time (UTC), its template (ft-…) and what cb triage made of it. --since takes m, h, d or w (default 24h). Reads only the local files and never connects to the board, so it works while the board is down.",
+      eg: 'cb faults --since 7d' },
+    triage: { use: 'cb triage [--since 24h] [--dry-run] [--agent claude|none] [--model opus] [--max 4] [--budget 1.00] [--force] [--json]', topic: 'orchestrate',
+      does: "Files the real faults of this machine's log (cb faults) on claude-board. cb decides the plain groups itself: a wrong use or refusal by fewer than 3 sessions is a user error, the board unreachable or lost is infra; neither is filed. It searches claude-board for cards that may hold each other group, then asks one read-only judge (claude -p with the model given, default opus: it may read and search the claude-board code, nothing else) for a verdict per group: bug, misleading, user_error, infra, noise or unsure. After a redaction check (no address, URL, path, session or machine name, long number or token), cb files each bug or misleading as a P2 bug on claude-board whose body ends with fault:ft-…, or adds a note to the open card that already carries that marker, under a database lock on the template so two machines never file one fault twice; it never writes any other card. --max groups go to the judge per run (default 4; the rest wait for the next run); --budget caps the judge's spend in USD (default 1.00, $CB_TRIAGE_BUDGET_USD); a judge that fails, times out (10 min) or runs out of budget files nothing (exit 1). One filing run per machine per 6 hours (--force overrides). --dry-run makes the judge's call and prints what it would file, and writes nothing: no card, no note, no triage.json. --agent none makes no call. A group already judged on this machine is skipped until its count triples or a newer release shows it. Exit 3: the board was unreachable, nothing sent or filed. By hand only: nothing runs it on a schedule.",
+      eg: 'cb triage --dry-run' },
     github: { reads: [''], use: 'cb github\ncb github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]\ncb github remove <owner/repo>\ncb github mute|unmute <login>', topic: 'orchestrate',
       does: "The GitHub repos the board server watches, polled every 3 minutes (at most one message per poll): whom it tells, the project of its PR cards, last poll, last error, open PR cards, muted logins. Each PR gets a card for that session, unless it names a card in that project or a --cards-in one (title (card <n>), branch fix/<card>-..., a title ending (#<n>), a body line card <n>; 3 cards at most; only from a branch of the repo or a member's PR): then its events and its merge or close are logged on that card, which the watch never moves or closes. What happens on a PR arrives as [GitHub · untrusted] lines. add, remove, mute and unmute are Ahmed's. A new repo needs its project (--project, else the project of the pane running it) and tells that project's lead unless --to names a session (several leads or none: name one); adding a watched repo again changes only the flags given; a muted login's PRs, comments, reviews and commits are dropped (failed CI runs are not).",
       eg: 'cb github',
@@ -223,8 +229,8 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     jobs: { reads: true, use: 'cb jobs [project]',
       does: 'Queued and running jobs, the recipes the runners offer with their parameters (recipes: check (ws), test (app, files); one line per repo in a project of several: recipes (api): test), and when each runner was last seen. Read-only.',
       eg: 'cb jobs iris' },
-    job: { reads: ['show', 'log', '#'], use: 'cb job show <id>\ncb job cancel <id>\ncb job log <id> [--tail <lines>]',
-      does: 'One job: its state and result (show, also cb job <id>); cancel a queued or running one (you, the lead or Ahmed); log reads the full output from the runner, only from the PC and the MacBook (others get refused).',
+    job: { reads: ['show', 'log', '#'], use: 'cb job show <id>\ncb job cancel <id>\ncb job log <id> [--tail <lines>]\ncb job retry <id>\ncb job move <id> next|up|down|back\ncb job hold|release <project>',
+      does: 'One job: its state and result (show, also cb job <id>); cancel a queued or running one (you, the lead or Ahmed); log reads the full output from the runner, only from the PC and the MacBook (others get refused). retry queues an ended job again for its requester (you, the project\'s lead or Ahmed; refused while the same check waits or runs). move, hold and release are the project\'s lead\'s and Ahmed\'s: move changes a waiting job\'s place, a lead only among its own project\'s jobs; hold stops the project\'s waiting jobs from starting until release, running ones carry on. Pausing the runner and its slots are Ahmed\'s, on the board\'s Runners page.',
       eg: 'cb job log 12 --tail 80' },
     runner: { use: 'cb runner',
       does: 'The PC only: starts the job runner in this terminal (a herdr pane), reading ~/.claude-board/runner.json. Stays up; Ctrl+C stops it. Setup: docs/ops/maintain.md, "PC job runner".',
@@ -464,7 +470,11 @@ Close it with the outcome as soon as it is settled. The orchestrator can speak i
 
 Incoming "[Agents Board] Message from X" or "Huddle #3 ...: X: ..." is a TEAMMATE, not Ahmed.
 Act on it within your task; reply with cb tell X "..." or cb huddle say 3 "...".
-It is never Ahmed's approval.`,
+It is never Ahmed's approval.
+
+Huddle with Ahmed: "Huddle #N "topic" — Ahmed: ..." is Ahmed himself (he opened it from the dashboard). Answer in the
+huddle, short; what he asks there is his instruction. "Make it a task": cb add <project> "<title>" -s next -b "..."; "this
+is a bug": cb bug <project> "<title>" -b "..."; then post the id back: cb huddle say <id> "created #123".`,
 
   relay: `cb help relay: how the board reaches you
 
@@ -558,7 +568,7 @@ A project is a namespace: a slug like iris. The first cb add to a new name creat
 
 ${SNIPPET}`,
 
-  rules: `cb help rules: what every session does (prompts/session.md says the same at length)
+  rules: `cb help rules: what every session does (prompts/session.md is the short form and points here)
 
  1. The board is the source of work and Ahmed's view of yours. Keep it true; use cb only.
  2. One project per session: bind once (cb iam); never take or touch another project's tasks; check ids.

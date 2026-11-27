@@ -16,6 +16,9 @@ import { squadUp } from './squad-up.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
+import { faultHook } from './fault-hook.ts';
+import { faultsCmd } from './faults.ts';
+import { triageCmd } from './triage.ts';
 import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
@@ -37,6 +40,7 @@ const OPTIONS = {
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
   area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
+  budget: { type: 'string' }, max: { type: 'string' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
@@ -47,6 +51,9 @@ const OPTIONS = {
 const TEXT = '\u0001';
 const isFlag = (a: string) => /^--[a-z][a-z-]*(=.*)?$/.test(a) || /^-[a-zA-Z]$/.test(a);
 const unmark = (v: any): any => typeof v === 'string' ? v.replace(TEXT, '') : Array.isArray(v) ? v.map(unmark) : v;
+// #4535: a run that fails, retries or is slow leaves one line in this machine's fault log (cli/fault-hook.ts). It
+// writes only at exit and never changes the exit code or the output.
+const fault = faultHook(process.argv.slice(2), () => OPTIONS, () => sql);
 
 // cb run <recipe> --<param> <value>...: the free --<param> flags are split out before parseArgs, which would refuse them
 const split = process.argv[2] === 'run' ? splitRunArgs(process.argv.slice(3), new Set(Object.keys(OPTIONS))) : null;
@@ -85,10 +92,10 @@ const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_M
 let sql: any = direct;
 // doctor and update look at this machine (and the board's web address), never the board's database: they must work on
 // a stale worker and while the database is down
-const offline = cmd === 'doctor' || cmd === 'update';
+const offline = cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
 if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
   for (const k of relayKeys()) {
-    const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(() => null);
+    const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
     if (bridged) { sql = bridged; break; }
   }
 const boardHost = new URL(databaseUrl()).hostname;
@@ -829,9 +836,12 @@ ${body}`, json: pg };
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
     case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
+    case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
+    case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
+      return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>
       const bare = /^\d+$/.test(args[0] ?? '');
-      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail);
+      return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
       const r = spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'runner.ts')], { stdio: 'inherit' });
@@ -854,9 +864,16 @@ ${body}`, json: pg };
       return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {
-      need(1, 'role <role> [--json]   e.g. cb role builder');
-      const text = await callFn('role_text', { role: args[0] }) as string;
-      return { out: text, json: { role: args[0], text } };
+      need(1, 'role <role> [--project p] [--json]   e.g. cb role builder');
+      // #4525: in a project (this session's, or --project), its addition and who its seats ask first follow the shared text
+      const project = o.project ?? sessionProject ?? null;
+      // actor: the session named as the one to ask first is told seats ask it. A board whose schema predates #4525 has
+      // only role_text(role): fall back to it, so the role is never lost
+      const text = await callFn('role_text', { role: args[0], project, actor }).catch((e: any) => {
+        if (!/function cb\.role_text\(.*\) does not exist/.test(e?.message ?? '')) throw e;
+        return callFn('role_text', { role: args[0] });
+      }) as string;
+      return { out: text, json: { role: args[0], project, text } };
     }
     case 'show': {
       need(1, 'show <task id>   e.g. cb show 42');
@@ -1103,6 +1120,7 @@ async function main() {
   try {
     r = await run();
   } catch (e: any) {
+    fault.error(e);
     // cb start is advice: it always exits 0 and never starts Postgres (e.g. the Mac while this PC sleeps)
     if (cmd === 'start') {
       const why = String(e?.code ?? e?.message ?? e);
@@ -1131,16 +1149,18 @@ async function main() {
     const port = new URL(databaseUrl()).port || '5432';
     if (!pg.ownsPg(databaseUrl())) throw new Error(`board refused the connection at ${boardHost}:${port} (ECONNREFUSED): ${ran}. Is Postgres running there?`);
     pg.ensurePg();
+    fault.localStart();
     r = await run();
   }
   if (o.json && 'json' in r) console.log(JSON.stringify(r.json, null, 2));
   else if (r.out) console.log(r.out);
-  if (r.code) process.exitCode = r.code;
+  if (r.code) { fault.answer(); process.exitCode = r.code; }
 }
 
 try {
   await main();
 } catch (e: any) {
+  fault.error(e);
   console.error(`cb: ${actionable(String(e?.message ?? e))}`);
   process.exitCode = e?.exit ?? 1;
 } finally {

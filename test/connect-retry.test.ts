@@ -47,6 +47,7 @@ test('withConnectRetry: a refused statement is sent again with backoff until it 
   assert.deepEqual(await sql`select ${1}`, [{ ok: 1 }]);
   assert.equal(calls.length, 3);
   assert.deepEqual(c.slept, [500, 1000]);
+  assert.equal(sql.retries, 2); // #4535: the fault log records a success that needed retries
   assert.deepEqual(sql([1, 2]), { list: [1, 2] }); // sql(list) is a helper, passed through
   assert.equal(sql.end(), 'ended'); assert.deepEqual(sql.binding, { actor: 'W1' });
 });

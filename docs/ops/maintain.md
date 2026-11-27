@@ -233,6 +233,38 @@ board's schema must already have `cb.session_usage` (the board applies it on sta
    and its numbers grow at each Stop.
 4. **Switch it off.** Remove that entry, or set `CB_USAGE_OFF=1` in the session's environment.
 
+## Fault log and triage (#4535)
+
+Every `cb` run that fails, needed a connect retry, started this machine's own board, or took over 5 s
+(`CB_FAULT_SLOW_MS`) appends one JSON line to `~/.claude-board/faults/<UTC day>.jsonl` on the machine that ran it. A run
+that succeeds writes nothing. The line holds the command and flag names, the kind, the exit code, an error code,
+timings, the pane and a masked message: only words found in cb's own source survive (`kit/fault-words.json`), every
+other word is `‹v›`, every number `N`, every argument value and quoted span `‹v›`. Never a value, a token, a URL, a path
+or an environment value.
+
+- **Where and how much.** `CB_FAULTS_HOME=<dir>` moves it, `CB_FAULTS_OFF=1` stops it. 5 MB per day file (then one
+  `cap` line and nothing more that day), 14 days kept (`CB_FAULTS_KEEP_DAYS`). Under `node --test` nothing is written
+  unless the test sets `CB_FAULTS_HOME`, so the suite's expected errors never reach a real log.
+- **The words file.** `kit/fault-words.json` is generated (`node kit/fault-line.mjs --words`). Regenerate it as part of
+  each release: `node cli/release.ts` prints a note when it differs from the source; then run the command on a branch
+  and merge it before the release. A word missing from it is only masked, never leaked, so a stale file is a note,
+  not a failure. `test/fault-log.test.ts` fails only when the file holds a word no longer in the source (a removed name
+  must not survive) or a denied name.
+- **Read it:** `cb faults [--since 24h] [--json]`. Local files only; works with the board down.
+- **Triage it, by hand only** (Q3002: no schedule): `cb triage --dry-run` first, then `cb triage`. cb decides the
+  plain groups itself (wrong use by fewer than 3 sessions, the board unreachable), searches claude-board for cards that
+  may hold the rest, and makes one `claude -p --model opus` call with Read, Grep and Glob only (no shell, no MCP
+  servers, no settings or hooks, an allow-listed environment) in a temporary copy of the tracked code (never the
+  checkout's `.env`). The whole card as filed (the judge's text and cb's facts) passes the redaction check, or the
+  group is held. Bugs and misleading messages pass a
+  redaction check and are filed as P2 bugs on claude-board ending `fault:ft-…`, or noted on the open card that carries
+  that marker, under `pg_advisory_xact_lock` on the template: two machines never file one fault twice. Nothing else is
+  ever written (Q3001). Bounds: `--max 4` groups per run (one Opus run with 2 groups measured USD 0.28), `--budget 1.00` USD (`CB_TRIAGE_BUDGET_USD`), a 10-minute
+  timeout (`CB_TRIAGE_TIMEOUT_MS`), one filing run per machine per 6 hours (`--force`). `triage.json` in the fault
+  folder remembers every verdict, so a group is judged again only when its count triples or a new release shows it.
+- **Not covered yet:** the hooks (session-start, usage-stop), the relay and the supervisor still log only to their own
+  files, and the guard's fail-closed reasons are not recorded (it needs the guard reinstalled, which is Ahmed's).
+
 ## Backups
 
 `deploy/backup.sh` runs nightly from root's crontab ([deploy.md](deploy.md#6-backups)): a `pg_dump -Fc` in
@@ -343,6 +375,11 @@ Set up, once, on the PC:
    and recipes. Logs live in `~/.claude-board/runner/logs` (override with `CB_RUNNER_HOME`), kept 7 days.
 2. Start `cb runner` in a herdr pane on the PC and leave it. It connects to the board, publishes its recipes
    (`cb jobs` shows them) and serves job logs. `itest` and `kbtest` need Docker running.
+   - Ahmed's slot and lane numbers on the board's Runners page (#4527) win over these two when set: the runner reads
+     them at start (a higher number takes the next restart, and a new slot's first job clones fresh; a lower one applies
+     at the next claim; slots 1-64, lanes 1-9). Clearing them there falls back to this file. A setting this file cannot
+     take (more lanes than its `laneEnv` allows) keeps the file's counts; the runner's pane logs why and the page shows
+     that it was refused. A board older than the runner has no setting: the runner runs this file's counts.
    - `slots` (1-10) is how many jobs run at once; `dbLanes` (1-9, default 1, at most `slots`) is how many of them may
      be DB jobs. Each DB job holds a lane, and `{lane}` in its recipe's env values becomes that lane's number, so every
      lane gets its own test stack: `"TEST_STACK_PROJECT": "cb-runner-it-{lane}"`, `"TEST_STACK_PG_PORT": "2544{lane}"`,
@@ -532,7 +569,13 @@ squad file (`cb squad set <project> -f <file>`):
   one or the other.
 - Role texts live in the database (`cb.role_texts`), and Ahmed edits them on the project settings page. Every edit is
   kept in `cb.role_text_edits`. Setup seeds only a role that has no row from `prompts/roles/*.md`. It never overwrites or
-  deletes a row, so a change to those files after a board's first setup has to be pasted on the page.
+  deletes a row, so a change to those files after a board's first setup reaches the board only when Ahmed presses "Load
+  the new texts" on the page (Role text section; it shows when the release's files differ from the stored texts). That
+  loads every text in one transaction through `cb.role_text_import`, each change kept in `cb.role_text_edits` (#4525).
+- Each project also has its own addition (at most 1000 characters) and who its stuck seats ask first (the lead, Ahmed or
+  a named session; the lead until set), in `cb.project_role_settings`, set on the same page. `cb role` and the start hook
+  print them after the board-wide text. The start hook's re-injection limits are `CAP` and `RESUME_KEEP` in `hooks/session-start.mjs`;
+  `test/role-text-size.test.ts` checks every text, with the longest addition, fits them uncut.
 
 ## Tests
 

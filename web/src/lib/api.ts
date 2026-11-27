@@ -84,7 +84,7 @@ export async function get<T>(path: string): Promise<T> {
 /** Functions without an actor argument: rpc() must not add one (Postgres then finds no function by that name and
  *  arguments). test/settings-web.test.ts checks the list against db/schema.sql. */
 export const NO_ACTOR = new Set(['page_get', 'digest', 'seen', 'goal_opened', 'goal_preview', 'goal_propose',
-  'squad_page', 'squad_options', 'role_text_page', 'github_watches'])
+  'squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page'])
 
 /** Every write goes through the same cb.* SQL functions the agents use. The UI acts as "ahmed". */
 export async function rpc<T = unknown>(fn: string, args: Record<string, unknown>): Promise<T> {

@@ -36,8 +36,13 @@ export interface SquadOptions {
   models_used: Record<string, string[]>; machines_used: ({ key: string } & MachineSpec)[]
 }
 export interface RoleTextPage {
-  roles: { role: string; body: string; updated_at: string; updated_by: string | null }[]
+  /** edited: the last change was made by hand on this page (not seeded, not a Load the new texts) */
+  roles: { role: string; body: string; updated_at: string; updated_by: string | null; edited?: boolean }[]
   edits: { id: number; role: string; actor: string; at: string; before: string | null; after: string }[]
+}
+/** cb.project_role_page: one project's addition to the role texts and who its stuck seats ask first (#4525). */
+export interface ProjectRolePage {
+  project: string; addition: string; ask_first: string; updated_at: string | null; updated_by: string | null; cap: number; sessions: string[]
 }
 export interface Watch {
   repo: string; to: string | null; project: string | null; card_projects?: string[]; since: string | null
@@ -452,6 +457,39 @@ export function roleTextState(body: string, saved: string) {
   const over = count > ROLE_TEXT_CAP, empty = count === 0, changed = t !== saved
   return { count, over, empty, changed, canSave: changed && !over && !empty }
 }
+
+/** A project's addition (#4525): trimmed as cb.project_role_set stores it, against its 1000 cap. Empty is allowed: it
+ *  removes the addition. */
+export const ADDITION_CAP = 1000
+export function additionState(body: string, saved: string) {
+  const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
+  const count = [...t].length
+  const over = count > ADDITION_CAP, changed = t !== saved
+  return { count, over, changed, canSave: changed && !over }
+}
+/** Who stuck seats ask first, as cb.project_role_set takes it: lead, ahmed, or a session name. */
+export const SESSION_NAME = /^[A-Za-z0-9@._-]{1,64}$/
+export type AskFirst = { kind: 'lead' | 'ahmed' | 'session'; name: string }
+export const askFirstOf = (v: string): AskFirst => (v === 'lead' || v === 'ahmed' ? { kind: v, name: '' } : { kind: 'session', name: v })
+export const askFirstValue = (a: AskFirst) => (a.kind === 'session' ? a.name.trim() : a.kind)
+export const askFirstOk = (a: AskFirst) => a.kind !== 'session' || (SESSION_NAME.test(a.name.trim()) && !['lead', 'ahmed'].includes(a.name.trim().toLowerCase()))
+/** Mid-sentence: "seats ask the lead first". */
+export const askFirstLabel = (v: string) => (v === 'lead' ? 'the lead' : v === 'ahmed' ? 'Ahmed' : v)
+/** The roles whose stored text differs from the one this release ships: what "Load the new texts" would change. */
+export function seedChanges(seeds: Record<string, string>, roles: RoleTextPage['roles']): string[] {
+  const stored = new Map(roles.map((r) => [r.role, r.body]))
+  return Object.keys(seeds).filter((k) => seeds[k] !== stored.get(k))
+    .sort((a, b) => (a === '_common' ? -1 : b === '_common' ? 1 : ROLES.indexOf(a as Role) - ROLES.indexOf(b as Role)))
+}
+
+/** Of those, the ones changed by hand on this page since they were seeded or last loaded: loading would replace an edit
+ *  (review M1: a load sets updated_by too, so updated_by alone would flag every loaded text). */
+export const handEdited = (changes: string[], roles: RoleTextPage['roles']) =>
+  changes.filter((k) => roles.find((r) => r.role === k)?.edited === true)
+
+/** A named ask-first session that has not worked on this project lately (review M2): the page warns, the server allows. */
+export const askFirstUnknown = (a: AskFirst, sessions: string[]) =>
+  a.kind === 'session' && askFirstOk(a) && !sessions.some((s) => s.toLowerCase() === a.name.trim().toLowerCase())
 
 /** squad_set's stale refusal opens with these words (db/schema.sql; test/settings-web.test.ts pins them). */
 export const STALE_PREFIX = 'Someone changed this squad since your copy was taken'

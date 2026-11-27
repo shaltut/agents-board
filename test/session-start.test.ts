@@ -55,7 +55,9 @@ test('after a compaction or a resume, a bound pane gets what cb resume and cb ro
   const resume = cb(bound, ['resume']), role = cb(bound, ['role', 'builder']);
   assert.match(resume, /#1 \[in_progress\] Fix the widget/);
   // the role text every seat reads carries the rule for when the hook does not print it (review I1)
-  assert.match(role.replace(/\s+/g, ' '), /if you did not get them \(or you run on another agent\), run `cb resume` and `cb role <your role>`/);
+  // (#4525: in words every agent reads the same way) and, bound in a project, that project's block last
+  assert.match(role.replace(/\s+/g, ' '), /If the output of `cb resume` and `cb role <your role>` is not in front of you, run both\./);
+  assert.match(role, /\n\n# This project: demo\n\nAsk first when stuck or a decision is needed: the lead /);
   for (const source of ['compact', 'resume', 'fork']) {
     const r = await hook(bound, source);
     assert.equal(r.status, 0, r.stderr);
@@ -102,7 +104,7 @@ test('with the seat\'s relay running, the hook asks the board through it, not on
   }
 });
 
-test('the re-injected block is capped near 6000 characters and says which command prints the rest (#4351)', { timeout: 120_000 }, async () => {
+test('the re-injected block is capped near 7500 characters and says which command prints the rest (#4351, #4525)', { timeout: 120_000 }, async () => {
   const sql = await db();
   const pane = paneOf('big');
   for (let i = 0; i < 40; i++)
@@ -112,10 +114,33 @@ test('the re-injected block is capped near 6000 characters and says which comman
   const r = await hook(pane, 'compact');
   assert.equal(r.status, 0, r.stderr);
   const block = contextOf(r).slice(hint.length);
-  assert.ok(block.length <= 6200, `block is ${block.length} characters`);
+  assert.ok(block.length <= 7700, `block is ${block.length} characters`);
   assert.match(block, /\[cut here: run `cb resume` for the rest\]/);
-  // the role text keeps its place: the cards are what gets cut
+  // the role text keeps its place, whole with the project's block (#4525): the cards are what gets cut
   assert.match(block, /# Rules for every role/);
+  assert.doesNotMatch(block, /\[cut here: run `cb role/);
+  assert.ok(block.endsWith((await sql`select cb.role_text('builder', 'demo') as t`)[0].t), 'cb role builder printed whole, project block last');
+});
+
+// #4525 review M6: a board whose schema predates the project argument (rolled back, or a copy updated out of order)
+// still hands the role over: the board-wide text alone, never nothing
+test('the project-aware read failing, the hook falls back to the board-wide role text (#4525)', { timeout: 120_000 }, async () => {
+  const sql = await db();
+  const pane = paneOf('old');
+  await sql`select cb.task_add(project => 'demo', title => 'On an older board', status => 'in_progress', assignee => 'W4@testbox')`;
+  await sql`select cb.iam(${M}, ${pane}, 'W4@testbox', 'demo', 'qa')`;
+  const board = (await sql`select cb.role_text('qa') as t`)[0].t;
+  await sql`alter function cb.role_text(text, text, text) rename to role_text_4525`;
+  try {
+    await sql`create function cb.role_text(role text) returns text language sql stable as $$ select cb.role_text_4525(role) $$`;
+    const r = await hook(pane, 'compact');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(contextOf(r).endsWith(`\n\n${board}`), 'the board-wide qa text, whole and last');
+    assert.match(contextOf(r), /what `cb resume` and `cb role qa` print now/);
+  } finally {
+    await sql`drop function if exists cb.role_text(text)`;
+    await sql`alter function cb.role_text_4525(text, text, text) rename to role_text`;
+  }
 });
 
 test('a stdin left open after its JSON does not hold a plain start (#4351)', { timeout: 30_000 }, async () => {
@@ -170,6 +195,7 @@ test('the prompts keep the compaction rule for seats the hook does not reach (#4
   const { readFileSync } = await import('node:fs');
   const one = (f: string) => readFileSync(f, 'utf8').replace(/\s+/g, ' ');
   for (const f of ['prompts/roles/_common.md', 'prompts/session.md'])
-    assert.match(one(f), /After a compaction or restart, a Claude seat gets `cb resume` and `cb role` printed by the start hook; if you did not get them \(or you run on another agent\), run `cb resume` and `cb role <your role>`\./, f);
+    // #4525: agent-neutral, so a seat on any agent reads the same rule
+    assert.match(one(f), /Lost context \(a compaction, a restart\)\? If the output of `cb resume` and `cb role <your role>` is not in front of you, run both\./, f);
   assert.match(one('prompts/orchestrator.md'), /After a compaction, if the start hook did not print `cb resume` and `cb role` \(or you run on another agent\), run them\./);
 });
