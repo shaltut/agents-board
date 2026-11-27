@@ -7,7 +7,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { seatKey } from '../bridge.ts';
-import { stripClaudeOnly } from './env.ts';
+import { stripClaudeOnly, withNoPrompt } from './env.ts';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 
 export type OpencodeEndpoint = { port: number; password: string; username?: string; updatedAt: number };
@@ -167,7 +167,7 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
       const cwd = normalizeAbs(l.cwd);
       if (!cwd) throw new Error(`opencode launch needs an absolute cwd (got ${JSON.stringify(l.cwd)})`);
       if (!model || model.startsWith('freellmapi/')) { const r = freellmRefusal(cwd, rule === undefined ? loadFreellmRule() : rule); if (r) throw new Error(r); }
-      const env = opencodeEnv(l.env);
+      const env = withNoPrompt(opencodeEnv(l.env)); // PR 104 review B3: no editor or pager waits for input
       const port = Number(env.CB_OPENCODE_PORT);
       if (!validPort(port)) throw new Error('opencode launch needs env CB_OPENCODE_PORT (1024-65535)');
       if (Object.keys(env).some((k) => k.toUpperCase() === 'OPENCODE_SERVER_PASSWORD')) throw new Error('opencode launch refuses OPENCODE_SERVER_PASSWORD in its env: the launch env goes on herdr\'s argv; the pane prestart makes the password');

@@ -931,11 +931,11 @@ test('squad up --dry-run (#4585): four builders, one per agent, plan four launch
     assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
       '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
     assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
-      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
     assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
-    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
     assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
-      ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+      ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
     // the port is the seat's own, stable across restarts, in range
     assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
   } finally { delete process.env.CB_MCP_GATE_OK; }
