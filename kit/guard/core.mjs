@@ -932,10 +932,13 @@ const rawAndJoined = (check) => (raw) => {
   const joined = joinLines(raw);
   return check(raw) ?? (joined === raw ? null : check(joined));
 };
+// #4594: >| (n>| too) is bash's noclobber override, a redirect: read as > before the split, or its | cut the target off
+// into a segment of its own. &>| and >>| are syntax errors in bash, left as they are. Rewriting only merges, never hides.
+const NOCLOBBER = /(?<![>&])>\|/g;
 const fenceWrite = rawAndJoined(fenceWriteOne);
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
-  const text = stripMessages(command).replace(URL_WORD, ' ');
+  const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '> ');
   if (GUARD_INSTALL.test(text) && !(text.match(SEGMENTS) ?? []).every((s) => !INSTALLER.test(s) || /(?:^|[ \t])--check(?![\w-])/.test(s))) return FENCE;
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";

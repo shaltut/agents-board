@@ -246,6 +246,9 @@ const fenceWrites = [
   'Set-Location C:\\tmp\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'Set-Location C:\\tmp\\\r\nCopy-Item evil.json $HOME\\.claude\\settings.json',
   'Get-ChildItem C:\\work\\\nCopy-Item evil.json $HOME\\.claude\\settings.json', 'cd C:\\tmp\\\nSet-Content $HOME\\.claude\\settings.json x',
   'echo a\\\ncp x ~/.claude/settings.json', 'ls # x\\\ncp evil.json ~/.claude/settings.json',
+  // #4594: >| (bash's noclobber override) is a redirect, not a pipe: the target was cut off into its own segment
+  'echo x >| ~/.claude/settings.json', 'echo x 2>| ~/.claude/settings.json', 'echo x 1>| ~/.claude/settings.json',
+  'echo x >|~/.claude-board/runner.json', 'cd ~/.claude && echo x >| settings.json',
 ];
 const fenceReads = [
   'cat ~/.claude/settings.json', String.raw`Get-Content $HOME\.claude\settings.json`, 'grep -n PreToolUse ~/.claude/settings.json',
@@ -270,6 +273,8 @@ const fenceReads = [
   'cd ~/.claude && cat settings.json',
   // #4587: a continued read stays a read
   'cat \\\n  ~/.claude/settings.json', 'git diff \\\n  -- opencode.json', 'cp a.json \\\n  b.json',
+  // #4594: a >| to an ordinary file, and a real pipe after a read
+  'echo x >| /tmp/out.txt', 'cat ~/.claude/settings.json | grep hooks',
 ];
 test('the fence (#4345): no seat writes the hook settings or ~/.claude-board, by any shell spelling; reads stay open', () => {
   for (const role of ROLES) {
