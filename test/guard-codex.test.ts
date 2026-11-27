@@ -235,7 +235,7 @@ const ONE_SHOTS = [
   'python x.py', 'python -c "print(1)"', 'python -m pytest -q', 'py -3 x.py', 'python3 -u -W ignore x.py', 'node x.js', 'node -e "1"', 'node --test', 'node -p 1+1',
   'ruby x.rb', 'perl -e 1', 'php x.php', 'php -r "echo 1;"', 'lua x.lua', 'deno run x.ts', 'bun run build',
   'psql -c "select 1"', 'psql -d app -f q.sql', 'mysql -e "select 1"', 'sqlite3 app.db "select 1"', 'redis-cli GET x', 'mongosh --eval "db.x"',
-  'docker exec web ls', 'docker exec web sh', 'docker exec -it web ls', 'docker compose exec web npm test', 'kubectl exec -it pod -- ls', 'ssh host ls', 'ssh -n host bash', 'command -v python', 'sudo -u web ls', 'timeout 60 python x.py', 'docker run --rm alpine echo hi', 'docker ps', 'docker compose up -d', 'kubectl exec pod -- ls', 'kubectl get pods',
+  'docker exec web ls', 'docker exec web sh', 'docker exec -it web ls', 'docker compose exec web npm test', 'kubectl exec -it pod -- ls', 'ssh host ls', 'ssh -n host bash', 'command -v python', 'timeout 60 python x.py', 'docker run --rm alpine echo hi', 'docker ps', 'docker compose up -d', 'kubectl exec pod -- ls', 'kubectl get pods',
   'cat notes.txt', 'cat a.txt | grep x', 'ls | xargs echo', 'xargs -a list.txt echo', 'sed -n 1p file.txt', "awk '{print $1}' file.txt", 'git log | head',
   'dd if=a of=b', 'tee < in.txt out.txt', 'echo hi | python', 'cat script.sh | bash', 'git log 2>&1 | head', 'nc -z host 80', 'python --version', 'vim --version',
   'while read l; do echo $l; done < f.txt', 'git log | while read l; do echo $l; done', "bash <<'EOF'\nls\nEOF", 'python <<EOF\nprint(1)\nEOF', 'python < script.py', 'bash <<< "ls"',
@@ -252,12 +252,15 @@ test('a board seat may not open an interactive session (shell, REPL, client, rem
   for (const c of SESSIONS) {
     const out = seat(c);
     assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', c);
-    assert.match(out.hookSpecificOutput.permissionDecisionReason, /write_stdin/, c);
+    // #4669 (merged after #4626): sudo, su, tmux and screen in a seat are refused first as a fresh-environment launch
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /write_stdin|fresh environment/, c);
   }
 });
 
 test('one-shot commands, input redirects and plain text naming a shell stay allowed (#4626)', () => {
   for (const c of ONE_SHOTS) assert.deepEqual(seat(c), {}, c);
+  // #4669: sudo is no one-shot in a seat any more: another user's process runs without the seat's variables
+  assert.match(seat('sudo -u web ls').hookSpecificOutput?.permissionDecisionReason ?? '', /fresh environment/);
 });
 
 test('the session rule ignores a tty field (the hook never sees one) and leaves a hand-started Codex alone (#4626)', () => {

@@ -11,7 +11,8 @@
 // exec_command, its one shell tool on every platform, arrives as tool_name Bash with { command: <raw string> } (there is
 // no unified_exec or PowerShell tool); apply_patch as { command: <patch text> }; write_stdin fires no hook at all, since
 // it feeds a session whose command already passed here as Bash; every other function tool arrives under its own name.
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -54,7 +55,7 @@ export function parseCodexInput(raw) {
   const name = p.tool_name;
   if (SHELL_TOOLS.has(name)) {
     if (typeof input.command !== 'string') return unreadable(`tool_input.command is ${input.command === undefined ? 'missing' : 'not a string'}`);
-    return { ok: true, tool: 'shell', command: input.command };
+    return { ok: true, tool: 'shell', command: input.command, ...(typeof p.cwd === 'string' && p.cwd ? { cwd: p.cwd } : {}) };
   }
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', input, cwd: typeof p.cwd === 'string' ? p.cwd : null };
   if (ASK_TOOLS.has(name)) return { ok: true, tool: 'ask' };
@@ -69,6 +70,8 @@ export function parseCodexInput(raw) {
 // An edit's targets as given, resolved against the hook's cwd (a relative hooks.json run from ~/.codex is the fence too),
 // and through the real path of their nearest existing folder (review 68-I2: ./, ../ and links are judged where they land).
 const FS = { resolve, dirname, basename, join, realpathSync };
+// #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
 export function editPaths(input, cwd) {
   return [...new Set(core.editTargets(input).flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }
@@ -89,8 +92,10 @@ export function runCodexShim(raw, env = process.env) {
     if (!p.ok) return !seat && p.unknown ? {} : deny(`Blocked: ${p.reason}`);
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const paths = p.tool === 'edit' ? editPaths(p.input, p.cwd) : p.tool === 'read' ? [...new Set(core.editPathForms(p.path, p.cwd, FS))] : undefined;
+    // #4669: a shell script the command runs is read from the hook's cwd and judged too; ssh to this machine's own name counts
     // stdin: Codex's exec_command keeps a process's input open for write_stdin, which no hook sees (#4626)
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths, stdin: p.tool === 'shell' });
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths,
+      readScript: readerFor(p.cwd ?? process.cwd()), hosts: [hostname()], stdin: p.tool === 'shell' });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return deny(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

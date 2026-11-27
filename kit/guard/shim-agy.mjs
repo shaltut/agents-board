@@ -13,7 +13,8 @@
 // (#4392): cb squad up always sets both, and core applies no secret or fence rule to a null role.
 // agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
 // every path arg, as given and as resolved (a link named notes.txt can lead to .env).
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -167,6 +168,9 @@ export function editPaths(call, input) {
   return [...new Set(targets.flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }
 
+// #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
   try {
@@ -183,8 +187,10 @@ export function runAgyShim(raw, env = process.env) {
       return why ? deny(`Blocked: ${why}`) : { decision: 'allow' };
     }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    // #4669: a shell script the command runs is read from the hook's cwd and judged too; ssh to this machine's own name counts
+    const cwd = isObject(p.input) && typeof p.input.cwd === 'string' && p.input.cwd ? p.input.cwd : process.cwd();
     const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1',
-      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined });
+      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined, readScript: readerFor(cwd), hosts: [hostname()] });
     if (v?.allow === true) {
       if (p.tool === 'edit') {
         const why = checkEditPath(p.call, p.input) ?? secretTarget(p.call, p.input, 'edit');
