@@ -335,7 +335,7 @@ test('Codex input box (#4002): a trailing $word or @word gets a space so Enter s
 test('startOne sends the first prompt through the adapter\'s promptText', { skip: !bashOk && 'no bash' }, (t) => {
   const w = world(t), p = pane(w.env, w.ws);
   assert.ok(startOne(launch('codex', w.ws, { prompt: 'cb iam x, then use $skill' }), p.run, {}, noPause, GATE).ok);
-  assert.deepEqual(p.calls.find((c) => c[0] === 'agent' && c[1] === 'prompt')!.slice(3), ['cb iam x, then use $skill ']);
+  assert.deepEqual(p.calls.find((c) => c[0] === 'agent' && c[1] === 'prompt')!.slice(3, 4), ['cb iam x, then use $skill ']);
 });
 
 // #4551: the round-two follow-ups. 70-M2: the shim and the core.mjs it loads must be this board's kit/guard bytes (a
@@ -450,4 +450,54 @@ test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks 
   assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'an escaped quote before "" does not close the string');
   writeFileSync(w.cfg, `[tui]\nnote = '''\n[features]\nhooks = true\n'''\n`);
   assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true only inside a multi-line string');
+});
+
+// #4687: OpenCode's TUI dropped squad up's first prompt, sent the moment herdr agent start returned. The prompt now waits
+// for the agent to start working (herdr's --wait: agent_prompt_stalled when it does not within 5 s); stalled, the pane is
+// read, and a prompt that is not on the screen is sent once more. For every agent kind: the fake here is a Claude seat.
+const STALLED = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_prompt_stalled"}}' };
+function promptWorld(prompts: ('ok' | 'stall')[], screen: string[] = []) {
+  const calls: string[][] = [];
+  let n = 0, reads = 0;
+  const run: Runner = (_m, args) => {
+    calls.push(args);
+    if (args[0] === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
+    if (args[0] === 'agent' && args[1] === 'prompt') return prompts[n++] === 'stall' ? STALLED : ok({});
+    if (args[0] === 'pane' && args[1] === 'read') return { status: 0, stdout: screen[reads++] ?? '', stderr: '' };
+    return ok({});
+  };
+  return { calls, run, prompts: () => calls.filter((c) => c[0] === 'agent' && c[1] === 'prompt') };
+}
+
+test('startOne (#4687): the first prompt waits for the agent to start working; landed at once, nothing more', () => {
+  const w = promptWorld(['ok']);
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 1);
+  const p = w.prompts()[0]!;
+  assert.equal(p[3], 'cb iam demo-B1@m demo --role builder, then cb next', 'the text stays the fourth argument');
+  assert.deepEqual(p.slice(4), ['--wait', '--until', 'working', '--until', 'blocked', '--timeout', '20000']);
+});
+
+test('startOne (#4687): a dropped first prompt (stalled, not on the screen) is sent once more', () => {
+  const w = promptWorld(['stall', 'ok'], ['opencode  > \n  ask anything...']);
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 2);
+  assert.deepEqual(w.prompts()[1], w.prompts()[0]);
+});
+
+test('startOne (#4687): a stalled prompt that is on the screen (it landed, the status lagged) is not sent twice', () => {
+  const w = promptWorld(['stall'], ['> cb iam demo-B1@m demo --role\n  builder, then cb next']);
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 1);
+});
+
+test('startOne (#4687): dropped twice: the seat is up, the line says the prompt is not confirmed and how to send it', () => {
+  const w = promptWorld(['stall', 'stall'], ['', '']);
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.ok, false);
+  assert.equal(r.line, 'started demo-B1@m, prompt not confirmed (sent twice, the agent never started working): herdr agent prompt demo-b1-m "cb iam demo-B1@m demo --role builder, then cb next"');
+  assert.equal(w.prompts().length, 2);
+  assert.ok(!w.calls.some((c) => c[0] === 'pane' && c[1] === 'close'), 'the agent is up: its pane stays');
 });

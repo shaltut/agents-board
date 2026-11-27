@@ -267,6 +267,36 @@ export function paneTail(run: Runner, m: string | null, pane: string): string {
 
 // A pane herdr just made refuses agent start (agent_pane_busy) until its shell prompt is up: about 10 s of retries.
 const BUSY_TRIES = 6, BUSY_WAIT_MS = 2000;
+
+// #4687: a TUI can drop a paste that comes the moment herdr agent start returns (OpenCode 1.19.4 did: its input box
+// stayed empty, the seat never ran cb iam). So the first prompt waits until the agent starts working; herdr says
+// agent_prompt_stalled when it does not within 5 s. A stall is not proof the text was lost (the status can lag), so the
+// pane is read first: the prompt is sent once more only when its start is not on the screen. Every agent kind.
+const PROMPT_WAIT = ['--wait', '--until', 'working', '--until', 'blocked', '--timeout', '20000'];
+const PROMPT_RETRY_MS = 3000;
+const STALLED = /agent_prompt_stalled|\btimeout\b/i;
+const squash = (t: string) => t.replace(/\s+/g, '');
+/** true once the agent took the prompt; false when it never started working after two sends. Other herdr errors throw. */
+function sendFirstPrompt(l: Launch, text: string, pane: string, run: Runner, pause: (ms: number) => void): boolean {
+  const send = () => {
+    const r = run(l.herdr, ['agent', 'prompt', herdrName(l.name), text, ...PROMPT_WAIT], 30_000);
+    if (r.status === 0) return true;
+    const why = (r.error?.message || r.stderr || r.stdout || 'herdr failed').trim();
+    if (STALLED.test(why)) return false;
+    throw new Error(why);
+  };
+  if (send()) return true;
+  pause(PROMPT_RETRY_MS);
+  // the screen wraps a long line, so the start of the prompt is compared without any spaces or line ends
+  const needle = squash(text).slice(0, 24);
+  let screen = '';
+  try {
+    const r = run(l.herdr, ['pane', 'read', pane, '--source', 'recent', '--lines', '40', '--format', 'text'], 10_000);
+    if (r.status === 0) screen = String(r.stdout ?? '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+  } catch { /* unread: as if not there, so it is sent again */ }
+  if (needle && squash(screen).includes(needle)) return true;
+  return send();
+}
 const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 /** A launch's adapter and native command, as startOne makes them before any pane. Throws an agent not installed, one
@@ -366,7 +396,8 @@ export function startOne(l: Launch, run: Runner, tabs: Record<string, { pane: st
     if (t && t.panes < 2) t.panes++; else tabs[l.machine] = { pane, panes: 1 }; // tab state only once the agent is up
     // the hint names the agent's own dialog; the platform is this machine's (a dialog's name does not depend on it for claude)
     if (blocked) return { ok: true, blocked, pane, line: `blocked ${l.name}: a startup dialog is waiting (${adapter.trustSpec([l.cwd], process.platform).dialogHint}). Answer it in herdr pane ${pane}${l.herdr ? ` on ${l.herdr}` : ''}, then run: ${promptCommand(l)}` };
-    herdr(l.herdr, ['agent', 'prompt', herdrName(l.name), adapter.promptText?.(l.prompt) ?? l.prompt]);
+    if (!sendFirstPrompt(l, adapter.promptText?.(l.prompt) ?? l.prompt, pane, run, pause))
+      return { ok: false, pane, line: `started ${l.name}, prompt not confirmed (sent twice, the agent never started working): ${promptCommand(l)}` };
     return { ok: true, pane, line: `started ${l.name}` };
   } catch (e) {
     if (started) return { ok: false, pane, line: `started ${l.name}, prompt not sent: ${promptCommand(l)}` };
