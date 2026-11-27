@@ -5,7 +5,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { seatKey } from '../cli/bridge.ts';
+import { bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { claudeEndpointPath } from '../cli/agents/claude.ts';
 import { claimTell, refusalWords } from '../cli/relay-refusal.ts';
 
 const clients: any[] = [];
@@ -19,9 +20,10 @@ const paneOf = (n: string) => `p-refuse-${n}-${process.pid}`;
 const seatFiles = (pane: string) => ['pid', 'log', 'refused'].map((x) => join(tmpdir(), `cb-relay-${seatKey(M, pane)}.${x}`));
 const memoOf = (pane: string) => seatFiles(pane)[2]!;
 const logOf = (pane: string) => { try { return fs.readFileSync(seatFiles(pane)[1]!, 'utf8'); } catch { return ''; } };
-const rmSeat = (pane: string) => { for (const f of seatFiles(pane)) fs.rmSync(f, { force: true }); };
-const envFor = (pane: string, o: Record<string, string> = {}) =>
-  ({ ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, HERDR_PANE_ID: pane, CB_MCP_GATE_OK: '', CB_AGENT: '', ...o });
+const rmSeat = (pane: string) => { for (const f of [...seatFiles(pane), bridgeFiles(seatKey(M, pane)).info, claudeEndpointPath(M, pane)]) fs.rmSync(f, { force: true }); };
+// never the inbox of a Claude session running these tests: with it, the claude start below would serve that session
+const envFor = (pane: string, o: Record<string, string> = {}) => ({ ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, HERDR_PANE_ID: pane,
+  CB_MCP_GATE_OK: '', CB_AGENT: '', CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '', CLAUDE_CODE_SESSION_ID: '', ...o });
 const relay = (pane: string, agent: string) => spawnSync('node', ['cli/relay.ts', '--pane', pane, '--agent', agent], { encoding: 'utf8', timeout: 20_000, env: envFor(pane) });
 const messages = (sql: any) => sql`select actor, project, summary, data ->> 'to' as to from cb.events where kind = 'message' order by id`;
 /** The refusal is told from a detached child: wait for its outcome line in the seat's log (the n-th such line). */
@@ -101,6 +103,7 @@ test('a relay that refuses its agent tells the bound seat\'s project lead once a
     // M1: a start that never holds the seat (a Claude hook with no inbox here) leaves the memo; a day later it is news again
     assert.equal(relay(bound, 'claude').status, 0);
     assert.ok(fs.existsSync(memoOf(bound)));
+    assert.equal(fs.existsSync(seatFiles(bound)[0]!), false, 'no relay took the seat');
     const old = new Date(Date.now() - 25 * 3600_000);
     fs.utimesSync(memoOf(bound), old, old);
     assert.equal(relay(bound, 'codex').status, 1);
