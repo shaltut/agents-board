@@ -280,6 +280,10 @@ const killBlocked = [
   'ForEach-Object { Stop-Process -Id $_.Id } -Inp (Get-Process node)',
   'ForEach-Object { Stop-Process -Id $_.Id } -InputObject:(Get-Process node)',
   '$sb = { Stop-Process -Id $_.Id }; ForEach-Object $sb -InputObject (Get-Process node)',
+  // ... and any cmdlet that may run a block on its -InputObject (fail closed: only read-only cmdlets are exempt)
+  '$sb = { $input | Stop-Process }; Start-Job -ScriptBlock $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id; $true }; Where-Object -FilterScript $sb -InputObject (Get-Process node)',
+  '$sb = { Stop-Process -Id $_.Id }; Measure-Command $sb -Inp (Get-Process node)',
   // #3883 n2: options between the shell and -Command / -c / /c, values included
   'powershell -NoProfile -Command "Stop-Process" -Name node',
   'pwsh -NoProfile -c "Stop-Process" -Name node',
@@ -388,6 +392,13 @@ const killPassed = [
   // #3883 n5: -InputObject of a lookup belongs to its own cmdlet, not to an earlier stop
   'Stop-Process -Id $mockPid; Format-Table -InputObject (Get-Process node)',
   'kill $PID; Measure-Object -InputObject (Get-Process node)',
+  'Stop-Process -Id $id; $n = Select-Object -InputObject (Get-Process node) -Property Id',
+  // #3883: the } of a parameter expansion ends no block: a lookup after it is a check
+  'kill $pid; echo "stopped ${pid}, remaining $(pgrep -c node)"',
+  'kill $pid; echo "${name} left: $(pgrep -fl node)"',
+  'kill "$SERVER_PID"; printf "%s\\n" ${PORT} $(pgrep -f vite)',
+  // #3883 n3: = 'Terminate' under another key is not a MethodName
+  `$x = @{ Action = "Terminate" }; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId`,
   // #3883 n3: a splat or a Terminate that names one process, then a by-name listing
   `$m = @{ MethodName = 'Terminate'; Query = "select * from Win32_Process where ProcessId = 1234" }; Invoke-CimMethod @m`,
   `Invoke-CimMethod -MethodName Terminate -Query "select * from Win32_Process where ProcessId = 1234"; Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Format-List ProcessId, CommandLine`,
