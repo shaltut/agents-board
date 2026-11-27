@@ -22,5 +22,6 @@ export function squadShow(sq: any): string {
   });
   const repos = sq.repos ? [`repos: ${Object.entries(sq.repos).sort(([a, x]: any, [b, y]: any) => (y.home - x.home) || a.localeCompare(b))
     .map(([k, v]: any) => v.home ? `${k} (home)` : k).join(', ')}`] : [];
-  return [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`].join('\n');
+  const prot = sq.protected?.length ? [`protected: ${sq.protected.join(', ')}`] : []; // #3779: not only with --json
+  return [...lines, ...repos, `areas: ${sq.areas.length ? sq.areas.map((a: any) => a.name ?? a).join(', ') : 'none'}`, ...prot].join('\n');
 }

@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { rpc, useProjects } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { RX, actorLabel, saveError, type Watch } from '@/lib/squad'
+import { useLeads } from '@/views/Sessions'
 import { Notice } from './bits'
 
 /** GitHub watches (#4523, Q2971): the repos whose pull requests come to this project, and the muted logins (board-wide).
@@ -63,6 +64,7 @@ function WatchRow({ w, project, pname, busy, onRemove }: {
   w: Watch; project: string; pname: (s: string | null) => string; busy: boolean; onRemove: () => void
 }) {
   const [sure, setSure] = useState(false)
+  const leads = useLeads()
   const also = (w.card_projects ?? []).filter((p) => p !== w.project)
   return (
     <li className="flex min-w-0 flex-col gap-1.5 rounded-lg border bg-card p-3 text-sm">
@@ -80,7 +82,7 @@ function WatchRow({ w, project, pname, busy, onRemove }: {
         {also.length > 0 && `, and may note cards in ${also.map(pname).join(', ')}`}.
       </div>
       {w.project !== project && <div className="text-[13px] text-muted-foreground">It logs on this project's cards, so it is listed here too.</div>}
-      <div className="text-muted-foreground">Tells <span className="text-foreground" title={w.to ?? undefined}>{w.to ? actorLabel(w.to) : 'nobody yet'}</span>
+      <div className="text-muted-foreground">Tells <span className="text-foreground" title={w.to ?? undefined}>{w.to ? actorLabel(w.to, leads) : 'nobody yet'}</span>
         {w.since && <> · watching since {new Date(w.since).toLocaleDateString([], { day: 'numeric', month: 'short' })}</>}
       </div>
       <div className="text-[13px]">

@@ -58,7 +58,7 @@ function wantNow(project: string, squad: Squad, live: Live[], quiet: Seen[] = []
       .sort((a, b) => b.at - a.at)[0];
     if (q) {
       for (const c of [w, alt]) if (q.actor === c.name) return [c];
-      quietLead = { actor: q.actor, mins: Math.floor((now - q.at) / 60_000) };
+      quietLead = { actor: q.actor, mins: Math.max(0, Math.floor((now - q.at) / 60_000)) }; // #3779: the board's clock may run ahead
       return [];
     }
     // orch@<m> live, or seen in the last day, bound to another project leads that one: taking its name here would rebind it
