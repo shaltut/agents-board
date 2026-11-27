@@ -134,6 +134,42 @@ test('the probe: runs only --version and --help, with the seats\' update-off env
   const r = makeProbe({ timeoutMs: 5000, env: onPath(dir) })('agy');
   assert.equal(r.version, 'agy 1.5.18');
   assert.match(r.help ?? '', /upd=true/);
-  assert.deepEqual(readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n'), ['--version', '--help']);
+  // the two calls run at once (L1): either order, each once
+  assert.deepEqual(readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').sort(), ['--help', '--version']);
   assert.equal(makeProbe({ env: onPath(dir) })('codex').path, null, 'not on this PATH: not installed');
+});
+
+// PR 95 review N1: no env value on the runner's command line (a process listing shows it; Windows caps it at 32,767 chars)
+const SECRET = `cb-fake-secret-${process.pid}-${Date.now()}`;
+function fakeAnyCli(t: { after: (fn: () => void) => void }, name: string, helpLine: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-fake-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  if (posix) { writeFileSync(join(dir, name), `#!/bin/sh\necho "${helpLine.replace(/%(\w+)%/g, '$$$1')}"\n`); chmodSync(join(dir, name), 0o755); }
+  else writeFileSync(join(dir, `${name}.cmd`), `@echo off\r\necho ${helpLine}\r\n`);
+  return dir;
+}
+
+test('the probe: the runner is started with the env in spawnSync\'s env option, never on its argv, once per CLI (N1, L1)', (t) => {
+  const dir = fakeAnyCli(t, 'codex', '  --x');
+  const calls: { cmd: string; args: string[]; env: NodeJS.ProcessEnv }[] = [];
+  const env = { ...process.env, PATH: dir, CB_FAKE_SECRET: SECRET };
+  const r = makeProbe({ env, spawn: (cmd, args, opts) => {
+    calls.push({ cmd, args, env: opts.env });
+    return { status: 0, stdout: JSON.stringify([{ status: 0, out: 'codex-cli 9.9.9', err: '', error: null }, { status: 0, out: '  --x', err: '', error: null }]) };
+  } })('codex');
+  assert.equal(r.version, 'codex-cli 9.9.9');
+  assert.equal(calls.length, 1, 'one runner does both calls');
+  const call = calls[0]!;
+  assert.equal(call.cmd, process.execPath);
+  assert.ok(!call.args.some((a) => a.includes(SECRET)), 'the secret value is not on the runner\'s command line');
+  assert.deepEqual(Object.keys(JSON.parse(call.args.at(-1)!)).sort(), ['args', 'file', 'ms', 'shell']);
+  assert.deepEqual(JSON.parse(call.args.at(-1)!).args, ['--version', '--help']);
+  assert.equal(call.env.CB_FAKE_SECRET, SECRET, 'the env goes in through spawnSync\'s env option');
+});
+
+test('the probe: the CLI still gets the env, through the runner (N1; a .cmd under cmd.exe on Windows)', (t) => {
+  const dir = fakeAnyCli(t, 'codex', '  --x  s=%CB_FAKE_SECRET%');
+  const r = makeProbe({ timeoutMs: 10_000, env: { ...process.env, PATH: [dir, process.env.PATH ?? process.env.Path ?? ''].join(delimiter), CB_FAKE_SECRET: SECRET } })('codex');
+  assert.equal(r.error, undefined);
+  assert.ok((r.help ?? '').includes(`s=${SECRET}`), 'the CLI saw the env value');
 });

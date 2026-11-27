@@ -93,47 +93,62 @@ export function findOnPath(exe: string, env: NodeJS.ProcessEnv = process.env, pl
 // timeout kills only what it started (cmd.exe for an npm .cmd shim), and waits on as long as the real CLI, its child,
 // holds the output pipe. Here the CLI gets its own pipes, so this runner's exit always ends the wait. F5: with a shell
 // (a .cmd or .bat file) the command is one string, never an argument list. The arguments are fixed words, never input.
+// PR 95 review N1: the runner's command line carries only { file, args, shell, ms }. The environment goes in through
+// spawnSync's env option and the CLI inherits it, so no env value (a token) is readable from a process listing, and a big
+// environment cannot push the command line past Windows' 32,767 chars. L1: one runner per CLI runs both calls at once,
+// each with its own timeout and tree kill.
 const RUNNER = `
 const { spawn, spawnSync } = require('node:child_process');
-const { file, arg, shell, ms, env } = JSON.parse(process.argv[1]);
+const { file, args, shell, ms } = JSON.parse(process.argv[1]);
 const win = process.platform === 'win32';
-const child = shell ? spawn('"' + file + '" ' + arg, { shell: true, windowsHide: true, env, detached: !win })
-  : spawn(file, [arg], { windowsHide: true, env, detached: !win });
-let out = '', err = '', done = false, timedOut = false;
-const add = (s, d) => (s.length > 262144 ? s : s + d);
-child.stdout.on('data', (d) => { out = add(out, d); });
-child.stderr.on('data', (d) => { err = add(err, d); });
-const finish = (status, error) => {
-  if (done) return;
-  done = true;
-  process.stdout.write(JSON.stringify({ status, out, err, error: timedOut ? 'ETIMEDOUT' : error }));
-  process.exit(0);
-};
-child.on('error', (e) => finish(null, e.code || e.message));
-child.on('close', (code) => finish(code, null));
-setTimeout(() => {
-  timedOut = true;
-  try { if (win) spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else process.kill(-child.pid, 'SIGKILL'); } catch {}
-  setTimeout(() => finish(null, 'ETIMEDOUT'), 1000);
-}, ms);
+const run = (arg) => new Promise((resolve) => {
+  const child = shell ? spawn('"' + file + '" ' + arg, { shell: true, windowsHide: true, detached: !win })
+    : spawn(file, [arg], { windowsHide: true, detached: !win });
+  let out = '', err = '', done = false, timedOut = false, timer;
+  const add = (s, d) => (s.length > 262144 ? s : s + d);
+  child.stdout.on('data', (d) => { out = add(out, d); });
+  child.stderr.on('data', (d) => { err = add(err, d); });
+  const finish = (status, error) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    resolve({ status, out, err, error: timedOut ? 'ETIMEDOUT' : error });
+  };
+  child.on('error', (e) => finish(null, e.code || e.message));
+  child.on('close', (code) => finish(code, null));
+  timer = setTimeout(() => {
+    timedOut = true;
+    try { if (win) spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); else process.kill(-child.pid, 'SIGKILL'); } catch {}
+    setTimeout(() => finish(null, 'ETIMEDOUT'), 1000);
+  }, ms);
+});
+Promise.all(args.map(run)).then((r) => { process.stdout.write(JSON.stringify(r)); process.exit(0); });
 `;
 type Ran = { status: number | null; out: string; err: string; error: string | null };
-function runCli(file: string, arg: string, timeoutMs: number, env: NodeJS.ProcessEnv): Ran {
+/** spawnSync's shape as the probe uses it; a test passes its own to see what the runner is started with. */
+export type SpawnSyncFn = (cmd: string, args: string[], opts: { encoding: 'utf8'; timeout: number; windowsHide: boolean; maxBuffer: number; env: NodeJS.ProcessEnv }) => { stdout: string; status: number | null; error?: Error };
+function runCli(file: string, args: string[], timeoutMs: number, env: NodeJS.ProcessEnv, spawn: SpawnSyncFn): Ran[] {
   const shell = /\.(?:cmd|bat)$/i.test(file);
-  const r = spawnSync(process.execPath, ['-e', RUNNER, JSON.stringify({ file, arg, shell, ms: timeoutMs, env })], { encoding: 'utf8', timeout: timeoutMs + 10_000, windowsHide: true });
-  try { return JSON.parse(r.stdout) as Ran; } catch { return { status: null, out: '', err: '', error: r.error ? String(r.error.message) : `the probe runner failed (exit ${r.status})` }; }
+  const r = spawn(process.execPath, ['-e', RUNNER, JSON.stringify({ file, args, shell, ms: timeoutMs })],
+    { encoding: 'utf8', timeout: timeoutMs + 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
+  try {
+    const ran = JSON.parse(r.stdout) as Ran[];
+    if (Array.isArray(ran) && ran.length === args.length) return ran;
+  } catch { /* below */ }
+  const error = r.error ? String(r.error.message) : `the probe runner failed (exit ${r.status})`;
+  return args.map(() => ({ status: null, out: '', err: '', error }));
 }
 
-/** A probe: --version and --help of the CLI on PATH, `timeoutMs` each (15 s), with the seats' update-off env (F6: the
- *  names in the adapter's own launch env, so a probe never starts an update the seats turn off). */
-export function makeProbe(o: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): AgentProbe {
-  const timeoutMs = o.timeoutMs ?? 15_000, base = o.env ?? process.env;
+/** A probe: --version and --help of the CLI on PATH, at once, `timeoutMs` each (15 s), with the seats' update-off env
+ *  (F6: the names in the adapter's own launch env, so a probe never starts an update the seats turn off). */
+export function makeProbe(o: { timeoutMs?: number; env?: NodeJS.ProcessEnv; spawn?: SpawnSyncFn } = {}): AgentProbe {
+  const timeoutMs = o.timeoutMs ?? 15_000, base = o.env ?? process.env, spawn = o.spawn ?? (spawnSync as unknown as SpawnSyncFn);
   return (kind) => {
     const path = findOnPath(kind, base);
     if (!path) return { path: null };
     const updateOff = Object.fromEntries(Object.entries(launchFlags(kind, BOARD, BOARD).env).filter(([k]) => /AUTO_?UPDATE/i.test(k)));
     const env = { ...base, ...updateOff };
-    const v = runCli(path, '--version', timeoutMs, env), h = runCli(path, '--help', timeoutMs, env);
+    const [v, h] = runCli(path, ['--version', '--help'], timeoutMs, env, spawn) as [Ran, Ran];
     const help = `${h.out}\n${h.err}`.trim();
     if (h.error || !help) return { path, error: h.error === 'ETIMEDOUT' ? `timed out after ${timeoutMs / 1000} s` : h.error ?? `--help printed nothing (exit ${h.status})` };
     const version = `${v.out}\n${v.err}`.split('\n').map((s) => s.trim()).find(Boolean)?.slice(0, 60) ?? '';
