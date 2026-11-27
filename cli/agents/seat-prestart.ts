@@ -22,7 +22,7 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { hookPath, words } from '../../kit/guard/install.mjs';
+import { codexHooksFeature, duplicateJsonKey, hookPath, readCodexToml, words } from '../../kit/guard/install.mjs';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import { ASK_TOOLS, EDIT_TOOLS, READ_TOOLS, SHELL_TOOLS } from '../../kit/guard/shim-agy.mjs';
 import { isClaudeOnly } from './env.ts';
@@ -71,65 +71,9 @@ export function runsShim(command: unknown, shim: string, o: { bareNode?: boolean
   return isAbs(file) && basename(file).toLowerCase() === shim && isFile(file) && sameAsKitGuard(file, shim);
 }
 
-/** A key repeated in one JSON object, or null (review 70-M3: JSON.parse keeps the last one, while Codex's parser may
- *  refuse the file or keep another, so the check and the agent could read different hooks). Keys compare decoded, so
- *  "hooks" and "hooks" are the same key. Expects text JSON.parse accepts. */
-export function duplicateJsonKey(text: string): string | null {
-  const stack: ({ keys: Set<string>; key: boolean } | null)[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
-      const top = stack[stack.length - 1];
-      if (top?.key) {
-        const k = JSON.parse(text.slice(i, j + 1)) as string;
-        if (top.keys.has(k)) return k;
-        top.keys.add(k);
-        top.key = false;
-      }
-      i = j;
-    } else if (c === '{') stack.push({ keys: new Set(), key: true });
-    else if (c === '[') stack.push(null);
-    else if (c === '}' || c === ']') stack.pop();
-    else if (c === ',') { const top = stack[stack.length - 1]; if (top) top.key = true; }
-  }
-  return null;
-}
-
-/** What a Codex config.toml says about hooks: `hooks`, its top-level [features] hooks (true, false, or undefined when
- *  unset); `profile`, the profile its top level selects; `profiles`, each profile's [profiles.<name>.features] hooks.
- *  Reads tables, dotted keys and inline tables. Review 70-M4: the text of a multi-line string ("""...""" or '''...''') is
- *  never read as keys, and profile counts only before the first table (after one, it is that table's key). */
-export function readCodexToml(toml: string): { hooks: boolean | undefined; profile: string | undefined; profiles: Map<string, boolean> } {
-  const out = { hooks: undefined as boolean | undefined, profile: undefined as string | undefined, profiles: new Map<string, boolean>() };
-  const inlineHooks = (v: string) => { const m = /\bhooks\s*=\s*(\w+)/.exec(v); return m ? m[1] === 'true' : undefined; };
-  // a basic """ string ends at """ with no escaping backslash before it (a\""" is an escaped quote and "": round 2 minor 3)
-  const closes = (s: string, d: string) => (d === '"""' ? /(?<!\\)(?:\\\\)*"""/ : /'''/).test(s);
-  let section = '', inTable = false, open: string | null = null;
-  for (const raw of toml.split(/\r?\n/)) {
-    if (open) { if (closes(raw, open)) open = null; continue; } // inside a multi-line string: text, not keys
-    const line = raw.replace(/\s+#.*$|^#.*$/, '').trim();
-    const head = /^\[\[?\s*([^\]]+?)\s*\]\]?$/.exec(line); // [table] or [[array.of.tables]] (PR 77 review M2)
-    if (head) { section = head[1]!.replace(/["'\s]/g, ''); inTable = true; continue; }
-    const kv = /^([\w."' -]+?)\s*=\s*(.+)$/.exec(line);
-    if (!kv) continue;
-    const key = [section, kv[1]!.replace(/["'\s]/g, '')].filter(Boolean).join('.'), val = kv[2]!.trim();
-    // a multi-line string that runs on past this line: only a value that starts with one (a triple quote inside a
-    // one-line string of the other kind, msg = "it'''s", opens nothing: PR 77 review M2)
-    const ml = /^("""|''')/.exec(val);
-    if (ml && !closes(val.slice(3), ml[1]!)) open = ml[1]!;
-    let m: RegExpExecArray | null;
-    if (key === 'features.hooks') out.hooks = val === 'true';
-    else if (key === 'features') { const h = inlineHooks(val); if (h !== undefined) out.hooks = h; }
-    else if (key === 'profile' && !inTable) out.profile = val.replace(/^(["'])(.*)\1$/, '$2');
-    else if ((m = /^profiles\.(.+)\.features\.hooks$/.exec(key))) out.profiles.set(m[1]!, val === 'true');
-    else if ((m = /^profiles\.(.+?)(?:\.features)?$/.exec(key))) { const h = inlineHooks(val); if (h !== undefined) out.profiles.set(m[1]!, h); }
-  }
-  return out;
-}
-/** [features] hooks in a Codex config.toml: true, false, or undefined when it does not set it. */
-export const codexHooksFeature = (toml: string): boolean | undefined => readCodexToml(toml).hooks;
+// duplicateJsonKey (review 70-M3), readCodexToml and codexHooksFeature (review 70-M4) live in kit/guard/install.mjs
+// (#4609), so the guard installer and this check read hooks.json and config.toml alike.
+export { codexHooksFeature, duplicateJsonKey, readCodexToml };
 
 const hookEntries = (list: unknown) => (Array.isArray(list) ? list.filter(isObject) : []);
 const runs = (e: Record<string, unknown>, shim: string, o: Parameters<typeof runsShim>[2]) =>
@@ -197,6 +141,11 @@ export function samePath(a: string, b: string, platform: NodeJS.Platform = proce
 export function seatRefusal(agent: string, machine: string, pane: string, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd(), home = homedir(), platform: NodeJS.Platform = process.platform): string | null {
   const left = Object.keys(env).filter(isClaudeOnly);
   if (left.length) return `the pane still holds Claude-only env (${left.sort().join(', ')})`;
+  // PR 96 review r2 I3: the guard applies its seat rules (role, fence, secrets, unknown tools) only where CB_ROLE and
+  // CB_AGENT are set, so a pane missing either, or naming another agent, would start an agent with the dangerous-command
+  // rules alone. cb squad up sets both on every pane; anything else is a broken launch.
+  if (!String(env.CB_ROLE ?? '').trim()) return 'CB_ROLE is not set in this pane, so the guard would apply no seat rule: start the seat with cb squad up, which sets it';
+  if (String(env.CB_AGENT ?? '').trim() !== agent) return `CB_AGENT is ${env.CB_AGENT ? JSON.stringify(String(env.CB_AGENT).slice(0, 40)) : 'not set'} in this pane, not ${agent}: start the seat with cb squad up, which sets it`;
   if (agent === 'codex') return codexRefusal(env, cwd, home, platform);
   if (agent === 'agy') {
     const hook = agyHookRefusal(cwd, home, platform);
