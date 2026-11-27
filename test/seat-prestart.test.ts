@@ -15,8 +15,6 @@ import { CLAUDE_ONLY_ENV, isClaudeOnly } from '../cli/agents/env.ts';
 import { codexPromptText, createCodexAdapter } from '../cli/agents/codex.ts';
 import { opencodeEndpointPath } from '../cli/agents/opencode.ts';
 
-// The owner's Codex switch (#4002): startOne reaches the registry's adapter, which reads it from this process
-process.env.CB_CODEX_BYPASS_HOOK_TRUST = '1';
 const BOARD = fileURLToPath(new URL('..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '');
 // Plainly fake values: the names are what count, and no value is ever printed by a child.
 const CANARY = { GITHUB_PERSONAL_ACCESS_TOKEN: 'not-a-token', CLAUDE_CODE_FAKE_SOCKET: 'fake', ANTHROPIC_FAKE_KEY: 'fake', anthropic_fake_lower: 'fake', CLAUDECODE: '1', CB_KEEP_ME: 'kept' };

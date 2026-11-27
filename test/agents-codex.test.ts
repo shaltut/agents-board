@@ -12,8 +12,6 @@ const recorder = (res: { status: number | null; stderr?: string; error?: Error }
   const calls: Call[] = [];
   return { calls, run: (m: string | null, a: string[], t?: number) => { calls.push([m, a, t]); return res; } };
 };
-// the owner's switch (#4002): without it every Codex launch is refused, so the launch tests run with it set
-const switched = createCodexAdapter(undefined, { CB_CODEX_BYPASS_HOOK_TRUST: '1' });
 const seat = (extra: Partial<SeatHandle> = {}): SeatHandle => ({ machine: 'testbox', pane: 'p1', herdrName: 'demo-b1-m', agent: 'codex', ...extra });
 const input = (extra: Partial<LaunchInput> = {}): LaunchInput =>
   ({ name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'codex', model: 'gpt-5.1-codex', board: 'C:/w/board', cwd: 'C:/w/x', ...extra });
@@ -27,7 +25,7 @@ test('registry: codex resolves to the codex adapter; its default model is null (
 });
 
 test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a builder, exact argv', () => {
-  assert.deepEqual(switched.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
+  assert.deepEqual(codexAdapter.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
     kind: 'codex',
     args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'workspace-write',
       '-c', 'sandbox_workspace_write.network_access=true',
@@ -46,29 +44,28 @@ test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; confi
   assert.match(codexAdapter.mcpGate ?? '', /\[mcp_servers\]/);
   assert.match(codexAdapter.mcpGate ?? '', /merges/);
   for (const role of ['builder', 'reviewer']) {
-    const a = switched.buildLaunch(input({ role })).args.join('\u0000');
+    const a = codexAdapter.buildLaunch(input({ role })).args.join('\u0000');
     assert.ok(a.includes(m.args.join('\u0000')), role);
   }
 });
 
 test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no network opening; other roles workspace-write', () => {
   for (const role of ['reviewer', 'qa', 'investigator']) {
-    const a = switched.buildLaunch(input({ role })).args;
+    const a = codexAdapter.buildLaunch(input({ role })).args;
     assert.equal(a[a.indexOf('-s') + 1], 'read-only', role);
     assert.ok(!a.some((x) => x.startsWith('sandbox_workspace_write')), role);
   }
   for (const role of ['lead', 'architect', 'owner', 'builder']) {
-    const a = switched.buildLaunch(input({ role })).args;
+    const a = codexAdapter.buildLaunch(input({ role })).args;
     assert.equal(a[a.indexOf('-s') + 1], 'workspace-write', role);
   }
 });
 
-// #4002 install gate: untrusted hooks never run (Esc on Hooks need review goes on without them). By default the board never
-// trusts hooks itself, so a Codex seat is refused before any pane; only the owner's switch adds the bypass flag.
-test('buildLaunch: never trusts hooks by default (refused, naming the switch); with CB_CODEX_BYPASS_HOOK_TRUST=1 the installed hooks always run', () => {
-  for (const env of [{}, { CB_CODEX_BYPASS_HOOK_TRUST: '' }, { CB_CODEX_BYPASS_HOOK_TRUST: '0' }])
-    assert.throws(() => createCodexAdapter(undefined, env).buildLaunch(input()), /CB_CODEX_BYPASS_HOOK_TRUST=1/, JSON.stringify(env));
-  const a = switched.buildLaunch(input()).args;
+// #4002 install gate (Ahmed, Q3004): untrusted hooks never run (Esc on Hooks need review goes on without them), so every
+// Codex launch runs the installed hooks without the trust step; a seat whose hooks.json lacks the cb guard entry is refused
+// by the prestart (test/seat-prestart.test.ts)
+test('buildLaunch: never answers a dialog, always runs the installed hooks (no trust step to skip), no Claude flags', () => {
+  const a = codexAdapter.buildLaunch(input()).args;
   assert.equal(a[0], '--no-daemon');
   assert.ok(a.includes('--dangerously-bypass-hook-trust'));
   for (const bad of ['--dangerously-bypass-approvals-and-sandbox', '--permission-mode', '--settings', '--approve-for-me', '-p'])
@@ -76,19 +73,19 @@ test('buildLaunch: never trusts hooks by default (refused, naming the switch); w
 });
 
 test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN, CLAUDE_CODE_*, ANTHROPIC_* and CLAUDECODE are dropped from the env (any case); others pass', () => {
-  const env = switched.buildLaunch(input({ env: {
+  const env = codexAdapter.buildLaunch(input({ env: {
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't',
     ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'e', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' } })).env;
   assert.deepEqual(env, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
-  assert.deepEqual(switched.buildLaunch(input()).env, {});
+  assert.deepEqual(codexAdapter.buildLaunch(input()).env, {});
 });
 
 test('buildLaunch: an empty model leaves -m out (Codex uses its own default); Claude names and bad names throw', () => {
-  const a = switched.buildLaunch(input({ model: '' })).args;
+  const a = codexAdapter.buildLaunch(input({ model: '' })).args;
   assert.ok(!a.includes('-m'));
-  for (const m of ['opus', 'sonnet', 'haiku', 'fable', 'Opus', 'FABLE']) assert.throws(() => switched.buildLaunch(input({ model: m })), /Claude model name/, m);
-  for (const m of ['openai/gpt-5', 'gpt 5', '-gpt', 'gpt;rm', 'x'.repeat(65)]) assert.throws(() => switched.buildLaunch(input({ model: m })), /not a Codex model name/, m);
+  for (const m of ['opus', 'sonnet', 'haiku', 'fable', 'Opus', 'FABLE']) assert.throws(() => codexAdapter.buildLaunch(input({ model: m })), /Claude model name/, m);
+  for (const m of ['openai/gpt-5', 'gpt 5', '-gpt', 'gpt;rm', 'x'.repeat(65)]) assert.throws(() => codexAdapter.buildLaunch(input({ model: m })), /not a Codex model name/, m);
   assert.equal(codexModelProblem('gpt-5.1-codex'), null);
   assert.equal(codexModelProblem('o4-mini'), null);
   assert.equal(codexModelProblem(''), null);
@@ -171,7 +168,7 @@ test('matcher and shim agree: every tool the shim judges matches (PowerShell onl
 });
 
 test('READ_ONLY_ROLES: the sandbox choice follows the guard list', () => {
-  for (const role of READ_ONLY_ROLES) { const a = switched.buildLaunch(input({ role })).args; assert.equal(a[a.indexOf('-s') + 1], 'read-only', role); }
+  for (const role of READ_ONLY_ROLES) { const a = codexAdapter.buildLaunch(input({ role })).args; assert.equal(a[a.indexOf('-s') + 1], 'read-only', role); }
 });
 
 test('instructionMapping: AGENTS.md native, CLAUDE.md as the fallback filename, no env', () => {

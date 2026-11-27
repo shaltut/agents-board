@@ -44,15 +44,8 @@ function retryAfterSec(text: string): number | undefined {
   return total > 0 ? total : undefined;
 }
 
-/** #4002 install gate, the owner's switch: Codex runs hooks only once a person trusts them, and Esc on "Hooks need review"
- *  goes on without them, so the guard fails open. A Codex seat starts only with --dangerously-bypass-hook-trust (the
- *  installed hooks always run; DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too), and
- *  only where CB_CODEX_BYPASS_HOOK_TRUST=1 is set (where cb squad up and the supervisor run). Unset: refused by name. */
-export const codexHookTrustBypassed = (env: NodeJS.ProcessEnv = process.env) => /^(?:1|true|yes)$/i.test(String(env.CB_CODEX_BYPASS_HOOK_TRUST ?? '').trim());
-
 // realRun is read when a call is made, never at import: squad-up.ts imports the registry that imports this file.
-// switchEnv: where the owner's switch is read (tests pass their own)
-export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), switchEnv: NodeJS.ProcessEnv = process.env): AgentAdapter {
+export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)): AgentAdapter {
   const adapter: AgentAdapter = {
     kind: 'codex',
     // No SessionStart hook hands the relay anything: the seat's relay is started by the pane before the agent runs.
@@ -62,7 +55,6 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), 
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
-      if (!codexHookTrustBypassed(switchEnv)) throw new Error(`codex seat ${l.name}: Codex runs the guard hook only after a person trusts it (Esc on "Hooks need review" goes on without it), so a Codex seat starts only with --dangerously-bypass-hook-trust, the owner's call: set CB_CODEX_BYPASS_HOOK_TRUST=1 where cb squad up and the supervisor run`);
       const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
       const env = stripClaudeOnly(l.env);
       return {
@@ -71,8 +63,10 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), 
           '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
           ...(l.model ? ['-m', l.model] : []),
           '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
-          // #4002 install gate (codexHookTrustBypassed): the installed hooks always run; the prestart refuses a seat with
-          // no guard entry in hooks.json, and the fence keeps every seat out of hooks.json and config.toml
+          // #4002 install gate (Ahmed, Q3004): Codex runs hooks only once a person trusts them, and Esc on "Hooks need
+          // review" goes on without them (the guard fails open). With this flag the installed hooks always run; the
+          // prestart refuses a seat whose hooks.json has no cb guard entry, and the fence keeps every seat out of hooks.json
+          // and config.toml. DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too.
           '--dangerously-bypass-hook-trust',
           '-s', readOnly ? 'read-only' : 'workspace-write',
           // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
@@ -136,7 +130,7 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), 
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
         matchers: { win32: re([...HANDLED_TOOLS]), darwin: re(base), linux: re(base) },
-        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json makes Codex show \"Hooks need review\" at the next start: only Ahmed trusts it, the board never answers it.",
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
       };
     },
 
@@ -150,8 +144,9 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t), 
       };
     },
 
-    // Two startup dialogs in a row on 0.160+: "Update available" is pre-empted by the flag; "Hooks need review" is not,
-    // and is never answered by the board: the seat parks as agent_not_ready until a person trusts the hooks.
+    // Startup dialogs on 0.160+: "Update available" is pre-empted by the -c flag; "Hooks need review" by the launch's
+    // --dangerously-bypass-hook-trust (Q3004). A folder not under [projects] still shows the folder trust dialog: the seat
+    // parks as agent_not_ready until a person answers it; the board never does.
     trustSpec() {
       return {
         dialogHint: '"Update available" (the launch already turns the update check off); the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml (hook trust is bypassed: the launch runs the installed hooks)',
