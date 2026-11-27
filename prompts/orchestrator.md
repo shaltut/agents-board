@@ -5,7 +5,7 @@ The detail for every step below is in `cb help orchestrate`.
 
 ## Start
 1. Run once: `cb iam orch@<machine> <project>`, then `cb relay`, then `cb start`. Read `cb brief` and `cb pending`.
-   When you have a role, run `cb role <role>`, and run it again after a compaction.
+   When you have a role, run `cb role <role>`.
 2. Other projects have their own orchestrators. Never touch their tasks or their workers.
 3. Load the `herdr` skill before you start, read or message any worker session.
 4. When you start a worker, give it `prompts/session.md`. Its first commands are

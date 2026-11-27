@@ -18,6 +18,7 @@ import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
 import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
+import { cardBlock, resumeText } from './resume-text.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 
 const OPTIONS = {
@@ -235,17 +236,6 @@ function printBrief(b: any) {
   sec('ANSWERED — DELIVER THESE', b.answered_pending, (q) =>
     `Q${q.id} → ${q.asked_by}${q.reply_to?.pane ? ` (pane ${q.reply_to.pane}@${q.reply_to.machine})` : ''}: ${q.answer}${q.was != null ? ` (CHANGED, was: ${q.was})` : ''}`);
   sec('RULES & FACTS', b.memory?.entries ?? [], memLine);
-}
-
-/** A staged card's block for cb resume and cb next: the words, the finish line, the page it is built from, notes, questions. */
-function cardBlock(c: any, head = true): string {
-  const ind = (s: string) => s.split('\n').map((l) => `    ${l}`).join('\n');
-  return [head && `#${c.id} [${c.status}] ${c.title}`, `  stage: ${c.stage_words}`,
-    c.part && `  your part: ${c.part.repo}`, c.parts && `  parts: ${c.parts}`, `  finish with: ${c.finish}`,
-    c.page && `  page (v${c.page.version}${c.page.approved ? ', approved' : ''}):\n${ind(c.page.body)}`,
-    c.notes.length && `  notes:\n${c.notes.map((n: any) => `    ${new Date(n.at).toISOString().slice(0, 16).replace('T', ' ')} ${n.actor}: ${flat(n.summary)}`).join('\n')}`,
-    c.questions.length && `  questions:\n${c.questions.map((q: any) => `    Q${q.id}${q.status === 'answered' ? ' answered:' : ''} ${flat(q.body)}`).join('\n')}`,
-  ].filter(Boolean).join('\n');
 }
 
 /** cb pass, fail and stage: where the card went and who takes it (cb.next_step), as a line and as json. */
@@ -817,9 +807,7 @@ ${body}`, json: pg };
     }
     case 'resume': {
       const r: any = await callFn('resume', { actor });
-      const roleLine = r.role ? `\n\nYour role: cb role ${r.role}` : '';
-      return { out: (r.cards.length ? [`${r.actor}${r.role ? ` (${r.role})` : ''}${r.project ? ` in ${r.project}` : ''}${r.area ? `, area ${r.area}` : ''}${r.model ? `, ${r.model}` : ''}`, ...r.cards.map((c: any) => cardBlock(c))].join('\n\n')
-        : `${r.actor}${r.role ? ` (${r.role})` : ''} holds no cards. Next: cb next${r.project ? '' : ' <project>'}`) + roleLine, json: r };
+      return { out: resumeText(r), json: r };
     }
     case 'squad': {
       if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|->  |  cb squad up <project> [--dry-run]');

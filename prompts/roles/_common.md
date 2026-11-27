@@ -2,7 +2,6 @@
 
 You are one session in a squad. Claude Board is the source of work and Ahmed's view of it. Use `cb` only.
 
-- After a compaction or restart: `cb resume`. It shows your cards, their stage, your notes and open questions.
 - Read the area page of the card you work: `cb page show --area <area>`. The owner of that area keeps it current.
 - Design before build. A card in a pipeline project has a design page (`cb page show <id>`). Review and QA compare
   against the approved version (`cb page show <id> --approved`).
