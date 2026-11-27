@@ -20,7 +20,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const M = 'testbox';
 const seatFiles = (pane: string) => {
   const k = seatKey(M, pane);
-  return { lock: join(tmpdir(), `cb-relay-${k}.pid`), log: join(tmpdir(), `cb-relay-${k}.log`), bridge: bridgeFiles(k).info, endpoint: claudeEndpointPath(M, pane) };
+  return { lock: join(tmpdir(), `cb-relay-${k}.pid`), log: join(tmpdir(), `cb-relay-${k}.log`), held: join(tmpdir(), `cb-relay-${k}.held`), bridge: bridgeFiles(k).info, endpoint: claudeEndpointPath(M, pane) };
 };
 const rmSeat = (pane: string) => { for (const f of Object.values(seatFiles(pane))) fs.rmSync(f, { force: true }); };
 
@@ -1205,13 +1205,15 @@ test('a new agent session mid-hold gets the held notices once it binds under the
     assert.ok(await until(() => /dropped 1 held notices: the new session bound under another name/.test(fs.readFileSync(f.log, 'utf8')), 5000), 'the drop is logged');
     assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #6/, 'by count only');
     assert.ok(!text(boxC).includes('job #6'), 'not pushed to another name');
-    // round 3 R1: the agent dies mid-hold and no new one comes: the relay leaves with its copy, logging how many, never what
+    // round 3 R1, #4630: the agent dies mid-hold: the relay leaves its copy in the seat's held file for the next relay in
+    // the pane, logging how many, never what
     await sql`select cb.tell('R1@test', 'job #7 lint at abcdef1: passed (exit 0).', 'runner')`;
     await wait(1500);
     assert.ok(!text(boxC).includes('job #7'), 'held');
     await boxC.close();
-    assert.ok(await until(() => /leaving: dropped 1 held notices from this relay's copy/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'leaving logs the count');
+    assert.ok(await until(() => /leaving: kept 1 held notices for the next relay in this pane/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'leaving logs the count');
     assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #7/, 'by count only');
+    assert.match(fs.readFileSync(f.held, 'utf8'), /job #7/, 'the copy is in the seat file');
   } finally {
     await Promise.all([boxA.close(), boxB.close(), boxC.close()]);
     await stopSeat(pane, relay);
@@ -1476,3 +1478,43 @@ for (const [who, role, bound, leads] of LEADS) {
     if (leads) await say; else await assert.rejects(say, new RegExp(`${who} is not in huddle`));
   });
 }
+
+// #4630 (review 78 round 3 R1, probe D): the usual restart order. The old agent dies, its relay leaves about 4 s later, and
+// the new agent starts after that: a new relay, a new session id, the board's row and hold started again. The held
+// copy waits in the seat's held file; the new relay pushes it once the new session binds under the same name.
+test('held notices survive a relay restart: the old agent dies, its relay leaves, a new one binds under the same name and gets them once (#4630)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-heldfile-${process.pid}`, first = sockPath('heldfile-a'), second = sockPath('heldfile-b'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2');
+  await Promise.all([boxA.ready, boxB.ready]);
+  const text = (b: any) => b.got.map((g: any) => g.message.content as string).join('\n');
+  await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+  writeClaudeEndpoint(M, pane, { socket: first, token: 'tok', sessionId: 'S1' });
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  let relay2: ReturnType<typeof spawn> | undefined;
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    await wait(1500);
+    await sql`select cb.tell('W1@test', 'job #7 test at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(boxA.got.length, 0, 'held');
+    await boxA.close(); // the old Claude dies; its endpoint still names its socket
+    assert.ok(await Promise.race([exitOf(relay).then(() => true), wait(10_000).then(() => false)]), 'the old relay left on its own');
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2', sessionId: 'S2' }); // the new Claude starts
+    relay2 = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+    assert.ok(await until(() => /found 1 held notices from the last relay in this pane/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'the new relay reads the copy');
+    assert.equal(fs.existsSync(f.held), false, 'read once');
+    await wait(1500);
+    assert.ok(!text(boxB).includes('job #7'), 'not bound yet: nothing pushed');
+    await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => text(boxB).includes('job #7'), 8000), 'bound under the same name: the held result reaches the new session');
+    await wait(1500);
+    assert.equal(text(boxB).match(/job #7/g)?.length, 1, 'once');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay2 ?? relay);
+  }
+});

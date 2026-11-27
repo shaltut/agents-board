@@ -14,7 +14,7 @@
 // agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
 // every path arg, as given and as resolved (a link named notes.txt can lead to .env).
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 let core = null;
@@ -74,6 +74,8 @@ export function parseAgyInput(raw) {
 }
 
 // realpath of the nearest existing ancestor plus the rest: a symlink inside the workspace cannot lead a write out of it.
+// PR 110 S2: the native realpath, which expands Windows short names (GIT~1 is .git); the JS one keeps them. null: a
+// short name that could not be expanded (S3), which the callers deny.
 function real(p) {
   let head = p;
   const tail = [];
@@ -83,8 +85,17 @@ function real(p) {
     tail.unshift(head.slice(up.length).replace(/^[\\/]+/, ''));
     head = up;
   }
-  try { return resolve(realpathSync(head), ...tail); } catch { return p; }
+  try { return resolve(realpathSync.native(head), ...tail); } catch { /* the JS one below */ }
+  let r;
+  try { r = resolve(realpathSync(head), ...tail); } catch { r = p; }
+  return core?.SHORT_SEGMENT?.test(r) ? null : r;
 }
+const SHORT = 'the guard could not expand a Windows short name (~1) in the path to the file it names: use the long name';
+
+// PR 110 S1: the path arguments in any case (agy, a Go binary, decodes JSON keys case-insensitively, the last one
+// winning), and any other path key core reads (move_path, a rename's keys), top level only: content is text (M1)
+const PATH_ARGS_LC = new Set(PATH_ARGS.map((k) => k.toLowerCase()));
+const pathKeys = (args) => Object.keys(args).filter((k) => PATH_ARGS_LC.has(k.toLowerCase()) || core?.isPathKey?.(k));
 // A path segment as the guard compares it: folded to lower case on every platform; on Windows also without trailing dots
 // and spaces (NTFS drops them: ".git." is ".git") and without anything from ":" on (an NTFS stream: ".git::$INDEX_ALLOCATION").
 export function normSegment(seg, platform = process.platform) {
@@ -99,18 +110,20 @@ export function checkPath(call, input, mode = 'edit', platform = process.platfor
   const verb = mode === 'read' ? 'reading' : 'editing';
   const denySegs = mode === 'read' ? WRITE_DENY_SEGMENTS.filter((s) => s !== '.git') : WRITE_DENY_SEGMENTS;
   const args = isObject(call.args) ? call.args : {};
-  const given = PATH_ARGS.filter((k) => args[k] !== undefined);
+  const given = pathKeys(args);
   if (given.length === 0) return `the ${mode}'s target path is missing (read: ${PATH_ARGS.join(', ')})`;
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
   const ws = Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' && input.workspacePaths[0] ? input.workspacePaths[0] : null;
   const root0 = ws ?? cwd;
   if (!root0) return `the hook input names no cwd or workspace to confine ${mode}s to`;
   const root = real(resolve(root0));
+  if (root === null) return SHORT;
   const base = resolve(cwd ?? root0);
   for (const k of given) {
     const v = args[k];
     if (typeof v !== 'string' || !v.trim()) return `the ${mode}'s target path (${k}) is not a non-empty string`;
     const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
+    if (abs === null) return `${SHORT} (${k})`;
     const rel = relative(root, abs);
     if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `${verb} outside the workspace (${k})`;
     const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
@@ -128,14 +141,30 @@ function secretTarget(call, input, mode) {
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : null;
   const ws = Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' ? input.workspacePaths[0] : null;
   const base = resolve(cwd ?? ws ?? '.');
-  for (const k of PATH_ARGS) {
+  for (const k of pathKeys(args)) {
     const v = args[k];
     if (typeof v !== 'string') continue;
-    if (core.secretPath(v) || core.secretPath(real(isAbsolute(v) ? resolve(v) : resolve(base, v)))) {
+    const r = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
+    if (core.secretPath(v) || (r !== null && core.secretPath(r))) {
       return `${mode === 'read' ? 'reading' : 'editing'} a secret file (${k}): what a seat reads goes to the model provider (#4347), so no seat opens .env, a private key or a credentials file. Use the file where it lives and name where a value lives instead; .env.example shows the keys. A value you need: cb ask`;
     }
   }
   return null;
+}
+
+// #4652: an edit's targets in every spelling core judges (as given, resolved against the cwd, through real paths), so
+// core's fence and secret rule run on agy's edits as on Codex's and OpenCode's. Before, evaluate got no paths and only
+// this shim's own segments were denied: a repo's .claude/settings.json, opencode.json or .codex config stayed writable.
+const FS = { resolve, dirname, basename, join, realpathSync };
+export function editPaths(call, input) {
+  const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd
+    : Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string' ? input.workspacePaths[0] : '.';
+  // #4663 (PR 109 review M1): the top-level path arguments only, the ones checkPath reads. agy has no patch tool, so a
+  // patch header or a path key inside an edit's content is text, never a target (core.editTargets would read both).
+  // A rename or move tool is denied today (unlisted); its keys (new_path, old_path ...) are read already (pathKeys)
+  const args = isObject(call.args) ? call.args : {};
+  const targets = pathKeys(args).map((k) => args[k]).filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim());
+  return [...new Set(targets.flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
@@ -154,7 +183,8 @@ export function runAgyShim(raw, env = process.env) {
       return why ? deny(`Blocked: ${why}`) : { decision: 'allow' };
     }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
+    const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1',
+      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined });
     if (v?.allow === true) {
       if (p.tool === 'edit') {
         const why = checkEditPath(p.call, p.input) ?? secretTarget(p.call, p.input, 'edit');

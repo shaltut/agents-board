@@ -626,6 +626,79 @@ test('startOne: no value survives in the pane lines: env sets, tokens, passwords
   assert.match(line, /error: no such file …/);
 });
 
+// #4617 (PR 93 re-review): a flag is a flag's shape, not anything after a dash; a secret-sounding word cuts the next one
+// whatever its form; tabs and curly quotes neither glue nor hide words
+test('startOne: only flag-shaped flags survive; secret-ish words cut the next word; tabs split, curly quotes trim (#4617)', () => {
+  const lineFor = (text: string) => {
+    const f = fake((c) => {
+      if (c.args[0] === 'tab') return paneOut('w5:p1');
+      if (c.args[1] === 'start') return TIMEOUT;
+      if (c.args[1] === 'read') return paneText(text);
+    });
+    return startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line;
+  };
+  // S1: random tokens after a dash, a password stuck to a short flag, upper-case or over-long "flags"
+  const s1 = lineFor('error: bad option -aB3dEf9xQ\nerror: invalid -pHunter6pw\nerror: unknown --Hunter7Secret\n'
+    + `error: unknown --${'a'.repeat(70)}\nerror: invalid --x_y_hunter8\n`);
+  for (const v of ['aB3dEf9xQ', 'Hunter6pw', 'Hunter7Secret', 'a'.repeat(70), 'hunter8']) assert.ok(!s1.includes(v), `"${v}" leaked: ${s1}`);
+  // real flags stay whole
+  const ok = lineFor("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: unknown option -m\nerror: invalid --model=gpt\n");
+  assert.match(ok, /'--dangerously-bypass-hook-trust' found/);
+  assert.match(ok, /unknown option -m/);
+  assert.match(ok, /invalid --model=…/);
+  // L1: plain-word secrets and names
+  const l1 = lineFor(['error: API_KEY: hunter9', 'error: bad access_token hunterA', 'error: wrong passphrase hunterB', 'error: unknown profile clientco',
+    'error: no such user jdoe', 'error: account acmecorp denied', 'error: org globex not found', 'error: login mallory failed', 'error: mysql -p hunterC refused',
+    'error: invalid credentials hunterD', 'error: authorization hunterE denied'].join('\n'));
+  for (const v of ['hunter9', 'hunterA', 'hunterB', 'clientco', 'jdoe', 'acmecorp', 'globex', 'mallory', 'hunterC', 'hunterD', 'hunterE']) assert.ok(!l1.includes(v), `"${v}" leaked: ${l1}`);
+  // L2: a tab splits words (it no longer glues a value onto a kept word); L3: curly quotes are trimmed like straight ones
+  const l2 = lineFor('error: invalid token\thunterF\nerror: unexpected argument \u201c--full-auto\u201d found\nerror: unknown \u2018--no-daemon\u2019\n');
+  assert.ok(!l2.includes('hunterF'), l2);
+  assert.match(l2, /\u201c--full-auto\u201d found/);
+  assert.match(l2, /unknown \u2018--no-daemon\u2019/);
+  // cosmetic: after bypass or oauth the next word is kept
+  assert.match(lineFor('error: --dangerously-bypass-hook-trust conflicts with sandbox\nerror: oauth provider rejected\n'), /bypass-hook-trust conflicts with sandbox.*oauth provider rejected/);
+});
+
+// PR 105 review: punctuation and linking words between a secret word and its value, other control characters, dashed
+// account flags, secret words matched inside ordinary words, and a very long line
+test('startOne: PR 105 review B1-B7: no value after "password :", "token is", a vertical tab or --user; ordinary words stay; long lines stay fast (#4617)', () => {
+  const lineFor = (text: string) => {
+    const f = fake((c) => {
+      if (c.args[0] === 'tab') return paneOut('w5:p1');
+      if (c.args[1] === 'start') return TIMEOUT;
+      if (c.args[1] === 'read') return paneText(text);
+    });
+    return startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line;
+  };
+  const leaks = (line: string, values: string[]) => values.filter((v) => line.includes(v));
+  // B1: a punctuation-only token between the word and the value
+  assert.deepEqual(leaks(lineFor(['error: password : hunterG', 'error: token = hunterH', 'error: secret - hunterI', 'error: api_key := hunterJ'].join('\n')),
+    ['hunterG', 'hunterH', 'hunterI', 'hunterJ']), []);
+  // B2: vertical tab, form feed and a bare CR are spaces, never glue
+  assert.deepEqual(leaks(lineFor('error: invalid token\u000bhunterK\nerror: invalid token\u000chunterL\nerror: bad token\rhunterM\n'), ['hunterK', 'hunterL', 'hunterM']), []);
+  // B3: an account name given as a long flag
+  const b3 = lineFor(['--user', '--username', '--profile', '--org', '--tenant', '--account'].map((f, i) => `error: unknown ${f} name${'ABCDEF'[i]}x`).join('\n'));
+  assert.deepEqual(leaks(b3, ['nameAx', 'nameBx', 'nameCx', 'nameDx', 'nameEx', 'nameFx']), []);
+  assert.match(b3, /--username/);
+  // B5: a linking word between the word and the value; an outcome after it is kept
+  assert.deepEqual(leaks(lineFor(['error: password is hunterN', 'error: token was hunterO', 'error: the key is set to hunterP', 'error: API_KEY = is hunterQ'].join('\n')),
+    ['hunterN', 'hunterO', 'hunterP', 'hunterQ']), []);
+  assert.match(lineFor('error: password is missing\n'), /password is missing/);
+  // B4: a secret word inside an ordinary word is not one, and the messages that matter stay readable
+  const b4 = lineFor(['error: tests passed then failed', 'error: keyboard layout invalid', 'error: author field missing', 'error: credit balance unknown',
+    'error: API key not found', 'error: authentication failed', 'error: codex login required', 'error: invalid --dangerously-bypass-hook-trust value'].join('\n'));
+  for (const kept of ['tests passed then failed', 'keyboard layout invalid', 'author field missing', 'credit balance unknown', 'API key not found',
+    'authentication failed', 'codex login required']) assert.ok(b4.includes(kept), `"${kept}" in ${b4}`);
+  // and compounds still are: camelCase, snake_case, one word
+  assert.deepEqual(leaks(lineFor(['error: bad accessToken hunterR', 'error: bad AUTH_TOKEN hunterS', 'error: bad apikey hunterT', 'error: bad client-secret hunterU',
+    'error: invalid credentials hunterV', 'error: authorization hunterW denied'].join('\n')), ['hunterR', 'hunterS', 'hunterT', 'hunterU', 'hunterV', 'hunterW']), []);
+  // B7: a 100k-character line is cut before it is cleaned, so it stays fast
+  const t0 = Date.now();
+  lineFor(`error: x${'!'.repeat(100_000)}\nerror: ${'a.'.repeat(100_000)}\nerror: ${'('.repeat(100_000)}\n`);
+  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+});
+
 test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
   const unreadable = fake((c) => {
     if (c.args[0] === 'tab') return paneOut('w5:p1');
@@ -858,11 +931,11 @@ test('squad up --dry-run (#4585): four builders, one per agent, plan four launch
     assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
       '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
     assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
-      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
     assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
-    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
     assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
-      ['CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+      ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
     // the port is the seat's own, stable across restarts, in range
     assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
   } finally { delete process.env.CB_MCP_GATE_OK; }

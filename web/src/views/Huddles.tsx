@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { CornerDownLeft, ListPlus, Plus } from 'lucide-react'
 import { get, qs, rpc, useProjects } from '@/lib/api'
 import { ago, clock, lineAuthor, splitActor } from '@/lib/format'
+import { defaultRecipient } from '@/lib/asks'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
 import { ActorChip, projectHue, ProjectChip, TaskId } from '@/components/Chips'
@@ -116,19 +117,19 @@ function Faces({ members }: { members: string[] }) {
   )
 }
 
-/** Ahmed opens a huddle: topic, the project's sessions (orchestrator preselected, live first), optional task. */
+/** Ahmed opens a huddle: topic, the project's sessions (its lead preselected, live first), optional task. */
 function NewHuddle({ open, onOpenChange, project }: { open: boolean; onOpenChange: (o: boolean) => void; project?: string }) {
   const { data: projects = [] } = useProjects()
   const [proj, setProj] = useState(project ?? '')
   const [topic, setTopic] = useState('')
   const [task, setTask] = useState('')
-  const [picked, setPicked] = useState<string[] | null>(null) // null = the default pick (orchestrator)
+  const [picked, setPicked] = useState<string[] | null>(null) // null = the default pick (the lead)
   const { data: sessions = [] } = useQuery({
     queryKey: ['sessions', proj], enabled: !!proj, queryFn: () => get<SessionRow[]>(`/api/sessions${qs({ project: proj })}`),
   })
   const mine = sessions.filter((s) => s.project === proj) // already live first; only bound sessions can join
-  const orch = mine.find((s) => /^orch(@|$)/.test(s.actor))
-  const members = picked ?? (orch ? [orch.actor] : [])
+  const lead = defaultRecipient(mine, proj) // #3771: by role, as the board finds it, not the orch@ name
+  const members = picked ?? (lead ? [lead] : [])
   const toggle = (a: string) => setPicked(members.includes(a) ? members.filter((m) => m !== a) : [...members, a])
 
   async function start(e: React.FormEvent) {

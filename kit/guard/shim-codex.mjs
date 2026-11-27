@@ -1,5 +1,7 @@
-// Codex PreToolUse hook (#4002 phase 2), wired in ~/.codex/hooks.json with a matcher on Bash, apply_patch and
-// request_user_input. Reads the hook input on stdin and CB_ROLE, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env,
+// Codex PreToolUse hook (#4002 phase 2), wired in ~/.codex/hooks.json by node kit/guard/install.mjs --agents codex with a
+// catch-all matcher (#4609): every tool reaches this file. In a board seat (CB_ROLE or CB_AGENT set) a tool it does not
+// judge is denied; outside one it passes, and Codex gets exactly what Claude gets there (PR 96 review I3, r2). Reads the hook input on
+// stdin and CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK from its pane's env,
 // asks core.mjs, and prints {} (allow: Codex rejects an explicit permissionDecision:allow) or Codex's deny object, exit 0:
 //   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}
 // Fails closed exactly like shim-claude.mjs: empty or unreadable input, a hook event other than PreToolUse, an unknown tool
@@ -24,8 +26,13 @@ try {
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 const EDIT_TOOLS = new Set(['apply_patch', 'Edit', 'Write']);
 const ASK_TOOLS = new Set(['request_user_input']);
-/** Every tool name this shim judges: the installer's hook matcher must name exactly these (an unmatched tool is never guarded). */
-export const HANDLED_TOOLS = [...SHELL_TOOLS, ...EDIT_TOOLS, ...ASK_TOOLS];
+// #4626: update_plan changes nothing outside the session (like Claude's plan tool); view_image reads a file into the
+// context, so it gets the secret-file rule of a read. spawn_agent stays unrecognized (blocked) until a live check shows a
+// sub-agent's own tools reach this hook (#4612).
+const PLAN_TOOLS = new Set(['update_plan']);
+const READ_TOOLS = new Set(['view_image']);
+/** Every tool name this shim judges; in a board seat any other tool is denied (the installer's matcher is a catch-all, #4609). */
+export const HANDLED_TOOLS = [...SHELL_TOOLS, ...EDIT_TOOLS, ...ASK_TOOLS, ...PLAN_TOOLS, ...READ_TOOLS];
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const detail = (e) => String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 200);
 const unreadable = (why) => ({ ok: false, reason: `guard could not read hook input (${why})` });
@@ -51,7 +58,12 @@ export function parseCodexInput(raw) {
   }
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', input, cwd: typeof p.cwd === 'string' ? p.cwd : null };
   if (ASK_TOOLS.has(name)) return { ok: true, tool: 'ask' };
-  return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard reads Bash, apply_patch and request_user_input` };
+  if (PLAN_TOOLS.has(name)) return { ok: true, tool: 'plan' };
+  if (READ_TOOLS.has(name)) {
+    if (typeof input.path !== 'string' || !input.path.trim()) return unreadable(`tool_input.path is ${input.path === undefined ? 'missing' : 'not a path'}`);
+    return { ok: true, tool: 'read', path: input.path, cwd: typeof p.cwd === 'string' ? p.cwd : null };
+  }
+  return { ok: false, unknown: typeof name === 'string' && name !== '', reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard reads Bash, apply_patch, request_user_input, update_plan and view_image` };
 }
 
 // An edit's targets as given, resolved against the hook's cwd (a relative hooks.json run from ~/.codex is the fence too),
@@ -67,12 +79,18 @@ export function runCodexShim(raw, env = process.env) {
   try {
     if (!core) return deny(`Blocked: guard failed to load core (${detail(loadErr)})`);
     const p = parseCodexInput(raw);
-    if (!p.ok) return deny(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
-    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const agent = String(env.CB_AGENT ?? '').trim() || null;
-    const paths = p.tool === 'edit' ? editPaths(p.input, p.cwd) : undefined;
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths });
+    // PR 96 review I3 and its r2 ruling: the hook is machine-wide (~/.codex/hooks.json), so outside a board seat (neither
+    // CB_ROLE nor CB_AGENT) Codex gets exactly what Claude gets there: a tool this shim does not judge passes (Claude's
+    // other tools never reach the guard), shell commands get the dangerous-command rules only, and a question follows
+    // CB_ALLOW_ASK as AskUserQuestion does
+    const seat = !!(role || agent);
+    if (!p.ok) return !seat && p.unknown ? {} : deny(`Blocked: ${p.reason}`);
+    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const paths = p.tool === 'edit' ? editPaths(p.input, p.cwd) : p.tool === 'read' ? [...new Set(core.editPathForms(p.path, p.cwd, FS))] : undefined;
+    // stdin: Codex's exec_command keeps a process's input open for write_stdin, which no hook sees (#4626)
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths, stdin: p.tool === 'shell' });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return deny(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

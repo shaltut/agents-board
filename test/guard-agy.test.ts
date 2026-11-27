@@ -161,8 +161,41 @@ test('edit confinement: .git, .agents, .gemini and kit/guard are denied, at any 
   for (const t of ['.git/hooks/pre-commit', join(ws, '.git', 'config'), '.agents/hooks.json', '.gemini/config/hooks.json', 'src/.git/x', 'kit/guard/core.mjs', join(ws, 'kit', 'guard', 'shim-agy.mjs'), 'src/../.agents/hooks.json']) {
     const r = edit({ TargetFile: t });
     assert.equal(r.decision, 'deny', t);
-    assert.match(r.reason ?? '', /not allowed|outside/);
+    assert.match(r.reason ?? '', /not allowed|outside|fence/); // .agents/hooks.json: core's fence (#4652) says it first
   }
+});
+
+// #4652: core's fence (editFence) runs on agy's edit targets too, as on Codex apply_patch and OpenCode write. Before, only
+// the shim's own segments were denied, so a repo's Claude settings, opencode.json or .codex config were writable.
+// #4663 (PR 109 review M1): agy has no patch tool, so a patch header in an edit's content is text, never a target
+test('edit fence (#4663 M1): an apply_patch example in the content of an ordinary file is not a target', () => {
+  assert.deepEqual(edit({ TargetFile: 'test/x.test.ts', CodeContent: '*** Begin Patch\n*** Add File: .codex/hooks.json\n+{}\n*** End Patch\n' }, undefined, 'write_to_file'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/x.md', ReplacementContent: '*** Update File: .claude/settings.json\n' }, undefined, 'replace_file_content'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/y.md', Content: { path: '.claude/settings.json' } }), { decision: 'allow' }, 'a path key inside content is text too');
+  assert.equal(edit({ TargetFile: '.claude/settings.json', CodeContent: 'x' }, undefined, 'write_to_file').decision, 'deny', 'the target itself still counts');
+});
+
+// PR 110 review S1: agy is a Go binary; Go's JSON decoding matches keys in any case, the last one winning. So a second
+// top-level path key in another case is a target too, for the fence (core) and for agy's own .git rule
+test('edit fence (PR 110 S1): a top-level path key in any case is a target', () => {
+  for (const args of [{ TargetFile: 'src/a.ts', targetFile: '.claude/settings.json' }, { TargetFile: 'src/a.ts', TARGETFILE: '.claude/settings.json' },
+    { TargetFile: 'src/a.ts', move_path: '.claude/settings.json' }, { TargetFile: 'src/a.ts', targetfile: '.git/config' }, { TARGETFILE: '.git/config' }])
+    assert.equal(edit(args, undefined, 'write_to_file').decision, 'deny', JSON.stringify(args));
+});
+
+test('edit fence (#4652): the repo-level fence paths are denied for every edit tool and path form; ordinary .claude work passes', () => {
+  for (const t of ['.claude/settings.json', '.claude/settings.local.json', 'opencode.json', '.codex/hooks.json', '.codex/config.toml',
+    '.opencode/plugins/x.js', join(ws, '.claude', 'settings.json'), 'src/../.claude/settings.json', '.CLAUDE/Settings.json', '.claude./settings.json']) {
+    for (const name of EDIT_TOOLS) {
+      const r = edit({ TargetFile: t }, undefined, name);
+      assert.equal(r.decision, 'deny', `${name} ${t}`);
+      assert.match(r.reason ?? '', /fence/, `${name} ${t}`);
+    }
+  }
+  for (const k of PATH_ARGS) assert.equal(edit({ [k]: '.claude/settings.json' }).decision, 'deny', k);
+  // a repo's own .claude skills and agents are ordinary work, as in the shell fence
+  assert.deepEqual(edit({ TargetFile: '.claude/skills/a.md' }), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: '.claude/agents/foo.md' }), { decision: 'allow' });
 });
 
 test('edit confinement: a missing, non-string or empty path denies; so does an unlisted arg name or a missing cwd', () => {

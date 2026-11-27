@@ -201,9 +201,19 @@ export function WaitsOn({ ids, className }: { ids: number[]; className?: string 
   )
 }
 
-/** A tag (work stream). Click filters Board and Backlog to it; it doesn't open the card. */
+const AGENT_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', agy: 'agy' }
+/** #4593 review 100 F3: a for:<agent> label (cb._for_agents) in plain words, as the digest says it: "for a Codex seat".
+ *  null for any other tag, and for a for: label naming no agent (the board ignores those). */
+export function forSeatWords(tag: string): string | null {
+  const m = /^for:(.+)$/i.exec(tag.trim())
+  const name = m ? AGENT_NAMES[m[1]!.toLowerCase()] : undefined
+  return name ? `for ${/^[aeiou]/i.test(name) ? 'an' : 'a'} ${name} seat` : null
+}
+
+/** A tag (work stream). Click filters Board and Backlog to it; it doesn't open the card. A for:<agent> label reads as the
+ *  seat it keeps the card for (#4593), never as the raw tag. */
 export function TagChip({ tag, active, className }: { tag: string; active?: boolean; className?: string }) {
-  const h = projectHue(tag)
+  const h = projectHue(tag), seat = forSeatWords(tag)
   return (
     <button type="button" title={active ? `Showing only ${tag}` : `Show only ${tag}`} aria-pressed={active}
       onPointerDown={(e) => e.stopPropagation()}
@@ -211,7 +221,7 @@ export function TagChip({ tag, active, className }: { tag: string; active?: bool
       className={cn('inline-flex h-5 items-center gap-px rounded-[4px] px-1.5 text-[11.5px] leading-none text-muted-foreground transition-colors hover:text-foreground',
         active && 'text-foreground ring-1 ring-foreground/40', className)}
       style={{ background: `oklch(0.7 0.09 ${h} / ${active ? 0.26 : 0.13})` }}>
-      <span aria-hidden className="opacity-60">#</span>{tag}
+      {seat ?? <><span aria-hidden className="opacity-60">#</span>{tag}</>}
     </button>
   )
 }
