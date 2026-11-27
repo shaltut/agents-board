@@ -11,13 +11,14 @@ import { callFn } from './rpc.ts';
 
 /** Runs `gh <args>` and returns its stdout; throws on failure. Injectable: tests never run the real gh. */
 export type Run = (args: string[]) => Promise<string>;
-// owner: Ahmed's GitHub login (#3221 review M4); left out, it is gh's own login (`gh api user`), asked once a process
-// and never when run is injected
-type Opts = { run?: Run; now?: Date; logTask?: number; owner?: string | null };
+type Opts = { run?: Run; now?: Date; logTask?: number };
 
 const KEY = 'github:', ACTOR = 'github', LABEL = '[GitHub · untrusted]';
 // [logins] Ahmed muted (cb github mute): his own Iris workers post as one; what they open, say or commit is dropped
 const MUTED = 'github-muted';
+// #3221 review M4: a login Ahmed sets as his own (a JSON string, e.g. "octocat"); a line by it is never held by his
+// relay. None by default: nothing is marked. Never gh's own login: the agents post under it.
+const OWNER = 'github-owner';
 const OUTBOX = 'github:outbox:'; // + target session: [message parts] written by the repos, not yet told (no '/': never a repo)
 // ponytail: a fixed margin for GitHub's indexing lag and clock skew; an event GitHub shows later than this is missed.
 const LAG = 10_000;
@@ -66,18 +67,6 @@ export function clean(s: unknown, n = 200): string {
 const cut = (v: string, n: number) => v.length > n ? v.slice(0, n - 1).replace(/[\uD800-\uDBFF]$/, '') + '…' : v;
 
 const isBot = (login: unknown) => /\[bot\]$/i.test(String(login ?? ''));
-
-/** Ahmed's login, lower case: the one given, else gh's own (the watch runs as his gh login), asked once a process. A
- *  failed lookup is null for this poll (his lines then wait like anyone's), never a failed poll. */
-let ghLogin: string | undefined;
-async function ownerLogin(o: Opts): Promise<string | null> {
-  if (o.owner !== undefined) return o.owner ? o.owner.toLowerCase() : null;
-  if (o.run) return null; // an injected gh (tests) is asked only what a poll asks
-  if (ghLogin === undefined) {
-    try { ghLogin = String(JSON.parse(await ghRun(['api', 'user'])).login ?? '').toLowerCase(); } catch { return null; }
-  }
-  return ghLogin || null;
-}
 
 /** Everything GitHub has in [since, until), read into memory first: a failure here writes nothing. */
 async function fetchEvents(repo: string, since: number, until: number, run: Run, muted: Set<string>) {
@@ -355,7 +344,8 @@ async function poll(o: Opts, only?: string): Promise<Map<string, Result>> {
     : await sql`select key, value from cb.settings where key like ${KEY + '%'} and key not like ${OUTBOX + '%'} order by key`;
   const [m] = await sql`select value from cb.settings where key = ${MUTED}`;
   const muted = new Set<string>((m?.value ?? []).map((x: string) => String(x).toLowerCase()));
-  const owner = rows.length ? await ownerLogin(o) : null; // no watched repo: gh is never called
+  const [ow] = await sql`select value from cb.settings where key = ${OWNER}`;
+  const owner = typeof ow?.value === 'string' && ow.value.trim() ? ow.value.trim().toLowerCase() : null;
   for (const r of rows) {
     const repo = r.key.slice(KEY.length), since = Date.parse(r.value.since), slice = Math.min(until, since + SLICE);
     results.set(repo, { ok: true, events: 0 });

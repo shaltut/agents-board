@@ -295,12 +295,14 @@ test('muted logins (Ahmed: shaltut, his own workers): what they open, say or com
   assert.deepEqual((await state(sql)).prs, {});
 });
 
-test("a line by Ahmed's own login (not muted) is marked urgent, so his relay never holds it; anyone else's is not (#3221 review M4)", async () => {
-  const urgentOf = async (who: string) => {
+test("a line by the login set as Ahmed's (github-owner, none by default) is marked urgent; anyone else's is not (#3221 review M4)", async () => {
+  const urgentOf = async (who: string, owner: string | null = 'Shaltut') => {
     const { sql, watch } = await board();
+    if (owner) await sql`insert into cb.settings (key, value) values ('github-owner', ${sql.json(owner)})`;
     const f = fakeGh({ [`repos/${R}/pulls`]: (q) => q.get('page') === '1' ? [pr(30, { title: 'Rulings' })] : [],
                        [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', who, 'OWNER')] });
-    await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch, owner: 'Shaltut' });
+    await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch });
+    assert.ok(!f.calls.some((c) => !String(c).startsWith('repos/')), 'gh is never asked who it is');
     const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github' order by id`;
     assert.equal(rows.length, 1);
     assert.doesNotMatch(rows[0].summary, /\u0001/, 'the mark never reaches the text');
@@ -309,12 +311,13 @@ test("a line by Ahmed's own login (not muted) is marked urgent, so his relay nev
   };
   assert.equal(await urgentOf('shaltut'), 'true', 'his login, case-blind');
   assert.equal(await urgentOf('dev1'), null, 'anyone else: a routine notice');
+  assert.equal(await urgentOf('shaltut', null), null, 'no login set (the default): nothing is marked, as on main');
   // his login muted: his comment is dropped; a failed run he pushed is GitHub's report, kept, and not his words
   const { sql, watch } = await board();
-  await sql`insert into cb.settings (key, value) values ('github-muted', ${sql.json(['shaltut'])})`;
+  await sql`insert into cb.settings (key, value) values ('github-muted', ${sql.json(['shaltut'])}), ('github-owner', ${sql.json('shaltut')})`;
   const f = fakeGh({ [`repos/${R}/issues/comments`]: () => [comment(30, at(5), 'take D8 out', 'shaltut', 'OWNER')],
                      [`repos/${R}/actions/runs`]: () => ({ pages: [{ total_count: 1, workflow_runs: [run({ name: 'Deploy', actor: { login: 'shaltut' } })] }] }) });
-  await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch, owner: 'shaltut' });
+  await gh.pollRepo(R, { run: f.run, now: NOW, logTask: watch });
   const rows = await sql`select summary, data ->> 'urgent' as u from cb.events where kind = 'message' and actor = 'github'`;
   assert.deepEqual(rows.map((r: any) => [r.summary.split('\n')[1], r.u]), [['  branch "main": 1 CI failure by shaltut', null]]);
 });

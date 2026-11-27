@@ -438,6 +438,19 @@ test('the hold ends right after the push, before the bookkeeping; a bind to anot
     await wait(1200);
     assert.equal(pushes().join('\n').match(/job #2 lint/g)?.length, 1, 'once');
     assert.match(pushes().join('\n'), /Message from orch: review #4 next/);
+    // round 2 M1: a teammate's memory change held in demo, then the same name moves to another project (the board keeps
+    // the hold, but returns memory only for the bound project): the copy pushes it, once
+    await sql`select cb.ensure_project('other')`;
+    await wait(1200);
+    await sql`select cb.mem_add(project => 'demo', title => 'Fixture X is synthetic only', kind => 'fact', actor => 'W5@pc')`;
+    await wait(1500);
+    const k = inbox.got.length;
+    assert.notEqual(await held(), null, 'the memory change waits');
+    await sql`select cb.iam('testbox', ${pane}, 'R9@testbox', 'other')`;
+    await sql`select cb.tell('R9@testbox', 'review #5 next', 'orch')`;
+    assert.ok(await upTo(() => pushes().slice(k).join('\n').includes('Fixture X is synthetic only'), 5000), 'the held memory change is pushed');
+    await wait(1200);
+    assert.equal(pushes().join('\n').match(/Fixture X is synthetic only/g)?.length, 1, 'once');
   } finally {
     await sql`drop trigger if exists slow_deliver on cb.questions`;
     await inbox.close();
@@ -1142,6 +1155,58 @@ test('same pane, new Claude session: the relay resets the pane\'s binding within
     assert.deepEqual(r, { actor: `${pane}@${M}`, project: null, session_id: 'S2' }, 'reset well before the 30 s poll');
   } finally {
     await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+// #3221 round 2 M2: a new agent process in the pane mid-hold (a new session id: the board starts the row again). The
+// held copy goes to it once it binds under the same name; under another name it is dropped, the log saying how many.
+test('a new agent session mid-hold gets the held notices once it binds under the same name; another name: dropped and logged (#3221)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-sidhold-${process.pid}`, first = sockPath('sidhold-a'), second = sockPath('sidhold-b'), third = sockPath('sidhold-c'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2'), boxC = fakeInbox(third, 'tok3');
+  await Promise.all([boxA.ready, boxB.ready, boxC.ready]);
+  const sidIs = async (s: string) => { for (const t = Date.now(); Date.now() - t < 8000; await wait(100))
+    if ((await sql`select session_id from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.session_id === s) return true; return false; };
+  const held = async () => (await sql`select hold_from from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.hold_from ?? null;
+  const text = (b: any) => b.got.map((g: any) => g.message.content as string).join('\n');
+  await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+  writeClaudeEndpoint(M, pane, { socket: first, token: 'tok', sessionId: 'S1' });
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    assert.ok(await sidIs('S1'));
+    await sql`select cb.tell('W1@test', 'job #5 test at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(boxA.got.length, 0, 'held');
+    assert.notEqual(await held(), null);
+    // a new Claude in the pane: the row starts again under the seat's own name, the hold cleared
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2', sessionId: 'S2' });
+    await boxA.close();
+    assert.ok(await sidIs('S2'));
+    await wait(1200);
+    assert.equal(boxB.got.length, 0, 'not bound yet: nothing pushed');
+    await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => text(boxB).includes('job #5 test'), 5000), 'bound under the same name: the held result is pushed');
+    await wait(1200);
+    assert.equal(text(boxB).match(/job #5 test/g)?.length, 1, 'once');
+    // again, but the next session binds under another name: dropped, and the log says how many, never what
+    await sql`select cb.tell('W1@test', 'job #6 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.ok(!text(boxB).includes('job #6'), 'held');
+    writeClaudeEndpoint(M, pane, { socket: third, token: 'tok3', sessionId: 'S3' });
+    await boxB.close();
+    assert.ok(await sidIs('S3'));
+    await sql`select cb.iam(${M}, ${pane}, 'R1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => /dropped 1 held notices: the new session bound under another name/.test(fs.readFileSync(f.log, 'utf8')), 5000), 'the drop is logged');
+    assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #6/, 'by count only');
+    assert.ok(!text(boxC).includes('job #6'), 'not pushed to another name');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close(), boxC.close()]);
     await stopSeat(pane, relay);
   }
 });

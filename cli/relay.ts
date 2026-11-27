@@ -182,8 +182,21 @@ let settleTimer: ReturnType<typeof setTimeout> | undefined;
 const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
 // #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
 let holdTimer: ReturnType<typeof setTimeout> | undefined;
-// the messages and broadcasts of the read last held, and whose they were (review I1: a bind to another name, below)
-let heldFor: { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[] } | undefined;
+// the messages, broadcasts and memory changes of the read last held, and whose they were (review I1: a bind to another
+// name or project, below); orphan: such a copy when another agent process took the pane, kept until that one binds
+type HeldCopy = { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[]; memory: any[] };
+let heldFor: HeldCopy | undefined, orphan: HeldCopy | undefined;
+const SEAT = `${PANE.trim()}@${M.trim().toLowerCase()}`; // the row's name before a bind (cb._seat_name)
+/** Pushes what a copy has that the board no longer returns in this read (that rest the read itself delivers). */
+async function pushCopy(was: HeldCopy, i: any) {
+  const has = (l: any[] | undefined) => new Set((l ?? []).map((x: any) => Number(x.id)));
+  const ms = has(i.messages), bs = has(i.broadcasts), xs = has(i.memory);
+  const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
+  const memory = was.memory.filter((x) => !xs.has(Number(x.id)));
+  if (!messages.length && !broadcasts.length && !memory.length) return;
+  await adapter.deliver(seat, format({ broadcasts, messages, memory, answers: [], events: [], next_work: [] }));
+  log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts, ${memory.length} memory held before a bind`);
+}
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -330,19 +343,24 @@ async function check() {
       // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
       // history): read again from the hold's cursor, so the held memory changes come back, once, before anything goes out
       if (i.hold && after !== Number(i.hold.from)) { after = Number(i.hold.from); again = true; continue; }
-      // #3221 review I1: the pane was bound to another name or project (cb.iam) while this relay held messages or
-      // broadcasts. The board returns those only to that name and project and from its mark, which a takeover by
-      // another name resets (and the hold with it), so they go now from this relay's copy; any the board still returns
-      // are left to it. Not after another session took the pane: that one starts clean (#4379). Memory comes back
-      // through `after`, as before.
-      if (heldFor && (heldFor.actor !== i.actor || heldFor.project !== i.project)) {
-        const was = heldFor, has = (l: any[]) => new Set(l.map((x: any) => Number(x.id)));
-        const ms = has(i.messages), bs = has(i.broadcasts);
-        const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
+      // #3221 review I1: the pane was bound to another name or project (cb.iam) while this relay held notices. The board
+      // returns messages only to that name, broadcasts and memory only for that project, and messages and broadcasts
+      // only from its mark, which a takeover by another name resets (and the hold with it); so they go now from this
+      // relay's copy, all but what the board still returns. Round 2 M2: another agent process in the pane (a new session
+      // id: the board starts the row again) gets the copy only once it binds under the same name; under another name
+      // it is dropped, and the log says how many (never what).
+      if (heldFor && (heldFor.actor !== i.actor || heldFor.project !== i.project || heldFor.sid !== sid)) {
+        if (heldFor.sid !== sid) orphan = heldFor;
+        else await pushCopy(heldFor, i);
         heldFor = undefined;
-        if (was.sid === sid && (messages.length || broadcasts.length)) {
-          await adapter.deliver(seat, format({ broadcasts, messages, answers: [], events: [], next_work: [] }));
-          log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts held for ${was.actor}`);
+      }
+      if (orphan && orphan.sid === sid) orphan = undefined; // a read with no id between two of the same: the board kept the row
+      if (orphan) {
+        const was = orphan;
+        if (i.actor === was.actor) { orphan = undefined; await pushCopy(was, i); }
+        else if (i.actor !== SEAT && !/^session-[0-9a-f]{8}$/.test(String(i.actor))) {
+          orphan = undefined;
+          log(`dropped ${was.messages.length + was.broadcasts.length + was.memory.length} held notices: the new session bound under another name`);
         }
       }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
@@ -370,7 +388,7 @@ async function check() {
           await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
           log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
         }
-        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts };
+        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [] };
         holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
         await sendCode(); // a held read still reports the code it runs (#4352)
         continue;
