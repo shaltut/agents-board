@@ -21,8 +21,25 @@ export const ADAPTERS: Readonly<Record<AgentKind, AgentAdapter>> = {
  *  refuse it exactly as before it was written. */
 const INSTALLED: ReadonlySet<AgentKind> = new Set<AgentKind>(['claude']);
 
-export function getAdapter(kind: string): AgentAdapter {
-  if (isAgentKind(kind) && INSTALLED.has(kind)) return ADAPTERS[kind];
+/** The kinds whose MCP gate the owner has checked: CB_MCP_GATE_OK=codex,agy (comma separated, any case). It is a claim about
+ *  every machine that runs those seats, so it is read where getAdapter runs: squad up, the supervisor and the seat's relay. */
+export const mcpGateOk = (env: NodeJS.ProcessEnv = process.env): Set<string> =>
+  new Set(String(env.CB_MCP_GATE_OK ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+
+/** #4392: an adapter whose CLI cannot start a seat with no MCP server for one run is refused by name, not started with
+ *  whatever servers the user's own config enables, until CB_MCP_GATE_OK names it. Null when it may start. */
+export function mcpGateRefusal(a: AgentAdapter, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (a.mcpGate === null || mcpGateOk(env).has(a.kind)) return null;
+  return `agent "${a.kind}" cannot start a seat with MCP off for one run: it needs ${a.mcpGate}. Check that on every machine that runs ${a.kind} seats, then set CB_MCP_GATE_OK=${a.kind} (comma separated with other agents) where cb squad up, the supervisor and the seat's relay run`;
+}
+
+/** `opts` is for tests: the environment to read CB_MCP_GATE_OK from and an installed set in place of INSTALLED. */
+export function getAdapter(kind: string, opts: { env?: NodeJS.ProcessEnv; installed?: ReadonlySet<AgentKind> } = {}): AgentAdapter {
+  if (isAgentKind(kind) && (opts.installed ?? INSTALLED).has(kind)) {
+    const refused = mcpGateRefusal(ADAPTERS[kind], opts.env);
+    if (refused) throw new Error(refused);
+    return ADAPTERS[kind];
+  }
   if (isAgentKind(kind)) throw new Error(`agent "${kind}" is not installed yet (phase 1 supports claude only)`);
   throw new Error(`unknown agent "${kind}"`);
 }

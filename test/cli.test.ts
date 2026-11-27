@@ -117,6 +117,15 @@ test('unreachable remote board fails within its retry budget with a clear messag
   assert.ok(Date.now() - t0 < 25_000, `took ${Date.now() - t0}ms`);
 });
 
+// #4413 review: a refused 'localhost' (not the board's own 5434) is an AggregateError with an empty message: it printed
+// "cb: . Run: cb help". Say what was refused.
+test('a refused local board that is not the board cluster says so in words', () => {
+  const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@localhost:1/claude_board_test_refused' });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /board refused the connection at localhost:1 \(ECONNREFUSED\): the call that failed never reached it/);
+  assert.match(r.err, /Is Postgres running there\?/);
+});
+
 test('unknown flag fails with a readable message, no stack', async () => {
   await db();
   const r = cb(['add', 'demo', 'x', '--label', 'foo']);
@@ -194,12 +203,25 @@ test('cb tell sends to one session and says whether it is live', async () => {
   const w = cb(['tell', 'W2@macbook', 'still', 'there?']);
   assert.equal(w.code, 0, w.err);
   assert.match(w.out, /\(its relay is down, but the session last wrote to the board 4m ago: the message waits until its relay restarts, up to 24h; reach it in its pane to run cb relay --restart\)/);
-  // #4379: a new Claude took its pane (another session id): the name has no session row now, a re-bound pane, gone
+  // #4379: a new Claude took its pane (another session id): the name has no session row now, a re-bound pane, never
+  // "its relay is down" (#4421 wording for a name with no row that wrote lately)
   await sql`update cb.sessions set session_id = 'S1' where actor = 'W2@macbook'`;
   await sql`select cb.inbox('mac', 'w1:p3', 0, 'S2')`;
   const g = cb(['tell', 'W2@macbook', 'anyone?']);
   assert.equal(g.code, 0, g.err);
-  assert.match(g.out, /\(relay not live and nothing from the session on the board in 30 minutes: it may be gone;/);
+  assert.match(g.out, /\(no relay session on the board under this name, but it last wrote to the board 4m ago/);
+  assert.doesNotMatch(g.out, /its relay is down/);
+  // #4421: no session row at all (a session that never started a relay), yet it wrote lately: not "it may be gone"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('V1@vps', 'demo', 'note', 'working', now() - interval '3 minutes')`;
+  const v = cb(['tell', 'V1@vps', 'ping']);
+  assert.equal(v.code, 0, v.err);
+  assert.match(v.out, /\(no relay session on the board under this name, but it last wrote to the board 3m ago: the message waits up to 24h for a relay under this name\)/);
+  // a session name with no '@' and no row (a session that runs cb with --as, no relay) gets the same, never "its relay is down"
+  await sql`insert into cb.events (actor, project, kind, summary, at) values ('ops-bot', 'demo', 'note', 'working', now() - interval '2 minutes')`;
+  const o = cb(['tell', 'ops-bot', 'ping']);
+  assert.equal(o.code, 0, o.err);
+  assert.match(o.out, /\(no relay session on the board under this name, but it last wrote to the board 2m ago/);
+  assert.doesNotMatch(o.out, /its relay is down/);
 });
 
 test('cb huddle: open, say, add, show, close; cb huddles lists it', async () => {

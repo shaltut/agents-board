@@ -1,19 +1,28 @@
 // Creates the database if missing and applies schema.sql (idempotent).
 // --test targets claude_board_test. Without --test, also puts bin/ on the user PATH (main checkout only, #373).
+// --test --stop stops a Windows worktree's own test cluster (#4413): run it before removing the worktree.
 import postgres from 'postgres';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { ensurePg, ownsPg } from './pg.ts';
+import { ensurePg, ensureTestPg, ownsPg, stopTestPg, testDbUrl } from './pg.ts';
 import { databaseUrl } from '../server/db.ts';
 import { loadRoleTexts } from './roles.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const isTest = process.argv.includes('--test');
-const url = new URL(isTest ? `postgres://cb@127.0.0.1:5434/${process.env.CB_TEST_DB ?? 'claude_board_test'}` : databaseUrl());
+if (process.argv.includes('--stop')) {
+  // without --test this would run the full setup against CB_DATABASE_URL's board (the live one on this PC)
+  if (!isTest) { console.error('--stop only stops a worktree\'s test cluster: run node db/setup.ts --test --stop'); process.exit(1); }
+  const r = stopTestPg();
+  (r.ok ? console.log : console.error)(r.message);
+  process.exit(r.ok ? 0 : 1);
+}
+const url = new URL(isTest ? testDbUrl() : databaseUrl());
 const dbName = url.pathname.slice(1);
 
-if (ownsPg(url.toString())) ensurePg();
+if (isTest) ensureTestPg(url.toString());
+else if (ownsPg(url.toString())) ensurePg();
 
 const adminUrl = new URL(url); adminUrl.pathname = '/postgres';
 const admin = postgres(adminUrl.toString(), { onnotice: () => {} });

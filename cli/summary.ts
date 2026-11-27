@@ -17,13 +17,43 @@ function shape(counts: { passed: number; failed: number; skipped: number; cancel
     const more = unique.length > MAX_NAMES ? `; and ${unique.length - MAX_NAMES} more` : '';
     text += ` Failing: ${shown}${more}`;
   }
-  return { text: cut(text), ran: counts.passed + counts.failed };
+  // failed: what did not pass (failed or cancelled) in the last count block; named: the failing names in the whole
+  // output (counts are last-wins, names add up: an earlier block's failure shows only here). Both 0 = no test failed (#4417)
+  return { text: cut(text), ran: counts.passed + counts.failed, failed: counts.failed + (counts.cancelled ?? 0), named: unique.length };
+}
+
+// each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
+const split = (output: string) => output.replace(ANSI, '').replaceAll('\0', '').split(/\r?\n/).map((l) => l.slice(0, 2000));
+const COUNT = /^\s*(?:\S{1,4}\s+)?(pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/;
+// code-frame lines (a linted file's source: oxlint, prettier's `[error] 2 | code`, Babel's `> 12 | code`) stay off the
+// board; so do pnpm's trailer lines, which would push the one real error out of the tail
+const FRAME = /^\s*(?:\[\w+\]\s*)?>?\s*(?:\d+\s*[│|]|[│|·╭╰─])/;
+const DROP = /ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL|^\s*Exit status \d+|^\s*WARN\s|^\s*(?:[A-Za-z]:)?[\\/]\S*:\s*$/;
+
+// the last 5 lines that are not code frames or trailer lines; with nothing left but trailer lines, the last line that
+// is not a code frame; '' when there is none
+function lastLines(lines: string[]): string {
+  const kept = lines.filter((l) => l.trim() && !FRAME.test(l));
+  const tail = kept.filter((l) => !DROP.test(l)).slice(-5);
+  return (tail.length ? tail : kept.slice(-1)).join('\n');
+}
+
+// node:test's closing block (tests, suites, pass ... todo, duration_ms) and vitest's (Test Files, Tests, Duration)
+const CLOSING = /^\s*(?:\S{1,4}\s+)?(?:tests|suites|duration_ms)\s+[\d.]+\s*$|^\s*(?:Test Files|Tests|Duration)\s/;
+
+/** Why a command that printed test counts still exited non-zero (#4417): its lines after the last count line
+ *  (lefthook's `exit status 1` and the command it failed, a crash after the run), else its last lines that are not
+ *  count lines (the counts follow in the summary anyway); '' for none. */
+export function afterCounts(output: string): string {
+  const lines = split(output);
+  const isCount = (l: string) => COUNT.test(l) || CLOSING.test(l);
+  const end = lines.findLastIndex(isCount);
+  return lastLines(lines.slice(end + 1)) || lastLines(lines.filter((l) => !isCount(l)));
 }
 
 /** The board summary for a log: counts and failing names for node:test / TAP / vitest, else the last 5 lines that are not code frames or pnpm trailer lines. */
-export function summarize(output: string): { text: string; ran: number | null } {
-  // each line is cut to 2000 chars so the per-line regexes below cannot backtrack on a megabyte line
-  const lines = output.replace(ANSI, '').replaceAll('\0', '').split(/\r?\n/).map((l) => l.slice(0, 2000));
+export function summarize(output: string): { text: string; ran: number | null; failed: number | null; named: number | null } {
+  const lines = split(output);
 
   const vt = lines.map((l) => /^\s*Tests\s+(\d+ (?:failed|passed|skipped|todo)\b.*|no tests)\s*$/.exec(l)?.[1]).filter((v): v is string => v !== undefined).at(-1);
   if (vt !== undefined) {
@@ -35,7 +65,7 @@ export function summarize(output: string): { text: string; ran: number | null } 
   const c: Record<string, number> = {};
   const names: string[] = [];
   for (const l of lines) {
-    const m = /^\s*(?:\S{1,4}\s+)?(pass|fail|cancelled|skipped|todo)\s+(\d+)\s*$/.exec(l);
+    const m = COUNT.exec(l);
     if (m) c[m[1]!] = Number(m[2]); // last occurrence wins
     const name = /^\s*✖ (.+?) \(\d+(?:\.\d+)?ms\)\s*$/.exec(l)?.[1] ?? /^\s*not ok \d+ - (.+?)(?:\s+#.*)?\s*$/.exec(l)?.[1];
     if (name) names.push(name);
@@ -44,14 +74,7 @@ export function summarize(output: string): { text: string; ran: number | null } 
     return shape({ passed: c.pass ?? 0, failed: c.fail ?? 0, skipped: c.skipped ?? 0, cancelled: c.cancelled, todo: c.todo }, names);
   }
 
-  // code-frame lines (a linted file's source: oxlint, prettier's `[error] 2 | code`, Babel's `> 12 | code`) stay off the
-  // board; so do pnpm's trailer lines, which would push the one real error out of the tail
-  const frame = /^\s*(?:\[\w+\]\s*)?>?\s*(?:\d+\s*[│|]|[│|·╭╰─])/;
-  const drop = /ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL|^\s*Exit status \d+|^\s*WARN\s|^\s*(?:[A-Za-z]:)?[\\/]\S*:\s*$/;
-  const kept = lines.filter((l) => l.trim() && !frame.test(l));
-  // nothing left but trailer lines: the last line that is not a code frame, never an empty summary
-  const tail = kept.filter((l) => !drop.test(l)).slice(-5);
-  return { text: cut((tail.length ? tail : kept.slice(-1)).join('\n') || '(no output)'), ran: null };
+  return { text: cut(lastLines(lines) || '(no output)'), ran: null, failed: null, named: null }; // never an empty summary
 }
 
 const MASK = '[masked]';

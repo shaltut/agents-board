@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
-import { planTick, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { mayBeLeaving, pastSeatNames, planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
@@ -22,8 +22,9 @@ const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC:
 // launched: names this run started or restored that the board has not yet seen live (planTick counts them as started)
 // closeSkipAt: names herdr lists but could not find for a close (an unnamed pane), skipped 10 minutes
 // elsewhereToldAt: per project, when "its PC is another machine" was last said; runnerPane: the runner tab this run opened
+// leavingTold (#3770): per leaving seat, the reason last said in the log: said again only when it changes
 export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
-  closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; runnerPane?: { pane: string; terminal?: string } };
+  closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
@@ -92,7 +93,11 @@ export async function tick(d: Deps): Promise<string[]> {
     d.signal?.throwIfAborted();
     try {
       const safeToClose = await safeToCloseOf(state, herdrStatus);
-      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose });
+      // #3770: the names earlier saved versions of the squad generated (cb.squad_set's 'squad updated' events, the last
+      // 20), read only when a live or holding session is one the squad does not want now (events has no project index)
+      const pastSeats = mayBeLeaving(state, herdrLive) ? pastSeatNames(state.project, (await sql`select e.data -> 'squad' as squad from cb.events e
+        where e.project = ${state.project} and e.kind = 'updated' and e.summary = 'squad updated' order by e.id desc limit 20`).map((r: any) => r.squad)) : new Set<string>();
+      const plan = planTick({ state, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats });
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length;
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
@@ -161,11 +166,24 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
     if (dryRun) out.push(`would close ${name}`);
     else out.push(await closeOne(d, state, name, log));
   }
+  // #3770: a seat the squad file no longer generates that stays open: said once per reason, never closed or freed here
+  for (const l of plan.leaving) {
+    if (dryRun) out.push(`would keep ${l.session} open (left the squad file): ${LEAVING[l.why]}`);
+    else if (memory.leavingTold.get(l.session) !== l.why) { memory.leavingTold.set(l.session, l.why); out.push(`${l.session} left the squad file but stays open: ${LEAVING[l.why]}`); }
+  }
+  if (!dryRun) for (const s of state.sessions) if (!plan.leaving.some((l) => l.session === s.actor)) memory.leavingTold.delete(s.actor);
   for (const n of plan.notes) {
     if (dryRun) out.push(`would note ${n.session} down again`);
     else { out.push(`${n.session} is down again after a restore: restore it by hand`); await log(project, 'down_again', n.session, 'restore it by hand'); }
   }
 }
+
+const LEAVING: Record<Leaving['why'], string> = {
+  busy: 'it holds work or is mid-turn; closed once idle, or hand its work over',
+  down: 'it is down and holds work; hand its cards over (cb edit <id> --assignee none) or restore it by hand',
+  machine: "its machine is not one of the squad's machines (check the name's case); close it by hand",
+  empty: 'the squad file names no seats besides the lead, so nothing is closed; fix the squad file, or close it by hand',
+};
 
 // A startup dialog (or a first prompt that was not sent) is a person's: the lead is told once per block (again only
 // after that agent is gone and the name blocks anew), with the pane and the command to finish. False when no lead
@@ -321,7 +339,7 @@ if (import.meta.main) {
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
-    closeSkipAt: new Map(), elsewhereToldAt: new Map() };
+    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map() };
   let code = 0;
   for (;;) {
     try {

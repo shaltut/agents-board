@@ -134,16 +134,14 @@ export const claudeAdapter: AgentAdapter = {
   relayStart: 'session-hook',
 
   // The args after `--` of `herdr agent start <name> --kind claude --pane <pane>`, as cli/squad-up.ts has always sent them.
-  // #4346: --strict-mcp-config with an empty --mcp-config loads no MCP server at all (no process spawned with the
-  // seat's env), on top of the mcp__* deny in the role file. Checked live: 83 MCP tools without, 0 with either.
   buildLaunch(l) {
     checkRoleSettings(l.role);
     const board = l.board.replace(/[\/]+$/, '');
+    const mcp = claudeAdapter.mcpOff(board);
     return {
       kind: 'claude',
-      args: ['--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', `${board}/kit/permissions/${l.role}.json`,
-        '--strict-mcp-config', '--mcp-config', `${board}/kit/mcp/none.json`],
-      env: { ...(l.env ?? {}) },
+      args: ['--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', `${board}/kit/permissions/${l.role}.json`, ...mcp.args],
+      env: { ...(l.env ?? {}), ...mcp.env },
     };
   },
 
@@ -214,5 +212,16 @@ export const claudeAdapter: AgentAdapter = {
 
   disableAskSpec() {
     return { toolName: 'AskUserQuestion', mechanism: 'hook', target: 'hooks/deny-ask.mjs' };
+  },
+
+  // #4346: --strict-mcp-config with an empty --mcp-config loads no MCP server at all (no process spawned with the
+  // seat's env), on top of the mcp__* deny in the role file. Checked live: 83 MCP tools without, 0 with either.
+  mcpGate: null,
+  mcpOff(board) {
+    return {
+      args: ['--strict-mcp-config', '--mcp-config', `${board.replace(/[\/]+$/, '')}/kit/mcp/none.json`],
+      env: {},
+      note: 'every MCP source is off for the run; kit/permissions/<role>.json also denies mcp__* and turns claude.ai connectors off',
+    };
   },
 };

@@ -6,7 +6,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind } from '../cli/agents/index.ts';
+import { ADAPTERS, AGENT_KINDS, defaultModelFor, getAdapter, isAgentKind, mcpGateRefusal } from '../cli/agents/index.ts';
 import { checkRoleSettings, claudeAdapter, claudeEndpointPath, clearClaudeEndpoint, readClaudeEndpoint, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 import { seatKey } from '../cli/bridge.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
@@ -84,6 +84,39 @@ test('buildLaunch refuses a role with no permission file, or one that is malform
     assert.doesNotThrow(() => checkRoleSettings('builder', dir));
   } finally { rmSync(dir, { recursive: true, force: true }); }
   for (const r of ['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) assert.doesNotThrow(() => checkRoleSettings(r), r);
+});
+
+test('mcpOff (#4392): claude turns every MCP source off for the run, its launch carries exactly those args', () => {
+  const m = claudeAdapter.mcpOff('C:/work/board/');
+  assert.deepEqual([m.args, m.env, claudeAdapter.mcpGate], [['--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], {}, null]);
+  const a = claudeAdapter.buildLaunch({ name: 'demo-B1@m', role: 'builder', repo: 'main', agent: 'claude', model: 'sonnet', board: 'C:/work/board/', cwd: 'C:/w/x' }).args;
+  assert.deepEqual(a.slice(-3), m.args);
+});
+
+test('mcpOff (#4392): every adapter declares one; codex, opencode and agy have an open gate, claude none', () => {
+  for (const k of AGENT_KINDS) {
+    const m = ADAPTERS[k].mcpOff('/b');
+    assert.ok(Array.isArray(m.args) && typeof m.env === 'object' && typeof m.note === 'string' && m.note, k);
+  }
+  assert.equal(claudeAdapter.mcpGate, null);
+  for (const k of ['codex', 'opencode', 'agy'] as const) assert.ok((ADAPTERS[k].mcpGate ?? '').length > 20, k);
+});
+
+test('getAdapter (#4392): an installed agent with an open MCP gate is refused by name until CB_MCP_GATE_OK names it', () => {
+  const installed = new Set(AGENT_KINDS);
+  for (const k of ['codex', 'opencode', 'agy'] as const) {
+    for (const env of [{}, { CB_MCP_GATE_OK: '' }, { CB_MCP_GATE_OK: 'claude' }, { CB_MCP_GATE_OK: `${k}x` }]) {
+      assert.throws(() => getAdapter(k, { installed, env }), (e: Error) =>
+        e.message.startsWith(`agent "${k}" cannot start a seat with MCP off for one run: it needs ${ADAPTERS[k].mcpGate}`) &&
+        e.message.includes(`set CB_MCP_GATE_OK=${k}`), `${k} ${JSON.stringify(env)}`);
+    }
+    for (const ok of [k, ` ${k.toUpperCase()} `, `claude,${k}`, `codex,opencode,agy`]) {
+      assert.equal(getAdapter(k, { installed, env: { CB_MCP_GATE_OK: ok } }), ADAPTERS[k], `${k} ${ok}`);
+    }
+  }
+  assert.equal(getAdapter('claude', { installed, env: {} }), claudeAdapter); // no gate: never needs the opt-in
+  // the opt-in never installs an agent: without the installed override, codex stays not installed
+  assert.throws(() => getAdapter('codex', { env: { CB_MCP_GATE_OK: 'codex' } }), /agent "codex" is not installed yet/);
 });
 
 test('endpoint file: keyed by seatKey, round-trips, private mode, no temp file left', () => {

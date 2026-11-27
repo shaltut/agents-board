@@ -105,7 +105,7 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
         targetPath: '.agents/hooks.json',
         shimFile: `${trimSlash(boardDir)}/kit/guard/shim-agy.mjs`,
         matchers: { win32: '.*', darwin: '.*', linux: '.*' },
-        notes: 'per-seat workspace file under the seat cwd, excluded from git; group cb-guard, event PreToolUse, type command, forward slashes and no quotes (Windows runs hooks through cmd /c); a hook MUST print {"decision":"allow"} to allow, {} counts as deny; the shim denies a pane with no CB_ROLE or CB_AGENT',
+        notes: 'per-seat workspace file under the seat cwd, excluded from git; group cb-guard, event PreToolUse, type command, forward slashes and no quotes (Windows runs hooks through cmd /c); a hook MUST print {"decision":"allow"} to allow, {} counts as deny; the shim denies a pane with no CB_ROLE',
       };
     },
 
@@ -127,6 +127,21 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
 
     disableAskSpec(): DisableAskSpec {
       return { toolName: 'ask_question', mechanism: 'hook', target: 'kit/guard/shim-agy.mjs' };
+    },
+
+    // #4392. agy loads ~/.gemini/config/mcp_config.json and every enabled plugin's mcp_config.json (its builtin
+    // mcp_servers.md), and has no flag (agy --help, 1.5.18), documented env var or documented --settings key that skips
+    // them for one run; `agy mcp disable` and `agy plugin disable` write the user's config. The catch-all guard hook
+    // denies every tool it does not list, MCP tools included, but the servers still start with the seat's env.
+    mcpGate: "no MCP server on the seat's machine: ~/.gemini/config/mcp_config.json defines none and no enabled plugin bundles " +
+      'one (check: agy mcp list lists none and agy plugin list shows no enabled plugin with MCP servers): agy has no per-run ' +
+      'way to skip them',
+    mcpOff() {
+      return {
+        args: [],
+        env: {},
+        note: 'nothing is added to the launch; the guard hook denies MCP tool calls, but servers would still start',
+      };
     },
   };
 }
