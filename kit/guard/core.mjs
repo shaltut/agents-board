@@ -140,6 +140,7 @@ function bashReader(text) {
 const END_LINE = /\n[ \t]*(\w+)[ \t]*(?=\n|$)/gm; // a line holding only a word, from the \n before it
 // a line bash takes as the end inside $( ) or backticks, though more follows the word: EOF) or EOF`
 const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)\x60])/g;
+const LONE_CR = /\r(?!\n)/;
 const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
 const LINE_START = /^/gm;
 function replaceHeredocs(text, fn) {
@@ -175,6 +176,8 @@ function replaceHeredocs(text, fn) {
     if (bash.unsure || bash.at() !== nl || bash.open.length !== depth || bash.low < depth) return false;
     const closing = lineFrom(closings.get(f.id), nl);
     if (closing && closing[0] < f.before) { bash.unsure = true; return false; }
+    // Git Bash drops every carriage return, so a lone one in the body may spell an earlier end line (\rEOF, E\rOF)
+    if (LONE_CR.test(text.slice(nl, f.before + 1))) { bash.unsure = true; return false; }
     bash.skip(f.end);
     // an end line bash does not take (blanks around it): bash's body goes on, so what follows cannot be read
     const last = text.slice(f.before + 1, f.end);
