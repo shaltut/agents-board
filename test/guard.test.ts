@@ -1277,8 +1277,9 @@ function machineBudget() {
 
 // #4832: a busy runner slows every core for as long as other jobs run, so reruns alone do not help, and the budget above
 // is set once, from a reference too short to show it. A run over that budget is held to the load beside it: the same plain
-// work, six rounds of it (about 130 ms on a quiet PC), timed right after the run. The budget is 8 times that, never under
-// the machine's own and never over twice it, so a quiet machine keeps its budget and a real slowdown still fails
+// work, six rounds of it, timed right after the run. The budget is 8 times that, never under the machine's own and never
+// over twice it. The quietest reading seen on the PC runner was 139 ms (1.1 s of 1 s), the busiest 275 ms (the cap of
+// 2 s), so a regression under twice the budget can pass while the runner is busy; a quiet run still fails it
 function loadReference() {
   const s = 'a line of notes\n'.repeat(37500);
   let n = 0;
