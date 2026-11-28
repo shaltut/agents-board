@@ -174,6 +174,8 @@ function replaceHeredocs(text, fn) {
   const isHeredoc = (at, nl, f) => {
     bash.read(at);
     if (bash.unsure || bash.at() !== at || bash.unchecked || inQuotes(bash.open.at(-1))) return false;
+    // PowerShell refuses a << only where it starts a token: in cb log 1 -<<'EOF' it is part of the word, and line 2 runs
+    if (at && !WORD_START.test(text[at - 1])) { bash.unsure = true; return false; }
     // <<'EOF'x: bash's delimiter is EOFx, so its body ends somewhere else
     DELIMITER_END.lastIndex = at + f.header;
     if (!DELIMITER_END.test(text)) { bash.unsure = true; return false; }
