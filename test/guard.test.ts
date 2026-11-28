@@ -1942,6 +1942,22 @@ test('#4825: no spelling of a shell\'s options keeps a string from being read as
     'Bash.exe -c', 'BASH.EXE -c', 'SH -c', "'/usr/bin/bash' -c", 'bash -c \\\n', 'ba""sh -c', 'ssh box', 'EVAL']) refused4825(`${shell} ${unplaced4825}`);
 });
 
+// PR 187 lead review: every shell the guard knows by name counts, and a held string's own words name none
+test('#4825: every shell the guard knows counts, however it is named', () => {
+  for (const shell of ['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'yash', 'fish', 'csh', 'tcsh', 'MKSH.EXE', '/usr/bin/yash', 'busybox ash']) {
+    for (const command of [`${shell} -c ${unplaced4825}`, `echo ${unplaced4825} | ${shell}`, `${shell} <<< ${unplaced4825}`, `${shell} <<'EOF'\n>$(case a in a) echo log;; esac) sudo codex\nEOF`]) refused4825(command);
+  }
+});
+
+test('#4825: the words of the string itself name no shell, up to its last one', () => {
+  const ends = (words: string) => `'>$(case a in a) echo log;; esac) ${words}'`;
+  for (const command of [`printf '%s' ${ends('see the sh docs')} | cat`, `echo ${ends('ask bash')} | cat`, `echo ${ends('eval')} ${ends('run ssh')} | tee log`]) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+  // a shell named right after it, or between two such strings, still counts
+  for (const command of [`echo ${ends('x')} | sh`, `echo ${ends('x')}|ash`, `echo ${ends('x')} | tee ${ends('y')} | mksh`]) refused4825(command);
+});
+
 test('#4825: the string is held to it however it reaches the shell', () => {
   for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `echo ${unplaced4825} | tee log | sudo -u x bash -x`,
     `cat > >(bash -c ${unplaced4825})`, `bash 2>&1 -c ${unplaced4825}`]) refused4825(command);
