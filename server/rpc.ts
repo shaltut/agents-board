@@ -40,12 +40,18 @@ export const useDb = (db: any) => { fallback = db; };
 
 export async function callFn(fn: string, args: Record<string, unknown> = {}, db: any = fallback) {
   if (!RPC_FUNCTIONS.includes(fn)) throw new RpcError(404, `unknown function ${fn}; available: ${RPC_FUNCTIONS.join(', ')}`);
+  return selectFn(db, fn, args, SETOF.has(fn));
+}
+
+/** Runs cb.<fn> with named arguments: its rows when it returns rows, else its one value. The caller has already
+ *  checked fn against its own list (RPC_FUNCTIONS here, OPS in cli/board.ts). */
+export async function selectFn(db: any, fn: string, args: Record<string, unknown>, rows: boolean): Promise<any> {
   const keys = Object.keys(args);
   for (const k of keys) if (!/^[a-z_]+$/.test(k)) throw new RpcError(400, `bad argument name "${k}"`);
   const ps = keys.map((k, i) => param(i + 1, args[k]));
   const call = keys.map((k, i) => `${k} => ${ps[i].expr}`).join(', ');
   const values = ps.map((p) => p.value) as any[];
-  if (SETOF.has(fn)) return await db.unsafe(`select * from cb.${fn}(${call})`, values);
+  if (rows) return await db.unsafe(`select * from cb.${fn}(${call})`, values);
   const [row] = await db.unsafe(`select cb.${fn}(${call}) as result`, values);
   return row?.result ?? null;
 }
