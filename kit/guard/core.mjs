@@ -2366,7 +2366,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
       const read = readings(text); // #4776: bash drops a script's carriage returns too
-      for (const t of read.flatMap(unredirected)) {
+      for (const t of read.flatMap((r) => unredirected(r))) {
         const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
         if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
       }
@@ -3051,11 +3051,13 @@ function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\
 // ends the word. << (a heredoc) stays. A substitution as the target is bounded, so the scan stays linear. Messages and
 // heredoc data are dropped first: which text is data depends on the redirect (cat > notes <<EOF writes its text away)
 const REDIRECT = /(?:\d{1,3}|\*|&|\{[A-Za-z_]\w{0,40}\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*(?:\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|`[^`\n]{0,200}`|"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|\\.|[^\s"'`\\;&|<>(){}])+/g;
-function unredirected(text) {
+function unredirected(text, left = () => ' ') {
   if (!/[<>]/.test(text)) return [text];
-  const kept = stripMessages(text), bare = kept.replace(REDIRECT, ' ');
+  const kept = stripMessages(text), bare = kept.replace(REDIRECT, left);
   return bare === kept ? [text] : [text, bare];
 }
+// for the stdin-session rule only output redirects are left out: an input one is what gives the command its input
+const outputOnly = (redirect) => (/^(?:\d+|\*|&|\{\w+\})?>/.test(redirect) ? ' ' : redirect);
 // the scripts a text calls, read with and without its redirects; a call both readings show is listed once
 function calledIn(text, cwd, deployHost) {
   const calls = scriptCalls(text, cwd, deployHost), [, bare] = unredirected(text);
@@ -3078,7 +3080,7 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      const spellings = readings(command).flatMap(unredirected); // #4776, #4803
+      const spellings = readings(command).flatMap((r) => unredirected(r)); // #4776, #4803
       for (const written of spellings) {
         // #4737: judged as written, then with split and built names read out (only when that changes something)
         const shown = revealed(written);
@@ -3092,7 +3094,8 @@ export function evaluate(req) {
         }
       }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
-      const session = stdin === true && role ? spellings.map((text) => stdinSession(text)).find(Boolean) : null;
+      const typed = stdin === true && role ? readings(command).flatMap((r) => unredirected(r, outputOnly)) : [];
+      const session = typed.map((text) => stdinSession(text)).find(Boolean) ?? null;
       return session ? block('role', SESSION(session)) : { allow: true };
     }
     // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool

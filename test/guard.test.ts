@@ -1857,7 +1857,11 @@ test('#4803: scripts and stdin sessions behind a redirect are judged too', () =>
   // a call counts once toward the 32-file limit, with or without the redirects beside it
   const many = Array.from({ length: 20 }, (_, i) => `bash s${i}.sh 2>&1`).join('\n') + '\n';
   assert.equal(judged4803('bash all.sh', 'builder', { readScript: (p) => (p.endsWith('all.sh') ? many : 'echo ok\n') }), 'allow');
-  for (const command of ['2>&1 bash', '>log python']) assert.equal(judged4803(command, 'builder', { stdin: true }), 'role', command);
+  for (const command of ['2>&1 bash', '>log python', 'bash > >(tee log)', '2>/dev/null bash']) assert.equal(judged4803(command, 'builder', { stdin: true }), 'role', command);
+  // an input redirect is what gives a command its input: only output redirects are left out of the session rule
+  for (const command of ['bash < ok.sh', '2>&1 bash < ok.sh', 'bash < ok.sh > out.log 2>&1', 'while read l; do echo $l; done < f.txt > out.log', 'python <<< "print(1)" 2>&1']) {
+    assert.equal(judged4803(command, 'builder', { stdin: true }), 'allow', command);
+  }
 });
 
 test('#4803: ordinary redirects, heredocs and text that only looks like one still pass', () => {
