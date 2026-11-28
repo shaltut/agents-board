@@ -185,6 +185,7 @@ const tick = () => { cancels(); claim(); };
 const follow = (listening: () => void) => {
   api!.events(['cb_jobs'], () => { listening(); tick(); }, { refused: (e) => {
     say(`the board refused the notice stream (${e.message}): trying again in 30 s`);
+    setTimeout(() => follow(listening), 30_000);
   } });
 };
 if (sql) await sql.listen('cb_jobs', tick, tick);

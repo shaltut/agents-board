@@ -425,7 +425,8 @@ test('API mode: a revoked key replaced in place needs no restart: calls and the 
 });
 
 test('API mode: another runner\'s key stops the runner and says what to do, without the key', apiOnly, async () => {
-  const secret = (await giveKey('wrong', 'pc-other')).split('_')[2]!;
+  const secret = (await giveKey('wrong', 'pc-other')).split('_').slice(2).join('_'); // base64url: it may hold a _
+  assert.equal(secret.length, 43);
   const cfg3 = join(TMP, 'runner-wrong-key.json');
   writeFileSync(cfg3, JSON.stringify({ name: NAME, slots: 1, log: { host: '127.0.0.1', port: await freePort(), peers: [] }, projects: { demo: project(ORIGIN, { idle: recipes.ok }) } }));
   const wrong = startRunner(cfg3, join(TMP, 'home3'), 'wrong');
