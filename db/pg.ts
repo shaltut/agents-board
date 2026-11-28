@@ -134,11 +134,40 @@ export function ensureTestPg(url: string, root = ROOT): void {
   else if (ownsPg(url)) ensurePg();
 }
 
-/** Stops a worktree's test cluster: run it before removing the worktree (a running Postgres holds the folder). */
+// #4922: when a server process dies, the postmaster logs this, ends every connection and recovers; whatever runs
+// meanwhile fails with "the database system is in recovery mode". Only the server's own LOG line counts.
+const CRASHED = /\] LOG:\s+terminating any other active server processes\s*$/;
+const WENT = /\] LOG:\s+.*\(PID (\d+)\) (?:exited with exit code|was terminated)/;
+const OWN_ERROR = /\] (?:PANIC|FATAL):/;
+
+/** One line per crash in a cluster's log (the first three): the process that went and its own last PANIC or FATAL. */
+export function databaseLost(log: string): string[] {
+  const lines = log.split(/\r?\n/);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length && out.length < 3; i++) {
+    if (!CRASHED.test(lines[i]!)) continue;
+    // the line naming the process is just above, at most a DETAIL line between them
+    let j = i - 1;
+    while (j > i - 3 && j >= 0 && !WENT.test(lines[j]!)) j--;
+    const pid = WENT.exec(lines[j] ?? '')?.[1];
+    const own = pid && lines.slice(Math.max(0, j - 200), j).findLast((l) => l.includes(`[${pid}] `) && OWN_ERROR.test(l));
+    const cause = pid ? `${lines[j]!.slice(0, 300)}; ${own ? `its own last error: ${own.slice(0, 300)}` : 'it logged no error of its own'}`
+      : (lines[i - 1] ?? '').slice(0, 300);
+    out.push(`database lost: the test Postgres crashed and restarted during this run, so failures from then on may not be real. ${cause}`);
+  }
+  return out;
+}
+
+/** Stops a worktree's test cluster: run it before removing the worktree (a running Postgres holds the folder). The
+ *  message starts with what the cluster's log says was lost, read before the stop (which can fail after a crash) and
+ *  before the runner's next job deletes .pgdata. */
 export function stopTestPg(root = ROOT): { ok: boolean; message: string } {
   if (!ownTestPg(root)) return { ok: true, message: 'no test cluster of its own here (not a Windows worktree or runner job)' };
   const dir = join(root, '.pgdata');
-  if (!running(dir)) return { ok: true, message: `no test cluster running in ${dir}` };
+  const log = join(dir, 'server.log');
+  const lost = existsSync(log) ? databaseLost(readFileSync(log, 'utf8')) : [];
+  const say = (m: string) => [...lost, m].join('\n');
+  if (!running(dir)) return { ok: true, message: say(`no test cluster running in ${dir}`) };
   const r = spawnWithin(pgCtl, ['-D', dir, 'stop', '-w'], { encoding: 'utf8' }, START, `pg_ctl stop in ${dir}`);
-  return { ok: r.status === 0, message: (r.stdout || r.stderr || r.error?.message || '').trim() };
+  return { ok: r.status === 0, message: say((r.stdout || r.stderr || r.error?.message || '').trim()) };
 }

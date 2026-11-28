@@ -506,6 +506,10 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     await down();
   }
   if (retried && out) out = { ...out, text: `${STACK_RETRIED} ${out.text}` }; // first: the board's 1000-char cut keeps it
+  // #4922: a teardown that read a crash out of the test database's log prints this line; it explains the failures, so it
+  // leads the summary (db/pg.ts databaseLost)
+  const lost = /^database lost: .*$/m.exec(tail(from))?.[0];
+  if (lost && out) out = { ...out, text: `${lost}\n${out.text}` };
   return stop.aborted ? null : out;
 }
 
