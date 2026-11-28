@@ -4,6 +4,7 @@ import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
 
@@ -143,13 +144,114 @@ test('a link comes back once, when it is made; the Users page only says whether 
   assert.deepEqual((await people()).map((p: any) => p.has_link), [false, true, true]);
 });
 
+/** Waits until the request in flight is stopped by a lock of this database, or has already answered. */
+async function heldUpOrAnswered(sql: any, answer: Promise<unknown>) {
+  let answered = false;
+  void answer.then(() => { answered = true; }, () => { answered = true; });
+  for (const end = Date.now() + 20_000; !answered && Date.now() < end;) {
+    const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`;
+    if (n) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+/** Ahmed's password change, held open (not yet committed) while `during` sends a request, then committed. */
+async function whileAPasswordChangeIsOpen(sql: any, during: () => Response | Promise<Response>): Promise<Response> {
+  const change = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'cb-web' } });
+  clients.push(change);
+  let answer!: Promise<Response>;
+  await change.begin(async (tx: any) => {
+    await tx`select cb.user_password('ahmed', 'ahmed-pass-2', 'ahmed')`;
+    await tx`select cb.sign_in_new('ahmed', true)`; // as /api/password does for an admin: every other way in ends
+    answer = Promise.resolve(during());
+    await heldUpOrAnswered(sql, answer);
+  });
+  return answer;
+}
+
+test('a sign-in with the old password, under way while it is changed, gets nothing', async () => {
+  const sql = await db();
+  await owner(sql);
+  const r = await whileAPasswordChangeIsOpen(sql, () => web('/api/login', { body: { name: 'ahmed', password: 'ahmed-pass-1' } }));
+  assert.equal(r.status, 401);
+  assert.equal(r.headers.get('set-cookie'), null);
+  assert.equal((await rows(sql)).length, 1, 'only the browser that changed the password is signed in');
+});
+
+test('a second password change that knew only the old password is refused, not applied after the first', async () => {
+  const sql = await db();
+  await owner(sql);
+  const cookie = await login('ahmed');
+  const r = await whileAPasswordChangeIsOpen(sql, () => web('/api/password', { cookie, body: { current: 'ahmed-pass-1', password: 'taken-over-1' } }));
+  assert.equal(r.status, 400);
+  assert.equal(r.headers.get('set-cookie'), null);
+  assert.equal((await rows(sql)).length, 1);
+  await login('ahmed', 'ahmed-pass-2');
+});
+
+// The rollback in docs/ops/maintain.md, run as written there, then the parts of the code before #4868 that use the old
+// column (cb.user_add and cb.user_rotate as of main a2f5bc9, cut to what touches it; the server's sign-in query).
+const recovery = () => {
+  const doc = readFileSync(new URL('../docs/ops/maintain.md', import.meta.url), 'utf8');
+  const found = /\*\*Rolling the board back past that change\*\*[\s\S]*?<<'SQL'\r?\n([\s\S]*?)\r?\nSQL\r?\n/.exec(doc);
+  assert.ok(found, 'maintain.md holds the rollback statements');
+  return found[1]!;
+};
+const OLD_FUNCTIONS = `
+create or replace function cb.user_add(name text, display text default null, actor text default null, role text default 'member') returns text language plpgsql as $$
+#variable_conflict use_variable
+declare a text := cb.set_actor(actor); n text := lower(trim(name)); r text := lower(trim(coalesce(role, 'member'))); t text; now_r text;
+begin
+  insert into cb.users (name, display, role) values (n, coalesce(nullif(trim(display), ''), initcap(n)), r)
+  on conflict on constraint users_pkey do update set role = case when r = 'admin' then 'admin' else cb.users.role end,
+    token = case when r = 'admin' and cb.users.role <> 'admin' then gen_random_uuid()::text else cb.users.token end
+  returning cb.users.token, cb.users.role into t, now_r;
+  return case when current_setting('application_name') = 'cb-web' and now_r = 'member' then t end;
+end $$;
+create or replace function cb.user_rotate(name text, actor text default null) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare n text := lower(trim(name)); t text;
+begin
+  perform cb.dashboard_only();
+  update cb.users u set token = gen_random_uuid()::text where u.name = n returning u.token into t;
+  return t;
+end $$;
+`;
+
+for (const board of ['a board moved over from before', 'a board first set up with hashes']) {
+  test(`rolled back on ${board}: the documented statements let the old code add and sign in users; forward again`, { timeout: 400_000 }, async () => {
+    const sql = await db();
+    if (board === 'a board moved over from before') {
+      await boardFromBefore(sql);
+      setup();
+    } else {
+      await sql`alter table cb.users drop column if exists token`; // as a new board has it
+      await owner(sql);
+    }
+    await sql.unsafe(OLD_FUNCTIONS); // the old schema.sql replaces the functions and leaves the table as it is
+    await sql.unsafe(recovery());
+    /** the old server's sign-in: who has this value */
+    const oldSignIn = async (value: string) => (await sql`select name from cb.users where token = ${value}`).map((r: any) => r.name);
+    const [{ v: added }] = await sql`select cb.user_add('ben', 'Ben') as v`; // someone new, after the recovery
+    assert.match(added ?? '', /^[0-9a-f-]{36}$/, 'a user added after the rollback gets a link');
+    assert.deepEqual(await oldSignIn(added), ['ben']);
+    const [{ v: remade }] = await sql`select cb.user_rotate('ben') as v`;
+    assert.deepEqual(await oldSignIn(remade), ['ben']);
+    assert.equal((await sql`select count(*)::int as n from cb.users where token is null`)[0].n, 0, 'every user, admins too');
+    setup();
+    assert.equal(await linkStatus(remade), 302, 'forward again: the link made meanwhile works');
+    assert.equal(await linkStatus(added), 401, 'and the one it replaced does not');
+    assert.equal((await sql`select count(*)::int as n from cb.users where token is not null`)[0].n, 0);
+  });
+}
+
 test('only the server signs a browser in: not a session, and not the web API', async () => {
   const sql = await db();
   await owner(sql);
   await assert.rejects(session()`select cb.sign_in_new('ahmed')`, /only Ahmed can do this/);
+  await assert.rejects(session()`select cb.sign_in_password('ahmed', 'ahmed-pass-1')`, /only Ahmed can do this/);
   const admin = await login('ahmed');
   const before = (await rows(sql)).length;
-  for (const fn of ['sign_in_new', 'sign_in_user', 'sign_out', '_sign_in_issue']) {
+  for (const fn of ['sign_in_new', 'sign_in_password', 'sign_in_user', 'sign_out', '_sign_in_issue']) {
     assert.notEqual((await web(`/api/rpc/${fn}`, { cookie: admin, body: { name: 'ahmed' } })).status, 200, fn);
   }
   assert.equal((await rows(sql)).length, before);

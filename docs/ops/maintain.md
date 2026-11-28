@@ -411,7 +411,9 @@ anyone in once the column is empty.
 admin cannot sign in. After the rollback, give every user a fresh value, then send members new links:
 
 ```bash
-dc exec db psql -U cb -d claude_board -c "update cb.users set token = gen_random_uuid()::text where token is null"
+dc exec -T db psql -U cb -d claude_board -v ON_ERROR_STOP=1 -1 <<'SQL'
+update cb.users set token = gen_random_uuid()::text where token is null;
+SQL
 ```
 
 Deploying the change again turns those values into hashes the same way.
