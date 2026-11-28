@@ -1870,13 +1870,16 @@ function psBare(args) {
   }
   return args.length;
 }
-// #4789: whether a -- after this word ends rg's options. After an option that may take a value (-e --) it is that value,
-// so only a switch that takes none, an option holding its value (=), or a plain word counts; a word the shell fills in
-// ($, a backtick) or a redirect before it leaves it unknown
+// #4789: whether the -- at args[k] ends rg's options. After an option that may take a value (-e --) it is that value,
+// so the word before must be a switch that takes none, an option holding its value (=), or a plain word. That word must
+// reach rg as written: a glob, a splat or a variable may turn into -e, and after a redirect it is the target, no
+// argument at all. One character per step, so it stays linear
 const RG_SWITCH = /^(?:-[nNiFwxsSlcoHIUPpqva.uz0L]+|--(?:line-number|no-line-number|ignore-case|fixed-strings|word-regexp|line-regexp|case-sensitive|smart-case|files-with-matches|count|only-matching|hidden|no-ignore|multiline|pcre2|no-heading|json|files|quiet))$/;
-function rgEnds(before) {
-  if (before === undefined) return true;
-  if (/[<>$`]/.test(before)) return false;
+const LITERAL_WORD = /^(?:'[^']*'|"[^"$`\\]*"|[A-Za-z0-9_./:=-])+$/;
+function rgEnds(args, k) {
+  if (k === 0) return true;
+  const before = args[k - 1];
+  if (!LITERAL_WORD.test(before) || /[<>]$/.test(args[k - 2] ?? '')) return false;
   const x = shellValue(before);
   return !x.startsWith('-') || x.includes('=') || RG_SWITCH.test(x);
 }
@@ -1924,7 +1927,7 @@ function codeStrings(name, args, cut) {
     for (let k = 0; k < args.length; k++) {
       const x = shellValue(args[k]);
       // #4789: nothing after the end of the options is one; a cut reading cannot tell where that is, so it reads on
-      if (x === '--' && !cut && rgEnds(args[k - 1])) break;
+      if (x === '--' && !cut && rgEnds(args, k)) break;
       const m = /^--pre(?:=(.*))?$/.exec(x);
       if (m) found.push(m[1] ?? shellValue(args[k + 1] ?? ''));
     }
@@ -2019,7 +2022,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
     if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg) && !FIND_WORD.test(seg)) {
       // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
       const plain = unhide(seg.replace(/["']/g, ''));
-      if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
+      if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FIND_WORD.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
     }
     // flat: a quote the cut left alone is dropped, never read as opening a word that swallows the rest
     const tokens = [...seg.matchAll(flat ? WORD : GIT_TOKEN)], w = tokens.map((m) => m[0]);
@@ -2032,10 +2035,18 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       walked.add(key);
       return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
     };
-    let cmd = true;
+    // #4789: find's ; ends an action's words, so each word is read once; open: actions since the last one
+    const ends = (k) => finds && shellValue(w[k]) === ';';
+    let cmd = true, open = 0;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
-      if (finds && FIND_EXEC.test(u[i])) { cmd = true; continue; } // #4789: what follows is a command of its own
+      if (finds && FIND_EXEC.test(shellValue(w[i]))) {
+        // with no ; between them each action's words run to the end of the segment: past a handful, refused unread
+        if (++open > MAX_COMMANDS_PER_SEGMENT) return FRESH_ENV('more find actions with no ; between them than the guard reads');
+        cmd = true; // #4789: what follows is a command of its own
+        continue;
+      }
+      if (ends(i)) open = 0;
       if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
         const why = follow(u[i]);
         if (why) return why;
@@ -2060,7 +2071,9 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
           const s = ENV_SPLIT.exec(option);
           if (s) {
             const split = option.slice(s[0].length) || (u[++i] ?? '');
-            const why = follow([split, ...w.slice(i + 1)].join(' '));
+            let stop = i + 1;
+            while (stop < w.length && !ends(stop)) stop++;
+            const why = follow([split, ...w.slice(i + 1, stop)].join(' '));
             if (why) return why;
             cmd = false;
             break;
@@ -2075,7 +2088,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       if (name === 'find') finds = true;
       // its arguments end at the next ( ) { } or backtick, where another command word may start: each word is read once
       let end = i + 1;
-      while (end < w.length && !/^[(){}`]$/.test(w[end])) end++;
+      while (end < w.length && !/^[(){}`]$/.test(w[end]) && !ends(end)) end++;
       for (const code of codeStrings(name, w.slice(i + 1, end), cut)) {
         const inner = follow(code);
         if (inner) return inner;
