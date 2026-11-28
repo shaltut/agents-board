@@ -9,6 +9,7 @@ const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
 const { closeWorker, failure, wire, workerApp } = await import('../server/worker.ts');
 const { setRelease } = await import('../server/release.ts');
+const { OPS } = await import('../server/ops.ts');
 
 const clients: any[] = [];
 after(() => Promise.all([...clients.map((c) => c.end()), closeWorker(), serverSql.end()]));
@@ -189,6 +190,15 @@ test('a runner key runs its own runner and no other; a machine key cannot act as
   assert.equal(await result(await call(mine, 'job_finish', end)), true);
   const [event] = await sql`select client from cb.events where client = ${idOf(mine)} limit 1`;
   assert.equal(event?.client, idOf(mine));
+});
+
+test('whatever a runner key may write names its runner, so the board can hold it to the key\'s', async () => {
+  const { sql } = await board();
+  const theirs = Object.entries(OPS).filter(([, op]) => op.kinds.includes('runner')).map(([fn]) => fn);
+  assert.ok(theirs.length >= 7);
+  const unbound = await sql`select distinct p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'cb' and p.provolatile = 'v' and p.proname in ${sql(theirs)} and not coalesce('runner' = any(p.proargnames), false)`;
+  assert.deepEqual(unbound.map((r: any) => r.proname), []);
 });
 
 test('keys: issued and revoked from the dashboard only, stored hashed, two live ones per machine and kind', async () => {

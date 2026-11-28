@@ -13,6 +13,7 @@ const seat: readonly Kind[] = ['machine'];
 const list = (more: Omit<Op, 'kinds'> & { kinds?: readonly Kind[] }, names: string) =>
   names.trim().split(/\s+/).map((n) => [n, { kinds: seat, ...more }] as const);
 const one = {}, rows = { setof: true } as const, never = { kinds: [] };
+const runner: { kinds: readonly Kind[] } = { kinds: ['runner'] };
 
 export const OPS: Record<string, Op> = Object.fromEntries([
   ...list(one, `
@@ -35,8 +36,8 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   // users, sign-ins and the GitHub watch are the owner's: never over the worker API
   ...list(never, 'github_mute github_watch_add github_watch_remove user_add user_known user_password user_set_role'),
   ...list({ ...never, ...rows }, 'user_show'),
-  // the runner's: not served yet. The slice that moves the runner (S4) gives them its kind, once each is bound to the
-  // key's runner (some name it by another argument, or by a job).
-  ...list(never, 'job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings'),
-  ...list({ ...never, ...rows }, 'jobs_cancelled'),
+  // the runner's own. Each that writes names its runner as `runner`, which the API holds to the key's: one without that
+  // argument must not be listed here (test/worker-api.test.ts checks). The two reads give counts and cancelled ids.
+  ...list(runner, 'job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings'),
+  ...list({ ...runner, ...rows }, 'jobs_cancelled'),
 ]);
