@@ -2546,10 +2546,34 @@ const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi,
 // (bounded: a few passes, each linear)
 // #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
 // ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
+// seg/../ folded, in one pass. A segment starts after a separator, a blank, a quote, = : ( or >. #4813: as one regex
+// with a lookbehind it tried each of those starts and rescanned the run from every one, quadratic on a long $($($( run
+// (27 s on 150 KB, past the hook's timeout, which counts as allow). Here each run is taken once, and only a run that
+// /.. follows is looked into, for its first start.
+const SEG_RUN = /[^\\/\s"';&|)>]+/g;
+const SEG_UP = /[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/y;
+const BEFORE_SEG = /[\\/\s"'=:(>]/;
+export function foldUp(s) {
+  if (!s.includes('..')) return s; // most commands: nothing to fold
+  let out = '', done = 0;
+  SEG_RUN.lastIndex = 0;
+  for (let run; (run = SEG_RUN.exec(s));) {
+    const end = SEG_RUN.lastIndex;
+    SEG_UP.lastIndex = end;
+    if (!SEG_UP.test(s)) continue;
+    let from = run.index;
+    while (from < end && from > 0 && !BEFORE_SEG.test(s[from - 1])) from++;
+    const left = s.slice(from, Math.min(end, from + 3));
+    if (from === end || left === '.' || left === '..') continue; // no start in it, or . and .. themselves
+    out += s.slice(done, from);
+    done = SEG_RUN.lastIndex = SEG_UP.lastIndex;
+  }
+  return done ? out + s.slice(done) : s;
+}
 const fold = (t) => {
   let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
   for (let i = 0; i < 8; i++) {
-    const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+    const n = foldUp(s);
     if (n === s) break;
     s = n;
   }
