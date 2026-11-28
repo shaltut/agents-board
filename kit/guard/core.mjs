@@ -348,6 +348,10 @@ function stripMessageArgs(text, docs, inner) {
   MESSAGE_AT.lastIndex = 0;
   for (let m; (m = MESSAGE_AT.exec(text));) {
     if (!isCode(m.index)) continue;
+    // #4827: how deep the message command is. A quote deeper than this, or past a point where its own level closed, is a
+    // word of another command: one in a substitution among the arguments or beside it, which runs
+    const depth = bash.open.length;
+    bash.low = depth;
     const head = m[0];
     let next = MESSAGE_AT.lastIndex; // the end of the args read so far; the next command is looked for from there
     args: for (;;) {
@@ -359,6 +363,7 @@ function stripMessageArgs(text, docs, inner) {
         const q = piece[1];
         if (!q) continue;
         if (!isCode(i)) break args;
+        if (bash.open.length !== depth || bash.low < depth) continue;
         // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
         if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && substitutes(q, inner))) continue;
         out += text.slice(done, i) + '""';
@@ -746,6 +751,16 @@ function scannedName(raw, names) {
   return names.has(escaped) ? escaped : name;
 }
 
+// #4836: PowerShell writes `. to end a variable's name before a dot ("$name`.txt"). Read as a substitution, that backtick
+// cut a redirect's file name into two filled words, "a command and its first argument". Only a whole double-quoted word
+// right after a > is spared: path text, one variable, `. and path text. SHELL_PARTS takes escapes and quoted strings in
+// order, so a > inside another string starts no match
+const SHELL_PARTS = new RegExp(String.raw`\\.|(>[ \t]*)?(${QUOTED})`, 'g');
+const DOT_TARGET = /^"[\w.:\\/-]*\$(?:env:)?\w+`\.[\w.-]*"$/;
+const TARGET_END = /^(?:[\s;|&)]|$)/;
+const dotTargets = (text) => (!text.includes('`.') ? text : text.replace(SHELL_PARTS, (all, redirect, quoted, at, whole) =>
+  (redirect && DOT_TARGET.test(quoted) && TARGET_END.test(whole.charAt(at + all.length)) ? redirect + quoted.replace('`', '') : all)));
+
 // Calls fn(w, i) for every word i whose command name (cmdName of the raw word: C:\...\git.exe, GIT.EXE, !git) is in
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
@@ -754,7 +769,7 @@ function scannedName(raw, names) {
 // unless the caller reads more words as the command (gitOrFilled, #4815). nested: cmd is the inside of a quoted word.
 const byName = (names) => (_w, name, i) => names.has(name[i]);
 function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names), nested = false) {
-  const text = stripMessages(String(cmd ?? ''), nested).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
+  const text = dotTargets(stripMessages(String(cmd ?? ''), nested)).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map((x) => scannedName(x, names)) };
@@ -2510,10 +2525,34 @@ const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi,
 // (bounded: a few passes, each linear)
 // #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
 // ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
+// seg/../ folded, in one pass. A segment starts after a separator, a blank, a quote, = : ( or >. #4813: as one regex
+// with a lookbehind it tried each of those starts and rescanned the run from every one, quadratic on a long $($($( run
+// (27 s on 150 KB, past the hook's timeout, which counts as allow). Here each run is taken once, and only a run that
+// /.. follows is looked into, for its first start.
+const SEG_RUN = /[^\\/\s"';&|)>]+/g;
+const SEG_UP = /[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/y;
+const BEFORE_SEG = /[\\/\s"'=:(>]/;
+export function foldUp(s) {
+  if (!s.includes('..')) return s; // most commands: nothing to fold
+  let out = '', done = 0;
+  SEG_RUN.lastIndex = 0;
+  for (let run; (run = SEG_RUN.exec(s));) {
+    const end = SEG_RUN.lastIndex;
+    SEG_UP.lastIndex = end;
+    if (!SEG_UP.test(s)) continue;
+    let from = run.index;
+    while (from < end && from > 0 && !BEFORE_SEG.test(s[from - 1])) from++;
+    const left = s.slice(from, Math.min(end, from + 3));
+    if (from === end || left === '.' || left === '..') continue; // no start in it, or . and .. themselves
+    out += s.slice(done, from);
+    done = SEG_RUN.lastIndex = SEG_UP.lastIndex;
+  }
+  return done ? out + s.slice(done) : s;
+}
 const fold = (t) => {
   let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
   for (let i = 0; i < 8; i++) {
-    const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+    const n = foldUp(s);
     if (n === s) break;
     s = n;
   }

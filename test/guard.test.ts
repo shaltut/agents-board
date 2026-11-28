@@ -6,7 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath, stripMessages, uncommented } from '../kit/guard/core.mjs';
+import { check, evaluate, foldUp, protectedPush, READ_ONLY_ROLES, ROLES, secretPath, stripMessages, uncommented } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
 import { runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
@@ -354,6 +354,33 @@ test('#4774: a command a shell runs is never dropped as message text; real messa
   }
   assert.deepEqual(missed, []);
   for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
+});
+
+// #4827: a quoted word deeper than the message command is not its text: it belongs to a command in a substitution
+// among its arguments (or beside it), which runs
+const nestedInArgs: [string, (c: string) => string][] = [
+  ['in a substitution among cb arguments', (c) => `cb log 1 $(${c})`],
+  ['after the message text', (c) => `cb log 1 "text" $(${c})`],
+  ['among commit arguments', (c) => `git commit --amend $(${c})`],
+  ['in a substitution inside a substitution', (c) => `cb log 1 $(echo $(${c}))`],
+  ['in parentheses after an input mark', (c) => `cb log 1 <(${c})`],
+  ['in backticks', (c) => `cb log 1 \`${c}\``],
+  ['in a second substitution, the message command in the first', (c) => `echo $(cb log 1 x) $(${c})`],
+];
+const quotedCmds = ["git push origin 'main'", "git push '-f' origin feat/x", "git reset '--hard'", "taskkill '/IM' node.exe"];
+test('#4827: a quoted word of a command in a substitution among message arguments is judged', () => {
+  const missed: string[] = [];
+  for (const [name, make] of nestedInArgs) {
+    for (const c of quotedCmds) {
+      if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
+    }
+  }
+  assert.deepEqual(missed, []);
+  // text at the message command's own depth is still text, after a substitution has closed too
+  for (const command of [`cb log 1 $(date +%s) "git reset --hard is blocked"`, `out=$(cb log 1 "git reset --hard")`,
+    `echo "$(cb log 1 'git reset --hard')"`, `cb log 1 "a" "git reset --hard" && cb tell lead 'git reset --hard'`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
 });
 
 // #4777: a quote in a comment pairs with nothing. The rules that pair quotes paired it with one in a later comment and
@@ -1390,6 +1417,22 @@ test('#4741: a command string stays judged after text that throws the quote coun
   }
 });
 
+// #4813: foldUp took over from this regex, which stays here as what it must give: the path fence reads its result
+test('#4813: the one-pass seg/../ fold gives what the regex gave', () => {
+  const was = (s: string) => s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+  for (const s of ['~/.codex/x/../hooks.json', 'a/b/c/../../d', ';a/../b', ';a=b/../c', 'x(1)/../y', '$($(a/..', './../a', '../..', 'a/.../b', 'a//..//b', 'a\\..\\b', 'a/..', 'a/..x', '=../..', '(./..', '']) {
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+  // random short paths over the characters either reading treats apart; a fixed seed, so a failure repeats
+  const parts = ['a', 'b', '.', '..', '/', '/', '/..', '\\', ' ', '"', "'", '=', ':', '(', ')', '>', ';', '&', '|', '$', '\n'];
+  let seed = 4813;
+  const next = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  for (let i = 0; i < 60000; i++) {
+    const s = Array.from({ length: next(14) }, () => parts[next(parts.length)]).join('');
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1513,8 +1556,14 @@ test('long commands stay fast', () => {
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
-    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced: unspaced nesting is
-    // slow in fencePath's .. fold, on its own card (#4813)
+    // #4813: the seg/../ fold started a match after any ( and rescanned the run from each: 27 s, then ALLOW
+    ['#4813, 50,000 nested substitutions, then a path', asBuilder('$('.repeat(50000) + ';' + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, the same with nothing between', asBuilder('$('.repeat(50000) + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, a quoted run of substitution openers after a variable', asBuilder('"$X' + '$('.repeat(50000) + '" ~/.claude/settings.json')],
+    ['#4813, the fold on 200 KB of places a segment may start', () => foldUp('=(:'.repeat(70000) + '/..')],
+    ['#4813, the fold on 200 KB of segments, each followed by a name', () => foldUp('a/..x/'.repeat(34000))],
+    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced here; unspaced
+    // nesting was slow in fencePath's .. fold, which the #4813 cases above pin
     ['#4802, 200 KB of closed $(a;) words, then a fence path', asBuilder(kb200('$(a;) ') + 'opencode.json')],
     ['#4802, 200 KB of $(a; left open, then a fence path', asBuilder(kb200('$(a;') + ' opencode.json')],
     ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
@@ -2064,10 +2113,30 @@ test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
-    'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
-  // #4836: a PowerShell target with a backtick escape is refused by the #4815 filled-program push rule. A false block,
-  // tracked on that card: this row pins what the guard does until it is fixed
-  assert.equal(judged4803('Get-Date > "$name`.txt"'), 'role');
+    'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+});
+
+// #4836: PowerShell writes `. to end a variable's name before a dot. In a redirect target that backtick was read as a
+// substitution, which cut the file name into two filled words: "a command and its first argument". Only that shape passes
+test('#4836: a PowerShell redirect target with a backtick-escaped dot is a file name, not a command', () => {
+  const allowed = ['Get-Date > "$name`.txt"', 'Get-Date >> "$name`.log"', 'Get-Date 2>"$env:TEMP`.err"', 'Get-Date > "C:\\logs\\$name`.2026.txt"',
+    'Get-Date > "out/run-$id`.txt" ; Get-Date'];
+  for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
+});
+
+test('#4836: every other filled pair stays refused', () => {
+  const refused = [
+    // the same word where it is no redirect target, also after a > that is only text
+    'echo "$name`.txt"', 'echo ">" "$name`.txt"', "echo 'a > ' \"$name`.txt\"",
+    // not the shape: blanks, another escape, two backticks, a substitution, a second variable, more after the quote
+    'Get-Date > "$name`.txt $x"', 'Get-Date > "$name`n.txt"', 'Get-Date > "$G`. p`"', 'Get-Date > "$a`.$(x)"', 'Get-Date > "$a`.$b"',
+    'Get-Date > "$name`.txt"$x`.y',
+    // a pair beside an exempt target
+    '$G $S > "$name`.txt"', 'Get-Date > "$name`.txt" ; $G "$a$b" origin feat/x',
+    // what a rule that read the line for push signals let through (the lead's reviews, which ruled it out)
+    '$G $(git remote | head -1) feat:main', '$G alias.p=$P p -f origin feat', '$G: $(echo origin feat)',
+    '$G `git remote | head -1` feat:main', '$G $(git config x.y) origin feat'];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
 });
 
 test('#4803: a heredoc header before the command word hides nothing', () => {

@@ -30,7 +30,7 @@ export interface Seat {
   running_model?: string | null; model_differs?: boolean
 }
 export interface SquadPage {
-  project: string; squad: Squad | null; version: number; pipeline: boolean; supervise: boolean; seats: Seat[]
+  project: string; squad: Squad | null; version: number; pipeline: boolean; supervise: boolean; auto_backup: boolean; seats: Seat[]
   acts_on?: { project: string; winding_down: boolean }[] // #4806: every project with the supervisor switch on
   history: { id: number; at: string; actor: string; version: number | null; via: 'page' | 'cli' | null; squad: Squad }[]
   reminders: { open: number; on: number }
