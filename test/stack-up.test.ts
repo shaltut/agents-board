@@ -87,12 +87,12 @@ test('stackUp: a job cancelled while its stack goes down is not brought up again
 
 test('boardStackGap: the board\'s setting when set, else 30 s; a board without the column, or any failure, keeps 30', async () => {
   const said: string[] = [];
-  const sql = (row: unknown, code?: string) => Object.assign(async (s: TemplateStringsArray) => {
-    assert.match(s.join('?'), /select stack_gap_set from cb\.runners/);
+  const board = (row: unknown, code?: string) => async (fn: string, args: Record<string, unknown>) => {
+    assert.deepEqual([fn, args], ['runner_settings', { name: 'pc' }]);
     if (code) throw Object.assign(new Error('x'), { code });
-    return row === undefined ? [] : [row];
-  }, { json: (x: unknown) => x });
-  const gap = (row: unknown, code?: string) => boardStackGap(sql(row, code), 'pc', (m) => said.push(m));
+    return row ?? null;
+  };
+  const gap = (row: unknown, code?: string) => boardStackGap(board(row, code), 'pc', (m) => said.push(m));
   assert.equal(STACK_GAP_S, 30);
   assert.equal(await gap({ stack_gap_set: 45 }), 45);
   assert.equal(await gap({ stack_gap_set: 0 }), 0);

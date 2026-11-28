@@ -411,6 +411,26 @@ dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       #
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
 lock at once. Removing someone, or a new link for a member, is on the Users page only.
 
+## Worker keys (#3222)
+
+What a machine will sign in to the worker API with ([README.md](README.md#who-can-do-what)); no worker uses one yet.
+Making and revoking a key is Ahmed's, from the VPS shell. `<machine>` is the name the board knows the machine by (its
+`CB_MACHINE`, else its hostname), in lower case.
+
+```bash
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -qAt -c "select cb.key_issue('<machine>', 'machine')"
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -qAt -c "select cb.key_issue('<machine>', 'runner', '<runner name>')"
+dc exec db psql -U cb -d claude_board -c "select jsonb_pretty(cb.keys_list())"   # no secrets: ids, machines, last use
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -c "select cb.key_revoke('<id>')"
+```
+
+`key_issue` prints the key **once** and the board cannot show it again. Send it straight into where the worker keeps it:
+never into a card, a message, a file in the repo or a chat. To replace a key, issue the new one, install it, then revoke
+the old one (two may be live). A revoked key is refused from its next request, and its open event streams end within
+25 s. Lost or leaked: revoke it. What a key did: `select * from cb.events where client = '<id>' order by id`, and
+`dc logs board | grep 'worker api: key <id>'`. `CB_API_RATE` in `.env` changes the limit of 1200 requests a minute per
+key.
+
 ## GitHub watch: Ahmed's own login (#3221)
 
 The lead's relay holds routine notices up to 10 minutes (and a session's own lines 120 s: `cb help relay`); a PR,
@@ -464,6 +484,8 @@ a new volume and a restore, never just a new image tag.
 | `healthz` 503, board logs `ECONNREFUSED db` | Postgres is down or still starting | `dc ps`, `dc logs db` |
 | db won't start: "cannot assign requested address" | Tailscale wasn't up when Docker started, so `CB_PG_BIND` doesn't exist yet | `sudo systemctl enable tailscaled`; `dc up -d db` |
 | A worker's `cb` says "board unreachable at 100.x.y.z" | the VPS, Tailscale or Postgres is down, or the URL/password is wrong | `tailscale ping vps2`; `dc ps`; check the worker's URL |
+| The worker API answers 401 "unknown or revoked worker key" | a mistyped or revoked key | `cb.keys_list()` (Worker keys): issue a new one |
+| The worker API answers 429 | one key made over 1200 requests in a minute, or holds 64 event streams | the log names the key id; find what loops, or raise `CB_API_RATE` |
 | A worker's `cb` errors "function cb.x(...) does not exist" | the worker's code is older or newer than the VPS's schema | update the worker's checkout (Upgrade) |
 | No Telegram pushes | no token, or another server polls with it (409 in the logs) | `TELEGRAM_BOT_TOKEN` in `.env`; stop the other server |
 | Log: "another board server polls Telegram and GitHub" | a second server (the PC's?) holds the poller lock | stop it; this one takes over within a minute |
@@ -569,9 +591,18 @@ when it stops. Card #3601; design: `docs/superpowers/specs/2026-11-23-supervisor
 Start it by hand on the PC, in a herdr tab named `supervisor`, and leave it: `cb supervise`. After any change to
 `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise` (it validates runner.json with the code
 it loaded at start). Only one runs at a time,
-on any machine (a Postgres advisory lock); a second says `another supervisor is running` and exits. Check the plan
-first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing); `cb supervise
---once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
+on any machine: it holds the supervisor lease on the board (`cb.leases`, #3222 S5), taken for 180 s and renewed every
+30 s. A second says `another supervisor is running`, who holds the lease and for how long, and exits. Stopping it
+(Ctrl-C, closing its pane) gives the lease back; one killed outright leaves it to run out, at most 180 s. The board
+saying the lease is another's ends the process. A board that does not answer does not: it keeps trying, and after
+150 s without a renewal the running tick stops. The renewal runs on its own thread, so a long seat start does not
+stop it. A supervisor that is hung (no tick and no `herdr` call for about 25 minutes) is not renewed: its lease runs
+out, at most 180 s later, and another can start. Once the lease is another's, or has not been renewed for 150 s, it
+makes no further `herdr` call, also in the middle of a seat start (a call already running is not cut off); a
+half-started seat's pane can be left open. **At the upgrade that brings the lease, stop the old supervisor before
+you start the new one:** an older one holds a database lock the new one does not look at, so both would run.
+Check the plan first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing, takes
+no lease); `cb supervise --once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
 `CB_SUPERVISOR_HOME`), one file a day, kept 7 days. Every start, close, restore and runner start is also a board event by actor
 `supervisor` (session names, roles and counts only).
 

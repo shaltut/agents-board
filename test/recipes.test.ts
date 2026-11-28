@@ -257,42 +257,43 @@ test('freeLane: the lowest lane no running job holds, none when all are taken', 
 test('boardHello: a board older than the runner keeps runner.json and the 3-argument hello; a refused setting goes back to the board', async () => {
   const text = cfgWith({ steps: [['a']], db: true, env: dbEnv }, lanes(2, { slots: 4 }));
   const file = loadConfig(text);
-  const fake = (row: object | undefined, fail: { select?: string; hello6?: string } = {}) => {
-    const calls: { q: string; v: unknown[] }[] = [];
-    const sql = Object.assign(async (s: TemplateStringsArray, ...v: unknown[]) => {
-      const q = s.join('?');
-      calls.push({ q, v });
-      if (q.includes('select slots_set') && fail.select) throw Object.assign(new Error('x'), { code: fail.select });
-      if (q.includes('runner_hello') && v.length === 6 && fail.hello6) throw Object.assign(new Error('x'), { code: fail.hello6 });
-      return q.includes('runner_hello') ? [{ n: 3 }] : row ? [row] : [];
-    }, { json: (x: unknown) => x });
-    return { sql, calls };
+  // a stand-in for the board: records each call, answers cb.runner_hello with 3 ended jobs and cb.runner_settings with row
+  const fake = (row: object | undefined, fail: { read?: string; hello6?: string } = {}) => {
+    const calls: { fn: string; args: Record<string, unknown> }[] = [];
+    const board = async (fn: string, args: Record<string, unknown>) => {
+      calls.push({ fn, args });
+      if (fn === 'runner_settings' && fail.read) throw Object.assign(new Error('x'), { code: fail.read });
+      if (fn === 'runner_hello' && Object.keys(args).length === 6 && fail.hello6) throw Object.assign(new Error('x'), { code: fail.hello6 });
+      return fn === 'runner_hello' ? 3 : row ?? null;
+    };
+    return { board, calls };
   };
   const said: string[] = [], say = (m: string) => said.push(m);
   // the board's setting fits: run it, report it, no refusal
   let f = fake({ slots_set: 12, lanes_set: null });
-  let r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
+  let r = await boardHello(f.board, 'pc', 'http://h:1', text, file, say);
   assert.deepEqual([r.cfg.slots, r.cfg.dbLanes, r.ended, r.fromBoard], [12, 2, 3, true]);
-  assert.deepEqual(f.calls[1]!.v.slice(3), [12, 2, null]);
+  const sent = f.calls[1]!.args;
+  assert.deepEqual([sent.slots, sent.db_lanes, sent.setting_refused], [12, 2, null]);
   // a setting runner.json cannot take (9 lanes on a file with one shared stack): runner.json's counts, and the reason
   // in the hello for the page
   const shared = cfgWith({ steps: [['a']], db: true, env: { TEST_STACK_PROJECT: 'it', TEST_STACK_PG_PORT: '55432' } }, { slots: 4 });
   f = fake({ slots_set: null, lanes_set: 2 });
-  r = await boardHello(f.sql, 'pc', 'http://h:1', shared, loadConfig(shared), say);
+  r = await boardHello(f.board, 'pc', 'http://h:1', shared, loadConfig(shared), say);
   assert.deepEqual([r.cfg.dbLanes, r.fromBoard], [1, false]);
-  assert.match(String(f.calls[1]!.v[5]), /does not fit runner\.json/);
-  // no setting columns (undefined column): one line, runner.json, the old hello with 3 arguments
+  assert.match(String(f.calls[1]!.args.setting_refused), /does not fit runner\.json/);
+  // a board without the setting's read (undefined function): one line, runner.json, the old hello with 3 arguments
   said.length = 0;
-  f = fake(undefined, { select: '42703' });
-  r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
-  assert.deepEqual([r.cfg, r.ended, r.fromBoard, f.calls[1]!.v.length], [file, 3, false, 3]);
+  f = fake(undefined, { read: '42883' });
+  r = await boardHello(f.board, 'pc', 'http://h:1', text, file, say);
+  assert.deepEqual([r.cfg, r.ended, r.fromBoard, Object.keys(f.calls[1]!.args).length], [file, 3, false, 3]);
   assert.equal(said.length, 1);
   assert.match(said[0]!, /board is older than this runner.*4 slots and 2 DB lane/);
-  // the columns there but the hello still the old one (undefined function): the same
+  // the read there but the hello still the old one (undefined function): the same
   f = fake({ slots_set: 12, lanes_set: null }, { hello6: '42883' });
-  r = await boardHello(f.sql, 'pc', 'http://h:1', text, file, say);
-  assert.deepEqual([r.cfg.slots, f.calls.length, f.calls[2]!.v.length], [4, 3, 3]);
+  r = await boardHello(f.board, 'pc', 'http://h:1', text, file, say);
+  assert.deepEqual([r.cfg.slots, f.calls.length, Object.keys(f.calls[2]!.args).length], [4, 3, 3]);
   // anything else still stops the start
-  f = fake(undefined, { select: '28P01' });
-  await assert.rejects(boardHello(f.sql, 'pc', 'http://h:1', text, file, say));
+  f = fake(undefined, { read: '28P01' });
+  await assert.rejects(boardHello(f.board, 'pc', 'http://h:1', text, file, say));
 });

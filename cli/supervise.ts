@@ -2,7 +2,7 @@
 // Every 60 s one tick: per supervised project it starts, restores and closes squad sessions through herdr as planTick
 // says; for every project with a squad that gets work it tells the lead of a seat stopped by its model's quota, and where
 // Ahmed turned automatic backup on it moves a seat still stopped at the next check to its squad's backup (#4787);
-// then it restarts the PC runner if it stopped beating. One supervisor anywhere: a Postgres advisory lock.
+// then it restarts the PC runner if it stopped beating. One supervisor anywhere: a lease on the board (lease.ts).
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import net from 'node:net';
@@ -11,13 +11,17 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
-import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, type Launch, type Runner } from './squad-up.ts';
+import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, START_MAX_MS, type Launch, type Runner } from './squad-up.ts';
 import { mayBeLeaving, nextBackup, onBackups, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
+import { fenced, keepAliveApart, supervisorLease } from './lease.ts';
 import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
 
-const TICK_MS = 20 * 60_000;
+export const TICK_MS = 20 * 60_000;
+// #4895: the lease is renewed only while the main thread speaks (each tick, each herdr call, so each step of a seat
+// start). Silent longer than the longest start, it is hung: the renewal stops and another supervisor can take over
+export const SILENT_MS = START_MAX_MS + 5 * 60_000;
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
   CLOSE_RETRY = 10 * 60_000;
 const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC: the runner tab's folder
@@ -489,25 +493,21 @@ const probe = (host: string, port: number) => new Promise<boolean>((ok) => {
   s.once('error', () => ok(false));
 });
 
-// One supervisor anywhere: a session advisory lock on its own one-connection client that is never recycled. A dropped
-// connection (board restart, killed backend) takes the lock with it; postgres.js reconnects a pool connection on its
-// next query, so the next check takes the lock again there (a reserved connection it never reconnects: a query on it
-// throws from a timer and never settles). True: held; false: another supervisor took it; throws: board unreachable.
-export const lockClient = (app: string) => connect(undefined, { app, max: 1, lifetime: null });
-export const locked = async (lock: any) => (await lock`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0]!.ok === true;
-
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'lease.ts', 'lease-worker.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`;
   let sql = connect(undefined, { app, max: 1 });
-  // A dry run writes nothing, so it takes no lock (it may preview while a supervisor runs). Checked every tick, before
-  // anything acts: re-entrant (true); board unreachable: the tick fails and the next one tries again
-  let lock = dryRun ? null : lockClient(app);
-  const isLocked = async () => !lock || await withDeadline(locked(lock), 30_000, 'the supervisor lock check');
+  // A dry run writes nothing, so it takes no lease (it may preview while a supervisor runs). Taken at start, then renewed
+  // before every tick and every 30 s on a thread of its own; board unreachable: the tick fails and the next one tries again
+  const lease = dryRun ? null : supervisorLease({ connect: () => connect(undefined, { app, max: 1 }), holder: `${machine()} pid ${process.pid}` });
+  const takeOrExit = async (tell: (line: string) => void) => {
+    const why = await lease?.keep();
+    if (why) { tell(why); process.exit(1); }
+  };
   // review I3: a board down at start is a failed first tick (retried every 60 s), not a crash with a stack trace
-  try { if (!(await isLocked())) { console.log('another supervisor is running'); process.exit(1); } }
+  try { await takeOrExit(console.log); }
   catch (e) { console.log(`${new Date().toISOString()} board unreachable at start (${msg(e)}): trying again every 60 s`); }
   const home = process.env.CB_SUPERVISOR_HOME || join(homedir(), '.claude-board', 'supervisor');
   const say = (line: string) => {
@@ -523,34 +523,45 @@ if (import.meta.main) {
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
     closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), unreadTold: new Set(), sighted: new Map() };
+  // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
+  let current: AbortController | undefined; // the running tick's
+  let renewal: ReturnType<typeof keepAliveApart> | undefined;
+  const giveBack = async () => { await renewal?.stop(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
+  if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
+    process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); giveBack().finally(() => process.exit(0)); });
+  }
   let code = 0;
   for (;;) {
     try {
-      if (!(await isLocked())) { say('another supervisor is running'); process.exit(1); }
-      const now = ((await withDeadline(sql`select now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
+      renewal?.beat();
+      await takeOrExit(say);
+      if (lease) renewal ??= keepAliveApart(lease.token()!, { app, silentMs: SILENT_MS, say, lost: (why) => { say(why); process.exit(1); },
+        abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')) });
+      const now = ((await withDeadline(sql`select cb.board_now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
       // the whole tick's cap is far above its worst case (3 starts at up to 180 s of herdr each, closes at 60 s each):
       // it catches a hang, not a slow tick; the DB waits above have their own 30 s. A tick given up on is aborted, so
       // it stops at its next step instead of acting on with its log writes failing (review I1, I2)
-      const stop = new AbortController();
+      const stop = current = new AbortController();
+      const run = fenced(realRun, () => renewal); // this tick's herdr calls: a word to the renewal thread, refused once the lease is not sure
       try {
-        for (const line of await withDeadline(tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
+        for (const line of await withDeadline(tick({ sql, run, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
       } finally { stop.abort(); }
       code = 0;
     } catch (e) {
       say(`tick failed: ${msg(e)}`); code = 1;
-      // #4261: a hung query means a dead connection that may never error: drop both clients and start fresh (the lock
-      // goes with its connection; the next check takes it again, or finds another supervisor and exits)
+      // #4261: a hung query means a dead connection that may never error: drop the client and start fresh (the lease is
+      // a row, not the connection's, and its own client does the same)
       if (e instanceof DeadlineError) {
-        say('reconnecting to the board: fresh clients');
-        const old = [sql, lock];
+        say('reconnecting to the board: fresh client');
+        const old = sql;
         sql = connect(undefined, { app, max: 1 });
-        if (lock) lock = lockClient(app);
-        for (const c of old) c?.end({ timeout: 0 }).catch(() => {});
+        old.end({ timeout: 0 }).catch(() => {});
       }
     }
     if (dryRun || once) break;
     await new Promise((r) => setTimeout(r, 60_000));
   }
+  await giveBack();
   process.exit(code);
 }
