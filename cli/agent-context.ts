@@ -4,7 +4,7 @@
 //     each installed agent's user-level rules file gets a copy of ~/.claude/CLAUDE.md, in a marked block, beside what the
 //     file already says. Per machine, under the home folder, never in git. It sends that file to each agent's model
 //     provider, so only the owner runs it: a squad seat may only --check.
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,7 +45,8 @@ function withBlock(now: string | null, rules: string, file: string): string {
 }
 
 export function syncUserRules(o: { home: string; env: NodeJS.ProcessEnv; agents?: string[]; check?: boolean }): RulesResult[] {
-  if (!o.check && o.env.CB_ROLE?.trim()) throw new Error('a squad seat does not write the owner\'s user files: the owner runs this in their own terminal (--check is fine in a seat)');
+  // either name makes a pane a seat
+  if (!o.check && (o.env.CB_ROLE?.trim() || o.env.CB_AGENT?.trim())) throw new Error('a squad seat does not write the owner\'s user files: the owner runs this in their own terminal (--check is fine in a seat)');
   const source = join(o.env.CLAUDE_CONFIG_DIR || join(o.home, '.claude'), 'CLAUDE.md');
   const raw = textOf(source);
   if (raw === null) throw new Error(`no ${source}: there is nothing to copy`);
@@ -53,7 +54,7 @@ export function syncUserRules(o: { home: string; env: NodeJS.ProcessEnv; agents?
   if (!rules.trim()) throw new Error(`${source} is empty: nothing was changed`);
   if (rules.includes(BEGIN) || rules.includes(END)) throw new Error(`${source} holds a cb:user-rules marker line: remove it, or the block cannot be found again`);
 
-  const asked = o.agents ?? AGENT_KINDS.filter((k) => ADAPTERS[k].userRulesFile(o.home, o.env) !== null);
+  const asked = [...new Set(o.agents ?? AGENT_KINDS.filter((k) => ADAPTERS[k].userRulesFile(o.home, o.env) !== null))];
   // every file is read and judged before the first write
   const plan = asked.map((agent) => {
     if (!isAgentKind(agent)) throw new Error(`unknown agent "${agent}"`);
@@ -61,6 +62,10 @@ export function syncUserRules(o: { home: string; env: NodeJS.ProcessEnv; agents?
     if (file === null) throw new Error(`${agent} reads the source file itself: leave it out of --agents`);
     // no config folder: the agent is not on this machine
     if (!existsSync(dirname(file))) return { agent, file, state: 'skipped' as const };
+    // a link to nothing reads as no file, and the write would follow it and make its target, wherever that is
+    if (!existsSync(file) && lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error(`${file} is a link to a file that is not there: nothing was changed. Remove the link or make its target, then run again`);
+    }
     // writing through a link to the source would put a copy of the source inside itself
     if (existsSync(file) && sameFile(file, source)) return { agent, file, state: 'linked' as const };
     const now = textOf(file), next = withBlock(now, rules, file);
