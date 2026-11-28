@@ -97,10 +97,11 @@ export function bannerText(p: Pick<Project, 'name' | 'state' | 'state_by' | 'sta
   return null
 }
 
-/** The Sessions page with no project chosen: seats of a disabled or archived project are left out (a seat with no
- *  project, or one not yet listed, stays). The endpoint keeps every seat: the ask box and the lead names read it too, and
- *  Ahmed's asks still reach a disabled project's seats. */
-export function liveSeats<S extends { project: string | null }>(rows: readonly S[], ps: readonly Pick<Project, 'slug' | 'state'>[]): S[] {
+/** The Sessions page and the Board with no project chosen: seats and cards of a disabled or archived project are left
+ *  out (a row with no project, or one not yet listed, stays: what cb._live says). Their endpoints keep every row: the
+ *  ask box and the lead names read every seat (Ahmed's asks still reach a disabled project's seats), and card search
+ *  reads every card, from the same request as the Board (#4720). */
+export function liveRows<S extends { project: string | null }>(rows: readonly S[], ps: readonly Pick<Project, 'slug' | 'state'>[]): S[] {
   const off = new Set(ps.filter((p) => p.state !== 'enabled').map((p) => p.slug))
   return rows.filter((s) => !s.project || !off.has(s.project))
 }

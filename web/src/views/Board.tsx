@@ -8,8 +8,9 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { BellRing, ChevronDown } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useTasks, type Status, type ListTask } from '@/lib/api'
+import { rpc, useProjects, useTasks, type Status, type ListTask } from '@/lib/api'
 import { STATUS } from '@/lib/format'
+import { liveRows } from '@/lib/projects'
 import { bandRank, byQueue, dropIndex } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
@@ -96,7 +97,11 @@ function PingAll({ tasks }: { tasks: ListTask[] }) {
 
 export function Board({ route }: { route: Route }) {
   const qc = useQueryClient()
-  const { data = [], isLoading } = useTasks(route.project, undefined, true)
+  // #4720: with no project chosen this is the command menu's own list, so the two cost one request; the Board leaves
+  // disabled and archived projects out itself
+  const { data: all = [], isLoading } = useTasks(route.project)
+  const { data: projects, isLoading: loadingProjects } = useProjects()
+  const data = useMemo(() => (route.project ? all : liveRows(all, projects ?? [])), [route.project, all, projects])
   const [optimistic, setOptimistic] = useState<{ id: number; status: Status; rank: number } | null>(null)
   const [active, setActive] = useState<ListTask | null>(null)
   const sensors = useSensors(
@@ -135,7 +140,7 @@ export function Board({ route }: { route: Route }) {
     }
   }
 
-  if (isLoading) return <p className="text-sm text-muted-foreground">Loading the board…</p>
+  if (isLoading || loadingProjects) return <p className="text-sm text-muted-foreground">Loading the board…</p>
 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={onStart} onDragEnd={onEnd} onDragCancel={() => setActive(null)}>

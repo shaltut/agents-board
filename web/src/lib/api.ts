@@ -116,8 +116,8 @@ export const liveOnly = <P extends Pick<Project, 'state'>>(ps: readonly P[]) => 
 export const usePipeline = (slug: string) => !!useProjects().data?.find((p) => p.slug === slug)?.pipeline
 /** A card from the list: no description (the server leaves it off; useTask has it). */
 export type ListTask = Omit<Task, 'body'>
-/** live: leave out a disabled or archived project when none is chosen: only Board and Backlog ask (#4559). Card search and a
- *  seat's page read every card. */
+/** live: leave out a disabled or archived project when none is chosen: only Backlog asks (#4559). The Board leaves them
+ *  out in the browser, so that it shares card search's request (#4720). Card search and a seat's page read every card. */
 export const useTasks = (project?: string, status?: Status, live?: boolean) =>
   useQuery({ queryKey: ['tasks', project, status, !!live], queryFn: () => get<ListTask[]>(`/api/tasks${qs({ project, status, live: live ? '1' : undefined })}`) })
 export const useQuestions = (project?: string, status?: string) =>
