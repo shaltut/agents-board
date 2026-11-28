@@ -442,6 +442,9 @@ const atShapes = ['at "-b"', "at '-b'", 'at -""b', String.raw`at -`, String.raw
   // a ) closes a subshell, and bash takes do or then straight after it: what follows must start no command
   'until (at < 0) do at now; done', 'until (at =) do at now; done', 'until (at -l) do at now; done', 'if (at < 0) { at now }',
   'until (at)do at now; done',
+  // PR 139 round 4 (R1): a case arm is also a word and a ), and bash drops the \ in front of a command name
+  ...[String.raw`\batch`, String.raw`\sudo codex`, String.raw`\wsl`, String.raw`\schtasks /run /tn x`, String.raw`\b$(echo atch)`, String.raw`\b"atch"`, String.raw`\s"u"do codex`]
+    .map((arm) => 'case $x in y) : ;; at)' + arm + ' ;; esac'),
   // as main: a word that is no known shape
   'at the end now'];
 test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {

@@ -1449,7 +1449,8 @@ const OWN_HOST_VAR = /^\$\{?(?:HOSTNAME|HOST|COMPUTERNAME)\}?$/i;
 // when at WOULD schedule was tried and failed three reviews: a shell has too many ways to write a flag or a time. The
 // shapes, judged on the text as written:
 //   - nothing after the word (at refuses to run without a time), unless the segment was cut at & (&> is a redirect)
-//   - the end of a search pattern's group: (before|at)\b
+//   - the end of a search pattern's group, closed by its quote, with plain words after: "(before|at)\b" notes.md
+//     (the same word and ) is a case arm, and bash drops the \ in front of a command: at)\sudo)
 //   - a comparison with a number, closed: at < 0)   (< only: after > or <= the number is at's time)
 //   - a script's assignment or equality: at = k, at === -1
 //   - listing or removing jobs: at -l, at -c 5, at -r 3, at -d 3; at -V or --version with nothing after
@@ -1457,7 +1458,7 @@ const OWN_HOST_VAR = /^\$\{?(?:HOSTNAME|HOST|COMPUTERNAME)\}?$/i;
 // and no further option, and their segment must not have been cut at & (&> is a redirect). Where a ) follows, bash takes
 // do or then straight after it, so only the end, a { or a script's throw, return, break or continue may come next.
 const AT_NOTHING = /^[ \t\r]*$/;
-const AT_GROUP_END = /^\)\\{1,2}[bBsSwWdD]/;
+const AT_GROUP_END = /^\)\\{1,2}[bBsSwWdD]["'](?:$|[ \t\r][^"'\\$`(){}]*$)/;
 const AT_COMPARE = /^[ \t]*<[ \t]*\d{1,19}[ \t]*\)/;
 const AT_SCRIPT = /^[ \t]+(?:={1,3}|!={1,2}|-[lcrd])(?=[ \t\r)]|$)/;
 const AT_VERSION = /^[ \t]+(?:-V|--version)[ \t\r]*$/;
@@ -1466,7 +1467,7 @@ const AT_AFTER = /^[ \t\r]*(?:\{[ \t\r]*)?(?:$|(?:throw|return|break|continue)(?
 // tail: the segment's text after the word; cut: the segment ended at an &
 function atHarmless(tail, cut) {
   if (AT_NOTHING.test(tail)) return !cut;
-  if (AT_GROUP_END.test(tail)) return true;
+  if (AT_GROUP_END.test(tail)) return !cut;
   const compare = AT_COMPARE.exec(tail);
   if (compare) return AT_AFTER.test(tail.slice(compare[0].length));
   if (AT_VERSION.test(tail)) return !cut;
