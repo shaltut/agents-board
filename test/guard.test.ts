@@ -1535,6 +1535,16 @@ test('long commands stay fast', () => {
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
+    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced: unspaced nesting is
+    // slow in fencePath's .. fold, on its own card (#4813)
+    ['#4802, 200 KB of closed $(a;) words, then a fence path', asBuilder(kb200('$(a;) ') + 'opencode.json')],
+    ['#4802, 200 KB of $(a; left open, then a fence path', asBuilder(kb200('$(a;') + ' opencode.json')],
+    ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
+    ['#4802, 200 KB of a filled word and an option whose bare value never closes', asBuilder(kb200('$A -C $( ') + 'opencode.json')],
+    ['#4802, 200 KB of a filled word and a bare backtick value', asBuilder(kb200('$A -C ` ') + 'opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$( ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of ${a:- starts', asBuilder('caffeinate $GIT "' + kb200('${a:- ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of one open $( and plain $x words', asBuilder('caffeinate $GIT "$(' + kb200('$x y ') + '" opencode.json')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
@@ -2256,6 +2266,27 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
 });
 
+test('#4828: a PowerShell variable that takes a git command\'s output is not the word git', () => {
+  const allowed = ['$x = git rev-parse main', '$x =git rev-parse main', '$tip = git rev-parse origin/main; git log --oneline $tip',
+    '$base = git merge-base HEAD main\ngit diff $base main', '$x, $y = git rev-parse main develop', '$a, $b, $c = git rev-parse HEAD main develop'];
+  for (const role of ['builder', 'reviewer', 'lead'] as const) {
+    for (const c of allowed) assert.equal(kindOf(c, role), 'allow', `${role}: ${c}`);
+  }
+  // a comparison of that variable is no git subcommand of a read-only role
+  assert.equal(kindOf('$h = git rev-parse HEAD; if ($h -eq "abc") { echo same }', 'reviewer'), 'allow');
+  // the git call after the = is still judged, and so is the variable used as the program
+  for (const c of ['$x = git push origin main', '$x =git push origin main', '$x =git push -f origin feat/my-card', '$r = git push origin HEAD',
+    '$p =gh pr merge 5']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.notEqual(kindOf('$x = git commit -m x', 'reviewer'), 'allow');
+  // a variable that does hold the name is still read out: quoted, a POSIX assignment, and used behind a launcher
+  for (const c of ["$g = 'git'; & $g push origin main", 'g=git; $g push origin main', 'g=git; caffeinate $g push origin main',
+    "$g='git'; caffeinate $g push origin main", '$g = git; & $g push origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+});
+
 test('#4826: a filled program with a word that is no git command and a protected branch is read as git', () => {
   // an alias set by an earlier statement or in the environment makes the unknown word a push
   const blocked = ['$G p origin main', '"$GIT" p origin master', '%GIT% p origin main', '& $g p origin main', 'cmd /c %GIT% p origin main',
@@ -2277,6 +2308,35 @@ test('#4826: a filled program with a word that is no git command and a protected
   for (const c of allowed) assert.equal(protectedPush(c, ['main', 'master']), null, c);
   // no read-only rule comes with it: a reviewer's filled program with an unknown word and no protected branch runs
   assert.equal(kindOf('$NODE report summary', 'reviewer'), 'allow');
+});
+
+test('#4833: git command names are case-sensitive, alias names are not: another case of one is an alias', () => {
+  // an alias named push (set by an earlier statement or in the environment) answers to PUSH
+  for (const c of ['git PUSH origin main', 'git Push origin main', 'git PUSH origin HEAD:master', 'timeout 5 git PUSH origin main',
+    'git -C /x PUSH origin main', '$G PUSH origin main', '& $g Push origin main', 'xargs git PUSH origin main', 'git SEND-PACK origin main',
+    'export GIT_CONFIG_PARAMETERS=x; git PUSH origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.ok(protectedPush('git PUSH origin develop', ['develop']), 'a configured branch, with or without a role');
+  // a read-only role runs git subcommands by their own names
+  for (const c of ['git COMMIT -m x', 'git Commit -m x']) assert.notEqual(kindOf(c, 'reviewer'), 'allow', c);
+  for (const c of ['git checkout main', 'git push origin feat/my-card', 'git status', 'git PUSH origin feat/my-card', 'echo "git PUSH origin main"']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
+});
+
+test('#4833: a redirect that takes no file word hides no branch after it', () => {
+  const shapes = ['git p origin 2>&1 B', '$G p origin 2>&1 B', 'git push origin 2>&1 B', '$G push origin 2>&1 B', 'git p origin >&2 B',
+    'git p origin 1>&- B', 'git p origin <&- B', 'git p origin *>&1 B', 'git p origin 3>&2 B', 'git subtree push --prefix x origin 2>&1 B',
+    'git $S origin 2>&1 B', 'git p origin > out.txt B', 'git p origin 2>$null B', 'git p origin &>log B', 'git p 2>&1 origin 2>&1 B'];
+  for (const s of shapes) {
+    assert.notEqual(kindOf(s.replace(/B$/, 'main')), 'allow', s);
+    assert.equal(evaluate({ tool: 'shell', command: s.replace(/B$/, 'develop'), protectedBranches: ['develop'] }).allow, false, `no role: ${s}`);
+  }
+  for (const c of ['git push origin feat/x 2>&1 | tee main', 'git lg 2>&1 | grep main', 'git status 2>&1 && echo main', 'git p origin feat/x > main',
+    'git checkout main 2>&1']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
 });
 
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
