@@ -8,7 +8,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { freeLane, loadConfig, type RunnerConfig } from './recipes.ts';
-import { boardHello, boardStackGap } from './runner-board.ts';
+import { boardHello, boardStackGap, type Board } from './runner-board.ts';
+import { call } from './board.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob, stackGate } from './runner-job.ts';
 import { isNetworkError, survive } from './survive.ts';
@@ -75,18 +76,19 @@ for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => { reap(STATE
 
 // the version covers all of the runner's own code
 const VERSION = createHash('sha1')
-  .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts', 'runner-board.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
+  .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts', 'runner-board.ts', 'board.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
   .digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-runner/${VERSION}`, max: 4 });
+const board: Board = (fn, args) => call(fn, args, sql); // every read and write; sql itself only listens (until S4)
 // #4527: Ahmed's slot setting on the board wins over runner.json's, read once here: a higher one takes this restart (a new
 // slot's first job clones it fresh); a lower one cb.job_claim applies at once. The counts run go back in runner_hello
 // (cli/runner-board.ts: a setting runner.json cannot take, or a board older than this runner, keeps runner.json's).
-const hello = await boardHello(sql, NAME, `http://${cfg.log.host}:${cfg.log.port}`, configText, cfg, say);
+const hello = await boardHello(board, NAME, `http://${cfg.log.host}:${cfg.log.port}`, configText, cfg, say);
 cfg = hello.cfg;
 const fromBoard = hello.fromBoard;
 if (hello.ended) say(`${hello.ended} job(s) left running by the last run ended as runner restarted`);
 // #4710: this runner's DB test stacks start at least this many seconds apart (the board's stack_gap_set, else 30)
-const stackGap = await boardStackGap(sql, NAME, say);
+const stackGap = await boardStackGap(board, NAME, say);
 const stackTurn = stackGate(stackGap * 1000);
 
 const prune = () => {
@@ -109,7 +111,7 @@ function start(slot: number, j: any, lane: number | undefined) {
   runJob(j, { cfg, home: HOME, slot, lane, stop: stop.signal, stackTurn })
     .then(async (r) => {
       if (!r) return say(`job #${j.id} cancelled`);
-      const done = await finish(sql, NAME, Number(j.id), r, say);
+      const done = await finish(board, NAME, Number(j.id), r, say);
       if (done === 'gave-up') lostClaim = true; // its end did not reach the board: the next claim loop ends it (I1)
       say(`job #${j.id} ${r.state}${r.exit_code === null ? '' : ` (exit ${r.exit_code})`}${done === 'gone' ? '; the job had already ended on the board' : done === 'gave-up' ? '; the board did not take its end, the next start ends it' : ''}`);
     })
@@ -125,7 +127,7 @@ async function claim() {
   try {
     // a claim that failed on the network may have committed: end what no slot holds (review I1), before claiming more
     if (lostClaim) {
-      const n = (await sql`select cb.runner_reconcile(${NAME}, ${[...slots.values()].map((s) => s.id)}::bigint[]) as n`)[0]!.n;
+      const n = await board('runner_reconcile_held', { runner: NAME, held: [...slots.values()].map((s) => s.id) });
       lostClaim = false;
       if (n) say(`${n} job(s) claimed while the board connection dropped ended: no slot was running them`);
     }
@@ -135,7 +137,7 @@ async function claim() {
         const free = Array.from({ length: cfg.slots }, (_, i) => i + 1).find((s) => !slots.has(s));
         if (free === undefined) break;
         const lane = freeLane([...slots.values()].flatMap((s) => s.lane === undefined ? [] : [s.lane]), cfg.dbLanes);
-        const j = (await sql`select cb.job_claim(${NAME}, ${lane !== undefined}) as j`)[0]!.j;
+        const j = await board('job_claim', { runner: NAME, allow_db: lane !== undefined });
         if (!j) break;
         start(free, j, j.db === true ? lane : undefined);
       }
@@ -152,7 +154,7 @@ async function cancels() {
   const ids = [...slots.values()].map((s) => s.id);
   if (!ids.length) return;
   try {
-    for (const { id } of await sql`select id from cb.jobs where id = any(${ids}::bigint[]) and state = 'cancelled'`) {
+    for (const { id } of await board('jobs_cancelled', { ids })) {
       for (const s of slots.values()) if (s.id === Number(id)) s.stop.abort();
     }
   } catch (e: any) {
@@ -163,7 +165,7 @@ async function cancels() {
 const tick = () => { cancels(); claim(); };
 await sql.listen('cb_jobs', tick, tick); // onlisten: also on every reconnect, when notices may have been missed
 setInterval(() => {
-  sql`select cb.runner_beat(${NAME})`.catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
+  board('runner_beat', { runner: NAME }).catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
   tick();
 }, 30_000);
 say(`runner ${NAME} up (cb-runner/${VERSION}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, test stacks ${stackGap} s apart, logs on http://${cfg.log.host}:${cfg.log.port}`);

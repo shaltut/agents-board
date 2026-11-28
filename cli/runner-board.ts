@@ -7,17 +7,16 @@ import { published, withBoard, type RunnerConfig } from './recipes.ts';
 const OLDER = new Set(['42703', '42883']);
 const older = (e: unknown) => OLDER.has(String((e as { code?: unknown } | null)?.code ?? ''));
 
-type Sql = { (s: TemplateStringsArray, ...v: any[]): Promise<any[]>; json: (v: any) => any };
+/** One named board call (call() in cli/board.ts, on the runner's own connection). */
+export type Board = (fn: string, args: Record<string, unknown>) => Promise<any>;
 
 /** #4710: seconds between two of this runner's DB test stack starts, unless the board sets cb.runners.stack_gap_set. */
 export const STACK_GAP_S = 30;
 
-/** The stack gap to run: the board's stack_gap_set (0-300) when set, else STACK_GAP_S. Asked on its own: on a board
- *  without the column, reading it with slots_set would drop the slot setting too. Any failure keeps the default. */
-export async function boardStackGap(sql: Sql, name: string, say: (m: string) => void): Promise<number> {
+/** The stack gap to run: the board's stack_gap_set (0-300) when set, else STACK_GAP_S. Any failure keeps the default. */
+export async function boardStackGap(board: Board, name: string, say: (m: string) => void): Promise<number> {
   try {
-    const [r] = await sql`select stack_gap_set from cb.runners where name = ${name}`;
-    const v = r?.stack_gap_set;
+    const v = (await board('runner_settings', { name }))?.stack_gap_set;
     return Number.isInteger(v) && v >= 0 && v <= 300 ? v : STACK_GAP_S;
   } catch (e) {
     if (!older(e)) say(`could not read the board's stack gap (${(e as Error)?.message ?? e}): using ${STACK_GAP_S} s`);
@@ -28,22 +27,23 @@ export async function boardStackGap(sql: Sql, name: string, say: (m: string) => 
 /** Reads the board's setting, fits it to runner.json (a setting the file cannot take keeps the file's counts, and the
  *  reason goes back to the board for the page, review M3), then says hello with the counts it runs. Returns the config
  *  to run, how many jobs the last run left running (now ended), and whether the board's setting is in use. */
-export async function boardHello(sql: Sql, name: string, logUrl: string, text: string, file: RunnerConfig,
+export async function boardHello(board: Board, name: string, logUrl: string, text: string, file: RunnerConfig,
   say: (m: string) => void): Promise<{ cfg: RunnerConfig; ended: number; fromBoard: boolean }> {
-  let board: { slots_set?: number | null; lanes_set?: number | null } | undefined, old = false;
-  try { [board] = await sql`select slots_set, lanes_set from cb.runners where name = ${name}`; } catch (e) {
+  let set: { slots_set?: number | null; lanes_set?: number | null } | null = null, old = false;
+  try { set = await board('runner_settings', { name }); } catch (e) {
     if (!older(e)) throw e;
     old = true;
   }
   if (!old) {
     let refused: string | null = null;
-    const cfg = withBoard(text, file, { slots: board?.slots_set, dbLanes: board?.lanes_set }, (m) => { refused = m; say(m); });
+    const cfg = withBoard(text, file, { slots: set?.slots_set, dbLanes: set?.lanes_set }, (m) => { refused = m; say(m); });
     try {
-      const [h] = await sql`select cb.runner_hello(${name}, ${logUrl}, ${sql.json(published(cfg))}, ${cfg.slots}, ${cfg.dbLanes}, ${refused}) as n`;
-      return { cfg, ended: Number(h?.n ?? 0), fromBoard: refused === null && (board?.slots_set != null || board?.lanes_set != null) };
+      const n = await board('runner_hello', { runner: name, log_url: logUrl, recipes: published(cfg), slots: cfg.slots,
+        db_lanes: cfg.dbLanes, setting_refused: refused });
+      return { cfg, ended: Number(n ?? 0), fromBoard: refused === null && (set?.slots_set != null || set?.lanes_set != null) };
     } catch (e) { if (!older(e)) throw e; }
   }
   say(`the board is older than this runner (it has no slot setting yet): running runner.json's ${file.slots} slots and ${file.dbLanes} DB lane(s)`);
-  const [h] = await sql`select cb.runner_hello(${name}, ${logUrl}, ${sql.json(published(file))}) as n`;
-  return { cfg: file, ended: Number(h?.n ?? 0), fromBoard: false };
+  const n = await board('runner_hello', { runner: name, log_url: logUrl, recipes: published(file) });
+  return { cfg: file, ended: Number(n ?? 0), fromBoard: false };
 }

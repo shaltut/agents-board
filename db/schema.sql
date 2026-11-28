@@ -7430,3 +7430,60 @@ create function cb.question_state(id bigint) returns table(status text, assigned
   select q.status, q.assigned_to, u.display from cb.questions q left join cb.users u on u.name = q.assigned_to
    where q.id = question_state.id
 $$;
+
+-- ---------------------------------------------------------------- The runner's and cb triage's own SQL (#3222 S1c)
+drop function if exists cb.runner_settings cascade;
+drop function if exists cb.jobs_cancelled cascade;
+drop function if exists cb.runner_reconcile_held cascade;
+drop function if exists cb.fault_file cascade;
+
+-- Ahmed's settings for a runner (#4527, #4710); null: no row yet. A board without this function is older than the
+-- runner, which then starts on runner.json's counts (cli/runner-board.ts).
+create function cb.runner_settings(name text) returns jsonb language sql stable as $$
+  select jsonb_build_object('slots_set', r.slots_set, 'lanes_set', r.lanes_set, 'stack_gap_set', r.stack_gap_set)
+    from cb.runners r where r.name = runner_settings.name
+$$;
+
+-- of the jobs a runner's slots hold (ids: [1, 2]), those cancelled on the board
+create function cb.jobs_cancelled(ids jsonb) returns table(id bigint) language sql stable as $$
+  select j.id from cb.jobs j
+   where j.state = 'cancelled' and j.id in (select x::bigint from jsonb_array_elements_text(jobs_cancelled.ids) x)
+$$;
+
+-- cb.runner_reconcile with the held ids as jsonb, as a named call sends a list. Its own name: a runner from before
+-- still calls runner_reconcile with a bigint[].
+create function cb.runner_reconcile_held(runner text, held jsonb) returns int language sql as $$
+  select cb.runner_reconcile(runner_reconcile_held.runner,
+                             array(select x::bigint from jsonb_array_elements_text(coalesce(runner_reconcile_held.held, '[]'::jsonb)) x))
+$$;
+
+-- cb triage files one fault (#4535), under the template's advisory lock, so two machines never file it twice (Q2999).
+-- It writes on claude-board only, and only on a card that carries this fault's marker (Q3001): a note on the open one,
+-- or a new bug. The caller has checked the texts for what a card may not hold, and sends null for one it held back:
+-- seen (the note), or title and body (the new card). facts closes the new card's body and carries the marker.
+-- Returns {action: filed | noted | held | cancelled | fixed | none, id}.
+create function cb.fault_file(tmpl text, seen text, last timestamptz, title text, body text, facts text, actor text)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare marker text := 'fault:' || tmpl; hit cb.tasks; made bigint;
+begin
+  if tmpl is null or tmpl !~ '^ft-[0-9a-f]{12}$' then
+    raise exception 'not a fault template: "%". cb triage files ft- and 12 hex digits', tmpl;
+  end if;
+  if facts is null or strpos(facts, marker) = 0 then raise exception 'a fault card''s facts must carry its marker %', marker; end if;
+  perform pg_advisory_xact_lock(hashtext('cb-fault:' || tmpl));
+  select * into hit from cb.tasks t where t.project = 'claude-board' and strpos(t.body, marker) > 0
+   order by t.status in ('done', 'cancelled'), t.id desc limit 1;
+  if hit.id is not null and hit.status not in ('done', 'cancelled') then
+    if seen is null then return jsonb_build_object('action', 'held', 'id', hit.id); end if;
+    perform cb.log(project => 'claude-board', summary => seen, task_id => hit.id::text, actor => actor);
+    return jsonb_build_object('action', 'noted', 'id', hit.id);
+  end if;
+  if hit.status = 'cancelled' then return jsonb_build_object('action', 'cancelled', 'id', hit.id); end if;
+  if hit.status = 'done' and last <= hit.done_at then return jsonb_build_object('action', 'fixed', 'id', hit.id); end if;
+  if coalesce(title, '') = '' or coalesce(body, '') = '' then return jsonb_build_object('action', 'none', 'id', hit.id); end if;
+  made := cb.task_add(project => 'claude-board', title => title,
+    body => body || E'\n\n' || coalesce('Seen again after #' || hit.id || E' was done.\n\n', '') || facts,
+    status => 'next', priority => 'P2', actor => actor, type => 'bug');
+  return jsonb_build_object('action', 'filed', 'id', made);
+end $$;
