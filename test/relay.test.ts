@@ -484,7 +484,7 @@ test('session lines wait the settle window and go in one push; a closed notice w
     assert.ok(Date.now() - asked < 4000);
     assert.match(pushes()[1]!, /Message from orch: are you free\?/);
     assert.match(pushes()[1]!, /orch closed #\d+ "second"/);
-    // a held note whose card moves on with no event for me: the board stops returning it, the relay still has it
+    // a held note whose card moves on: the board stops returning it (only the urgent "taken off you"), the relay has it
     const third = await add('third');
     assert.ok(await upTo(3, 12_000), 'the new card is told');
     await sql`select cb.log('demo', 'keep this line', ${third}, '{}', 'orch')`;
@@ -550,11 +550,11 @@ for (const sid of ['S-restart', '']) test(`a held card line survives the relay b
     fs.writeFileSync(seatFiles(pane).lock, '');
     relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
     exited = new Promise((r) => relay.on('exit', r));
-    await wait(2500);
-    await sql`select cb.tell(${me}, 'still there?', 'orch')`;
-    for (const t = Date.now(); !/still there/.test(text()) && Date.now() - t < 10_000;) await wait(100);
-    await wait(800);
+    // taking the card off me is urgent, so the new relay pushes at once, and the held note goes with it
+    for (const t = Date.now(); !inbox.got.length && Date.now() - t < 12_000;) await wait(100);
+    await wait(1500);
     assert.equal(inbox.got.length, 1, text());
+    assert.match(text(), /edited #\d+ "moving"/);
     assert.equal(text().match(/held through a kill/g)?.length, 1, text());
     assert.equal(fs.existsSync(seatFiles(pane).held), false, 'pushed: no copy is left behind');
   } finally {

@@ -26,8 +26,8 @@ export const lowMessage = (m: any) =>
   !m.raw && m.urgent !== true
   && (m.actor === 'runner' || m.actor === 'github' || (m.actor === 'board' && typeof m.notice === 'string'));
 
-/** A broadcast or a shared-memory change by anyone but Ahmed. */
-export const lowNotice = (x: any) => typeof x.actor === 'string' && x.actor !== 'ahmed';
+/** A broadcast or a shared-memory change by anyone but Ahmed, or another person the inbox marks `urgent`. */
+export const lowNotice = (x: any) => typeof x.actor === 'string' && x.actor !== 'ahmed' && x.urgent !== true;
 
 type Wait = 'now' | 'settle' | 'low' | 'ride';
 const NOT_SESSIONS = ['ahmed', 'board', 'github', 'runner', 'supervisor'];
@@ -37,7 +37,7 @@ const messageWait = (m: any): Wait => lowMessage(m) ? 'low'
 const noticeWait = (x: any): Wait => lowNotice(x) ? 'low' : 'now';
 // ride: no clock of its own
 const eventWait = (e: any): Wait => e.urgent !== false ? 'now' : e.kind === 'done' ? 'ride' : CARD_LINES.includes(e.kind) ? 'settle' : 'now';
-const cardWait = (t: any): Wait => typeof t.priority === 'string' && t.priority !== 'P0' && t.actor !== 'ahmed' ? 'settle' : 'now';
+const cardWait = (t: any): Wait => typeof t.priority === 'string' && t.priority !== 'P0' && t.actor !== 'ahmed' && t.urgent !== true ? 'settle' : 'now';
 
 /** When this relay first saw each held line. fresh: no read judged yet, so a hold already on the board is a relay's
  *  before this one, and what this read has is as old as that hold. */
@@ -48,8 +48,8 @@ export type HoldStep = { action: 'none' | 'deliver' | 'hold'; held: number; wait
 /** What the relay does with one read. typed: Ahmed's dashboard text (taken out of messages before this).
  *  none: nothing to push. deliver: push everything now (something urgent, a window is over, or a board that keeps no
  *  holds: its inbox has no `hold` key). hold: push nothing, read again in `wait` ms (null: nothing held has a clock).
- *  since: when the oldest held line on a clock was first seen, else now. The caller clears the clock once it has
- *  pushed, so a failed push keeps its lines' age. */
+ *  since: when the oldest held line on a clock was first seen; with none, the oldest "closed" notice (so later reads
+ *  do not renew it); else now. The caller clears the clock once it has pushed, so a failed push keeps its lines' age. */
 export function holdStep(i: any, typed: unknown[], clock: HoldClock = { seen: new Map(), now: Date.now(), fresh: true },
                          settleMs = SETTLE_WINDOW_MS): HoldStep {
   const of = (list: any[] | undefined, key: string, wait: (x: any) => Wait, id = 'id') =>
@@ -60,14 +60,17 @@ export function holdStep(i: any, typed: unknown[], clock: HoldClock = { seen: ne
   ];
   const start = clock.fresh && i.hold ? clock.now - Math.max(0, Number(i.hold.age_ms) || 0) : clock.now;
   clock.fresh = false;
-  let since = clock.now, due: number | null = null;
+  let clocked: number | null = null, riding: number | null = null, due: number | null = null;
+  const least = (a: number | null, b: number) => a === null ? b : Math.min(a, b);
   for (const l of lines) {
     if (!clock.seen.has(l.key)) clock.seen.set(l.key, start);
+    const first = clock.seen.get(l.key)!;
+    if (l.wait === 'ride') riding = least(riding, first);
     if (l.wait !== 'settle' && l.wait !== 'low') continue;
-    const first = clock.seen.get(l.key)!, until = first + (l.wait === 'low' ? HOLD_MS : settleMs);
-    since = Math.min(since, first);
-    due = due === null ? until : Math.min(due, until);
+    clocked = least(clocked, first);
+    due = least(due, first + (l.wait === 'low' ? HOLD_MS : settleMs));
   }
+  const since = clocked ?? riding ?? clock.now;
   const held = lines.filter((l) => l.wait !== 'now').length;
   const urgent = held < lines.length || typed.length > 0
     || [i.asks, i.answers, i.sent_back, i.answer_copies, i.huddles].some((l) => (l?.length ?? 0) > 0);

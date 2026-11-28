@@ -206,6 +206,13 @@ let holdTimer: ReturnType<typeof setTimeout> | undefined;
 // name or project, below); orphans: such copies when another agent process took the pane, each kept until that one
 // binds (cli/held-copy.ts). #4630: they start with what the last relay in this pane left.
 let heldFor: HeldCopy | undefined, orphans: HeldCopy[] = [];
+// The held file follows what is held, not only a clean exit: a relay that is killed (--restart on Windows, a crash)
+// still leaves it. Only the seat's lock holder writes it: a relay that lost the seat must not undo the new one's read.
+const saveCopies = () => {
+  if (lockPid() !== process.pid) return;
+  try { writeCopies(HELD, [...orphans, ...(heldFor ? [heldFor] : [])]); }
+  catch (e: any) { log(`held file not written: ${e?.message ?? e}`); }
+};
 const SEAT = `${PANE.trim()}@${M.trim().toLowerCase()}`; // the row's name before a bind (cb._seat_name)
 /** Pushes what a copy has that the board no longer returns in this read (that rest the read itself delivers). */
 async function pushCopy(was: HeldCopy, i: any) {
@@ -374,13 +381,15 @@ async function check() {
         else await pushCopy(heldFor, i);
         heldFor = undefined;
       }
-      // a copy of the same session: the board kept the row (a read with no id between two of the same, a code restart)
+      // what the pane's last relay or session left (a relay restart, a new agent, a read with no id between two of the same)
       if (orphans.length) {
         const o = sortOrphans(orphans, i, sid, SEAT, Date.now());
         orphans = o.keep;
+        // this session's own: held again by this relay, so its card lines join the next push (PR 165 review HIGH 1)
+        for (const c of o.mine) heldFor = { ...c, events: keepLines(heldFor?.events ?? [], c.events ?? []) };
         for (const c of o.push) await pushCopy(c, i);
         if (o.dropped) log(`dropped ${o.dropped} held notices: the new session bound under another name`);
-        if (o.expired) log(`dropped ${o.expired} held notices: older than the ${Math.round(HOLD_MS / 60_000)} min hold window`); // review 78 N2
+        if (o.expired) log(`dropped ${o.expired} held notices: too old to push`); // review 78 N2
       }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
@@ -411,6 +420,7 @@ async function check() {
           log(`holding ${step.held} lines`);
         }
         heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [], events: i.events, at: step.since };
+        saveCopies();
         // a Next offer leaves the settle list once due: put a held one back, due, so the next read checks and offers it again
         for (const t of i.next_work) pendingWork.set(Number(t.id), { t, at: 0 });
         if (step.wait !== null) holdTimer = setTimeout(() => { check(); }, step.wait + 100);
@@ -428,6 +438,7 @@ async function check() {
           await adapter.deliver(seat, format(i));
       }
       heldFor = undefined;
+      saveCopies();
       holdClock.seen.clear();
       // #3221 review I2: the hold ends first, on its own, right after the push (or with nothing left to push): a relay
       // that dies in the bookkeeping below must not leave a hold that makes the next one rewind and push it all again

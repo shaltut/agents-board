@@ -1,4 +1,5 @@
-// #3221, #4630: the relay's copy of the messages, broadcasts and memory changes of the read it last held. The board keeps
+// #3221, #4630: the relay's copy of the messages, broadcasts, memory changes and card lines of the read it last held,
+// written to the seat's held file at each hold. The board keeps
 // a hold only for the same name, project and session; when another agent process takes the pane (a new session id: the
 // board starts the row again), the copy is all that is left. It waits (an orphan) until that session binds: under the
 // same name it is pushed, under another it is dropped. #4630: it outlives the relay, in the seat's held file, since the
@@ -15,20 +16,27 @@ export type HeldCopy = { actor: string; project: unknown; sid: string | null; me
 export const copyCount = (cs: (HeldCopy | undefined)[]) =>
   cs.reduce((n, c) => n + (c ? c.messages.length + c.broadcasts.length + c.memory.length + (c.events?.length ?? 0) : 0), 0);
 
-/** What a read does with the orphans: push (bound under the copy's name), keep (the row is not bound yet), drop (bound
- *  under another name: dropped counts them), or forget at once (the same session: the board kept the row and returns
- *  them; or older than the hold window, review 78 N2: expired counts them). Every copy is judged on its own (N3). */
-export function sortOrphans(copies: HeldCopy[], i: { actor: unknown }, sid: string | null, seat: string, now: number) {
-  const push: HeldCopy[] = [], keep: HeldCopy[] = [];
+/** How long a session's own copy stays usable: as far back as the board reads a hold again (review M5). */
+export const SAME_SESSION_MS = 24 * 60 * 60_000;
+
+/** What a read does with the copies the pane's last relay left. The same session (or an agent that names none): the
+ *  board kept the row and returns what it still can, but a card line only while the card is still the seat's, so the
+ *  copy stays with this relay: mine (the same name and project) goes out with its next push, push (bound otherwise
+ *  meanwhile) goes now (PR 165 review HIGH 1). Another session: push (bound under the copy's name), keep (the row is
+ *  not bound yet) or drop (another name: dropped counts them). expired counts the copies too old to push: past the
+ *  hold window for another session (review 78 N2), past a day for the same one. Every copy is judged on its own (N3). */
+export function sortOrphans(copies: HeldCopy[], i: { actor: unknown; project?: unknown }, sid: string | null, seat: string, now: number) {
+  const push: HeldCopy[] = [], keep: HeldCopy[] = [], mine: HeldCopy[] = [];
   let dropped = 0, expired = 0;
   for (const c of copies) {
-    if (now - c.at > HOLD_MS) expired += copyCount([c]);
-    else if (c.sid === sid) continue;
+    const same = c.sid === sid;
+    if (now - c.at > (same ? SAME_SESSION_MS : HOLD_MS)) expired += copyCount([c]);
+    else if (same) (i.actor === c.actor && i.project === c.project ? mine : push).push(c);
     else if (i.actor === c.actor) push.push(c);
     else if (i.actor === seat || /^session-[0-9a-f]{8}$/.test(String(i.actor))) keep.push(c);
     else dropped += copyCount([c]);
   }
-  return { push, keep, dropped, expired };
+  return { push, keep, mine, dropped, expired };
 }
 
 const isCopy = (c: any): c is HeldCopy => c && typeof c.actor === 'string' && (c.sid === null || typeof c.sid === 'string')
@@ -42,12 +50,13 @@ export function writeCopies(file: string, copies: HeldCopy[]) {
   writeFileSync(file, JSON.stringify(copies), { mode: 0o600, flag: 'wx' });
 }
 
-/** The copies the last relay left, once (the file goes), without the ones past the hold window. A bad file is none. */
+/** The copies the last relay left, once (the file goes), without the ones no session could still get (sortOrphans
+ *  judges the rest). A bad file is none. */
 export function readCopies(file: string, now: number): HeldCopy[] {
   let raw: unknown;
   try { raw = JSON.parse(readFileSync(file, 'utf8')); } catch { raw = []; }
   rmSync(file, { force: true });
-  return Array.isArray(raw) ? raw.filter(isCopy).filter((c) => now - c.at <= HOLD_MS) : [];
+  return Array.isArray(raw) ? raw.filter(isCopy).filter((c) => now - c.at <= SAME_SESSION_MS) : [];
 }
 
 /** Review 106 L2: removes the held files in dir older than the hold window. herdr never reuses a pane id, so a seat

@@ -1770,7 +1770,8 @@ begin
                  else jsonb_build_object('from', greatest(hf, coalesce((select e.id from cb.events e where e.at <= now() - interval '24 hours'
                                                                          order by e.at desc limit 1), 0)),
                                          'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
-    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
+    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary,
+                                                             'urgent', cb._person(e.actor)) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
                                -- 24 h, as messages and huddles: a reused pane id keeps the old row's broadcast_seen (#4343)
@@ -1806,7 +1807,8 @@ begin
                                   and q.asked_by <> me and e.id > seen and e.at > now() - interval '24 hours'), '[]'),
     -- new unassigned bugs filed in my project, if I triage it (cb.triagers: its lead, else everyone bound)
     'bugs', coalesce((select jsonb_agg(jsonb_build_object('event_id', e.id, 'id', t.id, 'project', t.project, 'title', t.title,
-                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor) order by e.id)
+                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor,
+                                                          'urgent', cb._person(e.actor)) order by e.id)
                         from cb.events e join cb.tasks t on t.id = e.task_id
                        where e.kind = 'task_created' and t.type = 'bug' and t.assignee is null and t.status not in ('done', 'cancelled')
                          and t.project = proj and e.actor <> me and e.id > seen and e.at > now() - interval '24 hours'
@@ -1868,7 +1870,7 @@ begin
     'memory', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'action', e.data ->> 'action', 'actor', e.actor, 'memory', x.id,
                                                             'kind', x.kind, 'title', x.title,
                                                             'why', case when e.data ? 'why_flagged' then null else e.data ->> 'why' end,
-                                                            'why_hidden', e.data ? 'why_flagged',
+                                                            'why_hidden', e.data ? 'why_flagged', 'urgent', cb._person(e.actor),
                                                             'replaces', x.source ->> 'supersedes', 'by', n.id, 'by_title', n.title) order by e.id)
                           from cb.events e join cb.memories x on x.id = (e.data ->> 'memory')::bigint
                           left join cb.memories n on n.id = x.superseded_by
