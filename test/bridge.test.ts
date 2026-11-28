@@ -9,7 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect } from '../server/db.ts';
-import { freshDb, TEST_URL } from './helpers.ts';
+import { freshDb, stranger, TEST_URL } from './helpers.ts';
 import { serveBridge, openBridge, bridgeFiles, seatKey } from '../cli/bridge.ts';
 import { claudeEndpointPath } from '../cli/agents/claude.ts';
 
@@ -86,13 +86,15 @@ test('cb in a session with a relay runs through it, and opens no connection of i
     for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
     assert.ok(fs.existsSync(bridgeFiles(key).info), 'relay published its bridge');
     // cb names its own connections 'cb': none may appear while it runs through the relay
+    const otherCb = await stranger('cb'); // #3772: another run's cb, on its own database
     let own = 0, done = false;
     const watch = (async () => { while (!done) {
-      const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where application_name = 'cb'`;
+      const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and application_name = 'cb'`;
       own = Math.max(own, n); await wait(20);
     } })();
     const r = spawnSync('node', ['cli/cb.ts', 'add', 'demo', 'via the relay'], { encoding: 'utf8', env });
     done = true; await watch;
+    await otherCb.end();
     assert.equal(r.status, 0, r.stderr);
     const [t] = await sql`select title, created_by from cb.tasks`;
     assert.deepEqual({ ...t }, { title: 'via the relay', created_by: 'W7' });
@@ -185,6 +187,7 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
   const cb = (e: any, ...a: string[]) => { const r = spawnSync('node', ['cli/cb.ts', ...a], { encoding: 'utf8', env: e }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
   let n = 0;
   const addedBy = async () => { cb(env, 'add', 'demo', `t${++n}`); const [t] = await sql`select created_by from cb.tasks where title = ${'t' + n}`; return t.created_by; };
+  let otherRelay: Awaited<ReturnType<typeof stranger>> | undefined;
   try {
     for (let i = 0; i < 50 && !fs.existsSync(bridgeFiles(key).info); i++) await wait(100);
     cb(env, 'iam', 'W8', 'demo');
@@ -196,12 +199,15 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     await wait(400);
     assert.equal(await addedBy(), 'W10');
     // the relay's connections cut (Postgres restarted, a network change): a rename meanwhile is not missed
-    await sql`select pg_terminate_backend(pid) from pg_stat_activity where application_name like 'cb-relay%'`;
+    otherRelay = await stranger('cb-relay/0000000'); // #3772: it is not this run's to cut
+    await sql`select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and application_name like 'cb-relay%'`;
     await sql`select cb.iam('testbox', ${pane}, 'W11', null)`;
     assert.equal(await addedBy(), 'W11', 'no notice could reach the relay: cb must not get the old name');
     await wait(1500);
     assert.equal(await addedBy(), 'W11');
+    assert.equal((await sql`select 1 from pg_stat_activity where pid = ${otherRelay.pid}`).length, 1, 'a relay of another database was cut');
   } finally {
+    await otherRelay?.end();
     relay.kill();
     await exited;
     await closed(box);
