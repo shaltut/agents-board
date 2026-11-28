@@ -245,8 +245,10 @@ const heredocText = [
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
   for (const [name, make] of hiddenByHeredoc) {
     assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
-    assert.ok(evaluate({ tool: 'shell', command: make('unset CB_ROLE'), role: 'builder' }), `builder must block the seat variable: ${name}`);
+    assert.equal(evaluate({ tool: 'shell', command: make('git push origin main'), role: 'builder' }).allow, false, `builder must block a push to main: ${name}`);
   }
+  // the card's own repro: a role rule that reads the same stripped text
+  assert.equal(evaluate({ tool: 'shell', command: "cat > notes.txt <<'EOF'\nEOF\nunset CB_ROLE\nEOF", role: 'builder' }).allow, false, 'the seat variable');
   for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
 });
 
