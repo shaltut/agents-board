@@ -1857,12 +1857,17 @@ begin
     'last_event', (select coalesce(max(e.id), 0) from cb.events e));
 end $$;
 
--- A message to every session (project null) or to one project's sessions. Relays push it; cb brief lists 24h.
-create function cb.broadcast(message text, project text default null, actor text default null) returns bigint language plpgsql as $$
+-- A message to one project's sessions, or (everyone, project null) to every session. Relays push it; cb brief lists
+-- 24h. #4740 (Ahmed): the sender says which on purpose, so a forgotten project never reaches every session.
+create function cb.broadcast(message text, project text default null, actor text default null, everyone boolean default false)
+returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.read_project(project); new_id bigint;
 begin
   if coalesce(trim(message), '') = '' then raise exception 'message is required'; end if;
+  if (p is null) is distinct from coalesce(everyone, false) then
+    raise exception 'say one scope: cb broadcast "<message>" --project <p> (that project''s sessions) or --all (every session)';
+  end if;
   insert into cb.events (actor, project, kind, summary) values (a, p, 'broadcast', trim(message))
   returning cb.events.id into new_id;
   return new_id;
@@ -3320,7 +3325,7 @@ begin
    where t.id in (select cb.norm_id(x) from jsonb_array_elements_text(coalesce(skip, '[]')) x) and cb._goal_match(g.rules, g.project, t);
   n := cb._goal_pull(g, false);
   perform cb._goal_event(g, 'create', 'G' || g.id || ' set: ' || g.title, a);
-  perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' card' else ' cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a);
+  perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' card' else ' cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a, g.project is null);
   return g.id;
 end $$;
 
@@ -3363,7 +3368,7 @@ begin
     perform cb._goal_pull(g, true);
     select count(*) into n from cb.goal_tasks gt join cb.tasks t on t.id = gt.task_id
      where gt.goal_id = g.id and gt.state = 'in' and t.status not in ('done', 'cancelled');
-    perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' open card' else ' open cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a);
+    perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' open card' else ' open cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a, g.project is null);
   end if;
 end $$;
 
@@ -5852,6 +5857,7 @@ drop function if exists cb._job_tell cascade;
 drop function if exists cb.job_add cascade;
 drop function if exists cb.job_get cascade;
 drop function if exists cb.jobs_list cascade;
+drop function if exists cb.jobs_ended cascade;
 drop function if exists cb.job_cancel cascade;
 drop function if exists cb.runner_hello cascade;
 drop function if exists cb.runner_reconcile cascade;
@@ -5985,12 +5991,27 @@ begin
                   order by r.name) from cb.runners r), '[]'::jsonb));
 end $$;
 
+-- #4732: the newest 20 ended jobs, so a lost job id is looked up, not scanned for. more: older ones were left out
+-- (the 21st is read only to know that). summary is the job's output: whoever shows it marks it.
+create function cb.jobs_ended(project text default null, requester text default null, task_id bigint default null)
+returns jsonb language plpgsql stable as $$
+#variable_conflict use_variable
+declare p text := cb.read_project(project); found jsonb;
+begin
+  select coalesce(jsonb_agg(to_jsonb(t) order by t.finished_at desc, t.id desc), '[]'::jsonb) into found from (
+    select * from cb.jobs j
+     where j.finished_at is not null and (p is null or j.project = p)
+       and (requester is null or j.requester = requester) and (task_id is null or j.task_id = task_id)
+     order by j.finished_at desc, j.id desc limit 21) t;
+  return jsonb_build_object('jobs', found - 20, 'more', jsonb_array_length(found) > 20);
+end $$;
+
 create function cb.job_cancel(id bigint, actor text default null) returns void language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); j cb.jobs;
 begin
   select * into j from cb.jobs x where x.id = id for update;
-  if not found then raise exception 'no job #%', id; end if;
+  if not found then raise exception 'no job #%: cb jobs lists queued and running jobs, cb jobs --ended the ended ones', id; end if;
   -- #4527: from the dashboard only Ahmed (the Runners page is for every admin, and the web may call this function)
   if not (cb._is_dashboard() and a = 'ahmed') and j.requester <> a
      and not cb._is_lead(a, j.project) then  -- the lead of the job's project
@@ -6187,7 +6208,7 @@ create function cb.job_retry(id bigint, actor text default null) returns jsonb l
 declare a text := cb.set_actor(actor); j cb.jobs; n cb.jobs; dup bigint;
 begin
   select * into j from cb.jobs x where x.id = id;
-  if not found then raise exception 'no job #%', id; end if;
+  if not found then raise exception 'no job #%: cb jobs lists queued and running jobs, cb jobs --ended the ended ones', id; end if;
   if j.requester <> a and not cb._queue_manager(a, j.project) then
     raise exception 'only the requester, the lead of % or Ahmed can run job #% again', j.project, id;
   end if;
@@ -6215,7 +6236,7 @@ begin
   if place is null or place not in ('next', 'up', 'down', 'back') then raise exception 'place must be next, up, down or back'; end if;
   perform pg_advisory_xact_lock(hashtext('cb-job-queue'));
   select * into j from cb.jobs x where x.id = id;
-  if not found then raise exception 'no job #%', id; end if;
+  if not found then raise exception 'no job #%: cb jobs lists queued and running jobs, cb jobs --ended the ended ones', id; end if;
   own := cb._is_owner(a);
   if not own and not cb._is_lead(a, j.project) then
     raise exception 'only Ahmed or the lead of % can move its jobs in the queue', j.project;
