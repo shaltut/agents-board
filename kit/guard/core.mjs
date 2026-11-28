@@ -57,7 +57,7 @@ const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED
 // cannot follow (a heredoc nobody skipped, a case, whose ) closes nothing) makes it unsure for good: from there nothing
 // is dropped, so its text is judged as commands.
 const WORD_BREAK = /[\s;&|()<>]/;
-const ANSI_BODY = /(?:\\[\s\S]|[^'\\])*/y;
+const ANSI_BODY = /(?:\\[\s\S]|[^\x27\\])*/y;
 const CASE_AT = /case[ \t]/y;
 function bashReader(text) {
   let i = 0;
@@ -104,7 +104,7 @@ function bashReader(text) {
 }
 const END_LINE = /\n[ \t]*(\w+)[ \t]*(?=\n|$)/gm; // a line holding only a word, from the \n before it
 // a line bash takes as the end inside $( ) or backticks, though more follows the word: EOF) or EOF`
-const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)`])/g;
+const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)\x60])/g;
 const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
 const LINE_START = /^/gm;
 function replaceHeredocs(text, fn) {
