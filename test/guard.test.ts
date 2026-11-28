@@ -342,7 +342,7 @@ test('#4774: a command a shell runs is never dropped as message text; real messa
     // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
     if (!stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE')) missed.push(`${name}: the line does not reach the rules`);
     if (!check(make('git reset --hard'))) missed.push(`${name}: a reset passes`);
-    for (const c of ['git push origin main', 'git push -f origin feat/x', 'taskkill /IM node.exe']) {
+    for (const c of ['git push origin main', 'git push -f origin feat/x', 'taskkill /IM node.exe', 'env -i git push origin feat/x']) {
       if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
     }
   }
