@@ -1417,32 +1417,38 @@ const LEAD_SSH_HOST = /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$/;
 const OWN_HOST_VAR = /^\$\{?(?:HOSTNAME|HOST|COMPUTERNAME)\}?$/i;
 // #4734: "at" is also an English word and a variable name, so quoted text and script lines (if (at < 0), grep "a|at|b")
 // reach command position. It schedules only with a time: its first operand starts like one (a digit, now, noon, midnight,
-// teatime, today, tomorrow, next, a month or weekday, a Windows \\host), or the guard cannot read it ($, a backtick), or -t gives it, or xargs
-// feeds it. A redirect whose target the segment split cut off (at 2>&1 now) hides what follows, so it counts too. A bare
-// <= or >= is a script's comparison. -l -r -d -c first only list or remove jobs.
-const AT_DAY = 'next|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|satur|sun)(?:day)?|sat';
-const AT_TIME = new RegExp(String.raw`^(?:\d|(?:now|noon|midnight|teatime|today|tomorrow|${AT_DAY})(?![a-z])|\\\\|.*[$\x60])`, 'i');
+// teatime, today, tomorrow, next, a month or weekday, a + increment, a Windows \\host), or the guard cannot read it ($, a backtick), or -t gives it, or xargs
+// feeds it. -b is batch, which needs no time. A redirect whose target the segment split cut off (at 2>&1 now) hides what
+// follows, so it counts too; <= and >= are redirects to a file named =. An operand the shell turns into nothing ("") is
+// skipped, and one it may expand into a time (a brace list, a glob) counts. -l -r -d -c first only list or remove jobs.
+const AT_DAY = 'next|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|satur|sun)(?:day)?|sat';
+const AT_TIME = new RegExp(String.raw`^(?:\d|\+(?!=)|(?:now|noon|midnight|teatime|today|tomorrow|${AT_DAY})(?![a-z])|\\\\|.*[$\x60])`, 'i');
 const AT_REDIRECT = /^(?:\d*|&)(?:<<<|<<-?|<>|>>|>\||<|>)(.*)$/;
-function atSchedules(a) {
+const BRACES = /\{([^{}\s]*)\}/g; // one pass: a run stops at the next brace or blank
+const braceList = (text) => { for (const m of text.matchAll(BRACES)) if (/,|\.\./.test(m[1])) return true; return false; };
+const hasGlob = (word) => /[*?[]/.test(word.replace(new RegExp(QUOTED, 'g'), ''));
+// seg is the command's segment: WORD drops braces, so a brace list (at {,now}) is only seen there
+function atSchedules(a, seg) {
   if (/^-[lrdc]$/.test(a[0] ?? '')) return false;
+  if (braceList(seg)) return true;
   for (let i = 0; i < a.length; i++) {
-    if (a[i] === '<=' || a[i] === '>=') return false;
     const redirect = AT_REDIRECT.exec(a[i]);
     if (redirect) {
       if (!redirect[1] && ++i >= a.length) return true;
       continue;
     }
     if (a[i].startsWith('-')) {
-      if (/^-[mMvbkV]*t/.test(a[i])) return true;
-      if (/^-[mMvbkV]*[fqu]$/.test(a[i])) i++;
+      if (/^-[A-Za-z]*b/.test(a[i]) || /^-[mMvkV]*t/.test(a[i])) return true;
+      if (/^-[mMvkV]*[fqu]$/.test(a[i]) && hasGlob(a[++i] ?? '')) return true;
       continue;
     }
+    if (!a[i].replace(/["'\\\s]/g, '')) continue; // "", " " and "\ " leave the time to the next operand
     const word = a[i].replace(/["']/g, '').trim(); // n""ow is now to the shell, and so is n\ow
-    return AT_TIME.test(word) || AT_TIME.test(word.replace(/\\/g, ''));
+    return hasGlob(a[i]) || AT_TIME.test(word) || AT_TIME.test(word.replace(/\\/g, ''));
   }
   return false;
 }
-function freshLaunch(name, a, hosts, role) {
+function freshLaunch(name, a, hosts, role, seg = '') {
   const only = (ok) => a.length > 0 && a.every((x) => ok.test(x));
   if (OTHER_USER.has(name)) return only(/^(?:--version|-V|-h|--help|-l|--list|-k|-K)$/) ? null : name;
   if (name === 'ssh' || name === 'mosh') {
@@ -1457,7 +1463,7 @@ function freshLaunch(name, a, hosts, role) {
   }
   if (name === 'wsl') return only(/^(?:-l|--list|-v|--verbose|--status|--version|--help|-q|--quiet|--shutdown|--update|--all|--running)$/) ? null : name;
   if (name === 'launchctl') return a.some((x) => /^(?:submit|load|bootstrap|start|kickstart|asuser)$/.test(x)) ? name : null;
-  if (name === 'at') return atSchedules(a) ? name : null;
+  if (name === 'at') return atSchedules(a, seg) ? name : null;
   if (name === 'crontab') return a.some((x) => /^-[lr]$/.test(x)) ? null : name;
   if (name === 'systemd-run') return only(/^(?:--version|-h|--help)$/) ? null : name;
   if (name === 'batch') return name;
@@ -1482,12 +1488,17 @@ function freshLaunch(name, a, hosts, role) {
 }
 // #4736: SEGMENTS does not see quotes, so the | of grep -E "a|batch|b" put batch in command position. One quote-aware
 // pass blanks the quoted strings of a search command (grep, egrep, fgrep, rg, git grep), for the launcher walk only: they
-// are data to it. A double-quoted one with $( is run by the shell and stays. Where the pass could lose count of the
-// quotes or of what a name runs (a heredoc, a # comment, a backtick, $'...', a function or alias) or a flag runs a
-// program (rg --pre, git grep -O), the text is judged as it was. A quoted string any other command gets is not touched.
+// are data to it. The command text does not say whether bash or PowerShell runs it, so wherever the two could count the
+// quotes differently, or bash nests them, the whole text is judged as it was: a heredoc, any #, a backtick, $( ${ $[ $',
+// a here-string, --%, a smart quote (PowerShell closes a string at one), a backslash before a quote ("C:\src\" ends there
+// in PowerShell) or before a bare separator. So too with a function or alias, or a flag that runs a program (rg --pre,
+// git grep -O or any prefix of --open-files-in-pager). And a quoted string holding ; & a newline or a spaced | is never
+// blanked: a search pattern needs none, and code hidden by a miscount does. Other commands' strings are not touched.
+const COUNT_LOST = /<<|#|--%|`|\$[({[']|@["']|\\["']|[\u2018-\u201E]/;
+const NOT_A_PATTERN = /[;&\n\r]|\s\||\|\s/;
 const SHELL_TOKEN = /"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|\(\s*\)|[;&|\n()]|[ \t\r]+|[^;&|\n()"'\\ \t\r]+|[\s\S]/g;
 const SEARCHERS = new Set(['grep', 'egrep', 'fgrep', 'rg']);
-const SEARCH_RUNS = /^(?:--pre(?:=|$)|--open|-[A-Za-z]*O)/;
+const SEARCH_RUNS = /^(?:--pre(?:=|$)|--op|-[A-Za-z]*O)/;
 function searchWords(words) {
   let i = 0;
   while (i < words.length && (ASSIGNMENT.test(words[i].text) || FRESH_WRAP.has(cmdName(words[i].text)))) i++;
@@ -1499,29 +1510,29 @@ function searchWords(words) {
     name = words[i]?.text === 'grep' ? 'grep' : '';
   }
   const args = words.slice(i + 1);
-  return SEARCHERS.has(name) && !args.some((w) => SEARCH_RUNS.test(w.text.replace(/["']/g, ''))) ? args : [];
+  return SEARCHERS.has(name) && !args.some((w) => SEARCH_RUNS.test(w.text.replace(/["'\\]/g, ''))) ? args : [];
 }
 function blankSearchPatterns(text) {
-  // a backslash before a closing quote ("C:\src\") ends the string in PowerShell and not in bash: count is lost there too
-  if (!/grep|\brg\b/i.test(text) || /<<|`|\$'|\\["'](?=[\s;&|)]|$)/.test(text)) return text;
+  if (!/grep|\brg\b/i.test(text) || COUNT_LOST.test(text)) return text;
   const parts = text.match(SHELL_TOKEN) ?? [];
   let words = []; // this simple command's words: { text, quoted: [indexes into parts] }
   let word = null;
   const endCommand = () => {
-    for (const w of searchWords(words)) for (const k of w.quoted) if (!(parts[k][0] === '"' && parts[k].includes('$('))) parts[k] = '""';
+    for (const w of searchWords(words)) for (const k of w.quoted) if (!NOT_A_PATTERN.test(parts[k])) parts[k] = '""';
     words = [];
     word = null;
   };
   for (let k = 0; k < parts.length; k++) {
     const p = parts[k];
-    if (p === '"' || p === "'" || (p[0] === '(' && p.length > 1) || (!word && p[0] === '#')) return text;
+    if (p === '"' || p === "'" || (p[0] === '(' && p.length > 1) || /^\\[;&|()]$/.test(p)) return text;
     if (/^[;&|\n()]$/.test(p)) { endCommand(); continue; }
     if (/^[ \t\r]+$/.test(p)) { word = null; continue; }
     if (!word) words.push(word = { text: '', quoted: [] });
     word.text += p;
     if (p[0] === '"' || p[0] === "'") word.quoted.push(k);
   }
-  if (/(?:^|[;&|\n(])\s*(?:alias|function)\s/.test(text)) return text;
+  // [ \t\r], never \s: a newline starts a match already, and \s would re-read every later newline from each one
+  if (/(?:^|[;&|\n(])[ \t\r]*(?:alias|function)\s/.test(text)) return text;
   endCommand();
   return parts.join('');
 }
@@ -1538,7 +1549,7 @@ function freshEnvOne(command, hosts, role) {
       if (ASSIGNMENT.test(w[i]) || FRESH_WRAP.has(name)) continue;
       if (name === 'env') { while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) i++; continue; }
       if (name === 'timeout') { while (w[i + 1] && w[i + 1].startsWith('-')) i++; i++; continue; }
-      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role)
+      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, seg)
         ?? (name === 'at' && w.slice(0, i).some((x) => cmdName(x) === 'xargs') ? name : null);
       if (why) return FRESH_ENV(why);
       cmd = false;
