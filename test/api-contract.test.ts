@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshDb, onProject, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
+import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
 
 const { app } = await import('../server/main.ts');
 const { sql: serverSql, connect } = await import('../server/db.ts');
@@ -32,7 +32,7 @@ after(async () => {
 async function board() {
   const sql = await freshDb(); open.push(sql);
   const direct = connect(TEST_URL, { app: 'cb', max: 2 }); open.push(direct);
-  await onProject(sql, 'cai', 'demo');
+  await sql`select cb.ensure_project('demo')`;
   const [{ key }] = await sql`select cb.key_issue('boxa', 'machine', null) as key`;
   const env = { CB_KEY_DIR: mkdtempSync(join(tmpdir(), 'cb-contract-')), CB_BOARD_URL: url, CB_MACHINE: 'boxa' };
   const keyFile = installKey('machine', key, env);
