@@ -339,9 +339,8 @@ test('cb user add adds a person (Ahmed copies the link); cb ask --to and cb assi
   await sql`select cb.task_add(project => 'demo', title => 'PO sign-off')`;
   const u = cb(['user', 'add', 'cai', 'Cai'], { CB_PUBLIC_URL: 'https://board.example.app' });
   assert.equal(u.code, 0, u.err);
-  const [{ token }] = await sql`select token from cb.users where name = 'cai'`;
-  assert.equal(u.out, 'added cai (Cai): Ahmed copies their link from the Users page');
-  assert.ok(!u.out.includes(token), 'a session never sees the link');
+  assert.equal(u.out, 'added cai (Cai): Ahmed makes their link on the Users page (New link)');
+  assert.equal((await sql`select count(*)::int as n from cb.sign_ins`)[0].n, 0, 'a session makes no link, so it sees none');
   assert.match(cb(['users']).out, /cai\s+Cai/);
   await onProject(sql, 'cai', 'demo');
   assert.equal(cb(['ask', 'demo', 'E1 scope?', '-o', 'A=x', '-o', 'B=y', '--to', 'cai']).code, 0);
@@ -361,15 +360,16 @@ test('cb user add adds a person (Ahmed copies the link); cb ask --to and cb assi
 
 test("cb user rotate and remove are Ahmed's, on the Users page", async () => {
   const sql = await db();
-  cb(['user', 'add', 'cai', 'Cai']);
-  const [{ token }] = await sql`select token from cb.users where name = 'cai'`;
+  await sql`select cb.user_add('cai', 'Cai')`; // as the dashboard adds one: with a link
+  const links = () => sql`select user_name, encode(hash, 'hex') as hash from cb.sign_ins`;
+  const before = await links();
+  assert.equal(before.length, 1);
   for (const sub of ['rotate', 'remove']) {
     const r = cb(['user', sub, 'cai']);
     assert.equal(r.code, 1, sub);
     assert.match(r.err, /Ahmed does this on the Users page/);
   }
-  const [u] = await sql`select token from cb.users where name = 'cai'`;
-  assert.equal(u.token, token, 'nothing changed');
+  assert.deepEqual(await links(), before, 'nothing changed');
   assert.match(cb(['user', 'drop', 'cai']).err, /unknown user command "drop"/);
 });
 

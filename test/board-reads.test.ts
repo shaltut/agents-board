@@ -26,18 +26,24 @@ async function board() {
   return { sql, ask, count };
 }
 
-test('no function cb calls returns a sign-in token or a password hash', async () => {
+test('no function cb calls makes a sign-in or returns one or a password hash', async () => {
   const { sql } = await board();
   await sql`select cb.user_add('cai', 'Cai', 'ahmed')`;
   await sql`select cb.user_password('cai', 'correct horse battery', 'ahmed')`;
-  const [{ token, password }] = await sql`select token, password from cb.users where name = 'cai'`;
+  // #4868: a sign-in's value comes back once, when it is made, and the database keeps its hash. This connection counts
+  // as the dashboard, which may make one
+  const [{ value }] = await sql`select cb.sign_in_new('cai') as value`;
+  const [{ hash }] = await sql`select encode(hash, 'hex') as hash from cb.sign_ins where user_name = 'cai'`;
+  const [{ password }] = await sql`select password from cb.users where name = 'cai'`;
   const said = JSON.stringify([await sql`select * from cb.user_show('cai')`, await sql`select * from cb.users_overview()`]);
   assert.match(said, /Cai/);
-  for (const secret of [token, password]) assert.ok(!said.includes(secret), 'a secret column came back');
+  for (const secret of [value, hash, password]) assert.ok(secret && !said.includes(secret), 'a secret came back');
+  // no sign-in function is one cb, and so a worker key, may call
+  assert.deepEqual(Object.keys(OPS).filter((name) => /sign_(in|out)/.test(name)), []);
   // and by shape, for every function cb may call that has no user row to show here
   const shapes = await sql`select p.proname, pg_get_function_result(p.oid) as result from pg_proc p
     where p.pronamespace = 'cb'::regnamespace and p.proname = any(${Object.keys(OPS)}::text[])`;
-  assert.deepEqual(shapes.filter((f: any) => /\b(token|password)\b|cb\.users\b/i.test(f.result)).map((f: any) => f.proname), []);
+  assert.deepEqual(shapes.filter((f: any) => /\b(token|password)\b|cb\.(users|sign_ins)\b/i.test(f.result)).map((f: any) => f.proname), []);
 });
 
 test('task_row gives the card as the table holds it, dates as dates', async () => {

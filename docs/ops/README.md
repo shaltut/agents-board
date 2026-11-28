@@ -117,8 +117,10 @@ A runner key and a supervisor key can call nothing yet.
     and 2 bodies over 1 MB at once. All keys together: 64 calls, 512 streams, 4 large bodies.
   - *A request:* 1 MB at most (16 MB for a question with pictures, which is about 11 MB of picture files; over the
     database a question takes 6 of 5 MB), and its body must arrive within 60 s.
-- An admin's token (their cookie) is never shown or sent anywhere; a member's link is their token, shown only on the
-  Users page, to admins.
+- Sign-ins (`cb.sign_ins`) are stored as SHA-256 hashes: each password sign-in gets its own cookie value (90 days),
+  and a member's link is shown once, to the admin who makes it. An admin's cookie is never shown anywhere. Reading the
+  database or a backup gives nothing that signs in. It does not stop a holder of the database password, who can still
+  add a sign-in or set a password, and can read the password hashes.
 - The server trusts "plainly local" requests only on Ahmed's PC (HOST on loopback, no proxy headers). In the container
   `HOST=0.0.0.0` and `CB_TRUST_LOCAL=0`, so everyone signs in.
 - Secrets live in `deploy/.env` on the VPS (mode 600, git-ignored): the database password, the Telegram bot token, the

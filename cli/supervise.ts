@@ -206,8 +206,7 @@ async function quotaStops(d: Deps, state: State, herdr: { status: Record<string,
       const want = wantList(state.project, state.squad).find((w) => w.name === s.actor);
       // the seat that may be switched: the switch applies, and the words stand where the CLI prints its own limit message
       // (a seat whose own output quotes them is only told of)
-      // a switch needs stages, as cb._switching does: a squad #4806 supervises without them is only told
-      const applies = state.supervised && state.pipeline !== false && !!state.auto_backup && !isLead, banner = a.atQuotaBanner(tail);
+      const applies = state.supervised && !!state.auto_backup && !isLead, banner = a.atQuotaBanner(tail);
       const seat = applies && banner ? want : undefined;
       if (banner) d.memory.sighted.set(s.actor, pane);
       const next = seat ? nextBackup(state.project, state.squad, seat, s, startProblem) : null;
@@ -407,7 +406,8 @@ async function closeOne(d: Deps, state: State, name: string, log: Log, switching
       if (!fresh.winding_down) { await unmark(); return { line: `skip closing ${name}: ${state.project} is enabled again` }; }
       if (!s || s.jobs_running || (s.bound && s.bound !== fresh.project) || !windDownQuiet(s, fresh.state_at, d.now)) { await unmark(); return { line: `skip closing ${name}: it is working again` }; }
     } else if (switching) { // #4787: it keeps its cards, but only while the switch is on and the same stop still stands
-      if (!s || !fresh.supervised || !fresh.auto_backup || !s.quota_told) { await unmark(); return { line: `skip closing ${name}: it acted since its quota stop, or automatic backup is off` }; }
+      // fresh is as the board sends it: a squad with no stages says so under its own key (#4806)
+      if (!s || !(fresh.supervised || fresh.supervised_unstaged) || !fresh.auto_backup || !s.quota_told) { await unmark(); return { line: `skip closing ${name}: it acted since its quota stop, or automatic backup is off` }; }
       if (!isDeepStrictEqual(fresh.squad, switching)) { await unmark(); return { line: `skip closing ${name}: the squad was saved since the switch was planned` }; }
     } else if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return { line: `skip closing ${name}: it took work` }; }
     // the agent running there now judges and closes it (#4002); one with no adapter yet is never closed

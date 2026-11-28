@@ -113,19 +113,27 @@ test('only a squad the supervisor runs is switched; a switch ends the standing q
   await sql`update cb.tasks set assignee = ${B1}, status = 'in_progress' where id = ${id}`;
   await on(sql);
   await sup`select cb.supervise_log('sv', 'quota', ${B1}, 'herdr pane p1')`;
-  for (const off of [() => sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`,
-    () => sql`select cb.project_pipeline('sv', false, 'ahmed')`]) {
-    await off();
-    await assert.rejects(switchTo(sup, 1), /automatic backup is off/);
-    assert.equal((await sup`select cb.supervise_mark(${B1}, true) as r`)[0].r, false);
-    await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
-    await sql`select cb.project_pipeline('sv', true, 'ahmed')`;
-  }
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`;
+  await assert.rejects(switchTo(sup, 1), /automatic backup is off/);
+  assert.equal((await sup`select cb.supervise_mark(${B1}, true) as r`)[0].r, false);
+  await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
   await sup`select cb.supervise_log('sv', 'quota', ${B1}, 'herdr pane p1')`;
   assert.equal((await of(sup)).quota_told, true);
   await switchTo(sup, 1);
   await sup`select cb.supervise_log('sv', 'switch', ${B1}, 'sonnet to haiku')`;
   assert.equal((await of(sup)).quota_told, false);
+});
+
+test('#4877: a supervised squad with no stages is switched too: its held card does not stop the close', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+  const [{ id }] = await sql`select cb.task_add(project => 'sv', title => 'c', type => 'bug', status => 'next', actor => 'orch@pc') as id`;
+  await sql`update cb.tasks set assignee = ${B1}, status = 'in_progress' where id = ${id}`;
+  await on(sql);
+  await sup`select cb.supervise_log('sv', 'quota', ${B1}, 'herdr pane p1')`;
+  assert.equal((await sup`select cb.supervise_mark(${B1}, true) as r`)[0].r, true);
+  await switchTo(sup, 1);
+  assert.equal(await backups(sql), 1);
 });
 
 test('a switch planned on a squad that has since changed records nothing', async () => {
@@ -141,7 +149,6 @@ test('a switch planned on a squad that has since changed records nothing', async
 for (const [name, change] of [
   ['automatic backup going off', (tx: any) => tx`select cb.project_auto_backup('sv', false, 'ahmed')`],
   ['the project being disabled', (tx: any) => tx`select cb.project_state('sv', 'disabled', 'ahmed')`],
-  ['the pipeline going off', (tx: any) => tx`select cb.project_pipeline('sv', false, 'ahmed')`],
 ] as const) {
   test(`a switch that waits for ${name} records nothing`, async () => {
     const { sql, sup } = await setup();

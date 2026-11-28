@@ -7,7 +7,8 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { serve } from '@hono/node-server';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { releaseApp, setRelease } from '../server/release.ts';
@@ -22,7 +23,12 @@ const port = await new Promise<number>((res) => server.once('listening', () => r
 const base = `http://127.0.0.1:${port}`;
 const clients: any[] = [];
 const repo = join(tmp, 'board'), live = join(tmp, 'w', 'claude-board'), home = `${live}.home`;
+// #4919: another checkout's runner, started by a relative path, runs for the whole file, as a real one on the same PC
+// can: Windows does not show its folder, so a cb update that sees it refuses. It ends when this test process does.
+const otherRunner = spawn(process.execPath, ['-e', "process.stdin.resume().on('end', () => process.exit())", 'cli/runner.ts'],
+  { cwd: tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] });
 after(async () => {
+  otherRunner.kill(); // our own child, by its pid
   server.close();
   await Promise.all(clients.map((c) => c.end()));
   try { if (lstatSync(live).isSymbolicLink()) unlinkSync(live); } catch {} // the link first: a delete never goes through it
@@ -51,11 +57,14 @@ const copyTo = (dir: string) => { for (const p of FILES) { mkdirSync(join(dir, p
 const edit = (p: string, add: string) => writeFileSync(join(repo, p), readFileSync(join(repo, p), 'utf8') + add);
 const commit = (msg: string) => { git('add', '-A'); git('commit', '-qm', msg); setRelease(releaseAt(repo)); return git('rev-parse', 'HEAD'); };
 
+/** Every cb update here judges only the processes this test started: those naming its temp folder (#4919). */
+const OWN = ['--import', pathToFileURL(resolve('test/fixtures/own-processes.mjs')).href];
+
 /** async: the board answering cb runs in this process */
 function cb(args: string[], env: Record<string, string> = {}) {
   return new Promise<{ code: number; out: string; err: string }>((res) => {
-    execFile(process.execPath, ['cli/cb.ts', ...args], { timeout: 180_000, env: { ...process.env, CB_DATABASE_URL: TEST_URL, HERDR_PANE_ID: '',
-      CB_MACHINE: 'testbox', CB_ACTOR: 'W1@test', CB_PUBLIC_URL: '', CLAUDE_CODE_MESSAGING_SOCKET: '', ...env } },
+    execFile(process.execPath, [...OWN, 'cli/cb.ts', ...args], { timeout: 180_000, env: { ...process.env, CB_DATABASE_URL: TEST_URL, HERDR_PANE_ID: '',
+      CB_MACHINE: 'testbox', CB_ACTOR: 'W1@test', CB_PUBLIC_URL: '', CLAUDE_CODE_MESSAGING_SOCKET: '', CB_TEST_PROCESSES_NAMING: basename(tmp), ...env } },
     (e: any, out, err) => res({ code: e ? (typeof e.code === 'number' ? e.code : 1) : 0, out: String(out).trim(), err: String(err).trim() }));
   });
 }
