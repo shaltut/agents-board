@@ -356,6 +356,33 @@ test('#4774: a command a shell runs is never dropped as message text; real messa
   for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
 });
 
+// #4827: a quoted word deeper than the message command is not its text: it belongs to a command in a substitution
+// among its arguments (or beside it), which runs
+const nestedInArgs: [string, (c: string) => string][] = [
+  ['in a substitution among cb arguments', (c) => `cb log 1 $(${c})`],
+  ['after the message text', (c) => `cb log 1 "text" $(${c})`],
+  ['among commit arguments', (c) => `git commit --amend $(${c})`],
+  ['in a substitution inside a substitution', (c) => `cb log 1 $(echo $(${c}))`],
+  ['in parentheses after an input mark', (c) => `cb log 1 <(${c})`],
+  ['in backticks', (c) => `cb log 1 \`${c}\``],
+  ['in a second substitution, the message command in the first', (c) => `echo $(cb log 1 x) $(${c})`],
+];
+const quotedCmds = ["git push origin 'main'", "git push '-f' origin feat/x", "git reset '--hard'", "taskkill '/IM' node.exe"];
+test('#4827: a quoted word of a command in a substitution among message arguments is judged', () => {
+  const missed: string[] = [];
+  for (const [name, make] of nestedInArgs) {
+    for (const c of quotedCmds) {
+      if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
+    }
+  }
+  assert.deepEqual(missed, []);
+  // text at the message command's own depth is still text, after a substitution has closed too
+  for (const command of [`cb log 1 $(date +%s) "git reset --hard is blocked"`, `out=$(cb log 1 "git reset --hard")`,
+    `echo "$(cb log 1 'git reset --hard')"`, `cb log 1 "a" "git reset --hard" && cb tell lead 'git reset --hard'`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
 // #4777: a quote in a comment pairs with nothing. The rules that pair quotes paired it with one in a later comment and
 // lost the lines between. A shell runs the line between in each of these
 const hiddenByComment: [string, (c: string) => string][] = [
@@ -1513,6 +1540,16 @@ test('long commands stay fast', () => {
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
+    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced: unspaced nesting is
+    // slow in fencePath's .. fold, on its own card (#4813)
+    ['#4802, 200 KB of closed $(a;) words, then a fence path', asBuilder(kb200('$(a;) ') + 'opencode.json')],
+    ['#4802, 200 KB of $(a; left open, then a fence path', asBuilder(kb200('$(a;') + ' opencode.json')],
+    ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
+    ['#4802, 200 KB of a filled word and an option whose bare value never closes', asBuilder(kb200('$A -C $( ') + 'opencode.json')],
+    ['#4802, 200 KB of a filled word and a bare backtick value', asBuilder(kb200('$A -C ` ') + 'opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$( ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of ${a:- starts', asBuilder('caffeinate $GIT "' + kb200('${a:- ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of one open $( and plain $x words', asBuilder('caffeinate $GIT "$(' + kb200('$x y ') + '" opencode.json')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
