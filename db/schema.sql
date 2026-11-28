@@ -7764,3 +7764,25 @@ begin
     status => 'next', priority => 'P2', actor => actor, type => 'bug');
   return jsonb_build_object('action', 'filed', 'id', made);
 end $$;
+
+-- ---------------------------------------------------------------- The supervisor's own reads (#3222 S1c part 2)
+drop function if exists cb.supervised_projects cascade;
+drop function if exists cb.sessions_live cascade;
+drop function if exists cb.squad_history cascade;
+
+-- every project with a squad; which of them the supervisor acts on, cb.supervise_state says
+create function cb.supervised_projects() returns table(slug text) language sql stable as $$
+  select p.slug from cb.projects p where p.squad is not null order by p.slug
+$$;
+
+-- the sessions the board saw in the last 90 s, any project: the cap on live sessions of one machine counts them
+create function cb.sessions_live() returns table(actor text, machine text) language sql stable as $$
+  select s.actor, s.machine from cb.sessions s where s.last_seen > now() - interval '90 seconds'
+$$;
+
+-- a project's last 20 saved squads, newest first (#3770: the seat names its earlier versions generated)
+create function cb.squad_history(project text) returns table(squad jsonb) language sql stable as $$
+  select e.data -> 'squad' from cb.events e
+   where e.project = squad_history.project and e.kind = 'updated' and e.summary = 'squad updated'
+   order by e.id desc limit 20
+$$;

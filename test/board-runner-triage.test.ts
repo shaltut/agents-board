@@ -1,4 +1,4 @@
-// #3222 S1c: the functions the runner's and cb triage's own SQL became. The runner and triage suites pin what they do;
+// #3222 S1c: the functions the runner's, cb triage's and the supervisor's own SQL became. Their suites pin what they do;
 // this pins the rules that now live in SQL, above all where cb triage may write (Q3001).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -83,4 +83,22 @@ test('the runner\'s reads and its reconcile take their lists as jsonb', async ()
   const states = await sql`select id, state from cb.jobs where id in ${sql([held, lost])} order by id`;
   assert.equal(states[0].state, 'running');
   assert.notEqual(states[1].state, 'running');
+});
+
+test('the reads of the supervisor: projects with a squad, sessions seen in the last 90 s, earlier saved squads', async () => {
+  const { sql } = await board();
+  await sql`select cb.ensure_project('zed'), cb.ensure_project('bare')`;
+  await sql`update cb.projects set squad = '{}'::jsonb where slug in ('zed', 'demo')`;
+  assert.deepEqual((await sql`select * from cb.supervised_projects()`).map((r: any) => r.slug), ['demo', 'zed']);
+
+  await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo'), cb.iam('mac', 'p2', 'W2@mac', 'zed')`;
+  await sql`update cb.sessions set last_seen = now() - interval '91 seconds' where actor = 'W1@pc'`;
+  assert.deepEqual((await sql`select * from cb.sessions_live()`).map((r: any) => ({ ...r })), [{ actor: 'W2@mac', machine: 'mac' }]);
+
+  const saved = (project: string, summary: string, i: number) => sql`insert into cb.events (actor, project, kind, summary, data)
+    values ('ahmed', ${project}, 'updated', ${summary}, ${sql.json({ squad: { i } })})`;
+  for (let i = 1; i <= 22; i++) await saved('demo', 'squad updated', i);
+  await saved('zed', 'squad updated', 99);
+  await saved('demo', 'something else', 98);
+  assert.deepEqual((await sql`select * from cb.squad_history('demo')`).map((r: any) => r.squad.i), Array.from({ length: 20 }, (_, k) => 22 - k));
 });

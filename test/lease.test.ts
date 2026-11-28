@@ -332,7 +332,8 @@ test('a board that does not answer is no refusal: the tick is aborted only once 
   let now = 1_000_000, broken = false;
   const flaky = () => {
     const real = client();
-    return new Proxy(real, { apply: (t, self, args: any[]) => (broken ? Promise.reject(new Error('connection refused')) : Reflect.apply(t as any, self, args)) });
+    return { unsafe: (text: string, values: any[]) => (broken ? Promise.reject(new Error('connection refused')) : real.unsafe(text, values)),
+      end: (o?: any) => real.end(o) };
   };
   const mine = supervisorLease({ connect: flaky, holder: 'pc pid 1', clock: () => now });
   const did: string[] = [], said: string[] = [];
