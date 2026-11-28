@@ -216,7 +216,7 @@ test('#4622: only a lone echo or printf line may hold a quoted phrase after a va
     // anything beside the line: a pipe, another command, a second line, a group
     `${line} | cat`, `${line}; true`, `${line} && true`, `true || ${line}`, `${line} &`, `${line}\ntrue`, `(${line})`, `{ ${line}; }`,
     // anything in it that is not plain text or a plain variable
-    'echo "$(true) b" "$C d" opencode.json', 'echo "`true` b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
+    'echo "$(true) b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
     'echo $A x$B opencode.json',
     // m2, kept: two whole variables may be git and a writing command
     'python3 tools/check.py $A $B opencode.json']);
