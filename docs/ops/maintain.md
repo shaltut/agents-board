@@ -723,8 +723,9 @@ denied by the role permission files. Card #3746.
   in too), by this list and by every role's rules against a push (#4815): write `git` by its name. A variable that holds
   another tool with a `push` command (`$DOCKER push <image>`) is refused the same way: write that tool's name.
 - In a seat, a command and its first argument both filled in are refused when both are plain variables (`$G $SUB`, also
-  `$CC $CFLAGS`) or the segment could push (a protected branch, `push`, `--force` or a refspec): write the command's name
-  (#4815). Other filled text, such as `"$id: $(date)"`, passes (#4836).
+  `$CC $CFLAGS`) or the segment could push (a protected branch, `push`, a refspec, any option after them, or a
+  substitution of another program that a pipe cuts): write the command's name (#4815). Other filled text, such as
+  `"$id: $(date)"`, passes; a label or `name=$(...)` is read as printed text, so its options do not count (#4836).
 - A filled command word followed by a word that is no git command (`$G p origin main`, xargs' `{}`) and then a protected
   branch is refused, like the same line with `git`: an alias set earlier can make that word a push (#4826). A word that
   is a script or a path is not such a word (`"$PYTHON" tool.py origin main` runs).

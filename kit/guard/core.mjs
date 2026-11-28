@@ -690,6 +690,9 @@ const globRe = (e) => new RegExp(`^${e.split('*').map(literal).join('.*')}$`);
 // own, so a push's arguments never run into the next block); words end at whitespace and ( ) { } outside quotes.
 const SEGMENT = KILL_SEGMENT;
 const WORD = new RegExp(String.raw`(?:${QUOTED}|\\.|[^\s(){}"'\\])+`, 'g');
+// a segment's words as WORD cuts them, and its round brackets, in order; scanCommands keeps each segment's text for it
+const WORD_OR_BRACKET = new RegExp(`${WORD.source}|[()]`, 'g');
+const segmentSource = new WeakMap();
 // one layer of quoting off, as the shell does: "..." (\" \\ \$ \` inside unescaped), '...' as is, \x outside quotes.
 // The regex is built once, and a word with no quote or backslash is returned as is (the replace would change nothing):
 // every scan unquotes every word, so this is most of a scan's cost on a long command.
@@ -775,8 +778,9 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(name
     if (/^\|&?\n*$/.test(gap)) piped[k] = into[k + 1] || piped[k + 1];
     else if (gap === '&' && /[<>]$/.test(text.slice(segs[k].start, segs[k].end))) piped[k] = piped[k + 1];
   }
-  for (const [k, { raw, name }] of segs.entries()) {
+  for (const [k, { raw, name, start, end }] of segs.entries()) {
     const w = raw.map(unquote);
+    segmentSource.set(w, text.slice(start, end));
     const found = w.map((_x, i) => isHit(w, name, i));
     const hits = found.filter(Boolean).length;
     if (hits > MAX_COMMANDS_PER_SEGMENT) {
@@ -855,24 +859,48 @@ const beforeProgram = (x, k, w) => ASSIGNMENT.test(x) || SHELL_KEYWORD.has(x) ||
 const isProgram = (w, i) => i >= FILLED_REACH || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).every(beforeProgram);
 // in a seat, a program and its first argument both filled in may be git push, and the guard can read neither. #4836:
 // refused only when both are plain variables ($x, ${x}, ${x[@]}, ${x:-y}, $env:x, %x%: nothing in the line says what they
-// hold), or the segment could push: from the first argument on, a protected branch, push, --force or a refspec. Other
-// filled text ($(...), $id:, name=$v, a backtick escape) passes without those. The last such word is read once per segment
+// hold), or the segment could push: from the first argument on, a protected branch, push, --force, a refspec, any other
+// option, or a substitution left open (couldPush). Other filled text ($(...), $id:, name=$v, a backtick escape) passes
+// without those
 const PLAIN_VAR = /^(?:\$(?:(?:env|script|global|local|private|using):)?(?:\w+(?:\[[\w@*]*\])?|\{(?:env:)?\w+(?:\[[\w@*]*\])?\}|[@*])|\$\w+:-[^$`]*|%[A-Za-z_]\w*%)$/i;
 // src:dst (not a URL or a drive letter), +ref, refs/... or HEAD
 const REFSPEC = /^(?![A-Za-z]:[\\/])(?:\+?[\w./*-]*:(?!\/\/)[\w./*-]+|\+[\w./*-]+|refs\/\S+|HEAD)$/;
 const pushSignal = (x) => x.toLowerCase() === 'push' || /^--force(?:$|[-=])/.test(x) || REFSPEC.test(x)
   || namesBranch([x], (b) => b === 'main' || b === 'master') !== null;
-const lastSignal = new WeakMap();
-// from a git call a substitution opens on ($(git rev-parse --short HEAD)) the words are that call's, judged as git's
-const ownWords = (w) => {
-  const at = w.findIndex((x, k) => w[k - 1] === '$' && cmdName(x) === 'git');
-  return at < 0 ? w : w.slice(0, at);
+// What in a segment says a filled pair could push. The words of a git call inside a substitution ($(git rev-parse --short
+// HEAD)) are that call's own, judged by git's rules, up to its closing bracket. Returns the last word that is a push
+// signal, the last other -word, and the word opening the last substitution of another program that does not close in the
+// segment (a pipe inside it ends the segment, so what follows it is not read here); -1 for none
+function readPush(w) {
+  const open = []; // brackets not yet closed: a substitution or not, git's or not (null until its first word), the word before
+  let k = 0, inGit = 0, signal = -1, option = -1;
+  for (const [t] of segmentSource.get(w).matchAll(WORD_OR_BRACKET)) {
+    if (t === '(') open.push({ subst: k > 0 && w[k - 1].endsWith('$'), git: null, at: k - 1 });
+    else if (t === ')') { if (open.pop()?.git) inGit--; }
+    else {
+      const top = open[open.length - 1];
+      if (top && top.git === null) {
+        top.git = top.subst && cmdName(w[k]) === 'git';
+        if (top.git) inGit++;
+      }
+      if (!inGit && pushSignal(w[k])) signal = k;
+      else if (!inGit && /^-./.test(w[k])) option = k;
+      k++;
+    }
+  }
+  const unclosed = open.reduce((at, f) => (f.subst && !f.git ? Math.max(at, f.at) : at), -1);
+  return { signal, option, unclosed };
+}
+// printed text, not a command git would take: a label before a substitution ($id: $(date)), or name=... in the argument's
+// place (crlf=$(...)). For such a pair an option or an open substitution says nothing
+const printedPair = (w, i, j) => (w[i].endsWith(':') && w[j] === '$') || /^[\w.-]+=/.test(w[j]);
+const pushRead = new WeakMap(); // read once per segment
+const couldPush = (w, i, j) => {
+  if (!pushRead.has(w)) pushRead.set(w, readPush(w));
+  const { signal, option, unclosed } = pushRead.get(w);
+  return signal >= j || (!printedPair(w, i, j) && (option > j || unclosed >= j));
 };
-const couldPush = (w, j) => {
-  if (!lastSignal.has(w)) lastSignal.set(w, ownWords(w).findLastIndex(pushSignal));
-  return lastSignal.get(w) >= j;
-};
-const refusedPair = (w, i, j) => (PLAIN_VAR.test(w[i]) && PLAIN_VAR.test(w[j])) || couldPush(w, j);
+const refusedPair = (w, i, j) => (PLAIN_VAR.test(w[i]) && PLAIN_VAR.test(w[j])) || couldPush(w, i, j);
 const bothFilled = (word, first) => `${word.slice(0, 40)} ${first.slice(0, 40)}: the command and its first argument are both filled in by the shell, so the guard cannot tell it is not a git push: write the command's own name`;
 const gitOrFilled = (w, name, i) => GIT.has(name[i]) || filledGit(w, i) >= 0;
 // what the block adds for such a word, and the mark protectedPush puts on its branch so pushReason can add it
