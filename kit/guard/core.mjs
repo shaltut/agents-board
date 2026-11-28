@@ -746,6 +746,16 @@ function scannedName(raw, names) {
   return names.has(escaped) ? escaped : name;
 }
 
+// #4836: PowerShell writes `. to end a variable's name before a dot ("$name`.txt"). Read as a substitution, that backtick
+// cut a redirect's file name into two filled words, "a command and its first argument". Only a whole double-quoted word
+// right after a > is spared: path text, one variable, `. and path text. SHELL_PARTS takes escapes and quoted strings in
+// order, so a > inside another string starts no match
+const SHELL_PARTS = new RegExp(String.raw`\\.|(>[ \t]*)?(${QUOTED})`, 'g');
+const DOT_TARGET = /^"[\w.:\\/-]*\$(?:env:)?\w+`\.[\w.-]*"$/;
+const TARGET_END = /^(?:[\s;|&)]|$)/;
+const dotTargets = (text) => (!text.includes('`.') ? text : text.replace(SHELL_PARTS, (all, redirect, quoted, at, whole) =>
+  (redirect && DOT_TARGET.test(quoted) && TARGET_END.test(whole.charAt(at + all.length)) ? redirect + quoted.replace('`', '') : all)));
+
 // Calls fn(w, i) for every word i whose command name (cmdName of the raw word: C:\...\git.exe, GIT.EXE, !git) is in
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
@@ -754,7 +764,7 @@ function scannedName(raw, names) {
 // unless the caller reads more words as the command (gitOrFilled, #4815). nested: cmd is the inside of a quoted word.
 const byName = (names) => (_w, name, i) => names.has(name[i]);
 function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names), nested = false) {
-  const text = stripMessages(String(cmd ?? ''), nested).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
+  const text = dotTargets(stripMessages(String(cmd ?? ''), nested)).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map((x) => scannedName(x, names)) };
