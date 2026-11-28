@@ -231,7 +231,10 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # that follows a CR', (c) => `echo a\r# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
   ['after a # on a continued line', (c) => `echo a\\\n# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
   // PR 161 review (R1): bash scans backticks straight to the closing one, whatever quotes or # sit between
-  ['after a quote inside backticks', (c) => `echo \`echo '\`; #'\`; cat > a <<'EOF'\n${c}\nEOF`],
+  // Git Bash drops every carriage return, so there these lines end the heredoc
+  ['an end line with a CR before the word', (c) => `cat > a <<'EOF'\n\rEOF\n${c}\nEOF`],
+  ['an end line with a CR inside the word', (c) => `cat > a <<'EOF'\nE\rOF\n${c}\nEOF`],
+  ['after a quote inside backticks',(c) => `echo \`echo '\`; #'\`; cat > a <<'EOF'\n${c}\nEOF`],
   ["after $' inside backticks", (c) => `echo \`echo $'\`; #'\`; cat > a <<'EOF'\n${c}\nEOF`],
   // seats also run PowerShell, which has no heredoc: each of these runs the line there (checked in Windows PowerShell 5.1)
   ['in PowerShell smart double quotes', (c) => `echo “; cat > a <<'EOF' ”\n${c}\nEOF`],
