@@ -343,3 +343,145 @@ test('one key holds 64 streams at most, however many it opens at once', async ()
     delete process.env.CB_API_PING_MS;
   }
 });
+
+// ---- #4917: what a stranger, or a leaked key, can take from the board
+
+/** A key of the right shape that the board never made. */
+const forged = (n: number) => `cbk1_${n.toString(16).padStart(10, '0')}_${'A'.repeat(43)}`;
+const from = (key: string, address: string) => app.request('/w/v1/hello', { headers: { ...bearer(key), 'x-forwarded-for': address } });
+const retryAfter = (res: Response) => Number(res.headers.get('retry-after'));
+
+test('failed sign-ins are throttled by address before the database; a key that has worked is not', async () => {
+  const { sql } = await board();
+  const [worked, fresh] = [await issue(sql), await issue(sql, 'boxb')];
+  assert.equal((await from(worked, '203.0.113.7')).status, 200);
+  // the address is the hop our own proxy added: what a caller writes before it changes nothing
+  for (let i = 0; i < 20; i++) assert.equal((await from(forged(i), `198.51.100.${i}, 203.0.113.7`)).status, 401, `try ${i}`);
+  const over = await from(forged(99), '203.0.113.7');
+  assert.equal(over.status, 429);
+  assert.ok(retryAfter(over) >= 1 && retryAfter(over) <= 60, `retry-after ${retryAfter(over)}`);
+  // a good key the board has not seen work is refused too: so the database was not asked
+  assert.equal((await from(fresh, '203.0.113.7')).status, 429);
+  assert.equal((await from(worked, '203.0.113.7')).status, 200, 'the machine\'s working key still works');
+  assert.equal((await from(fresh, '203.0.113.8')).status, 200, 'another address is unaffected');
+  // revoked: asked once more, refused, and from then on throttled like any other
+  await sql`select cb.key_revoke(${idOf(worked)})`;
+  assert.deepEqual([(await from(worked, '203.0.113.7')).status, (await from(worked, '203.0.113.7')).status], [401, 429]);
+});
+
+test('keys the board has not seen work are checked four at a time; one key arriving many times is one check', async () => {
+  const { sql, session } = await board();
+  const key = await issue(sql);
+  let release!: () => void, locked!: () => void;
+  const held = new Promise<void>((r) => { release = r; }), isLocked = new Promise<void>((r) => { locked = r; });
+  const lock = session.begin(async (tx: any) => { await tx`lock table cb.worker_keys in access exclusive mode`; locked(); await held; });
+  await isLocked;
+  let statuses!: number[], same!: Promise<Response>[];
+  try {
+    const strangers = Array.from({ length: 6 }, (_, i) => Promise.resolve(from(forged(i), `192.0.2.${i}`)));
+    // the two over the limit answer while the database holds the other four
+    const first = await Promise.race([Promise.all([strangers[4]!, strangers[5]!]), new Promise<null>((r) => setTimeout(() => r(null), 2000))]);
+    assert.deepEqual(first?.map((r) => [r.status, retryAfter(r)]), [[429, 1], [429, 1]]);
+    release();
+    statuses = (await Promise.all(strangers)).map((r) => r.status);
+  } finally { release(); await lock; }
+  assert.deepEqual(statuses, [401, 401, 401, 401, 429, 429]);
+  same = Array.from({ length: 12 }, () => Promise.resolve(from(key, '192.0.2.50')));
+  assert.deepEqual((await Promise.all(same)).map((r) => r.status), Array(12).fill(200));
+});
+
+/** A call whose body is sent only when let go. waiting: the board holds the call and is reading it. first: sent at once. */
+function slowCall(key: string, fn: string, args: object, first = '') {
+  let ctrl!: ReadableStreamDefaultController<Uint8Array>, asked!: () => void, sentFirst = !first;
+  const waiting = new Promise<void>((r) => { asked = r; });
+  const body = new ReadableStream<Uint8Array>({
+    start(c) { ctrl = c; },
+    pull(c) {
+      if (sentFirst) return asked();
+      sentFirst = true;
+      c.enqueue(new TextEncoder().encode(first));
+    },
+  }, { highWaterMark: 0 });
+  const res = Promise.resolve(app.request(`/w/v1/call/${fn}`, { method: 'POST', headers: { 'content-type': 'application/json', ...bearer(key) }, body, duplex: 'half' } as RequestInit));
+  const send = () => {
+    const rest = JSON.stringify({ args });
+    // after `first` (spaces), the JSON that follows it is still one document
+    ctrl.enqueue(new TextEncoder().encode(rest));
+    ctrl.close();
+  };
+  return { res, waiting, send };
+}
+const proven = async (sql: any, machine: string) => {
+  const key = await issue(sql, machine);
+  assert.equal((await app.request('/w/v1/hello', { headers: bearer(key) })).status, 200);
+  return key;
+};
+
+test('one key has 8 calls in flight at most, and all keys 64', async () => {
+  const { sql } = await board();
+  const keys: string[] = [];
+  for (let i = 0; i < 9; i++) keys.push(await proven(sql, `box${i}`));
+  const read = (key: string) => slowCall(key, 'resume', { actor: 'W1@box0' });
+  const held = Array.from({ length: 8 }, () => read(keys[0]!));
+  try {
+    await Promise.all(held.map((h) => h.waiting));
+    const ninth = await call(keys[0]!, 'resume', { actor: 'W1@box0' });
+    assert.deepEqual([ninth.status, retryAfter(ninth)], [429, 1]);
+    assert.equal((await call(keys[1]!, 'resume', { actor: 'W1@box0' })).status, 200, 'another key is unaffected');
+    for (const key of keys.slice(1, 8)) held.push(...Array.from({ length: 8 }, () => read(key)));
+    await Promise.all(held.map((h) => h.waiting));
+    assert.equal((await call(keys[8]!, 'resume', { actor: 'W1@box0' })).status, 429, '64 in flight in all');
+  } finally { held.forEach((h) => h.send()); }
+  assert.deepEqual((await Promise.all(held.map((h) => h.res))).map((r) => r.status), Array(64).fill(200));
+  assert.equal((await call(keys[8]!, 'resume', { actor: 'W1@box0' })).status, 200, 'the slots are free again');
+});
+
+test('bodies over 1 MB are held two at a time for a key and four in all; small ones are not counted', async () => {
+  const { sql } = await board();
+  const [a, b, c] = [await proven(sql, 'boxa'), await proven(sql, 'boxb'), await proven(sql, 'boxc')];
+  const ask = (n: string) => ({ project: 'demo', body: `synthetic question ${n}?`, actor: `W1@${n}` });
+  const over = ' '.repeat(1_100_000);
+  const held = [[a, 'boxa'], [a, 'boxa'], [b, 'boxb'], [b, 'boxb']].map(([key, m]) => slowCall(key!, 'ask_post', ask(m!), over));
+  const large = (key: string, m: string) => app.request('/w/v1/call/ask_post', { method: 'POST', headers: bearer(key), body: over + JSON.stringify({ args: ask(m) }) });
+  try {
+    await Promise.all(held.slice(0, 2).map((h) => h.waiting));
+    assert.equal((await large(a, 'boxa')).status, 429, 'a third from this key');
+    await Promise.all(held.map((h) => h.waiting));
+    assert.equal((await large(c, 'boxc')).status, 429, 'a fifth in all');
+    assert.equal((await call(a, 'ask_post', ask('boxa'))).status, 200, 'a small one is not counted');
+  } finally { held.forEach((h) => h.send()); }
+  assert.deepEqual((await Promise.all(held.map((h) => h.res))).map((r) => r.status), [200, 200, 200, 200]);
+  assert.equal((await large(c, 'boxc')).status, 200, 'the slots are free again');
+});
+
+test('a request with pictures is 16 MB at most, and says what to do', async () => {
+  const { sql } = await board();
+  const key = await issue(sql);
+  const res = await call(key, 'ask_post', { project: 'demo', body: 'synthetic?', actor: 'W1@boxa', context: 'x'.repeat(17 * 1024 * 1024) });
+  const body = await res.json() as any;
+  assert.equal(res.status, 413);
+  assert.match(body.error, /over 16 MB.*pictures/);
+});
+
+test('a body that does not arrive is given up on, and its slot freed', async () => {
+  const { sql } = await board();
+  const key = await proven(sql, 'boxa');
+  process.env.CB_API_BODY_MS = '200';
+  try {
+    const stuck = Array.from({ length: 8 }, () => slowCall(key, 'resume', { actor: 'W1@boxa' }));
+    const gaveUp = await Promise.race([Promise.all(stuck.map((s) => s.res)), new Promise<null>((r) => setTimeout(() => r(null), 3000))]);
+    assert.deepEqual(gaveUp?.map((r) => r.status), Array(8).fill(408));
+  } finally { delete process.env.CB_API_BODY_MS; }
+  assert.equal((await call(key, 'resume', { actor: 'W1@boxa' })).status, 200);
+});
+
+test('where a key was last used from is the address the sign-in limit counts', async () => {
+  const { sql } = await board();
+  const key = await issue(sql);
+  process.env.CB_BEHIND_CLOUDFLARE = '1';
+  try {
+    await app.request('/w/v1/hello', { headers: { ...bearer(key), 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '192.0.2.1' } });
+  } finally { delete process.env.CB_BEHIND_CLOUDFLARE; }
+  const [row] = await sql`select last_used_from from cb.worker_keys where id = ${idOf(key)}`;
+  assert.equal(row.last_used_from, '203.0.113.9');
+});
