@@ -397,17 +397,18 @@ test('API mode: a claim whose reply is lost is ended, and the queue goes on', ap
 });
 
 test('API mode: a notice missed while the stream was down is claimed as soon as it reconnects', apiOnly, async () => {
+  // the 30 s beat looks for work too: start just after one, so only the reconnect can claim the job in time
+  const beats = () => worker!.seen.filter((fn) => fn === 'runner_beat').length;
+  const had = beats();
+  await until('a beat', () => (beats() > had ? true : undefined), 40_000);
+  await sleep(1000);
   worker!.cutStreams();
   await sleep(500);
   const id = await add('ok'); // its notice reaches no stream
-  await sleep(500);
-  const restored = Date.now();
+  await sleep(1000);
+  assert.equal((await get(id)).state, 'queued', 'nothing told the runner');
   worker!.restoreStreams();
-  assert.equal((await ended(id)).state, 'passed');
-  const trace = () => `ms from the restore: ${JSON.stringify(worker!.seen.filter((s) => s.at > restored - 3000).map((s) => [s.what, s.at - restored]))}\n${runner.out.slice(-1500)}`;
-  const opened = worker!.seen.find((s) => s.what === 'events' && s.at >= restored);
-  assert.ok(opened, `the stream was opened again; ${trace()}`);
-  assert.ok(worker!.seen.some((s) => s.what === 'job_claim' && s.at >= opened.at && s.at - opened.at < 2000), 'and the runner looked for work at once');
+  assert.equal((await ended(id, 15_000)).state, 'passed');
 });
 
 test('API mode: another runner\'s key stops the runner and says what to do, without the key', apiOnly, async () => {

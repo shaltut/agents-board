@@ -20,12 +20,12 @@ export async function apiBoardFor() {
 
   let lose: ((fn: string, result: unknown) => boolean) | null = null, cut = false;
   const streams = new Set<http.ServerResponse>();
-  const seen: { what: string; at: number }[] = []; // each call and each stream opened, as it arrived
+  const seen: string[] = []; // the function of each call, as it arrived
   const proxy = http.createServer((req, res) => {
     const fn = /^\/w\/v1\/call\/(\w+)$/.exec(req.url ?? '')?.[1];
     const stream = req.url!.startsWith('/w/v1/events');
     if (stream && cut) return void req.socket.destroy();
-    seen.push({ what: fn ?? (stream ? 'events' : req.url!), at: Date.now() });
+    if (fn) seen.push(fn);
     const forward = http.request({ host: '127.0.0.1', port: inner, path: req.url, method: req.method, headers: req.headers }, (back) => {
       if (fn && lose) {
         let text = '';
