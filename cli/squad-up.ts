@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { getAdapter, isAgentKind, mcpGateOk, type AgentKind } from './agents/index.ts';
 import type { AgentAdapter, LaunchSpec } from './agents/types.ts';
 import { homeTrust, type TrustCheck } from './squad-trust.ts';
+import { EFFORTS } from './agents/effort.ts';
 
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
 // machine.workspace: the herdr workspace (its label) new sessions open in; none: herdr's focused one (#3719)
@@ -143,8 +144,9 @@ export function launchFor(project: string, squad: Squad, w: Want, first: 'next' 
     env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(agent === 'opencode' ? { CB_OPENCODE_PORT: String(opencodePort(w.name)) } : {}),
       ...(squad.protected?.length ? { CB_PROTECTED_BRANCHES: squad.protected.join(',') } : {}) },
     settings: `${mc.board.replace(/[\/]+$/, '')}/kit/permissions/${w.role}.json`,
-    // --agent only for another agent than claude: a Claude seat's cb iam stays the 8-argument call (cli/iam-args.ts)
-    prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${model}${squad.repos ? ` --repo ${w.repo}` : ''}${agent !== 'claude' ? ` --agent ${agent}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
+    // --agent only for another agent than claude: a Claude seat's cb iam stays the 8-argument call (cli/iam-args.ts).
+    // --effort (#4766) always for an agent that takes one, 'default' included: a seat that says nothing is never judged
+    prompt: `cb iam ${w.name} ${project} --role ${w.role}${w.area ? ` --area ${w.area}` : ''} --model ${model}${EFFORTS[agent]?.length ? ` --effort ${effort ?? 'default'}` : ''}${squad.repos ? ` --repo ${w.repo}` : ''}${agent !== 'claude' ? ` --agent ${agent}` : ''}, then cb role ${w.role}, then cb ${first}${across}`,
   };
 }
 
