@@ -2173,14 +2173,31 @@ function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set
 // #4823: the words that reach a shell on its stdin. A segment before a stage that is piped into a shell (or iex) feeds it,
 // whatever lies between (tee, a ( ) or { } group): failing closed costs only a quoted line that starts with a launcher.
 // So does a here-string in a stage that names a shell. Returns (segment index) -> fed. One pass over the words
-const MORE_STDIN_SHELLS = new Set(['fish', 'ash', 'mksh']);
+const MORE_STDIN_SHELLS = new Set(['fish', 'ash', 'mksh', 'yash', 'tcsh', 'csh', 'posh']);
 // a stage that starts with one of these searches its input for the word sh: it runs none of it (rg --pre runs files)
 const SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'findstr', 'select-string']);
+// a shell given its code by -c reads its stdin as commands only if that code goes on to, and the ways to do that have no
+// end. So a stage is let off only for a shell at its start (after env and assignments, never under xargs) whose code is
+// written out in quotes and is nothing but commands known to take stdin as data
+const CODE_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+const DATA_ONLY = new Set(['cat', 'grep', 'wc', 'head', 'tail', 'sort', 'uniq', 'cut', 'tr', 'tee', 'jq']);
+const takesData = (code) => !/[$`(){}<\\"']/.test(code) && code.split(/[;&|\n]+/).every((part) => !part.trim() || DATA_ONLY.has(part.trim().split(/\s+/)[0]));
+function runsOwnCode(words) {
+  let i = 0;
+  while (i < words.length && (cmdName(words[i]) === 'env' || ASSIGNMENT.test(words[i]))) i++;
+  if (!CODE_SHELLS.has(cmdName(words[i] ?? ''))) return false;
+  for (i++; /^-./.test(words[i] ?? '') && words[i] !== '--' && words[i] !== '-s'; i++) {
+    if (/^-[a-z]*c$/.test(words[i])) return /^(?:"[^"]*"|'[^']*')$/.test(words[i + 1] ?? '') && takesData(words[i + 1].slice(1, -1));
+  }
+  return false;
+}
 const PIPE_END = /(?<!\|)\|&?[\s{}]*$/;
 function stdinFed(raw, segments) {
   const runs = segments.map((m) => {
     const names = (m[0].replace(/[<>]+/g, ' ').match(WORD) ?? []).map(cmdName);
-    return !SEARCHES.has(names[0]) && names.some((n) => PIPE_RUNNERS.has(n) || MORE_STDIN_SHELLS.has(n));
+    // script runs a shell on its input; further on in a stage the word is only a name (tee script)
+    const shell = names[0] === 'script' || names.some((n) => PIPE_RUNNERS.has(n) || MORE_STDIN_SHELLS.has(n));
+    return shell && !SEARCHES.has(names[0]) && !runsOwnCode(m[0].match(GIT_TOKEN) ?? []);
   });
   let lastPiped = 0, pending = false, end = 0;
   for (const [k, m] of segments.entries()) {
@@ -2188,19 +2205,45 @@ function stdinFed(raw, segments) {
     end = m.index + m[0].length;
     if (!m[0].trim()) continue;
     if (pending && runs[k]) lastPiped = k;
-    pending &&= /[<>]$/.test(m[0]); // the & of 2>&1 cuts a stage in two: its tail is the same stage
+    // the & of 2>&1 and the braces of xargs -I{} cut a stage in two: its tail is the same stage
+    pending &&= /[<>]$/.test(m[0]) || raw[end] === '{' || raw[end] === '}';
   }
   return (k) => k < lastPiped || (runs[k] && segments[k][0].includes('<<<'));
 }
-// the command lines a fed segment hands over: each quoted word, and the words echo or printf print, as one line. A \n
-// written for printf or echo -e ends a line
+// the command lines a fed segment hands over: each quoted word, each here-string word (quoted or not), and what echo or
+// printf print. null: a printf whose output is too long to work out
 const FEED_PRINTERS = new Set(['echo', 'printf', 'write-output', 'write-host']);
+// a word as it is handed on: quotes off (the $ of $'..' and $".." too), a written \n a new line, \x the character x
+const handedOn = (x) => unquote(x.replace(/^\$(?=["'])/, '')).replace(/\\n/g, '\n').replace(/\\([^\n])/g, '$1');
+const PRINTF_SPEC = /%(?:%|[-+ #0]*[\d*]*(?:\.[\d*]+)?[a-zA-Z])/g;
+// the format is used again while arguments remain. Each round adds its own text, so the room bounds the work
+function printfOutput([format = '', ...args], room) {
+  let out = '', next = 0;
+  for (;;) {
+    const before = next;
+    out += format.replace(PRINTF_SPEC, (s) => (s === '%%' ? '%' : args[next++] ?? ''));
+    if (out.length > room) return null;
+    if (next === before || next >= args.length) return out;
+  }
+}
 function fedLines(seg) {
   const w = seg.replace(/<<</g, ' <<< ').match(GIT_TOKEN) ?? [];
-  const lines = new Set(w.flatMap((x) => (/["']/.test(x) ? [unquote(x)] : [])));
+  const lines = new Set(w.flatMap((x, i) => (/["']/.test(x) || w[i - 1] === '<<<' ? [handedOn(x)] : [])));
   const at = w.findIndex((x) => FEED_PRINTERS.has(cmdName(x)));
-  if (at >= 0) lines.add(w.slice(at + 1).map(unquote).join(' '));
-  return [...lines].join('\n').replace(/\\n/g, '\n');
+  if (at >= 0) {
+    const name = cmdName(w[at]);
+    let from = at + 1;
+    if (name === 'printf') {
+      while (w[from] === '-v' || w[from] === '--') from += w[from] === '-v' ? 2 : 1;
+      const out = printfOutput(w.slice(from).map(handedOn), 4 * seg.length + 1000);
+      if (out === null) return null;
+      lines.add(out);
+    } else {
+      while ((name === 'echo' ? /^-[neE]+$/ : /^-\w+$/).test(w[from] ?? '')) from++;
+      lines.add(w.slice(from).map(handedOn).join(' '));
+    }
+  }
+  return [...lines].join('\n');
 }
 // flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
 // A string it follows gets the second reading only, so the readings never multiply from one level to the next
@@ -2226,6 +2269,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
     if (fed(k)) {
       while (written < writes.length && writes[written].at <= segment.index) applyWrite(vars, writes[written++]);
       const text = fedLines(seg);
+      if (text === null) return FRESH_ENV('a printf into a shell whose output is longer than the guard reads');
       const why = text && text !== seg ? followWith(text) : null;
       if (why) return why;
     }
