@@ -978,6 +978,88 @@ test('guard: a backslash inside the git, gh or az name does not hide the command
   for (const role of READ_ONLY_ROLES) assert.equal(judged(String.raw`g\it commit -m x`, role), false, `${role} commit`);
 });
 
+// #4737: the other ways to split or build the name. The guard judges the command as written and once more with these
+// spellings read out, so each is blocked like the plain one.
+test('guard: a split or built git, gh or az name does not hide the command (#4737)', () => {
+  const judged = (command: string, role: string, protectedBranches: string[] = []) =>
+    evaluate({ tool: 'shell', command, role, protectedBranches }).allow;
+  const pushes = [
+    // PowerShell's backtick, cmd's caret
+    '& g`it p origin main', '& "g`it" p origin main', '& g`i`t push origin main', 'g^it p origin main', 'cmd /c g^it p origin main',
+    'cmd /c ^g^i^t push origin main',
+    // expansions that leave nothing behind
+    'g$()it p origin main', 'g$( )it p origin main', 'g$(true)it p origin main', 'g``it p origin main', 'g${x}it p origin main',
+    'g${x}it push origin main', 'g$@it p origin main', 'g$*it push origin main',
+    // built by a substitution, or held in a variable set on the same line
+    '"$(echo g)it" p origin main', "$(printf 'g')it p origin main", '`echo g`it p origin main', 'x=g""it; $x p origin main',
+    "x='git' && \"${x}\" p origin main", "$g = 'git'; & $g push origin main",
+    // brace expansion with an empty member
+    '{g,}it p origin main', 'gi{t,} p origin main',
+    // ANSI-C quoting hex- or octal-escaping a letter
+    String.raw`bash -c $'g\x69t p origin main'`, String.raw`bash -c $'g\151t push origin main'`,
+    String.raw`bash -c $'git push origin ma\x69n'`, String.raw`$'g\x69t' push origin main`,
+  ];
+  for (const role of ROLES) {
+    for (const c of pushes) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    assert.equal(judged('g`it push origin develop', role, ['develop']), false, `${role} protected branch`);
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) {
+    for (const c of ['g`h pr merge 5', 'g^h pr merge 5', 'g${x}h pr merge 5', 'a$()z repos pr update --id 1 --status completed']) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+  }
+  for (const role of READ_ONLY_ROLES) assert.equal(judged('g`it commit -m x', role), false, `${role} commit`);
+  const everyday = ["git log --grep '^init'", "x=git; $x status", 'x=main; git log $x', String.raw`IFS=$'\n'; git status`,
+    String.raw`printf $'a\tb\n'`, 'ls ${dir}/it', 'echo "$(echo gi)"; git status', 'git log --format=%H -- src/{a,b}.ts',
+    'echo "$x" && git fetch origin', 'git push origin feat/{x,}', 'git rev-parse `git branch --show-current`'];
+  for (const c of everyday.filter((c) => !c.includes('feat/{x,}'))) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
+});
+
+// #4737, the PR 135 review: more expansions that leave nothing behind, quoted or not; printf with a format; and the two
+// quote forms that carry a dollar sign. Each is git to bash
+test('guard: quoted, defaulted and empty-output pieces inside the git name do not hide it (#4737)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const pushes = [
+    'g"$@"it push origin main', 'g"$*"it push origin main', 'g"${x}"it push origin main', 'g${x:-}it push origin main',
+    'g${x-}it push origin main', 'g${x:=}it push origin main', 'g${@}it push origin main', 'g"${x:-}"it push origin main',
+    'g$(false)it push origin main', 'g$(echo)it push origin main', 'g$(echo "")it push origin main', "g$(printf '')it push origin main",
+    'g`true`it push origin main', 'g`false`it push origin main', 'g`echo`it push origin main', 'g"$(true)"it push origin main',
+    '$(printf %s git) push origin main', "$(printf '%s' git) push origin main", '$(printf "%s\\n" g)it push origin main',
+    '$(echo -n git) push origin main', '`printf %s git` push origin main',
+    'g$""it push origin main', '$"git" push origin main', String.raw`$'\U00000067it' push origin main`,
+  ];
+  for (const role of ROLES) for (const c of pushes) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+  const everyday = ['echo "$@" && git status', 'echo "${x:-none}"; git log -1', 'test "$(false)" || git fetch origin',
+    'echo "$(printf %s hi)"; git status', 'ls "${dir:-.}"/it', 'echo "cost: $" && git status'];
+  for (const c of everyday) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
+});
+
+// #4737, R2's note on PR 132: an expansion with nothing in it between two brace groups still leaves them side by side
+test('guard: an empty expansion between brace groups does not keep the $HOME/ exemption (#4737)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  for (const set of ['declare {HO,X}$(){ME,Y}=x', 'declare {HO,X}${Z}{ME,Y}=x', 'export {H,}$@{OME,}=x', 'declare {HO,X}$(true){ME,Y}=x',
+    'declare {HO,X}"${Z:-}"{ME,Y}=x']) {
+    assert.equal(judged(`${set}; ${run}`), false, `must block: ${set}`);
+  }
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  for (const c of [`cp f "\${name}"{,.bak}; ${fetch}`, `mkdir -p \${dir}/{a,b}; ${fetch}`, `echo \${A}\${B}; ${fetch}`]) {
+    assert.equal(judged(c), true, `must pass: ${c}`);
+  }
+});
+
+// #4737: a PowerShell variable name joined from two strings is still that name
+test('guard: a concatenated PowerShell variable name drops the $HOME/ exemption (#4737)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  for (const set of [`Set-Variable -Name ('HO'+'ME') -Value ${ps} -Force`, `sv ('ho' + 'me') ${ps} -Force`,
+    `[Environment]::SetEnvironmentVariable('HO'+'ME', ${ps})`]) {
+    assert.equal(judged(`${set}; ${run}`), false, `must block: ${set}`);
+  }
+  assert.equal(judged(`$n = 1 + 2; ${run}`), true);
+});
+
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
@@ -1036,6 +1118,19 @@ test('long commands stay fast', () => {
     // #4729: the PowerShell setter test reads each segment once; the quote-stripped copy is made once per text
     ['git settings, 200 KB of setter words beside a $HOME/ value', asBuilder(kb200('sv ni set ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // #4737: reading split names out is one pass per step, and the second reading is judged at most once
+    ['#4737, one word of 200 KB of split-name pieces', asBuilder('g' + kb200('`^""') + 'x')],
+    ['#4737, 200 KB of g${x} words', asBuilder(kb200('echo g${x}; '))],
+    // the PR 135 review: an unclosed substitution before 200 KB of blanks was quadratic (30 s, past the hook's timeout)
+    ['#4737, g, an open substitution and 200 KB of blanks', asBuilder('g$(' + ' '.repeat(200000) + 'x')],
+    ['#4737, echo of an open echo and 200 KB of blanks', asBuilder('echo $(echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, an open backtick echo and 200 KB of blanks', asBuilder('g`echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, one word of 200 KB of quoted and empty-output pieces', asBuilder('g' + kb200('"$@"$(echo "")`true`${x:-}$""') + 'x')],
+    ['#4737, 200 KB of open printf formats', asBuilder(kb200("$(printf '%s ") + kb200('$(echo -n -n '))],
+    ['#4737, 200 KB of unclosed $(echo and $\' starts', asBuilder(kb200('$(echo    ') + kb200("$'\\x41 "))],
+    ['#4737, 200 KB of same-line assignments and uses', asBuilder(kb200('x=git; $x status; '))],
+    ['#4737, 200 KB of g^it log commands', asBuilder(kb200('g^it log -1; '))],
+    ['#4737, 200 KB of plus signs and blanks beside a $HOME/ value', asBuilder('sv ' + kb200('a    +    ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     // PR 132 review: the brace and wildcard tests read each word and statement once
     ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
