@@ -1014,6 +1014,25 @@ test('guard: a split or built git, gh or az name does not hide the command (#473
   for (const c of everyday.filter((c) => !c.includes('feat/{x,}'))) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
 });
 
+// #4737, the PR 135 review: more expansions that leave nothing behind, quoted or not; printf with a format; and the two
+// quote forms that carry a dollar sign. Each is git to bash
+test('guard: quoted, defaulted and empty-output pieces inside the git name do not hide it (#4737)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const pushes = [
+    'g"$@"it push origin main', 'g"$*"it push origin main', 'g"${x}"it push origin main', 'g${x:-}it push origin main',
+    'g${x-}it push origin main', 'g${x:=}it push origin main', 'g${@}it push origin main', 'g"${x:-}"it push origin main',
+    'g$(false)it push origin main', 'g$(echo)it push origin main', 'g$(echo "")it push origin main', "g$(printf '')it push origin main",
+    'g`true`it push origin main', 'g`false`it push origin main', 'g`echo`it push origin main', 'g"$(true)"it push origin main',
+    '$(printf %s git) push origin main', "$(printf '%s' git) push origin main", '$(printf "%s\\n" g)it push origin main',
+    '$(echo -n git) push origin main', '`printf %s git` push origin main',
+    'g$""it push origin main', '$"git" push origin main', String.raw`$'\U00000067it' push origin main`,
+  ];
+  for (const role of ROLES) for (const c of pushes) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+  const everyday = ['echo "$@" && git status', 'echo "${x:-none}"; git log -1', 'test "$(false)" || git fetch origin',
+    'echo "$(printf %s hi)"; git status', 'ls "${dir:-.}"/it', 'echo "cost: $" && git status'];
+  for (const c of everyday) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
+});
+
 // #4737: a PowerShell variable name joined from two strings is still that name
 test('guard: a concatenated PowerShell variable name drops the $HOME/ exemption (#4737)', () => {
   const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
@@ -1086,6 +1105,12 @@ test('long commands stay fast', () => {
     // #4737: reading split names out is one pass per step, and the second reading is judged at most once
     ['#4737, one word of 200 KB of split-name pieces', asBuilder('g' + kb200('`^""') + 'x')],
     ['#4737, 200 KB of g${x} words', asBuilder(kb200('echo g${x}; '))],
+    // the PR 135 review: an unclosed substitution before 200 KB of blanks was quadratic (30 s, past the hook's timeout)
+    ['#4737, g, an open substitution and 200 KB of blanks', asBuilder('g$(' + ' '.repeat(200000) + 'x')],
+    ['#4737, echo of an open echo and 200 KB of blanks', asBuilder('echo $(echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, an open backtick echo and 200 KB of blanks', asBuilder('g`echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, one word of 200 KB of quoted and empty-output pieces', asBuilder('g' + kb200('"$@"$(echo "")`true`${x:-}$""') + 'x')],
+    ['#4737, 200 KB of open printf formats', asBuilder(kb200("$(printf '%s ") + kb200('$(echo -n -n '))],
     ['#4737, 200 KB of unclosed $(echo and $\' starts', asBuilder(kb200('$(echo    ') + kb200("$'\\x41 "))],
     ['#4737, 200 KB of same-line assignments and uses', asBuilder(kb200('x=git; $x status; '))],
     ['#4737, 200 KB of g^it log commands', asBuilder(kb200('g^it log -1; '))],

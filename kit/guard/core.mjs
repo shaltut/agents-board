@@ -1865,14 +1865,21 @@ Ask on Agents Board instead, then KEEP WORKING on something else:
 // same command sets x to one of the names. A name built any other way (from two variables, a file, a decoder) is not
 // read: server-side branch protection is the fence for those.
 const ANSI_C = /\$'((?:\\.|[^'\\])*)'/g;
-const ANSI_ESCAPE = /\\(?:x([\da-f]{1,2})|u([\da-f]{1,4})|([0-7]{1,3})|([\s\S]))/gi;
+const ANSI_ESCAPE = new RegExp(String.raw`${ANSI_NUMBER.source}|\\([\s\S])`, 'g');
 const ANSI_NAMED = { n: '\n', t: '\t', r: '\r' };
-const ansiText = (body) => body.replace(ANSI_ESCAPE, (_all, hex, uni, oct, ch) => (ch !== undefined ? ANSI_NAMED[ch] ?? ch
-  : String.fromCharCode(oct !== undefined ? parseInt(oct, 8) : parseInt(hex ?? uni, 16))));
+const ansiText = (body) => body.replace(ANSI_ESCAPE, (all, x, u, long, oct, ch) => (ch !== undefined ? ANSI_NAMED[ch] ?? ch
+  : ansiChar(all, x, u, long, oct)));
 const requote = (s) => (s.includes("'") ? `"${s.replace(/["\\$`]/g, '\\$&')}"` : `'${s}'`);
-const ECHOED = /(?:\$\(\s*(?:echo|printf)\s+(["']?)([\w.-]*)\1\s*\)|`(?:echo|printf)[ \t]+(["']?)([\w.-]*)\3`)/g;
+// every run of blanks below is bounded: two open-ended ones side by side were quadratic (30 s on 200 KB, past the hook's
+// timeout, and a timed-out hook allows; PR 135 review)
+const PRINTS = String.raw`(?:-[neE]{1,3}|--|'%[sb](?:\\n)?'|"%[sb](?:\\n)?"|%[sb])`; // echo's options, printf's format
+const SAYS = String.raw`(?:echo|printf)(?:[ \t]{1,4}${PRINTS}){0,3}[ \t]{1,4}`;
+const ECHOED = new RegExp(String.raw`\$\([ \t]{0,4}${SAYS}(["']?)([\w.-]+)\1[ \t]{0,4}\)|\`${SAYS}(["']?)([\w.-]+)\3\``, 'g');
 const EMPTY_BRACE = /\{([a-z]{1,3}),\}/gi;
-const GAP = String.raw`(?:\`|\^|""|''|\\|\$\(\s*(?:true|:)?\s*\)|\$\{\w*\}|\$[@*!1-9])`;
+// what a shell leaves out of a word: a command that prints nothing, and an expansion with nothing in it, quoted or not
+const NOTHING = String.raw`(?:(?:echo|printf)[ \t]{1,4}(?:""|'')|true|false|echo|:)`;
+const EMPTY = String.raw`(?:\$\([ \t]{0,4}(?:${NOTHING}[ \t]{0,4})?\)|\$\{(?:\w+|[@*])(?::?[-=+])?\}|\$[@*!1-9])`;
+const GAP = String.raw`(?:\`[ \t]{0,4}${NOTHING}[ \t]{0,4}\`|\`|\^|"${EMPTY}{1,4}"|\$?""|\$?''|\\|${EMPTY})`;
 // no gap holds a name's first letter except inside ${...}, where a word character or { is before it: so a match never
 // starts inside another's gaps, and the unbounded * stays linear
 // (cmd drops a caret before the first letter too: ^g^i^t)
@@ -1884,7 +1891,8 @@ export function revealed(command) {
   const text = command.replace(ANSI_C, (_all, body) => requote(ansiText(body)))
     .replace(ECHOED, (_all, _q, a, _p, b) => a ?? b)
     .replace(EMPTY_BRACE, '$1')
-    .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''));
+    .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''))
+    .replace(/\$(?=(["'])(?:git|gh|az)\1)/gi, ''); // $"git" is git: the dollar goes with the locale quote
   const set = new Map([...text.matchAll(NAME_SET)].map((m) => [m[1], m[3]]));
   return set.size ? text.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : text;
 }
