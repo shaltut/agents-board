@@ -1163,6 +1163,30 @@ function machineBudget() {
   return Math.max(1000, Math.round(best * 25));
 }
 
+// #4807: the reference is its best of 5 runs, so one slow run of a case on a busy machine is no regression. A case over
+// budget runs again, twice at most, and its best run counts: a real slowdown is over every time. The guard keeps its last
+// stripped text and its HOME answers between calls, so a rerun gets `again` to change its text by, after a small command
+function bestRun(run: (again: number) => unknown, budget: number, now = () => performance.now()) {
+  let best = Infinity;
+  for (let again = 0; again < 3 && best >= budget; again++) {
+    if (again > 0) evaluate({ tool: 'shell', command: 'ls', role: 'builder' });
+    const from = now();
+    run(again);
+    best = Math.min(best, now() - from);
+  }
+  return best;
+}
+
+test('#4807: a case over budget runs again and its best run counts; one that is slow every time stays over', () => {
+  for (const [durations, best, runs] of [[[500], 500, [0]], [[1200, 700], 700, [0, 1]], [[1200, 1100, 900], 900, [0, 1, 2]], [[1900, 1950, 1890, 10], 1890, [0, 1, 2]]] as const) {
+    let clock = 0;
+    const seen: number[] = [];
+    const got = bestRun((again) => { clock += durations[seen.length]; seen.push(again); }, 1000, () => clock);
+    assert.equal(got, best, String(durations));
+    assert.deepEqual(seen, runs, String(durations));
+  }
+});
+
 // #4767: PR 124 reads quotes as bash does for plain text. Where bash and PowerShell, or a comment or a heredoc body,
 // count them differently, that reading took a real command for quoted data. Such a command is read a second time the old
 // way, cut at every separator. "launch" stands for the seat leaving: sudo, a scheduler, a pane launch
@@ -1259,11 +1283,11 @@ test('long commands stay fast', () => {
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
   const heredocThen600KB = "cat > notes.txt <<'EOF'\n" + 'a line of notes\n'.repeat(37500); // no end line
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
-  const asBuilder = (command: string) => () => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: ['development'] });
+  const asBuilder = (command: string) => (again = 0) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'builder', protectedBranches: ['development'] });
   const kb200 = (s: string) => s.repeat(Math.ceil(200000 / s.length));
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
-  const cases: [string, () => unknown][] = [
+  const cases: [string, (again: number) => unknown][] = [
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
     // earlier < feed is a running flag, not a look-back from every by-name lookup
     // secret files (#4347): names everywhere, with and without a reader, and one 200 KB word ending in .key
@@ -1410,10 +1434,8 @@ test('long commands stay fast', () => {
     ['#4742, escaped quotes, as a seat with a stdin', () => evaluate({ tool: 'shell', command: 'echo ' + escaped, role: 'builder', stdin: true })],
   ];
   for (const [name, run] of cases) {
-    const t = performance.now();
-    run();
-    const ms = performance.now() - t;
-    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms (this machine's budget: ${budget} ms)`);
+    const ms = bestRun(run, budget);
+    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms at best (this machine's budget: ${budget} ms)`);
   }
   // reading every git/gh/az word's arguments to the segment's end is (count x length): past 16 in one segment, block
   passes('builder', ['echo ' + 'git '.repeat(16)]);
@@ -1657,10 +1679,8 @@ test('#4707 review: the new reads stay fast on long commands', () => {
     spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
   };
   for (const [name, command] of Object.entries(long)) {
-    const from = process.hrtime.bigint();
-    evaluate({ tool: 'shell', command, role: 'lead' });
-    const ms = Number(process.hrtime.bigint() - from) / 1e6;
-    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms, budget ${Math.round(budget)} ms`);
+    const ms = bestRun((again) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'lead' }), budget);
+    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms at best, budget ${Math.round(budget)} ms`);
   }
 });
 
