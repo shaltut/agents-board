@@ -37,7 +37,7 @@ test('every action the page calls takes an actor in db/schema.sql (rpc() adds it
 
 test('every reason cb.runner_queue gives reads as words, with no key, state name or number code', () => {
   const reasons = [...schema.matchAll(/jsonb_build_object\('reason', '(\w+)'/g)].map((m) => m[1]!);
-  for (const r of ['next', 'no_runner', 'held', 'down', 'lane', 'slot']) assert.ok(reasons.includes(r), `the schema gives ${r}`);
+  for (const r of ['next', 'no_runner', 'held', 'down', 'lane', 'slot', 'project']) assert.ok(reasons.includes(r), `the schema gives ${r}`);
   const whys: Why[] = [
     { reason: 'next' }, { reason: 'no_runner' }, { reason: 'held', by: 'L1@pc', at: '2026-01-01T10:12:00Z' },
     { reason: 'down', runner: 'pc', since: null }, { reason: 'paused', runner: 'pc', by: 'ahmed', at: '2026-01-01T10:12:00Z' },
@@ -50,6 +50,12 @@ test('every reason cb.runner_queue gives reads as words, with no key, state name
   assert.equal(waitWords({ reason: 'lane', busy: 4, of: 4 }), 'Waiting for a database lane (4 of 4 busy)');
   assert.equal(waitWords({ reason: 'paused', runner: 'pc', by: 'ahmed', at: 'x' }, at), 'The runner is paused by Ahmed since 10:12');
   assert.equal(waitWords({ reason: 'mystery' } as any), 'Waiting', 'an unknown reason is never shown as its key');
+  // #4559 slice 4: the board's own sentence for a project that gets no work, as cb._state_words gives it
+  const words = 'Cedar is disabled by Ahmed since 28 Nov 10:00 UTC: no work is handed out there';
+  const project: Why = { reason: 'project', state: 'disabled', words };
+  assert.equal(waitWords(project, at), words);
+  assert.ok(!RAW.test(words));
+  assert.deepEqual(result({ state: 'cancelled', summary: 'cancelled: the project was archived' }), { said: 'Stopped because the project was archived.', output: null });
 });
 
 test('every state and every summary the board or runner writes itself maps to plain words; job output stays apart', () => {

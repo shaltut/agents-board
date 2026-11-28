@@ -241,9 +241,27 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['in PowerShell smart single quotes', (c) => `echo ‘; cat > a <<'EOF' ’\n${c}\nEOF`],
   ['in a PowerShell block comment', (c) => `echo <# \ncat > a <<'EOF' #>\n${c}\nEOF`],
   ['in a PowerShell string that follows a backslash', (c) => `echo \\'; cat > a <<'EOF'\n'\n${c}\nEOF`],
-  ['in a PowerShell comment after a comma', (c) => `echo a,# ; cat > a <<'EOF'\n${c}\nEOF`],
   // bash reads 1# as a word; PowerShell starts a comment there, so the quote after it opens nothing
-  ['after a # that follows a number', (c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
+  // PR 161 review round 2 (R1), and what the same search found next to it. Each runs in Git Bash 5.2 or PowerShell 5.1
+  ...['“', '”', '„'].map((q): [string, (c: string) => string] =>
+    [`after a backslash and the smart quote ${q.codePointAt(0)!.toString(16)}`, (c) => `echo "a\\${q}; # "; cat > a <<'EOF'\n${c}\nEOF`]),
+  ['in a substitution inside quoted ${ }', (c) => `echo "\${x:-$(# }"; cat > a <<'EOF'\n${c}\nEOF\n)}"`],
+  ['in a substitution inside ${ }', (c) => `echo \${x:-$(# }; cat > a <<'EOF'\n${c}\nEOF\n)}`],
+  ['after a $( split by a continued line', (c) => `echo "$\\\n(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside $(( ))', (c) => `echo $(( 1 # )) '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside (( ))', (c) => `(( 1 # )); echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  // PR 161 review (R2): PowerShell refuses a << only where it starts a token. Glued to a word it is part of that word
+  ...['cat > a', 'cat', 'cb log 1 -b -', 'cb log 1 0', 'git commit -F -', 'cat =', 'cat > a -'].map((head): [string, (c: string) => string] =>
+    [`a marker glued to the word before it: ${head}`, (c) => `${head}<<'EOF'\n${c}\nEOF`]),
+  // PowerShell does not check the syntax inside a $( ) that is part of a command's name, so there a << stops nothing
+  // (PowerShell 5.1's parser: no error, and the next line is a command)
+  ['in a PowerShell command name, a $( glued to a word', (c) => `x=$(cat > a <<'EOF'\n)\n${c}\nEOF`],
+  ['in a PowerShell command name, a quote glued to a word', (c) => `a="$(cat > a <<'EOF'\n)"\n${c}\nEOF`],
+  ['after a # inside an array subscript', (c) => `a[ 1 # ]=2; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # that follows a number',(c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
   ['in a PowerShell here-string',(c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
 ];
 const heredocText = [
@@ -251,12 +269,12 @@ const heredocText = [
   `cb log 1 -b - <<'EOF'\ndon't "quote" # git reset --hard\nEOF`, `git commit -F - <<'EOF'\ngit reset --hard\nEOF`,
   `git commit -m "$(cat <<'EOF'\nfix: it's done; git reset --hard is only described\nEOF\n)"`,
   `cat > a <<'EOF'\ndon't\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`,
-  `echo "a # b" 'c <<' # it's a comment <<\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "a # b" 'c <<' # a comment; [with] {plain} words\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
-  `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # \u201cnote\u201d\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # note\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `mkdir -p out && [ -f *.md ] && { echo $HOME $?; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
-  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # don't\ngit reset --hard\nEOF`,
-  `echo "\${HOME}" \${#x} \${y:-z} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
+  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # done\ngit reset --hard\nEOF`,
+  `echo "\${HOME}" \${#x} \${y:-z} \${sha:0:7} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`,`cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
 ];
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
   for (const [name, make] of hiddenByHeredoc) {
@@ -291,7 +309,8 @@ const hiddenByMessage: [string, (c: string) => string][] = [
 const messageText = [
   `cb log 1 "git reset --hard is blocked"`, `cd ~/work && cb log 1 "never git reset --hard here"`,
   `cd C:\\w\\x; cb tell lead "git reset --hard"`, `# post the result\ncb log 1 "git reset --hard"`,
-  `# don't forget the "log"\ncb log 1 "git reset --hard"`, `cb log 1 "a" && cb tell lead 'git reset --hard'`,
+  // a comment holding a quote, \ $ ( ) or < before a message is not read past (#4768 never skips comments): judged as written
+  `cb log 1 "a" && cb tell lead 'git reset --hard'`,
   `out=$(cb log 1 "git reset --hard")`, `echo "$(cb log 1 'git reset --hard')"`,
   `cat > a <<'EOF'\ndon't\nEOF\ncb log 1 "git reset --hard"`,
   `python3 - <<'PY'\nprint("it's")\nPY\ncb log 1 "git reset --hard"`,
@@ -1287,6 +1306,57 @@ test('#4767: a launch that a quote miscount would hide is blocked; plain quoted 
   for (const c of miscountFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
 });
 
+const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
+  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
+  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
+  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
+  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval eval eval eval eval sudo codex', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
+  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
+  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
+  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
+  // a -- or -Command before the string is not its first word
+  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
+  // a quoted flag, and cmd switches that carry a value
+  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'",
+  // the name that carries the string, split by quotes or a backslash, with the launcher in the string split too
+  // (no piece of the split word may read as a launcher by itself, or the segment is walked anyway)
+  String.raw`s\h -c 's"u"do codex'`, `s'h' -c 's"u"do codex'`, `b"as"h -c 's"u"do codex'`, String.raw`e\val 's"u"do codex'`, `e""val 's"u"do codex'`, `e'v'al 's"u"do codex'`,
+  String.raw`r\g --pre 's"u"do' x f`, `r'g' --pre 's"u"do' x f`, `c""md /c 's"u"do codex'`, `c'm'd /c 's"u"do codex'`, `i'e'x 's"u"do codex'`,
+  // Git Bash writes cmd's switch with two slashes
+  'cmd //c schtasks /run /tn x', 'cmd.exe //k sudo codex', 'cmd //c "su"','cmd //v:off//c schtasks /run /tn x',
+  // Invoke-Expression takes its string after common parameters too, and any parameter may bind its value with a colon
+  'iex -Command:"sudo codex"', "iex -c:'Start-ScheduledTask x'", 'Invoke-Expression -Verbose "sudo codex"', "iex -ea 0 'sudo codex'", 'iex -ErrorAction SilentlyContinue "sudo codex"',
+  "iex -vb -Debug -wa:0 -ov x -Command 'sudo codex'", 'iex -Command: "sudo codex"', "iex -Verbose:$false -c 'sudo codex'"];
+const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
+  'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log',
+  'cmd //c "dir /b"', 'cmd //c ver', 'iex -Verbose "Get-Date"', "iex -ea 0 'Get-ScheduledTask'", 'iex -Command:"Get-Date"', `echo "it's fine" && s'h' -c 'echo a'`];
+test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
+  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
+  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  // the lead keeps its herdr prompt inside a string too, and nothing else (its ssh is judged by #4707's deploy-host rule)
+  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'herdr agent prompt w1:p2 hi'`, role: 'lead' }), { allow: true });
+  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
+});
+
+// PR 142 review (R2): after text that throws the quote count off, only the second reading sees what follows, so it must
+// read the command strings too. Each prefix leaves the first reading inside a quote that the shell has closed
+const thrownOff = ["echo $'a\\'b'; ", "cat <<EOF\ndon't\nEOF\n", 'Get-ChildItem "C:\\"; ', 'Write-Output "a\u201D; '];
+const hiddenStrings = ['bash -c su', 'bash -c "sudo codex"', "sh -c 'batch'", 'eval sudo codex', 'eval "at now"', 'cmd /c "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x',
+  'pwsh -c "Start-ScheduledTask x"', "iex 'Start-ScheduledTask x'", 'rg --pre=sudo x f', 'env -S su', 'env -S "sudo codex"', 'ssh "$H" "sudo codex"',
+  'bash -c "bash -c \'sudo codex\'"', 'bash -c "ssh localhost uptime; true"'];
+const hiddenStringsFine = ['bash -c "ls -la"', 'bash -c ls', 'eval echo hi', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'rg --pre cat x f', 'env -S "ls -la"',
+  'bash -c "ls; true"', 'eval "$(direnv hook bash)"', 'git commit -m "eval sudo codex"'];
+test('#4741: a command string stays judged after text that throws the quote count off', () => {
+  for (const p of thrownOff) {
+    for (const c of hiddenStrings) assert.match(evaluate({ tool: 'shell', command: p + c, role: 'builder' }).reason ?? '', /fresh environment/, p + c);
+    for (const c of hiddenStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: p + c, role: 'builder' }), { allow: true }, p + c);
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1362,6 +1432,25 @@ test('long commands stay fast', () => {
     ['miscount check, 200 KB of newlines after empty parentheses, as a builder', asBuilder('grep x ()' + '\n'.repeat(200000))],
     ['miscount check, 200 KB of empty parentheses, as a builder', asBuilder('grep x ' + kb200('() \n'))],
     ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
+    // #4741: a code string is walked once however two readings find it, and its words are read once per level
+    ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of eval words after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval '))],
+    ['code strings, 200 KB of iex parameters, as a builder', asBuilder('iex ' + kb200('-ea 0 '))],
+    ['code strings, a 200 KB cmd double-slash option word, as a builder', asBuilder('cmd ' + kb200('//a') + ' x')],
+    ['code strings, 200 KB of quote-split words, as a builder', asBuilder(kb200('s"h" x; '))],
+    ['code strings, 200 KB of lone quotes and backslashes, as a builder', asBuilder(kb200('a\\b \' " '))],
+    ['code strings, 200 KB of eval after open parentheses after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval x ( '))],
+    // two readings of one eval line find two strings at each level, "x <inner>" and "<inner>": the work must not double per level
+    ['code strings, eval of a word and a quoted eval nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, the same nest after an open quote, as a builder', asBuilder('echo "a”; ' + Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, 200 KB of eval after open parentheses, as a builder', asBuilder(kb200('eval x ( '))],
+    ['code strings, quoted -c strings nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'bash -c ' + JSON.stringify(c), 'ls ' + 'x '.repeat(50000)))],
+    ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
+    ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
+    ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
+    ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
+    ['code strings, one 200 KB -c string left open, as a builder', asBuilder("sh -c '" + kb200('a '))],
+    ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
@@ -1391,6 +1480,8 @@ test('long commands stay fast', () => {
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4775, 200 KB of quoted substitution openers, as a builder', asBuilder('echo "$('.repeat(25000))],
     ['#4775, 200 KB of quoted substitutions, as a builder', asBuilder('echo "$(date)";'.repeat(13000))],
+    ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
+    ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
@@ -1836,4 +1927,55 @@ const card4734Runs = [
 test('#4734: the reported script and search commands pass; a real launch by that word, however spelled, stays blocked', () => {
   for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
+});
+
+// #4776: Git Bash drops every carriage return, quoted ones too, in -c text, a script file and stdin, so a word split by
+// one runs. Each command here was allowed although what bash runs is refused
+const kindOf = (command: string, role: string | null = 'builder', readScript?: (p: string) => string | null) => {
+  const r = evaluate({ tool: 'shell', command, role, readScript });
+  return r.allow ? 'allow' : r.kind;
+};
+test('#4776: a carriage return inside a word hides nothing from the dangerous-command rules or a role', () => {
+  assert.equal(kindOf('git re\rset --hard', null), 'dangerous', 'no role');
+  assert.equal(kindOf('git re\rset --hard'), 'dangerous');
+  assert.equal(kindOf('g\rit reset --hard', null), 'dangerous');
+  assert.equal(kindOf('bash -c "git re\rset --hard"'), 'dangerous', 'inside quotes too');
+  assert.equal(kindOf('gh pr me\rrge 5'), 'role');
+  assert.equal(kindOf('git push origin ma\rin'), 'role');
+  assert.equal(kindOf('unset CB_RO\rLE'), 'role');
+  assert.equal(kindOf('su\rdo codex'), 'role');
+});
+
+test('#4776: the command is still judged as written, and an ordinary CRLF command still passes', () => {
+  assert.equal(kindOf('Write-Host hi\rgit reset --hard'), 'dangerous', 'a lone CR ends a line in PowerShell');
+  assert.equal(kindOf("cat > n.txt <<'EOF'\r\ntext\r\nEOF\r\nunset CB_ROLE\r\n"), 'role', 'a heredoc closed by a CRLF line');
+  assert.equal(kindOf('cd /c/w/x\r\ngit status\r\ngit diff --stat\r\n'), 'allow');
+});
+
+test('#4776: a script the seat runs is read without its carriage returns too', () => {
+  const files: Record<string, string> = {
+    's.sh': 'echo hi\r\nunset CB_RO\rLE\r\n',
+    'outer.sh': 'bash inn\rer.sh\r\n',
+    'inner.sh': 'unset CB_AGENT\n',
+    'plain.sh': 'echo hi\r\ngit status\r\n',
+    'many.sh': Array.from({ length: 20 }, (_, i) => `bash leaf${i}.sh\r\n`).join(''),
+  };
+  const read = (p: string) => files[p] ?? (/^leaf\d+\.sh$/.test(p) ? 'echo ok\r\n' : null);
+  assert.equal(kindOf('bash s.sh', 'builder', read), 'role');
+  assert.equal(kindOf('bash outer.sh', 'builder', read), 'role', 'the script it names, spelled with a CR');
+  assert.equal(kindOf('bash plain.sh', 'builder', read), 'allow');
+  assert.equal(kindOf('bash many.sh', 'builder', read), 'allow', 'a CRLF script counts each script it runs once');
+});
+
+// #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
+// seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
+test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
+  const edit = (text: string) => ["cd /c/w/x && python - <<'EOF'", 's = open("cli/x.ts").read()',
+    's = s.replace("OLD", """' + text + '""")', 'open("cli/x.ts", "w").write(s)', 'EOF'].join('\n');
+  assert.deepEqual(evaluate({ tool: 'shell', command: edit('const total = items.length'), role: 'builder' }), { allow: true }, 'the control');
+  for (const text of ["fail('the value is unset: pass --name')", "spawnSync('rm', ['-f', file], { env: process.env })", 'export const line = [ ${k}= ]']) {
+    const r = evaluate({ tool: 'shell', command: edit(text), role: 'builder' });
+    assert.equal(r.kind, 'role', text);
+    assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
+  }
 });

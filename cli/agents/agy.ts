@@ -26,7 +26,7 @@ export function checkAgyModel(model: string): void {
 // Only the last lines are read (the agent's own output sits above them), and only banner wording: a bare "429" or
 // "rate limit" in code or prose is not a stop. Line-start anchors for the status-code forms.
 const TAIL_LINES = 6;
-const QUOTA = /exhausted your quota on this model|^\W*(?:AI:\s*)?out of credits\b|prepaid balance is insufficient|spend(?:ing)? cap (?:reached|exceeded|hit)/im;
+const QUOTA = /exhausted your quota on this model|third-party quota reached\. please switch to gemini models|^\W*(?:AI:\s*)?out of credits\b|prepaid balance is insufficient|spend(?:ing)? cap (?:reached|exceeded|hit)/im;
 const RATE = /rate limit active for [^\s;.,]+|^\W*(?:error:?\s*)?(?:429\b|RESOURCE_EXHAUSTED\b)/im;
 const RETRY = /retry in (\d+)\s*s/i;
 

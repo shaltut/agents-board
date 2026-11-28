@@ -327,6 +327,16 @@ test('a part passes build with an Azure DevOps pull request link; a link without
   assert.equal((await card(sql, id)).links['pr:api'], ADO);
 });
 
+test("a part's Azure DevOps link may end in a slash and name a project with %20; the browser's tab link is refused (#3778)", async () => {
+  const sql = await setup();
+  const id = await approved(sql);
+  await claim(sql, 'zed-B1@mac');
+  const ADO = 'https://dev.azure.com/org/my%20project/_git/api/pullrequest/12/';
+  await assert.rejects(() => pass(sql, id, 'zed-B1@mac', 'built', { pr: 'https://dev.azure.com/org/proj/_git/api/pullrequest/12?_a=files' }), /give the full pull request URL/);
+  assert.equal((await pass(sql, id, 'zed-B1@mac', 'built', { pr: ADO }))[0].r, 'build');
+  assert.equal((await card(sql, id)).links['pr:api'], ADO);
+});
+
 test('review is per part', async () => {
   const sql = await setup();
   const id = await atReview(sql);
@@ -593,7 +603,8 @@ test('one-repo card: its events and inbox are unchanged (pin)', async () => {
   const e1 = await top(sql);
   await fail(sql, id, 'R1@mac', 'no tests');
   r = await inbox(sql, 'p2', e1);
-  assert.deepEqual(strip(r.events), [{ task_id: id, kind: 'moved', summary: 'no tests', actor: 'R1@mac', title: 'c', status: 'next' }]);
+  // urgent (#3221): false, so the relay may hold it for its settle window
+  assert.deepEqual(strip(r.events), [{ task_id: id, kind: 'moved', summary: 'no tests', actor: 'R1@mac', title: 'c', status: 'next', urgent: false }]);
   assert.deepEqual(r.next_work, [{ id, title: 'c', priority: 'P2' }]);
   assert.deepEqual(r.messages, []);
   assert.equal((await sql`select count(*)::int n from cb.events where task_id = ${id} and kind = 'message'`)[0].n, 0);
