@@ -319,3 +319,17 @@ test('a squad with one repo: a card with no repos named counts under it', async 
   assert.deepEqual([s.waiting.builder, s.waiting.reviewer], [{ api: 1 }, { api: 1 }]);
   assert.ok(s.sessions.every((x: any) => x.repo === 'api'));
 });
+
+test('#4559 slice 3: a supervised project that is not live winds down; running jobs are counted apart', async () => {
+  const { sql, sup } = await setup();
+  assert.equal((await state(sup)).winding_down, false);
+  await sql`select cb.project_state('sv', 'disabled', 'ahmed')`;
+  const s = await state(sup);
+  assert.deepEqual([s.supervised, s.winding_down, !!s.state_at], [false, true, true]);
+  assert.deepEqual(s.sessions.map((x: any) => x.jobs_running), s.sessions.map(() => 0));
+  await sql`select cb.project_state('sv', 'archived', 'ahmed')`;
+  assert.equal((await state(sup)).winding_down, true);
+  await sql`select cb.project_state('sv', 'disabled', 'ahmed')`;
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`;
+  assert.equal((await state(sup)).winding_down, false, 'a squad the supervisor does not run is left alone');
+});
