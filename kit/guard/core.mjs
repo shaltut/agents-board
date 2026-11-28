@@ -2170,7 +2170,7 @@ const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), th
 // original is tested too, so a Windows path keeps its separators)
 const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi, '');
 // review 68-I2: /./ and seg/../ folded, so ~/.codex/./hooks.json and ~/.codex/x/../hooks.json name the file they reach
-// (bounded: a few passes, each linear)
+// (bounded: a few passes, each linear. #4838: nesting deeper than the passes is refused, never judged half folded)
 // #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
 // ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
 // seg/../ folded, in one pass. A segment starts after a separator, a blank, a quote, = : ( or >. #4813: as one regex
@@ -2197,14 +2197,15 @@ export function foldUp(s) {
   }
   return done ? out + s.slice(done) : s;
 }
+const FOLD_PASSES = 8;
 const fold = (t) => {
   let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; ; i++) {
     const n = foldUp(s);
-    if (n === s) break;
+    if (n === s) return s;
+    if (i === FOLD_PASSES) throw new Error(`a path climbs back with .. through more than ${FOLD_PASSES} nested folders, more than the guard folds: write the path without the ..`);
     s = n;
   }
-  return s;
 };
 // #4551 (review 68-m3): an NTFS stream suffix names the file or folder itself (hooks.json::$DATA is hooks.json's main
 // stream, .codex::$INDEX_ALLOCATION or .codex:$I30:$INDEX_ALLOCATION the folder), and a shell that expands $DATA to

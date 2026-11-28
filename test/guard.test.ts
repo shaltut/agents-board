@@ -1254,6 +1254,28 @@ test('#4741: a command string stays judged after text that throws the quote coun
   }
 });
 
+// #4838: the fold stopped after 8 passes and judged what was left, so a path nested deeper kept its climbs
+test('#4838: a path that climbs back through more folders than the guard folds is refused', () => {
+  const climbs = (n: number) => Array.from({ length: n }, (_x, i) => `d${i}`).join('/') + '/..'.repeat(n);
+  for (const n of [9, 10, 40]) {
+    const fenced = `~/.claude/${climbs(n)}/settings.json`;
+    assert.equal(evaluate({ tool: 'shell', command: `echo x > ${fenced}`, role: 'builder' }).allow, false, `${n} deep, a shell write`);
+    assert.equal(evaluate({ tool: 'edit', paths: [fenced], role: 'builder' }).allow, false, `${n} deep, the edit tool`);
+  }
+  // the refusal says what to do: for an edit of any such path, and for a shell write that names a fenced folder. A shell
+  // write that names none cannot reach one, and the fence does not read its paths
+  for (const req of [{ tool: 'edit', paths: [`${climbs(9)}/notes.txt`] }, { tool: 'shell', command: `echo x > ~/.claude/${climbs(9)}/settings.json` }] as const) {
+    const refused = evaluate({ ...req, role: 'builder' } as Parameters<typeof evaluate>[0]);
+    assert.match(refused.allow ? '' : refused.reason ?? '', /more than the guard folds: write the path without/, req.tool);
+  }
+  assert.deepEqual(evaluate({ tool: 'shell', command: `echo x > ${climbs(9)}/notes.txt`, role: 'builder' }), { allow: true });
+  // as many as it folds still pass, and so do climbs that are not nested, however many
+  for (const path of [`src/${climbs(8)}/notes.txt`, `src/${'a/../'.repeat(30)}notes.txt`, `${'../'.repeat(30)}notes.txt`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command: `echo x > ${path}`, role: 'builder' }), { allow: true }, path);
+    assert.deepEqual(evaluate({ tool: 'edit', paths: [path], role: 'builder' }), { allow: true }, path);
+  }
+});
+
 // #4813: foldUp took over from this regex, which stays here as what it must give: the path fence reads its result
 test('#4813: the one-pass seg/../ fold gives what the regex gave', () => {
   const was = (s: string) => s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
