@@ -18,7 +18,7 @@ import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
-import { HERDR_NAMED, herdrNameForPane, namelessDead, readRunningModel, watchdogStep, type Watch } from './relay-seat.ts';
+import { HERDR_NAMED, herdrNameForPane, namelessDead, watchdogStep, type Watch } from './relay-seat.ts';
 import { realRun } from './squad-up.ts';
 import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
@@ -491,13 +491,6 @@ async function leave(seatTaken = false) {
 }
 
 clearInterval(keepFresh); // the watchdog touches the lock from here on
-// #4786: the model the seat really runs, once a minute, once the agent has been seen up
-setInterval(() => {
-  if (leaving || !watch.seenAlive) return;
-  readRunningModel({ adapter, pane: PANE, read: (args) => realRun(null, args, 10_000), save: (model) => sql`select cb.seat_model(${M}, ${PANE}, ${model})` })
-    .catch((e: any) => log(`running model not saved: ${e?.message ?? e}`));
-}, 60_000);
-
 // #4610: a non-Claude seat's prestart starts this relay before herdr starts the agent: it waits for it (relay-seat.ts).
 // A Claude relay starts from its session's hook, the agent already up: no grace, as before.
 let leaving = false, ticking = false; // unbridge() is async: one exit, not one per tick

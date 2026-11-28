@@ -25,20 +25,6 @@ export const HERDR_NAMED: ReadonlySet<string> = new Set(['codex', 'agy']);
  *  (no heartbeat, and the start grace ends it when the agent never comes up). agy's own isAlive says alive with no name. */
 export const namelessDead = (agent: string, herdrName: string | undefined) => HERDR_NAMED.has(agent) && !herdrName;
 
-/** #4786: reads the model the seat really runs off its visible screen and saves it, for an agent whose adapter can tell
- *  from the screen. Only the model id leaves this function: no screen text is stored or logged. A read that fails saves
- *  nothing (the board keeps the last reading). */
-export async function readRunningModel(o: { adapter: { runningModel?(screen: string): string | null }; pane: string;
-  read: (args: string[]) => { status: number | null; stdout?: unknown }; save: (model: string) => Promise<unknown> }): Promise<void> {
-  if (!o.adapter.runningModel) return;
-  let model: string | null = null;
-  try {
-    const r = o.read(['pane', 'read', o.pane, '--source', 'visible', '--format', 'text']);
-    if (r.status === 0) model = o.adapter.runningModel(String(r.stdout ?? ''));
-  } catch { return; }
-  if (model) await o.save(model);
-}
-
 /** The herdr agent of this kind running in this pane, from `herdr agent list` JSON ({result: {agents: [{name, pane_id,
  *  agent}]}}). The kind must match (review 98 M1): a codex relay never takes a Claude agent's name and types into it. */
 export function herdrNameForPane(list: unknown, pane: string, agent: string): string | null {

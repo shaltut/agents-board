@@ -30,10 +30,6 @@ const QUOTA = /exhausted your quota on this model|third-party quota reached\. pl
 const RATE = /rate limit active for [^\s;.,]+|^\W*(?:error:?\s*)?(?:429\b|RESOURCE_EXHAUSTED\b)/im;
 const RETRY = /retry in (\d+)\s*s/i;
 
-// The footer: "<mode> · <model's display name> · <effort>", the whole line (reported from a seat on agy 1.5.19)
-const FOOTER_LINES = 3;
-const FOOTER = /^[a-z][a-z-]{0,15} · ([A-Za-z](?:[A-Za-z0-9. -]{0,58}[A-Za-z0-9])?) · (minimal|low|medium|high|xhigh|max)$/;
-
 const trimSlash = (s: string) => s.replace(/[\/\\]+$/, '');
 const ok = (r: { status: number | null; error?: unknown }) => r.status === 0 && !r.error;
 
@@ -103,17 +99,6 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       if (!m) return null;
       const retry = RETRY.exec(paneTail);
       return { kind: 'rate_limit', raw: m[0], ...(retry ? { retryAfterSec: Number(retry[1]) } : {}) };
-    },
-
-    // #4786: agy can change model inside its pane (a spent quota offers another), so the footer is what is true now.
-    // The screen is the agent's own output too: only the last lines are read, and the result is only ever shown
-    runningModel(screen: string): string | null {
-      for (const line of screen.split(/\r?\n/).filter((l) => l.trim()).slice(-FOOTER_LINES)) {
-        const m = FOOTER.exec(line.trim());
-        // the id 'agy models' prints for this name and effort: "Claude Opus 5.5" at medium is claude-opus-5-5-medium
-        if (m) return `${m[1]!.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${m[2]}`;
-      }
-      return null;
     },
 
     // Per seat, never the global ~/.gemini/config/hooks.json (that applies to every agy session on the machine, the owner's

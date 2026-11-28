@@ -196,7 +196,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'What needs the lead in a pipeline project (the 15-minute digest, now), each line with the command that acts on it. The digest caps each group at 5 lines; --all shows every line. Read-only.',
       eg: 'cb digest iris --all' },
     sessions: { reads: true, use: 'cb sessions [project]', topic: 'orchestrate',
-      does: 'Every session: relay live or not, what it holds, idle time, questions to Ahmed. "holds work, gone quiet" = reassign or close. A seat that now runs another model than it was started with gets a "⚠ model" line: a Claude seat is read from its usage hook (as of its last finished turn), an agy seat from its screen footer (once a minute). Other agents report no running model yet.',
+      does: 'Every session: relay live or not, what it holds, idle time, questions to Ahmed. "holds work, gone quiet" = reassign or close.',
       eg: 'cb sessions' },
     session: { reads: true, use: 'cb session <name>', topic: 'orchestrate',
       does: 'One session: open tasks, questions, last 10 actions. Check it before handing out work.',

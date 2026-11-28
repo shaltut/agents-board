@@ -24,8 +24,6 @@ export interface Seat {
   actor: string; machine: string | null; role: string | null; area: string | null; repo: string | null; agent: string | null
   model: string | null; in_squad: boolean; want_agent: string | null; want_model: string | null; same: boolean | null
   holds: number; last_seen: string
-  /** #4786: the model the seat really runs, where the board can tell, and whether it is another than `model` */
-  running_model?: string | null; model_differs?: boolean
 }
 export interface SquadPage {
   project: string; squad: Squad | null; version: number; pipeline: boolean; supervise: boolean; seats: Seat[]
@@ -541,8 +539,6 @@ export function seatNote(s: Seat, sq: Squad | null, supervised: boolean): string
   if (!s.in_squad) {
     return supervised ? `${name} is no longer in this squad: it closes once it is idle.` : `${name} is no longer in this squad: nothing closes it on its own.`
   }
-  // #4786: first, since the squad's setting says nothing about a model switched inside the agent
-  if (s.model_differs) return `${name} was started on ${setupLabel(s.agent, s.model)} and now runs ${s.running_model}.`
   if (s.same !== false) return null
   const was = `${name} runs ${setupLabel(s.agent, s.model)}; the squad says ${setupLabel(s.want_agent, s.want_model)}.`
   if (!supervised || s.role === 'lead') return `${was} It changes at its next start.`
