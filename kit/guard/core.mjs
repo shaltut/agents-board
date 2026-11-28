@@ -3189,20 +3189,21 @@ function wordEnd(text, i, powershell) {
   return open.length ? -1 : Math.min(i, text.length);
 }
 // #4825: a string can reach a shell after any options, by <<< or down a pipe, so no option is read: a quoted target
-// that cannot be placed refuses where its command, or a later one in its pipeline, names a shell (sh and its kin, ssh,
+// that cannot be placed refuses where its command, or a later one in its pipeline, names a shell (POSIX_SHELLS, ssh or
 // eval; in any case)
-const SHELL_NAMED = /(?<![\w.-])(?:(?:ba|da|z|k)?sh|ssh|eval)(?:\.exe)?(?![\w.-])/i;
+const SHELL_NAMED = new RegExp(`(?<![\\w.-])(?:${[...POSIX_SHELLS, 'ssh', 'eval'].join('|')})(?:\\.exe)?(?![\\w.-])`, 'i');
 // as written, and with quotes and backslashes taken out, so a split name is seen and a Windows path still is
 const namesShell = (text) => SHELL_NAMED.test(text) || SHELL_NAMED.test(text.replace(/["'\\]/g, ''));
 const NAME_OVERLAP = 64; // a name split over quotes is looked for this far back
 // follows the commands of a pipeline through the unquoted text, to tell when a string lost inside one reaches a shell
 // (lost.handed). Each character is looked at once, plus the overlap at each call
 function pipelines(text, lost) {
-  let from = 0, checked = 0, named = false, held = false;
-  // names are read only while a lost string waits for a shell, so a text that loses nothing costs nothing
+  let from = 0, checked = 0, lostEnd = 0, named = false, held = false;
+  // names are read only while a lost string waits for a shell, so a text that loses nothing costs nothing. The look back
+  // for a split name stops at the last lost string: its own words are never read
   const look = (to) => {
     if (!held || to <= checked) return;
-    if (!named) named = namesShell(text.slice(Math.max(from, checked - NAME_OVERLAP), to));
+    if (!named) named = namesShell(text.slice(Math.max(from, lostEnd, checked - NAME_OVERLAP), to));
     checked = to;
     if (named) lost.handed = true;
   };
@@ -3224,7 +3225,7 @@ function pipelines(text, lost) {
       held = true;
       lost.quoted = true;
       look(start);
-      checked = Math.max(checked, end);
+      checked = lostEnd = Math.max(checked, end);
     },
   };
 }
