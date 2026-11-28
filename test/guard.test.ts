@@ -1884,9 +1884,8 @@ test('#4803: a redirect target is read to its end however it nests, and one that
     assert.equal(judged4803(`${r} bash`, 'builder', { stdin: true }), 'role', `stdin: ${r}`);
   }
   // what the guard cannot place is refused, with no role too: the command behind it cannot be found
-  for (const command of ['>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(case $x in a) echo f;; esac) sudo codex', '>$(echo # )\n) sudo codex', '>$(echo log;# )\n) sudo codex']) {
-    assert.notEqual(judged4803(command), 'allow', command);
-  }
+  const refused = (command: string) => { for (const role of ['builder', null]) assert.notEqual(judged4803(command, role), 'allow', `${role}: ${command}`); };
+  ['>$(case $x in a) echo f;; esac) sudo codex', '>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(echo # )\n) sudo codex', '>$(echo log;# )\n) sudo codex'].forEach(refused);
   // a shell script a seat runs is held to the same; another language's file is not shell text, so its quotes mean nothing here
   const ran = (path: string, text: string) => judged4803(`./${path} now`, 'builder', { readScript: (p: string) => (p.endsWith(path) ? text : null) });
   const oddQuotes = "// it's here\nif (a > b) x = '<p>'\n";
@@ -1895,9 +1894,14 @@ test('#4803: a redirect target is read to its end however it nests, and one that
   assert.notEqual(judged4803('>$(echo x git push --force origin main', null), 'allow');
   // what bash's count cannot follow is not read again with PowerShell's, which could take the command into the target;
   // and a string handed to a shell is that shell's text
-  for (const command of ['>$(true \\"; case a in a) :;; esac) sudo codex \\")', ...['bash -c', 'sh -ec', 'eval'].map((shell) => `${shell} '>$(case a in a) echo log;; esac) sudo codex'`)]) {
-    assert.notEqual(judged4803(command), 'allow', command);
+  refused('>$(true \\"; case a in a) :;; esac) sudo codex \\")');
+  // PR 176 re-review: other options may come before and after the -c, and the shell may be named by its program file
+  for (const shell of ['bash -c', 'sh -ec', 'eval', 'bash -o pipefail -c', 'sh -euo pipefail -c', 'bash --login -c', 'bash -O extglob -c', 'bash -c --', 'bash.exe -c',
+    '"C:/Program Files/Git/bin/bash.exe" -c', 'bash -ce', 'bash -c -x', 'eval --', `bash --rcfile /opt/${'long-folder/'.repeat(12)}rc -c`]) {
+    refused(`${shell} '>$(case a in a) echo log;; esac) sudo codex'`);
   }
+  // a file or folder whose name has case next to a dot is no case statement
+  for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
     'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
@@ -1957,7 +1961,7 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
     ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
     ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
     ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
-    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
+    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
     const t = performance.now();
     judged4803(command);
     const ms = performance.now() - t;
