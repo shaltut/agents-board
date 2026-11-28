@@ -49,7 +49,7 @@ test('cb help is the manual: overview, rules, topics, grouped commands with exam
 // #4450: rule 10 said only "keep working"; the exit codes and the check before a resend are documented
 test('cb help documents exit 3 (did not run) and rule 10 says to run the named check before a resend', () => {
   // #4515: a read is safe to run again too
-  assert.match(OVERVIEW_TEXT, /^ +Exit 2 = cb lock take queued you \(not held\)\. Exit 3 = a board on another machine was unreachable and nothing\n +of the command reached it, or the command only reads: safe to run again unchanged \(this machine's own board\n +never gives 3\)\.$/m);
+  assert.match(OVERVIEW_TEXT, /^ +Exit 2 = cb lock take queued you \(not held\)\. Exit 3 = a board on another machine was unreachable and nothing\n +of the command reached it, or the command only reads: safe to run again unchanged \(this machine's own board\n +never gives 3, except to cb triage\)\.$/m);
   assert.match(help('rules')!, /^10\. Board unreachable: keep working\. .*Did not run, or it only\n +reads \(exit 3, a board on another machine only\): run it again once the board is back\. Otherwise \(exit 1\) it may\n +have run: run the check it names \(cb show <id>, cb search \.\.\.\) first, never a blind resend/m);
 });
 
@@ -250,4 +250,31 @@ test('cb start exits 0 when the board is down, and does not start Postgres', () 
   const r = cb(['start'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out + r.err, /board unreachable: keep working and register this later\. Retry: cb start/);
+});
+
+// #4723: the manual drifted as commands were added: these pin it to what cb.ts does
+test('cb help json names every command that takes --json, and the shapes that are not the plain ones', () => {
+  const page = help('json')!;
+  for (const c of Object.keys(COMMANDS).filter((c) => !['help', 'runner', 'supervise'].includes(c)))
+    assert.match(page, new RegExp(`(?<![\w-])${c}(?![\w-])`), `cb help json does not say what cb ${c} --json prints`);
+  for (const s of ['squad trust', 'job retry', 'job move', 'job hold|release', 'update --check', 'update --rollback'])
+    assert.ok(page.includes(s), s);
+  assert.match(page, /\{claimed: null, skipped\}/);
+  assert.match(page, /^ +add .*disabled/m);
+  assert.match(page, /^ +squad set .*version.*changed/m);
+});
+
+test('cb help and cb help json say which results exit 1 or 3 on stdout', () => {
+  for (const page of [OVERVIEW_TEXT, help('json')!]) {
+    for (const c of ['cb doctor', 'cb update --check', 'cb run --wait']) assert.ok(page.includes(c), c);
+    assert.match(page, /on stdout/);
+    assert.match(page, /cb triage/);
+  }
+  assert.doesNotMatch(help('json')!, /An error is still text on stderr \("cb: \.\.\."\), never JSON/);
+});
+
+test('cb help relay covers every agent, how its relay starts, and the held routine notices', () => {
+  const page = help('relay')!;
+  for (const w of ['Claude Code', 'codex', 'opencode', 'agy', '--agent', 'prestart', 'CB_MCP_GATE_OK', '10 minutes'])
+    assert.ok(page.includes(w), w);
 });
