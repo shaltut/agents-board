@@ -1,4 +1,5 @@
-// OpenCode guard shim (#4002 phase 3). A plugin in ~/.config/opencode/plugins/ (tool.execute.before) runs this with
+// OpenCode guard shim (#4002 phase 3). A plugin in ~/.config/opencode/plugins/ (1.x: tool.execute.before; 2.x:
+// execute.before, #4817) runs this with
 // {"tool":"<opencode tool id>","args":{...},"sessionID":"..."} on stdin, and CB_ROLE, CB_PROTECTED_BRANCHES and CB_ALLOW_ASK
 // in the env. It prints {} (allow) or {"decision":"block","reason":"..."}, exit 0; the plugin throws Error(reason) on a block
 // and must itself throw when this process fails or prints anything else. Same fail-closed rules as shim-claude.mjs: empty or
@@ -19,7 +20,7 @@ try {
 }
 
 const FS = { resolve, dirname, basename, join, realpathSync };
-const SHELL_TOOLS = new Set(['bash', 'powershell']);
+const SHELL_TOOLS = new Set(['bash', 'powershell', 'shell']); // shell: OpenCode 2.x's name (#4817)
 const EDIT_TOOLS = new Set(['edit', 'write', 'patch', 'apply_patch', 'multiedit']);
 // native reads (#4002 install gate): a path naming a secret file blocks for a role seat, as a shell read does
 const READ_TOOLS = new Set(['read', 'grep', 'glob', 'list']);
@@ -42,7 +43,8 @@ export function parseOpencodeInput(raw) {
   if (SHELL_TOOLS.has(name)) {
     if (!isObject(p.args)) return unreadable(`args is ${p.args === undefined ? 'missing' : 'not an object'}`);
     if (typeof p.args.command !== 'string') return unreadable(`args.command is ${p.args.command === undefined ? 'missing' : 'not a string'}`);
-    return { ok: true, tool: 'shell', command: p.args.command };
+    const { workdir } = p.args;
+    return { ok: true, tool: 'shell', command: p.args.command, ...(workdir === undefined || workdir === null || workdir === '' ? {} : { workdir }) };
   }
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', args: p.args };
   if (READ_TOOLS.has(name)) return { ok: true, tool: 'read', args: p.args, name };
@@ -72,9 +74,18 @@ export function runOpencodeShim(raw, env = process.env) {
     if (typeof glob === 'string' && glob.trim()) paths.push(glob.trim());
     // review 68-I2: each target also resolved against the cwd and through the real path of its nearest existing folder
     const forms = paths && [...new Set(paths.flatMap((t) => core.editPathForms(t, process.cwd(), FS)))];
-    // #4669: a shell script the command runs is read from OpenCode's cwd and judged too; ssh to this machine's own name counts
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms,
-      readScript: readerFor(process.cwd()), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
+    // #4817: a shell call's workdir is where OpenCode runs the command: judged as a cd to it first, so a relative write
+    // there is not missed. A name that cannot go in quotes stops a seat's call
+    let command = p.command, cwd = process.cwd();
+    if (p.workdir !== undefined) {
+      if (typeof p.workdir === 'string' && !/["$`\r\n]/.test(p.workdir)) {
+        command = `cd "${p.workdir.replace(/\\/g, '/')}"\n${command}`;
+        cwd = resolve(cwd, p.workdir);
+      } else if (seat) return block('Blocked: the shell workdir cannot be read safely (not text, or it holds a quote, $, backtick or line break): leave workdir out and cd in the command');
+    }
+    // #4669: a shell script the command runs is read from the folder it runs in and judged too; ssh to this machine's own name counts
+    const v = core.evaluate({ tool: p.tool, command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms,
+      readScript: readerFor(cwd), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return block(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));
