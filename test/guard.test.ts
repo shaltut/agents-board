@@ -297,7 +297,7 @@ test('#4824: a heredoc message to git commit stays text beside a redirect; what 
   };
   assert.deepEqual([
     "git commit -q -F - <<'EOF' > /tmp/c.log 2>&1", "git commit -q -F - > /tmp/c.log 2>&1 <<'EOF'", "git commit -q -F - 2>&1 <<'EOF'",
-    "git commit -q -F - >&2 <<'EOF'", "git commit -q -F - 2>&-<<'EOF'", "cb log 1 - 2>&1 <<'EOF'",
+    "git commit -q -F - >&2 <<'EOF'", "git commit -q -F - 2>&- <<'EOF'", "cb log 1 - 2>&1 <<'EOF'",
   ].map((head) => refused(heredoc(head, message, 'echo $?; git rev-parse HEAD'))).filter(Boolean), []);
   // a real separator, or a shell that reads the body, keeps the body judged
   for (const head of [
