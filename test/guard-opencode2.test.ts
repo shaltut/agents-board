@@ -1,7 +1,7 @@
 // The board guard in OpenCode 2.x (#4817): its plugin shape and tool names differ from 1.x, whose plugin it never runs. Pure.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,7 +9,7 @@ import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
 
 const kit = (f: string) => fileURLToPath(new URL(`../kit/guard/${f}`, import.meta.url));
 const fwd = (p: string) => p.replace(/\\/g, '/');
-const CB = ['CB_ROLE', 'CB_AGENT', 'CB_PROTECTED_BRANCHES', 'CB_ALLOW_ASK'];
+const CB = ['CB_ROLE', 'CB_AGENT', 'CB_PROTECTED_BRANCHES', 'CB_ALLOW_ASK', 'CB_GUARD_MARKER', 'CB_GUARD_NONCE'];
 
 // the template as the installer fills it: this node, and the shim of this checkout
 async function load(t: { after: (fn: () => void) => void }, shim: string | null = kit('shim-opencode.mjs')) {
@@ -59,6 +59,53 @@ test('#4817: the 2.x plugin blocks when it is not filled in or the shim is missi
     const call = await hooked((await load(t, shim)).default);
     await assert.rejects(call('shell', { command: 'ls' }), /^Error: Blocked: the board guard/);
   }
+});
+
+// the proof from inside the agent: with no marker holding this launch's nonce, the board refuses the seat
+function proof(t: { after: (fn: () => void) => void }) {
+  const dir = mkdtempSync(join(tmpdir(), 'oc2-proof-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const marker = join(dir, 'marker.json');
+  Object.assign(process.env, { CB_GUARD_MARKER: marker, CB_GUARD_NONCE: 'nonce-1' });
+  const standIn = (body: string) => { const f = join(dir, 'stand-in-shim.mjs'); writeFileSync(f, body); return f; };
+  return { dir, marker, standIn };
+}
+
+test('#4817: the loaded 2.x plugin leaves its marker once its hook is in and the shim allowed one call and refused one', async (t) => {
+  seat(t, 'builder');
+  const { marker } = proof(t);
+  await hooked((await load(t)).default);
+  assert.equal(JSON.parse(readFileSync(marker, 'utf8')).nonce, 'nonce-1');
+});
+
+test('#4817: no marker from a guard that did not run, allows everything or refuses everything, or outside a seat', async (t) => {
+  seat(t, 'builder');
+  const { marker, standIn } = proof(t);
+  for (const [what, shim] of [
+    ['not filled in', null],
+    ['missing shim', join(tmpdir(), 'cb-no-such-folder', 'shim-opencode.mjs')],
+    ['allows everything', standIn('process.stdout.write("{}")')],
+  ] as const) {
+    await hooked((await load(t, shim)).default);
+    assert.equal(existsSync(marker), false, what);
+  }
+  await hooked((await load(t, standIn('process.stdout.write(JSON.stringify({ decision: "block", reason: "Blocked by role (builder): all" }))'))).default);
+  assert.equal(existsSync(marker), false, 'refuses everything');
+  delete process.env.CB_ROLE;
+  delete process.env.CB_AGENT;
+  await hooked((await load(t)).default);
+  assert.equal(existsSync(marker), false, 'not a seat');
+});
+
+test('#4817: with no nonce nothing is written, and a marker that cannot be written leaves the hook in place', async (t) => {
+  seat(t, 'builder');
+  const { dir, marker } = proof(t);
+  delete process.env.CB_GUARD_NONCE;
+  await hooked((await load(t)).default);
+  assert.equal(existsSync(marker), false);
+  Object.assign(process.env, { CB_GUARD_NONCE: 'nonce-2', CB_GUARD_MARKER: join(dir, 'no-such-folder', 'marker.json') });
+  const call = await hooked((await load(t)).default);
+  await assert.rejects(call('shell', { command: 'git reset --hard' }), /^Error: Blocked dangerous command/);
 });
 
 test('#4817: 2.x calls its shell tool "shell", judged as a shell command', () => {
