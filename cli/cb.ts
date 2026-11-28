@@ -647,8 +647,8 @@ async function run(): Promise<unknown> {
       return { out: out.filter(Boolean).join('\n'), json: { tasks, questions: qs, events: ev } };
     }
     case 'broadcast': {
-      need(1, 'broadcast "<message>" [--project <p>]');
-      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor });
+      need(1, 'broadcast "<message>" --project <p> | --all');
+      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor, everyone: !!o.all });
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: { id: Number(id), project: o.project ?? null } };
     }
     case 'relay': {

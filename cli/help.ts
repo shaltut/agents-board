@@ -170,8 +170,8 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     huddles: { reads: true, use: 'cb huddles [project]', topic: 'huddle',
       does: 'Open huddles and the last week\'s closed ones.',
       eg: 'cb huddles' },
-    broadcast: { use: 'cb broadcast "<message>" [--project <p>]', topic: 'huddle',
-      does: 'One message to every session (or one project\'s). Orchestrator and Ahmed; workers use cb tell.',
+    broadcast: { use: 'cb broadcast "<message>" --project <p> | --all', topic: 'huddle',
+      does: 'One message to one project\'s sessions (--project <p>) or to every session of every project (--all). One of the two is required, never both. The line a session gets names the scope: "to <project>" or "to everyone". Orchestrator and Ahmed; workers use cb tell.',
       eg: 'cb broadcast "develop is frozen until 14:00Z" --project iris' },
   }],
   ['SHARED MEMORY', {
@@ -458,7 +458,7 @@ Never: AskUserQuestion (blocked here: it stops the session); stopping to wait fo
 Which one
   cb tell <session> "<msg>"            one session: a handoff, a heads-up, a reply
   cb huddle ...                        several sessions working one thing out: a shared bug, a design call, an overlap
-  cb broadcast "<msg>" [--project p]   everyone (orchestrator and Ahmed; workers don't broadcast)
+  cb broadcast "<msg>" --project p|--all   a project, or everyone (orchestrator and Ahmed; workers don't)
   cb ask ...                           a decision for Ahmed: never settle it in a huddle
 Names: cb sessions. You only talk to sessions in your own project.
 
