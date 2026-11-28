@@ -998,6 +998,8 @@ test('#4787: a dry run of the second check says the switch and does none of it',
   assert.ok(out.includes('would switch sv-B1@macbook (sonnet to haiku)'), out.join('\n'));
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
   assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
+});
+
 // every project with a squad is checked: claude-board itself has no stages, and its stopped reviewers are why #4787 exists
 for (const [name, off] of [
   ['a squad with no stages', (sql: any) => sql`select cb.project_pipeline('sv', false, 'ahmed')`],
