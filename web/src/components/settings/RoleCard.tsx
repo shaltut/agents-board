@@ -9,7 +9,9 @@ import {
 } from '@/lib/squad'
 import { NativeSelect, Problems, Stepper } from './bits'
 
-/** A model field: Claude's four names in a list; another agent's model typed, with the names already used offered. */
+/** A model field: Claude's four names in a list; another agent's model typed freely, with the names already used offered
+ *  as buttons that replace the value. Never a native datalist: selecting a second suggestion appended it to the first
+ *  with no separator (#4717). */
 export function ModelField({ agent, value, onChange, label, options }: {
   agent: string; value: string; onChange: (m: string) => void; label: string; options: SquadOptions
 }) {
@@ -21,12 +23,19 @@ export function ModelField({ agent, value, onChange, label, options }: {
       </NativeSelect>
     )
   }
-  const list = `models-${agent}`
+  const used = options.models_used[agent] ?? []
   return (
     <>
-      <Input aria-label={label} value={value} onChange={(e) => onChange(e.target.value.trim())} list={list} spellCheck={false}
+      <Input aria-label={label} value={value} onChange={(e) => onChange(e.target.value.trim())} spellCheck={false}
         placeholder={agent === 'opencode' ? 'provider/model' : 'model name'} className="h-8 w-48 font-mono text-xs" />
-      <datalist id={list}>{(options.models_used[agent] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+      {used.length > 0 && (
+        <span className="inline-flex flex-wrap gap-1" aria-label={`Models already used for ${label}`}>
+          {used.map((m) => (
+            <Button key={m} type="button" variant="outline" size="xs" aria-label={`Use ${m} for ${label}`} title={m}
+              className="max-w-[12rem] truncate font-mono" onClick={() => onChange(m)}>{m}</Button>
+          ))}
+        </span>
+      )}
     </>
   )
 }
@@ -52,7 +61,7 @@ function Backups({ list, onChange, own, options, label }: {
   const [agent, setAgent] = useState('codex')
   const [model, setModel] = useState('')
   const max = options.limits.fallbacks
-  const problem = model ? modelProblem(agent, model) : null
+  const problem = model ? modelProblem(agent, model, options.models_used[agent]) : null
   const dup = list.some((f) => f.agent === agent && f.model === model) || (own.agent === agent && own.model === model)
   return (
     <div className="space-y-1.5">
