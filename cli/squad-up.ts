@@ -9,11 +9,12 @@ import { homeTrust, type TrustCheck } from './squad-trust.ts';
 // machine.repo: the one repo's folder of a squad without repos; with repos each repo lists its own paths (#3703)
 // machine.workspace: the herdr workspace (its label) new sessions open in; none: herdr's focused one (#3719)
 type Machine = { herdr: string | null; repo?: string; board: string; workspace?: string };
-// #4002: a role's agent (absent: claude, never stored), its ranked fallback, and per-seat overrides of either. A seat's
+// #4002: a role's agent (absent: claude, never stored), its ranked fallback, and per-seat overrides of either; #4763: an
+// effort on each (absent: the agent's own default). A seat's
 // key is Want.seatKey. Nothing switches to a fallback yet: it rides on the launch for the agent switch to come.
-type Fallback = { agent: AgentKind; model: string }[];
-export type SeatOverride = { agent?: AgentKind; model?: string; fallback?: Fallback };
-type Role = { count?: number | Record<string, number>; model: string; machine: string; agent?: AgentKind; fallback?: Fallback; seats?: Record<string, SeatOverride> };
+type Fallback = { agent: AgentKind; model: string; effort?: string }[];
+export type SeatOverride = { agent?: AgentKind; model?: string; effort?: string; fallback?: Fallback };
+type Role = { count?: number | Record<string, number>; model: string; machine: string; agent?: AgentKind; effort?: string; fallback?: Fallback; seats?: Record<string, SeatOverride> };
 type Repo = { home: boolean; paths: Record<string, string> };
 // protected (#3746): branch names or * globs; each session's pane gets CB_PROTECTED_BRANCHES, read by the push hook
 export type Squad = { machines: Record<string, Machine>; roles: Record<string, Role>; repos?: Record<string, Repo>;
@@ -24,7 +25,7 @@ export type Want = { name: string; role: string; area?: string; repo: string; se
 // env: set in the session's pane (herdr --env), so the agent and its hooks inherit it: always CB_ROLE and CB_AGENT,
 // CB_MCP_GATE_OK for another agent than claude when it is set where the launch is planned (gateEnv), and
 // CB_PROTECTED_BRANCHES when the squad has a list. board: the board checkout on the machine (the adapter's kit path)
-export type Launch = { name: string; role: string; area?: string; repo: string; seatKey: string; agent: AgentKind; model: string; fallback?: Fallback;
+export type Launch = { name: string; role: string; area?: string; repo: string; seatKey: string; agent: AgentKind; model: string; effort?: string; fallback?: Fallback;
   machine: string; herdr: string | null; board: string; cwd: string; settings: string; prompt: string; workspace?: string; env: Record<string, string> };
 
 const LETTER: Record<string, string> = { architect: 'A', builder: 'B', reviewer: 'R', qa: 'Q', investigator: 'I' };
@@ -96,11 +97,14 @@ export function wantList(project: string, squad: Squad): Want[] {
   return want;
 }
 
-/** A seat's agent, model and fallback: the seat's own override the role's; a seat's fallback, when it has one, replaces
- *  the role's (as cb._expected_model reads them). No agent anywhere: claude. */
-export function seatSpec(squad: Squad, w: Want): { agent: AgentKind; model: string; fallback?: Fallback } {
+/** A seat's agent, model, effort and fallback: the seat's own override the role's; a seat's fallback, when it has one,
+ *  replaces the role's (as cb._expected_model reads them). No agent anywhere: claude. The role's effort goes only to a
+ *  seat on the role's agent: the levels differ by agent. */
+export function seatSpec(squad: Squad, w: Want): { agent: AgentKind; model: string; effort?: string; fallback?: Fallback } {
   const role = squad.roles[w.role]!, seat = role.seats?.[w.seatKey], fallback = seat?.fallback ?? role.fallback;
-  return { agent: seat?.agent ?? role.agent ?? 'claude', model: seat?.model ?? role.model, ...(fallback ? { fallback } : {}) };
+  const agent = seat?.agent ?? role.agent ?? 'claude';
+  const effort = seat?.effort ?? (agent === (role.agent ?? 'claude') ? role.effort : undefined);
+  return { agent, model: seat?.model ?? role.model, ...(effort ? { effort } : {}), ...(fallback ? { fallback } : {}) };
 }
 /** How a launch names what it runs: a Claude seat its model, as always; another agent agent/model. */
 export const runsOn = (l: { agent: string; model: string }) => (l.agent === 'claude' ? l.model : `${l.agent}/${l.model}`);
@@ -128,12 +132,12 @@ export const opencodePort = (name: string) => 41000 + (parseInt(createHash('sha2
 
 // env: where CB_MCP_GATE_OK is read (gateEnv); squad up and the supervisor pass none, so it is this machine's
 export function launchFor(project: string, squad: Squad, w: Want, first: 'next' | 'resume' = 'next', env: NodeJS.ProcessEnv = process.env): Launch {
-  const machine = w.name.split('@')[1], mc = squad.machines[machine], repos = reposOf(squad), { agent, model, fallback } = seatSpec(squad, w);
+  const machine = w.name.split('@')[1], mc = squad.machines[machine], repos = reposOf(squad), { agent, model, effort, fallback } = seatSpec(squad, w);
   // with repos: the session names its repo, and the architect and qa (who read across repos) get every repo's folder
   const across = squad.repos && (w.role === 'architect' || w.role === 'qa')
     ? `. Repos: ${Object.entries(repos).filter(([, r]) => r.paths[machine]).map(([k, r]) => `${k} ${r.paths[machine]}`).join(', ')}` : '';
   return {
-    ...w, agent, model, ...(fallback ? { fallback } : {}), machine, herdr: mc.herdr, board: mc.board, cwd: repos[w.repo]?.paths[machine] ?? '',
+    ...w, agent, model, ...(effort ? { effort } : {}), ...(fallback ? { fallback } : {}), machine, herdr: mc.herdr, board: mc.board, cwd: repos[w.repo]?.paths[machine] ?? '',
     ...(mc.workspace ? { workspace: mc.workspace } : {}),
     // CB_PROTECTED_BRANCHES last: the pane-making call ends with it, as before #4002
     env: { CB_ROLE: w.role, CB_AGENT: agent, ...gateEnv(agent, env), ...(agent === 'opencode' ? { CB_OPENCODE_PORT: String(opencodePort(w.name)) } : {}),
@@ -332,7 +336,7 @@ const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffe
 export type AdapterGate = { installed?: ReadonlySet<AgentKind>; env?: NodeJS.ProcessEnv };
 export function launchSpec(l: Launch, gate: AdapterGate = {}): { adapter: AgentAdapter; spec: LaunchSpec } {
   const adapter = getAdapter(l.agent, gate);
-  return { adapter, spec: adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, board: l.board, cwd: l.cwd, env: l.env }) };
+  return { adapter, spec: adapter.buildLaunch({ name: l.name, role: l.role, area: l.area, repo: l.repo, agent: l.agent, model: l.model, effort: l.effort, board: l.board, cwd: l.cwd, env: l.env }) };
 }
 
 const PRESTART_WORD = /^[A-Za-z0-9._:][A-Za-z0-9._:-]{0,63}$/; // never a leading -: pwsh would read it as a parameter name

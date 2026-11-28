@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -311,12 +311,15 @@ test('a shim copied without core.mjs, or beside a broken one, still denies', () 
     writeFileSync(join(dir, 'broken', 'core.mjs'), 'export const x = ;\n');
     assert.match(runHook(shell('ls'), seat(), join(dir, 'broken', 'shim-agy.mjs')).reason ?? '', /^Blocked: guard failed to load core/);
     mkdirSync(join(dir, 'mixed')); copyFileSync(SHIM, join(dir, 'mixed', 'shim-agy.mjs'));
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => { throw new Error("boom"); };\n');
+    const hosts = 'export const localHosts = () => [];\n'; // the shim asks core for these before evaluate (#4707)
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => { throw new Error("boom"); };\n');
     const mixed = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
     assert.equal(mixed.decision, 'deny');
     assert.match(mixed.reason ?? '', /^Blocked: guard error \(boom\)/);
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
-    assert.equal(runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs')).decision, 'deny');
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
+    const silent = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
+    assert.equal(silent.decision, 'deny');
+    assert.match(silent.reason ?? '', /gave no decision/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -394,4 +397,58 @@ test('#4730: only a registration whose worktree points back counts; neighbours a
   rmSync(wt, { recursive: true, force: true });
   mkdirSync(wt);
   denied(join(wt, 'a.ts'));
+});
+
+// #4743 (PR 127 review): the deny segments are read below each root, so they never saw a root that itself sits inside one.
+test('#4743: a linked worktree whose root sits inside .git, .agents or .gemini opens nothing', () => {
+  const { base, main, wt } = repoWithWorktree();
+  const roots = [join(base, '.gemini', 'a'), join(base, '.agents', 'deep', 'b'), join(base, '.git', 'c'), join(base, '.GEMINI-x', '.Agents')];
+  roots.forEach((r, i) => gitIn(main, 'worktree', 'add', '-q', '-b', `denied${i}`, r));
+  for (const r of roots) {
+    assert.match(read({ TargetFile: join(r, 'a.ts') }, from(main)).reason ?? '', /reading outside the workspace/, r);
+    assert.match(edit({ TargetFile: join(r, 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/, r);
+  }
+  assert.deepEqual(edit({ TargetFile: join(wt, 'a.ts') }, from(main)), { decision: 'allow' }); // the others stay open
+});
+
+test('#4743: such a worktree nested in the workspace still keeps its own kit/guard denied', () => {
+  const { main } = repoWithWorktree();
+  const nested = join(main, '.git', 'nested-wt');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'in-git', nested);
+  assert.match(read({ TargetFile: join(nested, 'kit', 'guard', 'core.mjs') }, from(main)).reason ?? '', /kit\/guard is not allowed/);
+  assert.match(edit({ TargetFile: join(nested, 'a.ts') }, from(main)).reason ?? '', /not allowed/);
+});
+
+// The three spellings the PR 127 review probed by hand
+test('#4743 pin: a junction or link inside a worktree that leads out is denied; one that leads in is allowed', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const away = join(base, 'away');
+  mkdirSync(away);
+  try {
+    symlinkSync(away, join(wt, 'out'), 'junction');
+    symlinkSync(wt, join(base, 'shortcut'), 'junction');
+  } catch { t.skip('cannot create links here'); return; }
+  assert.match(edit({ TargetFile: join(wt, 'out', 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/);
+  assert.match(read({ TargetFile: join(wt, 'out', 'a.ts') }, from(main)).reason ?? '', /reading outside the workspace/);
+  assert.deepEqual(edit({ TargetFile: join(base, 'shortcut', 'a.ts') }, from(main)), { decision: 'allow' });
+});
+
+test('#4743 pin: a worktree registered with relative paths is found, from the main checkout and from a sibling', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const rel = join(base, 'rel');
+  gitIn(main, '-c', 'worktree.useRelativePaths=true', 'worktree', 'add', '-q', '-b', 'relative', rel);
+  if (!/^gitdir: \.\./.test(readFileSync(join(rel, '.git'), 'utf8'))) { t.skip('this git writes no relative worktree links'); return; }
+  for (const w of [main, wt]) assert.deepEqual(edit({ TargetFile: join(rel, 'a.ts') }, from(w)), { decision: 'allow' }, w);
+  assert.deepEqual(edit({ TargetFile: join(wt, 'a.ts') }, from(rel)), { decision: 'allow' });
+});
+
+test('#4743 pin: an 8.3 short name reads as the long one inside a worktree and for a denied root', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const hidden = join(base, '.gemini', 'a');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'short', hidden);
+  mkdirSync(join(wt, '.gemini'));
+  const inWt = join(wt, 'GEMINI~1'), toHidden = join(base, 'GEMINI~1', 'a');
+  if (process.platform !== 'win32' || !existsSync(inWt) || !existsSync(toHidden)) { t.skip('no 8.3 names here'); return; }
+  assert.match(edit({ TargetFile: join(inWt, 'x.json') }, from(main)).reason ?? '', /not allowed/);
+  assert.match(edit({ TargetFile: join(toHidden, 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/);
 });

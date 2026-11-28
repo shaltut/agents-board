@@ -173,9 +173,9 @@ CB_TEST_DB=claude_board_test pnpm -s test                                       
 Tests expect Postgres on `127.0.0.1:5434` as user `cb` and **only ever touch databases named `claude_board_test*`**:
 `test/helpers.ts` refuses any other `CB_TEST_DB`, because each test run truncates every table. Use a distinct
 `CB_TEST_DB=claude_board_test_<name>` per parallel worktree. On Windows the test setup starts the private cluster for
-you; elsewhere have Postgres running first. A Windows git worktree gets its own cluster on its own port instead of
-5434 (stop it with `node db/setup.ts --test --stop` before removing the worktree). Never point the tests at a board you
-care about. A few files
+you; elsewhere have Postgres running first. A Windows git worktree, and a PC runner job's checkout, gets its own cluster
+on its own port instead of 5434 (stop it with `node db/setup.ts --test --stop` before removing the worktree). Never
+point the tests at a board you care about. A few files
 (`test/agents.test.ts`, `test/guard.test.ts`) are pure and need no database.
 
 ### Deploy with Docker Compose

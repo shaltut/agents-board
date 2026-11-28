@@ -254,6 +254,23 @@ mode. `--check` with `--agents` also checks each wiring and runs the probes thro
 plugin is exactly what this checkout writes). Seats never write these files: the fence keeps them out, and the installer
 itself refuses anything but `--check` when `CB_ROLE` or `CB_AGENT` is set.
 
+## Rules files for the other agents
+
+Claude Code reads `CLAUDE.md`. Codex, agy and OpenCode read `AGENTS.md`. There is one source for each level (#4765).
+
+- **The repo.** `CLAUDE.md` is the file to edit. `node cli/agent-context.ts repo` makes `AGENTS.md` from it;
+  commit both. `test/agent-context.test.ts` fails when they differ.
+- **The user level, per machine.** From a checkout with `pnpm install` done, in the owner's own terminal:
+  `node cli/agent-context.ts user` copies `~/.claude/CLAUDE.md` into `~/.codex/AGENTS.md`,
+  `~/.config/opencode/AGENTS.md` and `~/.gemini/AGENTS.md` (`CODEX_HOME` and `XDG_CONFIG_HOME` are followed).
+  - **It sends that file to each agent's model provider** from the next session on: read it first.
+    `--agents codex,agy` limits which agents get it.
+  - The copy sits between two `cb:user-rules` marker lines. What the file already said stays, outside the block: read
+    it for lines that now contradict the copy. Taking the copy away again is deleting the block.
+  - An agent with no config folder on the machine is skipped. Run it again after editing the source;
+    `--check` writes nothing and exits 1 when a copy is out of date. A squad seat may only `--check`.
+  - These files are never in git.
+
 ## Usage ledger
 
 `hooks/usage-stop.mjs` (#4349) is a Claude Code **Stop** hook. At each Stop it sums the token usage of every assistant
@@ -496,6 +513,11 @@ Set up, once, on the PC:
    - Placeholders in `steps`, `finally` and `cwd` are written `{name}` (declared in `params`; at most one per step
      argument). Write `{{` and `}}` for literal braces (inline JS, JSON: `fs.rmSync('dist', {{force:true}})`), so
      misspelled parameter names are still refused at start (#3773).
+   - A DB recipe whose tests start Postgres on the PC (this repo's own `test` recipe) gets a cluster per slot: every job
+     has `CB_RUNNER_JOB=1`, so `db/pg.ts` treats the slot like a worktree (own port, `.pgdata` in the slot), and a
+     `finally` step `node db/setup.ts --test --stop` stops it. A cluster left running anyway (a runner crash, a commit
+     older than #4756) is stopped before the slot's next `git clean`, which cannot delete its open log; only a postmaster
+     whose command line names that slot's `.pgdata` is stopped.
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
@@ -636,6 +658,13 @@ review), and fails closed where it cannot read it:
   do git's interactive modes (`add -p`, `add -i`, `checkout -p`, `rebase -i`, `clean -i`, `commit --interactive`) and
   `crontab -e`.
 - grep, sed, head, tail and cut given a file read that file, not the input (`grep foo file | awk` passes).
+- A package runner or `find -exec` is judged by the command it starts (`npx node`, `pnpm exec bash`, `npm exec -- python`,
+  `uv run python`, `find . -exec bash \;` are sessions; `npx tsc` and `find . -exec bash {} \;` pass) (#4658).
+- A one-shot whose code opens a session counts: `python -m code` or `-m pdb`, `pty.spawn`, `code.interact`,
+  `breakpoint()`, Node's `require('repl')`, `binding.irb`, and a call that starts a bare shell (`exec "/bin/sh"`,
+  `os.system('cmd')`, `spawnSync('bash', {stdio: 'inherit'})`; `os.system('sh build.sh')` passes). This reads only the
+  literal spellings. Code that builds the names gets past it; `--disable unified_exec_tty` is what stops a seat typing
+  into a process.
 
 Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
 handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every

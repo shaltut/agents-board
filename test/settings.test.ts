@@ -173,6 +173,27 @@ test('squad_options: the agents (main or backup only), the limits and the names 
   assert.ok(new RegExp(o.patterns.slug).test('macbook') && !new RegExp(o.patterns.slug).test('Mac_Book'));
 });
 
+test('a model that is two known names joined is refused on save, so a CLI save cannot store one (#4717)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  // two agy names used in one squad, so both are known for agy
+  await sql`select cb.squad_set('demo', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
+    builder: { count: 2, machine: 'macbook', agent: 'agy', model: 'gemini-4-neon-high', seats: { '2': { model: 'gemini-4-neon-xhigh' } } } } })}, 'ahmed')`;
+  const [{ o }] = await sql`select cb.squad_options() as o`;
+  assert.deepEqual(o.models_used.agy, ['gemini-4-neon-high', 'gemini-4-neon-xhigh']);
+  // the picker slip, saved from the CLI: refused, naming both halves
+  await sql`select cb.ensure_project('other')`;
+  const joined = 'gemini-4-neon-highgemini-4-neon-xhigh';
+  await assert.rejects(sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
+    builder: { count: 1, machine: 'macbook', agent: 'agy', model: joined } } })}, 'ahmed')`, /two model names joined/);
+  // and the same name twice, which the page refuses too
+  await assert.rejects(sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
+    builder: { count: 1, machine: 'macbook', agent: 'agy', model: 'gemini-4-neon-highgemini-4-neon-high' } } })}, 'ahmed')`, /two model names joined/);
+  // a single known name still saves
+  await sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
+    builder: { count: 1, machine: 'macbook', agent: 'agy', model: 'gemini-4-neon-xhigh' } } })}, 'ahmed')`;
+});
+
 test('squad_page: the squad and its version, live seats against what they should run, history newest first, reminders', async () => {
   const sql = await db();
   await sql`select cb.ensure_project('demo')`;

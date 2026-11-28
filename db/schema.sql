@@ -1951,6 +1951,7 @@ begin
     ) a
     left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
     where a.actor is not null and a.actor not in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner') and a.actor not in (select u.name from cb.users u)
+    offset 0  -- #4353: a fence. Without it the planner copies r, every subquery above with it, into both sort keys
   ) x), '[]');
 end $$;
 
@@ -5126,6 +5127,9 @@ drop function if exists cb._repo cascade;
 drop function if exists cb._check_repos cascade;
 drop function if exists cb._repo_list cascade;
 drop function if exists cb._check_model cascade;
+drop function if exists cb._efforts cascade;
+drop function if exists cb._check_effort cascade;
+drop function if exists cb._models_used cascade;
 drop function if exists cb._check_seat cascade;
 drop function if exists cb._agents_main cascade;
 alter table cb.projects add column if not exists squad jsonb;
@@ -5179,12 +5183,49 @@ begin
   return array(select jsonb_array_elements_text(j));
 end $$;
 
+-- The model names already used for each agent, across every saved squad: the settings page's suggestions, and what
+-- makes a name that is two of them joined detectable on save (#4717). Per agent: {"claude": ["opus", ...], ...}.
+create function cb._models_used() returns jsonb language sql stable as $$
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
+  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
+  specs as (
+    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
+    union all
+    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
+      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
+  ),
+  pairs as (
+    select s.agent, s.model from specs s where s.model is not null
+    union
+    select f->>'agent', f->>'model' from specs s
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
+     where f->>'agent' is not null and f->>'model' is not null
+  )
+  select coalesce((select jsonb_object_agg(z.agent, z.models) from
+                   (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}')
+$$;
+
 -- A model for an agent (#4002), refused naming the field (label) and the shape to give. Claude takes its four names;
 -- codex and agy a model name, never a Claude one (the slip when only the agent was changed); opencode provider/model.
 -- A null model is refused like a wrong one (it would pass not in and !~ silently); a null agent is claude.
-create function cb._check_model(agent text, model text, label text) returns void language plpgsql immutable as $$
+-- A value that is two known names joined with no separator (the settings picker's slip, #4717) is refused too: it still
+-- fits the shape, but it is not one model. stable: it reads the names already used.
+create function cb._check_model(agent text, model text, label text) returns void language plpgsql stable as $$
 #variable_conflict use_variable
+declare
+  known text[]; a text; b text;
 begin
+  if model is not null then
+    known := array(select jsonb_array_elements_text(coalesce(cb._models_used()->coalesce(agent, 'claude'), '[]'::jsonb)));
+    foreach a in array known loop
+      if a <> model and length(model) > length(a) and left(model, length(a)) = a then
+        b := substring(model from length(a) + 1);
+        if b = any(known) then
+          raise exception '% model "%" is two model names joined (% and %): pick one', label, model, a, b;
+        end if;
+      end if;
+    end loop;
+  end if;
   case coalesce(agent, 'claude')
     when 'claude' then
       if model is null or model not in ('opus', 'sonnet', 'haiku', 'fable') then
@@ -5212,11 +5253,28 @@ end $$;
 -- All four in every project since #4585 (Q3024).
 create function cb._agents_main() returns text[] language sql immutable as $$ select array['claude', 'codex', 'opencode', 'agy']::text[] $$;
 
--- One seat's agent, model and fallback (#4002): a role's own, or a seat's override of its role. ag and mo are what it
+-- #4763: the effort levels each agent takes when a seat starts (cli/agents/effort.ts is the same list); none: no effort.
+create function cb._efforts() returns jsonb language sql immutable as $$
+  select '{"claude": ["low", "medium", "high", "xhigh", "max"], "codex": ["low", "medium", "high", "xhigh", "max", "ultra"],
+           "opencode": [], "agy": ["low", "medium", "high", "xhigh", "max"]}'::jsonb
+$$;
+
+-- One effort of a role, seat or backup, for the agent it runs. effort is the value as given: a JSON null is refused too.
+create function cb._check_effort(agent text, effort jsonb, label text) returns void language plpgsql immutable as $$
+declare levels jsonb := cb._efforts()->agent;
+begin
+  if jsonb_array_length(levels) = 0 then raise exception '% effort: % takes no effort when a seat starts: leave it out', label, agent; end if;
+  if jsonb_typeof(effort) is distinct from 'string' or not levels ? (effort #>> '{}') then
+    raise exception '% effort for % must be one of % (got %): leave it out for the agent''s own default', label, agent,
+      (select string_agg(u.x, ', ' order by u.n) from jsonb_array_elements_text(levels) with ordinality u(x, n)), effort;
+  end if;
+end $$;
+
+-- One seat's agent, model, effort and fallback (#4002, #4763): a role's own, or a seat's override of its role. ag and mo are what it
 -- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
--- the inherited one (so claude, the default, is never written), the model only when given, the fallback only when it
--- lists some, as {agent, model} pairs.
-create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql immutable as $$
+-- the inherited one (so claude, the default, is never written), the model and the effort only when given, the fallback
+-- only when it lists some, as {agent, model} entries, each with its effort when it has one.
+create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
 declare a text := ag; m text := mo; fb jsonb := '[]'; cnt int; x record; k text; pair text; pairs text[] := '{}';
 begin
@@ -5235,6 +5293,7 @@ begin
     m := case when jsonb_typeof(spec->'model') = 'string' then spec->>'model' end;
     perform cb._check_model(a, m, label);
   end if;
+  if spec ? 'effort' then perform cb._check_effort(a, spec->'effort', label); end if;
   if spec ? 'fallback' then
     -- an if, not OR: jsonb_array_length errors on a non-array, and SQL does not promise OR's order
     if jsonb_typeof(spec->'fallback') is distinct from 'array' then cnt := 6; else cnt := jsonb_array_length(spec->'fallback'); end if;
@@ -5244,24 +5303,25 @@ begin
     for x in select e.v, e.n from jsonb_array_elements(spec->'fallback') with ordinality e(v, n) loop
       k := label || ' fallback ' || x.n;
       if jsonb_typeof(x.v) is distinct from 'object' then raise exception '% must be {"agent": "<agent>", "model": "<model>"}', k; end if;
-      if exists (select 1 from jsonb_object_keys(x.v) j where j not in ('agent', 'model')) then
-        raise exception '% has an unknown key: only agent and model', k;
+      if exists (select 1 from jsonb_object_keys(x.v) j where j not in ('agent', 'model', 'effort')) then
+        raise exception '% has an unknown key: only agent, model and effort', k;
       end if;
       if jsonb_typeof(x.v->'agent') is distinct from 'string' or x.v->>'agent' not in ('claude', 'codex', 'opencode', 'agy') then
         raise exception '% agent must be one of claude, codex, opencode, agy (got %)', k, coalesce(x.v->'agent', 'null');
       end if;
       perform cb._check_model(x.v->>'agent', case when jsonb_typeof(x.v->'model') = 'string' then x.v->>'model' end, k);
-      pair := (x.v->>'agent') || ' ' || (x.v->>'model');
+      if x.v ? 'effort' then perform cb._check_effort(x.v->>'agent', x.v->'effort', k); end if;
+      pair := (x.v->>'agent') || ' ' || (x.v->>'model'); -- another effort makes no other backup: it is the same model
       if x.v->>'agent' = a and x.v->>'model' = m then
         raise exception '% (%) is the same as its own agent and model: a fallback must be another', k, pair;
       end if;
       if pair = any(pairs) then raise exception '% (%) is listed twice', k, pair; end if;
       pairs := pairs || pair;
-      fb := fb || jsonb_build_array(jsonb_build_object('agent', x.v->>'agent', 'model', x.v->>'model'));
+      fb := fb || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object('agent', x.v->>'agent', 'model', x.v->>'model', 'effort', x.v->'effort')));
     end loop;
   end if;
   return jsonb_strip_nulls(jsonb_build_object('agent', nullif(a, ag), 'model', case when spec ? 'model' then m end,
-                                              'fallback', nullif(fb, '[]')));
+                                              'effort', spec->'effort', 'fallback', nullif(fb, '[]')));
 end $$;
 
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
@@ -5397,10 +5457,10 @@ begin
       raise exception 'unknown role %: one of lead, architect, owner, builder, reviewer, qa, investigator', r.key;
     end if;
     if jsonb_typeof(r.value) is distinct from 'object' then raise exception 'role % must be an object', r.key; end if;
-    if exists (select 1 from jsonb_object_keys(r.value) k where k not in ('count','model','machine','agent','fallback','seats')) then
-      raise exception 'role % has an unknown key: only count, model, machine, agent, fallback and seats', r.key;
+    if exists (select 1 from jsonb_object_keys(r.value) k where k not in ('count','model','machine','agent','effort','fallback','seats')) then
+      raise exception 'role % has an unknown key: only count, model, machine, agent, effort, fallback and seats', r.key;
     end if;
-    -- the role's agent, model and fallback (#4002); its seats once its count is known
+    -- the role's agent, model, effort and fallback (#4002); its seats once its count is known
     rv := cb._check_seat(r.value, 'claude', cb._role_model(r.key), r.key);
     if jsonb_typeof(r.value->'machine') is distinct from 'string' or not (squad->'machines' ? (r.value->>'machine')) then
       raise exception '% machine is not in machines', r.key;
@@ -5437,13 +5497,13 @@ begin
         if not (rp->nm->'paths' ? (r.value->>'machine')) then raise exception 'repo % has no path on %', nm, r.value->>'machine'; end if;
       end loop;
     end if;
-    -- seats (#4002), each overriding the role's agent, model or fallback, keyed as wantList (cli/squad-up.ts) names its
+    -- seats (#4002), each overriding the role's agent, model, effort or fallback, keyed as wantList (cli/squad-up.ts) names its
     -- sessions: the lead 1, an owner its area, a builder or reviewer with repos <repo>:<n> (the home repo's too), any
     -- other 1..count. A seat left with nothing of its own is not saved, nor is an empty seats map.
     st := '{}';
     if r.value ? 'seats' then
       if jsonb_typeof(r.value->'seats') is distinct from 'object' then
-        raise exception '% seats must be an object of seats: {"<seat>": {"agent", "model", "fallback"}}, a seat named 1, 2 ... (with repos <repo>:1, for an owner its area)', r.key;
+        raise exception '% seats must be an object of seats: {"<seat>": {"agent", "model", "effort", "fallback"}}, a seat named 1, 2 ... (with repos <repo>:1, for an owner its area)', r.key;
       end if;
       if r.key = 'owner' then sk := seen;
       elsif rp is not null and r.key in ('builder', 'reviewer') then
@@ -5451,10 +5511,10 @@ begin
       else sk := array(select g::text from generate_series(1, c) g); end if;
       for se in select * from jsonb_each(r.value->'seats') loop
         if se.key <> all(sk) then raise exception '% seat % is not one of its seats: %', r.key, se.key, array_to_string(sk, ', '); end if;
-        if jsonb_typeof(se.value) is distinct from 'object' then raise exception '% seat % must be an object: {"agent", "model", "fallback"}', r.key, se.key; end if;
-        if se.value = '{}' then raise exception '% seat % is empty: give agent, model or fallback', r.key, se.key; end if;
-        if exists (select 1 from jsonb_object_keys(se.value) k where k not in ('agent', 'model', 'fallback')) then
-          raise exception '% seat % has an unknown key: only agent, model and fallback', r.key, se.key;
+        if jsonb_typeof(se.value) is distinct from 'object' then raise exception '% seat % must be an object: {"agent", "model", "effort", "fallback"}', r.key, se.key; end if;
+        if se.value = '{}' then raise exception '% seat % is empty: give agent, model, effort or fallback', r.key, se.key; end if;
+        if exists (select 1 from jsonb_object_keys(se.value) k where k not in ('agent', 'model', 'effort', 'fallback')) then
+          raise exception '% seat % has an unknown key: only agent, model, effort and fallback', r.key, se.key;
         end if;
         sv := cb._check_seat(se.value, coalesce(rv->>'agent', 'claude'), coalesce(r.value->>'model', cb._role_model(r.key)), r.key || ' seat ' || se.key);
         if sv <> '{}' then st := st || jsonb_build_object(se.key, sv); end if;
@@ -5566,27 +5626,14 @@ end $$;
 -- paths must match, the model names already used in any squad (per agent, for suggestions) and the machines already
 -- used in any squad (to add one to another project).
 create function cb.squad_options() returns jsonb language sql stable as $$
-  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
-  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
-  specs as (
-    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
-    union all
-    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
-      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
-  ),
-  pairs as (
-    select s.agent, s.model from specs s where s.model is not null
-    union
-    select f->>'agent', f->>'model' from specs s
-      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
-     where f->>'agent' is not null and f->>'model' is not null
-  )
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null)
   select jsonb_build_object(
     'roles', to_jsonb(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']),
     'repo_bound_roles', to_jsonb(array['builder', 'reviewer']),
     'agents', (select jsonb_agg(jsonb_build_object('agent', g, 'main', g = any(cb._agents_main())) order by n)
                  from unnest(array['claude', 'codex', 'opencode', 'agy']) with ordinality u(g, n)),
     'claude_models', to_jsonb(array['opus', 'sonnet', 'haiku', 'fable']),
+    'efforts', cb._efforts(),
     'default_models', (select jsonb_object_agg(x, cb._role_model(x)) from unnest(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) x),
     'limits', jsonb_build_object('count_min', 1, 'count_max', 8, 'lead_count', 1, 'macbook_seats', 8, 'fallbacks', 5,
                                  'session_name', 32, 'protected', 30, 'protected_length', 100, 'workspace_length', 64),
@@ -5595,8 +5642,7 @@ create function cb.squad_options() returns jsonb language sql stable as $$
                                    'codex_model', '^[a-z0-9][a-z0-9._-]{0,63}$',
                                    'opencode_model', '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$',
                                    'agy_model', '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-    'models_used', coalesce((select jsonb_object_agg(z.agent, z.models) from
-                     (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}'),
+    'models_used', cb._models_used(),
     'machines_used', coalesce((select jsonb_agg(distinct jsonb_build_object('key', m.key) || m.value)
                                  from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'machines') = 'object' then sq.squad->'machines' else '{}' end) m), '[]'))
 $$;

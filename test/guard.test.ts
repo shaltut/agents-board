@@ -410,110 +410,9 @@ const freshEnvFine = [
   `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
   'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
 ];
-// #4734: "at" is an English word and a common variable name, and a script a heredoc writes, or the | of a search pattern,
-// puts it where a command would be. It is blocked unless the words after it are a shape that cannot schedule
-const atFine = [
-  `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
-  String.raw`grep -n "fresh environment\|schtasks\|'at'\|cron" kit/guard/core.mjs`, 'grep -E "before|at|after" notes.md', 'grep -E "(at|on) the end" notes.md',
-  'rg "x;at;y" src', "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"", "node -e \"\n  if (at < 0) { return; }\n\"",
-  'at -l', 'at -c 5', 'at -r 3', 'at -V', 'at --version', 'echo x | at',
-];
-// PR 139 review (R2) H1-H3: -b is batch and needs no time; <= and >= are redirects to a file named =; and an operand the
-// shell turns into nothing, or expands, can leave a time behind it
-const atReview = ['echo x | at -b', 'at -bf job.sh', 'echo x | at -mb', 'at >= now', 'at <= now', 'at {,now}', 'at {n..n}ow', 'at -f {job.sh,now}', 'at {,}now',
-  'at "" now', "at '' now", 'at " " now', String.raw`at "\ " now`, 'at no?', 'at n[o]w', 'at *', "node -e \"\n  if (at >= 0) break;\n\"",
-  // not in the review: some at builds take a bare increment, and sept is a month
-  'at +5min', 'at + 1 hour', 'at sept 4'];
-const atRuns = ['at now', 'at now+1min', 'at "now + 1 hour"', "at 'midnight'", 'at noon tomorrow', 'at teatime', 'at 4pm', 'at 16:00', 'at 0400 -f job.sh', 'at -m -q b now', 'at -f job.sh 10:00',
-  'at -mf job.sh now', 'at -t 202601011200', 'at -mt202601011200', 'at < job.sh now', 'at <job.sh now', "at now <<'EOF'\nls\nEOF", 'at "$WHEN"', 'at $(date +%H:%M)', 'at `cat t`',
-  'at 2>&1 now', 'echo now | xargs at', String.raw`at \\host 10:00 cmd`, 'echo x | /usr/bin/at now', 'if true; then at now; fi', 'bash -c "echo x | at now"', 'at \\\n now',
-  'at n""ow', "at 'mid'night", String.raw`at \now`, 'at tomorrow', 'at friday', 'at jul 4', 'at next week'];
-// PR 139 review round 3 (R1): quoted and escaped flags, and a brace list holding a quoted blank, got past the reading of
-// at's operands. The rule is now the other way round: at is blocked unless the words after it are one of a few shapes
-// that cannot schedule. These are the review's spellings, and others of the same kind found while rewriting
-const atShapes = ['at "-b"', "at '-b'", 'at -""b', String.raw`at -`, String.raw`at \-b`, 'at -m""b', 'at "-t" 202601011200', "at '-t' 202601011200",
-  'at "-m" now', String.raw`at \-m now`, 'at "-f" job.sh now', 'at -""f job.sh now', 'at {" ",now}',
-  // the segment split cuts at &, so what follows is not seen
-  'at &>/dev/null now', 'at &> f now', 'at = x &> f -t 202601011200', 'at -l &>f -t 202601011200', 'at = ";" -t 202601011200', 'at = x "-t" 202601011200',
-  // -V prints the version and carries on; only alone is it harmless
-  'at -V now',
-  // a number after > is an operand, and a ) the shell does not read closes nothing
-  'at < 0 now', 'at <= 0)', '(at >= 0)', String.raw`at < 0\) now`,
-  // a ) closes a subshell, and bash takes do or then straight after it: what follows must start no command
-  'until (at < 0) do at now; done', 'until (at =) do at now; done', 'until (at -l) do at now; done', 'if (at < 0) { at now }',
-  'until (at)do at now; done',
-  // PR 139 round 4 (R1): a case arm is also a word and a ), and bash drops the \ in front of a command name
-  ...[String.raw`\batch`, String.raw`\sudo codex`, String.raw`\wsl`, String.raw`\schtasks /run /tn x`, String.raw`\b$(echo atch)`, String.raw`\b"atch"`, String.raw`\s"u"do codex`]
-    .map((arm) => 'case $x in y) : ;; at)' + arm + ' ;; esac'),
-  // as main: a word that is no known shape
-  'at the end now'];
-test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {
-  for (const c of atFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of [...atRuns, ...atReview, ...atShapes]) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
-});
-
-// #4736 (folded into #4734): the | of a quoted search pattern is not a pipe, so the word between two of them is not a
-// command. Only a search command's own quoted strings are read as data; a quoted string a shell or a program runs is not
-const searchFine = [
-  'grep -E "a|batch|b" f', "grep -nE 'relay|batch|queue' cli/relay.ts", 'rg -n "x|sudo|y" src', "git grep -E 'tmux new|crontab' -- docs", 'git -C ../x grep "a|batch|b"',
-  'cd cli && LC_ALL=C grep -E "a|batch|b" relay.ts | head -5', 'cb bug "guard: blocked" -b "the search was grep -E \\"a|batch|b\\" cli/relay.ts" -l guard',
-  `python3 - <<'EOF'\nimport re\nat = 1\nx = re.compile('foo|at|bar')\nEOF`,
-];
-const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$(echo x | batch)" f', 'grep `true; batch -f j` f',
-  "bash <<'EOF'\nat now\nEOF", "bash -c 'true | batch'", 'echo "see grep " ; sudo codex exec x "y"', "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
-  "git grep -O'x;batch' y", "alias grep=eval; grep 'true;batch'", "grep() { eval \"$1\"; }; grep 'true;batch'",
-  // PowerShell: a backslash does not escape, so "C:\src\" ends there and what follows runs
-  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`,
-  // PR 139 review (R2) H4, H5: PowerShell also closes a string at a smart quote, and at a quote after any backslash
-  'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
-  String.raw`rg "a\"x ; schtasks /run /tn y ; echo "b\"c`,
-  // nested quotes: inside "$( )" or "${ }" bash starts a new string, so the pass loses count
-  'grep x "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
-  // PowerShell here-strings, block comments and --% quote differently
-  'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "',
-  // git takes any unique prefix of --open-files-in-pager, and a backslash in a flag is dropped
-  "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`,
-  // the same spellings with only pipes inside, so each bail is pinned by itself
-  'rg "a”|schtasks /run /tn y|rg “b" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`, 'grep x "$(echo "|sudo codex|echo ")"',
-  'grep x "${y:-"|sudo codex|echo "}"', 'rg x {# "\n|sudo codex|\n{# "', String.raw`rg x \; . "x|sudo|y"`,
-  // a quoted string holding ; & a newline or a spaced pipe is not blanked: a search pattern needs none of them
-  'rg "a; sudo codex" f', 'rg "a | batch" f'];
-test('#4736: a quoted search pattern or bug body naming a launcher passes; the same word where something runs it is blocked', () => {
-  for (const c of searchFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of searchStillRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
-});
-
-// #4741: the string a shell is given to run (bash -c, cmd /c, pwsh -c, eval, rg --pre) is a command, quoted or not. With
-// no | or ; inside it, the segment walk saw one word and never read it
-const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
-  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
-  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
-  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
-  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
-  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval echo hi', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
-  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
-  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
-  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
-  // a -- or -Command before the string is not its first word
-  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
-  // a quoted flag, and cmd switches that carry a value
-  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
-  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'"];
-const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
-  'bash deploy.sh -c "sudo codex"', 'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
-  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
-  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log'];
-test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
-  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
-  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  // the lead keeps its herdr prompt and deploy ssh inside a string too, and nothing else
-  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'ssh "$VPS" uptime'`, role: 'lead' }), { allow: true });
-  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
-});
-
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
 const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
-  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
+  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'DEPLOY_HOST=vps2; ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
 test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
   for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) {
     if (role === 'lead' && leadKeeps.includes(c)) continue;
@@ -557,12 +456,13 @@ test('#4669 I2: herdr --machine <m> / -m <m> before a pane run or send-keys is s
   }
 });
 
-// N1 (the lead's ruling on #4669): a lead seat keeps herdr agent prompt, herdr pane send-keys and ssh to the deploy VPS
+// N1 / #4707 R2-1: a lead seat keeps herdr agent prompt, herdr pane send-keys and a resolved variable naming the deploy VPS
 // (deploy/copy-to-vps.sh); every other role is blocked from them, and the lead is not exempt from the rest
 test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the deploy ssh; other roles are blocked', () => {
   const deploy = readFileSync(fileURLToPath(new URL('../deploy/copy-to-vps.sh', import.meta.url)), 'utf8');
+  assert.match(deploy, /^VPS=\$\{VPS:-vps2\}$/m, 'the guard exception must track the deploy script default');
   const readScript = (p: string) => (p.replace(/^.*[\\/]/, '') === 'copy-to-vps.sh' ? deploy : null);
-  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript });
+  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript, deployHost: 'vps2' });
   for (const c of [...leadKeeps, 'bash deploy/copy-to-vps.sh', 'VPS=vps2 deploy/copy-to-vps.sh']) {
     assert.deepEqual(ev(c, 'lead'), { allow: true }, `lead: ${c}`);
     for (const role of ROLES.filter((r) => r !== 'lead')) assert.equal(ev(c, role).kind, 'role', `${role}: ${c}`);
@@ -974,6 +874,192 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
   blocksByRole('builder', [`printf '${merge}' | grep bash`]);
 });
 
+// #4729 (PR 111 r4). R4-1: a quoted, escaped, lower-case or brace spelling of HOME is still a mention of HOME, so it
+// drops the $HOME/ exemption. Each hidden push is spelled so no other rule reads it (\x69, 'ma'+'in'): only this one blocks.
+test('guard: quoted, escaped, lower-case and brace spellings of HOME drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // quoted and escaped names (bash), and PowerShell's backtick
+    `read -r HO""ME <<< ${sh}`, String.raw`read -r \HOME <<< ` + sh, `read -r "H"OME <<< ${sh}`, `read -r H'O'ME <<< ${sh}`,
+    `printf -v HO''ME '%s' ${sh}`, `export HO""ME=${sh}`, `declare -n r=HO""ME; r=${sh}`, String.raw`for HO\ME in ` + `${sh}; do :; done`,
+    'unset HO""ME; : ${HOME:=' + sh + '}', ': ${HOME:=' + sh + '}', 'Set-Variable -Name HO`ME -Value ' + ps + ' -Force',
+    // a name split over a continued line
+    'read -r HO\\\nME <<< ' + sh,
+    // brace spellings
+    `export {HOME,x}=${sh}`, `declare {HOME,x}=${sh}`, `read -r {HOME,x} <<< ${sh}`,
+    // PowerShell reads a variable's name in any case
+    `Set-Variable -Name home -Value ${ps} -Force`, `Set-Variable -Name Home -Value ${ps} -Force`, `sv home ${ps} -Force`,
+    `set home ${ps} -Force`, `New-Variable -Name home -Value ${ps} -Force`, 'Remove-Variable home -Force',
+    `Set-Variable -Value 'a;b' -Name home -Force`, String.raw`Set-Item Variable:\HOME -Value ` + `${ps} -Force`,
+    `Set-Item Variable:/HOME -Value ${ps} -Force`, `si variable:home ${ps} -Force`, `$global:home = ${ps}`,
+    `$env:home = ${ps}`, '${env:home} = ' + ps, `[Environment]::SetEnvironmentVariable('home', ${ps})`,
+  ].map((set) => `${set}; ${run}`);
+  const kept = ['echo "${HOME}"; ' + run, 'cd ${HOME} && ' + run, 'git -c core.sshCommand="ssh -i ${HOME}/.ssh/k" fetch',
+    `echo "$HOME"; ${run}`, `echo "home page"; ${run}`, `cd /home/ubuntu/w && ${run}`, `set -e; cd /home/ubuntu; ${run}`,
+    `git remote set-url origin /srv/home && ${run}`, `Set-Location home; ${run}`, `export HOMEBREW_PREFIX=/opt/homebrew; ${run}`,
+    String.raw`git -c core.sshCommand="ssh -i $USERPROFILE\.ssh\key" fetch`];
+  for (const role of ['lead', 'builder']) {
+    for (const c of blocked) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    for (const c of kept) assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+  }
+});
+
+// #4729, the PR 132 review: a brace expansion inside a word can spell the name; a lower-case or wildcard name can reach a
+// PowerShell setter from another segment; and reading HOME with a default or trimmed is a read, like ${HOME}
+test('guard: the PR 132 review spellings drop the $HOME/ exemption; default-value reads keep it (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // brace expansion inside the name
+    `declare H{O,}ME=${sh}`, `export H{O,}ME=${sh}`, `declare {H,}OME=${sh}`, `declare HOM{E,}=${sh}`, `read -r H{O,}ME <<< ${sh}`,
+    `declare H{O..O}ME=${sh}`, `declare H{{O,},}ME=${sh}`, `bash -c "declare H{O,}ME=x"`,
+    // the name and the setter in different segments
+    `$n='home'; Set-Variable $n ${ps} -Force`, `$p=@{Name='home';Value=${ps};Force=$true}; Set-Variable @p`,
+    `'home' | % { Set-Variable $_ ${ps} -Force }`, `Get-Variable home | Set-Variable -Value ${ps} -Force`,
+    // wildcard names, which PowerShell matches against HOME
+    `Set-Variable -Name hom? -Value ${ps} -Force`, `Set-Variable -Name ho*e -Value ${ps} -Force`,
+    `Set-Variable -Name HOM[E] -Value ${ps} -Force`, `Set-Item variable:hom* ${ps} -Force`,
+    `Get-Variable hom* | Set-Variable -Value ${ps} -Force`, `$n='hom*'; Set-Variable $n ${ps} -Force`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`cd "\${HOME:-/tmp}" && ${fetch}`, `test -n "\${HOME+x}" && ${fetch}`, `cd \${HOME-/tmp} && ${fetch}`,
+    `echo \${HOME:+yes} && ${fetch}`, `echo \${HOME#/} \${HOME%/} && ${fetch}`, `cb log 1 "set up home"; ${fetch}`,
+    `git commit -m "Set Home"; ${fetch}`, `set -e; ls src/*.ts; ${fetch}`, `git log HEAD@{1}..HEAD; ${fetch}`,
+    `cat src/{a,b}.ts; ${fetch}`, `curl -d '{"a":1,"b":2}' x; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729, the PR 132 re-read: brace groups side by side spell the name with no letter beside a brace, and an ANSI-C or
+// locale quote ($'...', $"...") leaves no dollar sign in the word bash builds, its escapes decoded
+test('guard: side-by-side brace groups and ANSI-C or locale quotes drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const blocked = [
+    'declare {HO,X}{ME,Y}=x', 'export {H,}{O,}{M,}{E,}=x', 'read -r {HO,X}{ME,Y} <<< x', 'cat src/{a,b}{1,2}.ts', // the accepted cost
+    String.raw`declare HOM$'E'=x`, 'declare HOM$"E"=x', String.raw`export $'\x48'OME=x`, String.raw`export $'\x48OME=x'`,
+    String.raw`export $'\110OME'=x`, String.raw`declare $'HOME'=x`, String.raw`declare $'\U00000048OME'=x`,
+    // an earlier $' that opens no quote must not pair with the real one
+    String.raw`echo 'a$' ; declare HOM$'E'=x`, String.raw`echo 'a$' ; export $'\x48'OME=x`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`grep -n 'end$' src/a.ts; ${fetch}`, String.raw`printf $'a\tb\n'; ${fetch}`, `echo "cost: $" ; ${fetch}`,
+    `echo \${A}\${B}; ${fetch}`, `echo '[{"a":1},{"b":2}]'; ${fetch}`, String.raw`printf '\UFFFFFFFF'; ${fetch}`, String.raw`echo $'\UFFFFFFFF'; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729: bash drops a backslash before an ordinary letter, so g\it is git (and g\h is gh, a\z is az) to every rule that
+// reads those commands; a Windows path to git.exe stays git, and a quoted 'g\it' keeps its backslash
+test('guard: a backslash inside the git, gh or az name does not hide the command (#4729)', () => {
+  const judged = (command: string, role: string, protectedBranches: string[] = []) =>
+    evaluate({ tool: 'shell', command, role, protectedBranches }).allow;
+  for (const role of ROLES) {
+    for (const c of [String.raw`g\it push origin main`, String.raw`g\i\t push origin HEAD:main`, String.raw`gi\t push -f origin feat/x`,
+      String.raw`/usr/bin/g\it push origin main`, String.raw`sudo g\it push origin main`, String.raw`g\it p origin main`,
+      String.raw`bash -c 'g\it push origin main'`, String.raw`g\it -c alias.p=push p origin feat/x`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+    assert.equal(judged(String.raw`g\it push origin develop`, role, ['develop']), false, `${role} protected branch`);
+    for (const c of [String.raw`"C:\Program Files\Git\cmd\git.exe" status`, String.raw`ls C:\repos\g\it`, String.raw`g\it status`]) {
+      assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+    }
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) {
+    for (const c of [String.raw`g\h pr merge 5`, String.raw`a\z repos pr update --id 1 --status completed`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+  }
+  for (const role of READ_ONLY_ROLES) assert.equal(judged(String.raw`g\it commit -m x`, role), false, `${role} commit`);
+});
+
+// #4737: the other ways to split or build the name. The guard judges the command as written and once more with these
+// spellings read out, so each is blocked like the plain one.
+test('guard: a split or built git, gh or az name does not hide the command (#4737)', () => {
+  const judged = (command: string, role: string, protectedBranches: string[] = []) =>
+    evaluate({ tool: 'shell', command, role, protectedBranches }).allow;
+  const pushes = [
+    // PowerShell's backtick, cmd's caret
+    '& g`it p origin main', '& "g`it" p origin main', '& g`i`t push origin main', 'g^it p origin main', 'cmd /c g^it p origin main',
+    'cmd /c ^g^i^t push origin main',
+    // expansions that leave nothing behind
+    'g$()it p origin main', 'g$( )it p origin main', 'g$(true)it p origin main', 'g``it p origin main', 'g${x}it p origin main',
+    'g${x}it push origin main', 'g$@it p origin main', 'g$*it push origin main',
+    // built by a substitution, or held in a variable set on the same line
+    '"$(echo g)it" p origin main', "$(printf 'g')it p origin main", '`echo g`it p origin main', 'x=g""it; $x p origin main',
+    "x='git' && \"${x}\" p origin main", "$g = 'git'; & $g push origin main",
+    // brace expansion with an empty member
+    '{g,}it p origin main', 'gi{t,} p origin main',
+    // ANSI-C quoting hex- or octal-escaping a letter
+    String.raw`bash -c $'g\x69t p origin main'`, String.raw`bash -c $'g\151t push origin main'`,
+    String.raw`bash -c $'git push origin ma\x69n'`, String.raw`$'g\x69t' push origin main`,
+  ];
+  for (const role of ROLES) {
+    for (const c of pushes) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    assert.equal(judged('g`it push origin develop', role, ['develop']), false, `${role} protected branch`);
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) {
+    for (const c of ['g`h pr merge 5', 'g^h pr merge 5', 'g${x}h pr merge 5', 'a$()z repos pr update --id 1 --status completed']) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+  }
+  for (const role of READ_ONLY_ROLES) assert.equal(judged('g`it commit -m x', role), false, `${role} commit`);
+  const everyday = ["git log --grep '^init'", "x=git; $x status", 'x=main; git log $x', String.raw`IFS=$'\n'; git status`,
+    String.raw`printf $'a\tb\n'`, 'ls ${dir}/it', 'echo "$(echo gi)"; git status', 'git log --format=%H -- src/{a,b}.ts',
+    'echo "$x" && git fetch origin', 'git push origin feat/{x,}', 'git rev-parse `git branch --show-current`'];
+  for (const c of everyday.filter((c) => !c.includes('feat/{x,}'))) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
+});
+
+// #4737, the PR 135 review: more expansions that leave nothing behind, quoted or not; printf with a format; and the two
+// quote forms that carry a dollar sign. Each is git to bash
+test('guard: quoted, defaulted and empty-output pieces inside the git name do not hide it (#4737)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const pushes = [
+    'g"$@"it push origin main', 'g"$*"it push origin main', 'g"${x}"it push origin main', 'g${x:-}it push origin main',
+    'g${x-}it push origin main', 'g${x:=}it push origin main', 'g${@}it push origin main', 'g"${x:-}"it push origin main',
+    'g$(false)it push origin main', 'g$(echo)it push origin main', 'g$(echo "")it push origin main', "g$(printf '')it push origin main",
+    'g`true`it push origin main', 'g`false`it push origin main', 'g`echo`it push origin main', 'g"$(true)"it push origin main',
+    '$(printf %s git) push origin main', "$(printf '%s' git) push origin main", '$(printf "%s\\n" g)it push origin main',
+    '$(echo -n git) push origin main', '`printf %s git` push origin main',
+    'g$""it push origin main', '$"git" push origin main', String.raw`$'\U00000067it' push origin main`,
+  ];
+  for (const role of ROLES) for (const c of pushes) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+  const everyday = ['echo "$@" && git status', 'echo "${x:-none}"; git log -1', 'test "$(false)" || git fetch origin',
+    'echo "$(printf %s hi)"; git status', 'ls "${dir:-.}"/it', 'echo "cost: $" && git status'];
+  for (const c of everyday) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
+});
+
+// #4737, R2's note on PR 132: an expansion with nothing in it between two brace groups still leaves them side by side
+test('guard: an empty expansion between brace groups does not keep the $HOME/ exemption (#4737)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  for (const set of ['declare {HO,X}$(){ME,Y}=x', 'declare {HO,X}${Z}{ME,Y}=x', 'export {H,}$@{OME,}=x', 'declare {HO,X}$(true){ME,Y}=x',
+    'declare {HO,X}"${Z:-}"{ME,Y}=x']) {
+    assert.equal(judged(`${set}; ${run}`), false, `must block: ${set}`);
+  }
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  for (const c of [`cp f "\${name}"{,.bak}; ${fetch}`, `mkdir -p \${dir}/{a,b}; ${fetch}`, `echo \${A}\${B}; ${fetch}`]) {
+    assert.equal(judged(c), true, `must pass: ${c}`);
+  }
+});
+
+// #4737: a PowerShell variable name joined from two strings is still that name
+test('guard: a concatenated PowerShell variable name drops the $HOME/ exemption (#4737)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  for (const set of [`Set-Variable -Name ('HO'+'ME') -Value ${ps} -Force`, `sv ('ho' + 'me') ${ps} -Force`,
+    `[Environment]::SetEnvironmentVariable('HO'+'ME', ${ps})`]) {
+    assert.equal(judged(`${set}; ${run}`), false, `must block: ${set}`);
+  }
+  assert.equal(judged(`$n = 1 + 2; ${run}`), true);
+});
+
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
@@ -993,6 +1079,72 @@ function machineBudget() {
   assert.ok(n > 0);
   return Math.max(1000, Math.round(best * 25));
 }
+
+// #4767: PR 124 reads quotes as bash does for plain text. Where bash and PowerShell, or a comment or a heredoc body,
+// count them differently, that reading took a real command for quoted data. Such a command is read a second time the old
+// way, cut at every separator. "launch" stands for the seat leaving: sudo, a scheduler, a pane launch
+const miscounts = [
+  // a lone quote in a heredoc body or a comment pairs with a later one, and hides what is between
+  "cat <<'EOF'\ndon't\nEOF\nsudo codex\necho 'x'", 'cat <<EOF\nsay "hi\nEOF\nsudo codex\necho "x"',
+  "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
+  // PowerShell: no backslash escapes, a smart quote closes a string, and here-strings, <# #> and --% quote differently
+  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`, String.raw`echo "C:\w\" ; sudo codex ; echo "x\"`, String.raw`rg "a\"x ; schtasks /run /tn y ; echo "b\"c`,
+  'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
+  'echo "a\u201D ; sudo codex ; echo \u201Cb"', 'rg "a\u201D|schtasks /run /tn y|rg \u201Cb" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`,
+  'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "', 'echo `" ; sudo codex ; echo `"',
+  'rg x {# "\n|sudo codex|\n{# "',
+  // bash nests a new string inside "$( )" and "${ }"
+  'grep x "$(echo " "; sudo codex; echo " ")"', 'echo "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
+  'grep x "$(echo "|sudo codex|echo ")"', 'grep x "${y:-"|sudo codex|echo "}"',
+  // the search itself runs its text: a program flag, or the search word made into something else
+  "git grep -O'x;batch' y", "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`, "alias grep=eval; grep 'true;batch'",
+  "grep() { eval \"$1\"; }; grep 'true;batch'",
+  // PR 159 review (R1) 1: a delimiter that is not a plain word, so the guard cannot place the body
+  "cat <<'E-O-F'\ndon't\nE-O-F\nsudo codex\ncat <<'E-O-F'\nwon't\nE-O-F", "cat <<\\EOF\ndon't\nEOF\nsudo codex\ncat <<\\EOF\nwon't\nEOF",
+  "cat <<EOF.1\ndon't\nEOF.1\nsudo codex\ncat <<EOF.1\nwon't\nEOF.1",
+  // 2: a line bash does not take as the end: blanks after or before the word, or a tab under << without the -
+  "cat <<'EOF'\nEOF \ndon't\nEOF\nsudo codex\ncat <<'EOF'\nEOF \nwon't\nEOF", "cat <<'EOF'\n  EOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n  EOF\nwon't\nEOF",
+  "cat <<'EOF'\n\tEOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n\tEOF\nwon't\nEOF",
+  // 3: other function bodies, and PowerShell's alias setters
+  "grep() ( eval \"$1\" ); grep 'true;batch'", "grep()\n{\n eval \"$1\"\n}\ngrep 'true;batch'", "grep () if true; then eval \"$1\"; fi; grep 'true;batch'",
+  "Set-Alias grep Invoke-Expression; grep 'true;batch'", "New-Alias rg iex; rg 'true;batch'", "sal grep iex; grep 'true;batch'", "nal rg iex; rg 'true;batch'",
+];
+const miscountFine = [
+  `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', \'\'\'\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n\'\'\')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
+  'grep -E "before|at|after" notes.md', 'rg "x;at;y" src', 'grep "a|batch|b" f', 'grep -E "(at|on) the end" notes.md',
+  "cat <<'EOF' > n.md\nit isn't, and it won't\nEOF\ngrep \"a|batch|b\" f",
+  'grep "a|batch|b" <<< "$x"'.replace('$x', 'x'), "cat <<-EOF > n.md\n\tbody\n\tEOF\ngrep \"a|batch|b\" f", "cat <<EOF > n.md\nbody\nEOF\nrg \"x;at;y\" src",
+];
+test('#4767: a launch that a quote miscount would hide is blocked; plain quoted searches stay allowed', () => {
+  for (const c of miscounts) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
+  for (const c of miscountFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+});
+
+const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
+  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
+  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
+  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
+  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval eval eval eval eval sudo codex', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
+  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
+  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
+  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
+  // a -- or -Command before the string is not its first word
+  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
+  // a quoted flag, and cmd switches that carry a value
+  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'"];
+const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
+  'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log'];
+test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
+  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
+  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  // the lead keeps its herdr prompt inside a string too, and nothing else (its ssh is judged by #4707's deploy-host rule)
+  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'herdr agent prompt w1:p2 hi'`, role: 'lead' }), { allow: true });
+  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
+});
 
 test('long commands stay fast', () => {
   const budget = machineBudget();
@@ -1029,6 +1181,27 @@ test('long commands stay fast', () => {
     ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
     // PR 111 r3-2: nested $HOME/ setting values read the command for HOME once per text, not once per value
     ['git settings, 200 KB of nested $HOME/ values', asBuilder('git ' + kb200(`-c core.fsmonitor='git -c core.sshCommand="$HOME/k" status' `) + 'status')],
+    // #4729: the PowerShell setter test reads each segment once; the quote-stripped copy is made once per text
+    ['git settings, 200 KB of setter words beside a $HOME/ value', asBuilder(kb200('sv ni set ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // #4737: reading split names out is one pass per step, and the second reading is judged at most once
+    ['#4737, one word of 200 KB of split-name pieces', asBuilder('g' + kb200('`^""') + 'x')],
+    ['#4737, 200 KB of g${x} words', asBuilder(kb200('echo g${x}; '))],
+    // the PR 135 review: an unclosed substitution before 200 KB of blanks was quadratic (30 s, past the hook's timeout)
+    ['#4737, g, an open substitution and 200 KB of blanks', asBuilder('g$(' + ' '.repeat(200000) + 'x')],
+    ['#4737, echo of an open echo and 200 KB of blanks', asBuilder('echo $(echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, an open backtick echo and 200 KB of blanks', asBuilder('g`echo ' + ' '.repeat(200000) + 'x')],
+    ['#4737, one word of 200 KB of quoted and empty-output pieces', asBuilder('g' + kb200('"$@"$(echo "")`true`${x:-}$""') + 'x')],
+    ['#4737, 200 KB of open printf formats', asBuilder(kb200("$(printf '%s ") + kb200('$(echo -n -n '))],
+    ['#4737, 200 KB of unclosed $(echo and $\' starts', asBuilder(kb200('$(echo    ') + kb200("$'\\x41 "))],
+    ['#4737, 200 KB of same-line assignments and uses', asBuilder(kb200('x=git; $x status; '))],
+    ['#4737, 200 KB of g^it log commands', asBuilder(kb200('g^it log -1; '))],
+    ['#4737, 200 KB of plus signs and blanks beside a $HOME/ value', asBuilder('sv ' + kb200('a    +    ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // PR 132 review: the brace and wildcard tests read each word and statement once
+    ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
@@ -1037,34 +1210,27 @@ test('long commands stay fast', () => {
     ['kill scan, 200 KB of kill words', () => check(kb200('kill '))],
     ['kill scan, 200 KB of taskkill /pid', () => check(kb200('taskkill /pid 1 '))],
     ['kill scan, 200 KB of quoted words', () => check('echo ' + kb200('"a b" '))],
-    // #4736: the search-pattern pass reads the command once; #4734: at reads its own 40 words
-    ['search blanking, 200 KB of quoted patterns, as a builder', asBuilder('grep ' + kb200('"a|batch" '))],
-    ['search blanking, 200 KB of open parentheses and blanks, as a builder', asBuilder('grep x ' + kb200('(          '))],
-    ['search blanking, 200 KB after one unclosed quote, as a builder', asBuilder('grep "' + kb200('a '))],
-    ['search blanking, a 200 KB option word, as a builder', asBuilder('grep -' + 'a'.repeat(200000) + ' x')],
-    ['at, 200 KB of at segments, as a builder', asBuilder(kb200('at -m x$; at < 0; '))],
-    ['at, a 200 KB time word, as a builder', asBuilder('at ' + 'a'.repeat(200000))],
-    // #4741: a code string is walked at most CODE_DEPTH deep, and its words are read once per level
+    // #4767: the second reading and what decides it are each read once
+    ['second reading, 200 KB of separators after a comment, as a builder', asBuilder('ls # ' + kb200('; '))],
+    ['second reading, 200 KB of escaped quotes, as a builder', asBuilder('echo # ' + escaped)],
+    ['miscount check, 200 KB of heredoc headers, as a builder', asBuilder(kb200("<<'a'\n"))],
+    ['miscount check, 200 KB of short heredocs, as a builder', asBuilder(kb200('x <<a\nb\na\n'))],
+    ['miscount check, 200 KB of heredoc marks on one line, as a builder', asBuilder(kb200('<<a '))],
+    ['miscount check, 200 KB quote left open, as a builder', asBuilder('echo "' + kb200('a '))],
+    ['miscount check, 200 KB of parentheses, as a builder', asBuilder('grep x ' + kb200('( '))],
+    ['miscount check, 200 KB of newlines after empty parentheses, as a builder', asBuilder('grep x ()' + '\n'.repeat(200000))],
+    ['miscount check, 200 KB of empty parentheses, as a builder', asBuilder('grep x ' + kb200('() \n'))],
+    ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
+    // #4741: a code string is walked once however two readings find it, and its words are read once per level
     ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of eval after open parentheses, as a builder', asBuilder(kb200('eval x ( '))],
+    ['code strings, quoted -c strings nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'bash -c ' + JSON.stringify(c), 'ls ' + 'x '.repeat(50000)))],
     ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
     ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
     ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
     ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
     ['code strings, one 200 KB -c string left open, as a builder', asBuilder("sh -c '" + kb200('a '))],
-    ['code strings, 200 KB of closed quotes before an open one, as a builder', asBuilder('sh -c ' + kb200('"a" ') + "'")],
     ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
-    // PR 139 review (R2) H6: a newline is a separator and was also \s, so each one re-read every later one
-    ['search blanking, 200 KB of newlines, as a builder', asBuilder('grep x' + '\n'.repeat(200000))],
-    ['search blanking, 200 KB of blank lines, as a builder', asBuilder('grep x' + kb200(' \r\n'))],
-    ['search blanking, 200 KB of open parentheses and newlines, as a builder', asBuilder('grep x ' + kb200('(\n'))],
-    ['search blanking, 200 KB of separators, as a builder', asBuilder('grep x ' + kb200(';'))],
-    ['at, 200 KB of unclosed braces, as a builder', asBuilder('at ' + kb200('{,') )],
-    ['at, 200 KB of brace words, as a builder', asBuilder(kb200('at {a}; '))],
-    // PR 139 review round 3: operands of escaped quotes took 13 to 33 s
-    ['at, 200 KB of escaped quotes, as a builder', asBuilder('at ' + escaped)],
-    ['at -f, 200 KB of escaped quotes, as a builder', asBuilder('at -f ' + escaped + ' now')],
-    ['at, 200 KB of assignments in one segment, as a builder', asBuilder(kb200('at = '))],
-    ['at, 200 KB of at words in one segment, as a builder', asBuilder(kb200('then at '))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
@@ -1106,6 +1272,9 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
     ['#4669 I1, 200 KB of local x; echo "$k=$v"; as a builder', asBuilder(kb200('local x; echo "$k=$v"; '))],
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
+    ['#4707, 200 KB of quoted assignment values, as a builder', asBuilder(kb200('local args="--set $k=$v"; '))],
+    ['#4707, 200 KB of wrapper option values, as a builder', asBuilder(kb200('xargs -a f ') + 'echo hi')],
+    ['#4707, 200 KB of host assignments before SSH, as a lead', () => evaluate({ tool: 'shell', command: kb200('VPS=vps2; ') + 'ssh "$VPS" uptime', role: 'lead' })],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
     // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
@@ -1269,7 +1438,7 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     const bad = join(tmp, 'bad');
     mkdirSync(bad);
     copyFileSync(SHIM, join(bad, 'shim-claude.mjs'));
-    writeFileSync(join(bad, 'core.mjs'), 'export function evaluate() { return { allow: true }; }\n');
+    writeFileSync(join(bad, 'core.mjs'), 'export const localHosts = () => [];\nexport function evaluate() { return { allow: true }; }\n');
     const refused = installGuard(bad, target);
     assert.equal(refused.ok, false);
     assert.equal(refused.failures.length, 4, refused.failures.join('\n'));
@@ -1297,4 +1466,231 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     }
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// #4707, the review of PR 124 at e588da1. Its HIGH 3 (a one-word bash -c or eval launcher) is #4741's
+const mustBlock = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.equal(evaluate({ tool: 'shell', command, role, ...extra }).allow, false, `must block (${role}): ${command}`);
+};
+const mustAllow = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.deepEqual(evaluate({ tool: 'shell', command, role, ...extra }), { allow: true }, `must allow (${role}): ${command}`);
+};
+
+test('#4707 review H1: ssh to this machine in a URI, with two @, as any zero or IPv6 loopback, or through -o', () => {
+  mustBlock(['ssh a@b@localhost codex', 'ssh ssh://localhost', 'ssh ssh://me@localhost:22', 'ssh ssh://[::1]:22', 'ssh 0x0 codex', 'ssh 0.0 codex',
+    'ssh 00 codex', 'ssh ::ffff:127.0.0.1 codex', 'ssh 0:0:0:0:0:0:0:1 codex', 'ssh me@::1%lo codex', 'ssh 0:0:0:0:0:0:0:0 codex',
+    'ssh -o Hostname=localhost foo codex', 'ssh -oHostname=127.0.0.1 foo codex', 'ssh -o "HostName localhost" foo codex',
+    'ssh -o hostname=$H foo codex', 'ssh -o ProxyCommand="nc localhost 22" foo codex', 'ssh -oProxyCommand="nc 127.1 22" foo codex']);
+  mustBlock(['ssh -o HostName=localhost "$VPS" codex'], 'lead', { deployHost: 'vps2' });
+  mustAllow(['ssh ssh://git@github.com:22', 'ssh -o HostName=remote.example box uptime', 'ssh -o BatchMode=yes remote.example uptime',
+    'ssh -o ProxyCommand="ssh -W %h:%p jump.example" box uptime', 'ssh 2001:db8::7 uptime']);
+});
+
+test('#4707 review H2: only a text script over the read limit is refused; a large binary run by path is not', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-guard-big-'));
+  try {
+    const binary = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(300 * 1024, 1)]);
+    const pad = '# padding\n'.repeat(35000);
+    writeFileSync(join(dir, 'app'), binary);
+    writeFileSync(join(dir, 'configure'), '#!/bin/sh\n' + pad);
+    writeFileSync(join(dir, 'plain'), pad);
+    writeFileSync(join(dir, 'named.sh'), binary);
+    writeFileSync(join(dir, 'late-nul'), pad + '\0');
+    const run = (command: string) => runClaudeShim(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: dir }), { CB_ROLE: 'builder' });
+    assert.deepEqual(run('./app --version'), {});
+    for (const c of ['./configure', 'bash plain', 'bash named.sh', 'bash late-nul']) assert.equal(run(c).decision, 'block', c);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#4707 review M1: a lead ssh variable is known only from a plain assignment that the shell keeps', () => {
+  mustBlock([': VPS=vps2; ssh "$VPS" codex', 'VPS=vps2 ssh "$VPS" codex', 'VPS=vps2 true; ssh "$VPS" codex',
+    'VPS=vps2; read VPS <<< localhost; ssh "$VPS" codex', 'VPS=vps2; printf -v VPS %s localhost; ssh "$VPS" codex',
+    'VPS=vps2; VPS+=.localhost; ssh "$VPS" codex', 'VPS=vps2; mapfile -t VPS < f; ssh "$VPS" codex',
+    'declare -n r=VPS; VPS=vps2; r=localhost; ssh "$VPS" codex', 'false && VPS=vps2; ssh "$VPS" codex',
+    'if x; then VPS=vps2; fi; ssh "$VPS" codex', '(VPS=vps2); ssh "$VPS" codex', 'VPS=vps2; eval "$s"; ssh "$VPS" codex',
+    'VPS=vps2; . ./env.sh; ssh "$VPS" codex', 'if x; then :; VPS=vps2; fi; ssh "$VPS" codex',
+    'f() { :; VPS=vps2; }; ssh "$VPS" codex', 'while false; do :; VPS=vps2; done; ssh "$VPS" codex', '(true; VPS=vps2; true); ssh "$VPS" codex',
+    'case $x in a) :; VPS=vps2;; esac; ssh "$VPS" codex', 'VPS=vps2; unset VPS; ssh "$VPS" codex', 'VPS=vps2; for VPS in localhost; do ssh "$VPS" codex; done'], 'lead');
+  mustAllow(['VPS=vps2; ssh "$VPS" uptime', 'export VPS=vps2 && ssh "$VPS" uptime', 'A=1 VPS=vps2; ssh "${VPS}" uptime'], 'lead');
+  mustAllow(['VPS=vps2 ssh "$VPS" uptime'], 'lead', { deployHost: 'vps2' });
+  const readScript = (p: string) => (p === 'd.sh' ? 'VPS=${VPS:-vps2}\nssh "$VPS" uptime\n' : null);
+  mustBlock(['VPS=vps2 true; bash d.sh', 'read VPS <<< localhost; bash d.sh'], 'lead', { readScript, deployHost: 'localhost' });
+  mustAllow(['VPS=vps2 bash d.sh', 'bash d.sh'], 'lead', { readScript });
+  // the deploy script itself, which the lead runs
+  const deploy = readFileSync(join(import.meta.dirname, '..', 'deploy', 'copy-to-vps.sh'), 'utf8');
+  mustAllow(['bash deploy/copy-to-vps.sh', 'VPS=vps2 bash deploy/copy-to-vps.sh --final'], 'lead', { readScript: () => deploy });
+});
+
+test('#4707 review: the new reads stay fast on long commands', () => {
+  const budget = machineBudget();
+  const long = {
+    prints: 'printf '.repeat(30000),
+    evals: Array.from({ length: 20000 }, (_, i) => `v${i}=1`).join(';') + ';eval'.repeat(40000),
+    namerefs: '(declare -n '.repeat(16000) + 'declare -n r=' + 'a'.repeat(50000),
+    envs: 'node -e "spawn(' + ' env'.repeat(50000) + ' '.repeat(50000) + 'env}"',
+    options: 'ssh ' + '-o A=b '.repeat(28000) + 'box uptime',
+    splits: 'env -S '.repeat(25000),
+    joinedSplits: 'env -vS '.repeat(22000),
+    refs: 'declare -n a=b '.repeat(13000),
+    spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
+  };
+  for (const [name, command] of Object.entries(long)) {
+    const from = process.hrtime.bigint();
+    evaluate({ tool: 'shell', command, role: 'lead' });
+    const ms = Number(process.hrtime.bigint() - from) / 1e6;
+    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms, budget ${Math.round(budget)} ms`);
+  }
+});
+
+test('#4707 review M2: an env shorthand anywhere in a child option object is blocked; a copy of process.env is not', () => {
+  mustBlock(['node -e "const env={}; spawn(c,[],{stdio:\'inherit\',env})"', 'node -e "const env={}; spawn(c,[],{cwd, env})"',
+    'node -e "let env={...process.env}; env={}; spawn(c,[],{env})"']);
+  mustAllow(['node -e "const env={...process.env}; spawn(c,[],{env})"', 'node -e "const env = { ...process.env, A: 1 }; spawn(c,[],{cwd, env})"']);
+});
+
+test('#4707 review M3: wrapper options that take a value, and env -S, keep the launcher in command position', () => {
+  mustBlock(["xargs -d '\\n' sudo", 'xargs --delimiter x sudo', 'xargs --process-slot-var S sudo', 'timeout -s 9 5 sudo codex',
+    'timeout -k 1 --signal KILL 5 sudo codex', "env -S 'sudo codex'", "env --split-string='sudo codex'", 'env -S sudo codex', 'env -u FOO sudo codex']);
+  mustAllow(["xargs -d '\\n' echo", 'timeout -s 9 5 echo sudo', "env -S 'echo sudo'", 'env -u FOO echo sudo']);
+});
+
+test('#4707 review M4: scripts reached through -c, env, a leading or numbered redirect, or head are read', () => {
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`bash -c 'bash ${f}'`, `sh -c "cat ${f} | bash"`, `env bash ${f}`, `env A=1 bash ${f}`, `< ${f} bash`,
+    `bash 0< ${f}`, `head ${f} | bash`, `tail -n 5 ${f} | sh`, `timeout -s 9 5 bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
+});
+
+test('#4707 review M5: a nameref to a target the guard cannot read is blocked', () => {
+  mustBlock(['x=CB_ROLE; declare -n r=$x; r=; codex', 'typeset -n r="$x"; r=', 'f() { local -n r=$1; r=; }; f CB_ROLE']);
+  mustAllow(['declare -n r=PATH', 'declare -i n=$x', 'grep -rn "declare -n r=$x" kit']);
+});
+
+// the review of ed4b13a
+test('#4707 review 2 H1: ssh -o HostName with inner quotes or space around this machine\'s name, as OpenSSH reads it', () => {
+  mustBlock(['ssh -o \'HostName="localhost"\' foo codex', 'ssh -o \'HostName localhost \' foo codex', 'ssh -o "HostName=\'127.0.0.1\'" foo codex',
+    'ssh -o \'HostName=local""host\' foo codex', 'ssh -o \'"HostName" localhost\' foo codex', 'ssh -o "HostName=localhost # box" foo codex',
+    'ssh -o \'HostName=\t::1\t\' foo codex']);
+  mustAllow(['ssh -o \'HostName="remote.example"\' box uptime', 'ssh -o "HostName remote.example " box uptime']);
+});
+
+test('#4707 review 2 H2: a nameref command is judged on every operand, not only the first', () => {
+  mustBlock(['x=CB_ROLE; declare -n a=foo r=$x; r=; codex', 'local -n a=PATH b="$1"', 'typeset -g -n a=foo "r=$x"',
+    'declare -n a=\'$lit\' r="a\'$x\'"', 'declare -n $spec', 'declare -n r; r=$x; r=', 'command declare -n a=foo r=`id`', 'declare -gn a=foo r=${x}']);
+  mustAllow(['declare -n a=foo r=PATH', 'declare -n r=\'$literal\'', 'declare -n a=foo; b=$x', 'declare -n', 'declare -p -x',
+    'declare a=foo r=$x', 'declare +n r', 'grep -rn "declare -n a=foo r=$x" kit']);
+});
+
+test('#4707 review 2 H3: a combined short option still takes its value: env -vS, -vu, timeout -vs, xargs -0n', () => {
+  mustBlock(['env -vS \'sudo codex\'', 'env -iS \'codex\'', 'env -vS\'sudo codex\'', 'env -0vS "sudo codex"', 'env -vu FOO sudo codex',
+    'env -vC /tmp sudo codex', 'timeout -vs 9 5 sudo codex', 'timeout -fk 1 5 sudo codex', 'xargs -0n 1 sudo codex', 'xargs -rI {} sudo codex',
+    'stdbuf -oL sudo codex']);
+  mustAllow(['env -vS \'echo sudo\'', 'env -vu SHELL echo sudo', 'env -uSHELL echo sudo', 'timeout -vs 9 5 echo sudo', 'xargs -0n 1 echo sudo']);
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`env -S 'bash ${f}'`, `env -vS "bash ${f}"`, `env --split-string='bash ${f}'`, `timeout -vs 9 5 bash ${f}`, `env -vu FOO bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
+});
+
+// #4734 and #4736: a script line or a search pattern holding the two-letter scheduler word was refused. #4707's
+// quote-aware walk (PR 124) fixed the reported commands; these pin them, and the spellings four reviews of PR 139 used to
+// get a real launch past a narrower rule, so a later one cannot reopen either side
+const card4734Fine = [
+  "python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE \"\\b(const|let) (argv|at)\\b\" a.js",
+  "grep -n \"fresh environment\\|schtasks\\|'at'\\|cron\" kit/guard/core.mjs",
+  "grep -E \"before|at|after\" notes.md",
+  "grep -E \"(at|on) the end\" notes.md",
+  "rg \"x;at;y\" src",
+  "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"",
+  "node -e \"\n  if (at < 0) { return; }\n\"",
+  "at -l",
+  "at -c 5",
+  "at -r 3",
+  "grep -E \"a|batch|b\" f",
+  "grep -nE 'relay|batch|queue' cli/relay.ts",
+  "rg -n \"x|sudo|y\" src",
+  "git grep -E 'tmux new|crontab' -- docs",
+  "git -C ../x grep \"a|batch|b\"",
+  "cd cli && LC_ALL=C grep -E \"a|batch|b\" relay.ts | head -5",
+  "cb bug \"guard: blocked\" -b \"the search was grep -E \\\"a|batch|b\\\" cli/relay.ts\" -l guard",
+];
+const card4734Runs = [
+  "at now",
+  "at now+1min",
+  "at \"now + 1 hour\"",
+  "at 'midnight'",
+  "at noon tomorrow",
+  "at teatime",
+  "at 4pm",
+  "at 16:00",
+  "at 0400 -f job.sh",
+  "at -m -q b now",
+  "at -f job.sh 10:00",
+  "at -mf job.sh now",
+  "at -t 202601011200",
+  "at -mt202601011200",
+  "at < job.sh now",
+  "at <job.sh now",
+  "at now <<'EOF'\nls\nEOF",
+  "at \"$WHEN\"",
+  "at $(date +%H:%M)",
+  "at `cat t`",
+  "at 2>&1 now",
+  "echo now | xargs at",
+  "at \\\\host 10:00 cmd",
+  "echo x | /usr/bin/at now",
+  "if true; then at now; fi",
+  "bash -c \"echo x | at now\"",
+  "at \\\n now",
+  "at n\"\"ow",
+  "at 'mid'night",
+  "at \\now",
+  "at tomorrow",
+  "at friday",
+  "at jul 4",
+  "at next week",
+  "echo x | at -b",
+  "at -bf job.sh",
+  "echo x | at -mb",
+  "at >= now",
+  "at <= now",
+  "at {,now}",
+  "at {n..n}ow",
+  "at -f {job.sh,now}",
+  "at {,}now",
+  "at \"\" now",
+  "at '' now",
+  "at \" \" now",
+  "at \"\\ \" now",
+  "at no?",
+  "at n[o]w",
+  "at *",
+  "at +5min",
+  "at + 1 hour",
+  "at sept 4",
+  "at \"-b\"",
+  "at '-b'",
+  "at -\"\"b",
+  "at -\\b",
+  "at \\-b",
+  "at -m\"\"b",
+  "at \"-t\" 202601011200",
+  "at '-t' 202601011200",
+  "at \"-m\" now",
+  "at \\-m now",
+  "at \"-f\" job.sh now",
+  "at -\"\"f job.sh now",
+  "at {\" \",now}",
+  "case $x in y) : ;; at)\\batch ;; esac",
+  "case $x in y) : ;; at)\\sudo codex ;; esac",
+  "case $x in y) : ;; at)\\wsl ;; esac",
+  "case $x in y) : ;; at)\\schtasks /run /tn x ;; esac",
+  "case $x in y) : ;; at)\\b$(echo atch) ;; esac",
+  "case $x in y) : ;; at)\\b\"atch\" ;; esac",
+  "case $x in y) : ;; at)\\s\"u\"do codex ;; esac",
+];
+test('#4734: the reported script and search commands pass; a real launch by that word, however spelled, stays blocked', () => {
+  for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
 });

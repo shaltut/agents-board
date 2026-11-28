@@ -11,8 +11,8 @@
 // exec_command, its one shell tool on every platform, arrives as tool_name Bash with { command: <raw string> } (there is
 // no unified_exec or PowerShell tool); apply_patch as { command: <patch text> }; write_stdin fires no hook at all, since
 // it feeds a session whose command already passed here as Bash; every other function tool arrives under its own name.
-import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -71,7 +71,7 @@ export function parseCodexInput(raw) {
 // and through the real path of their nearest existing folder (review 68-I2: ./, ../ and links are judged where they land).
 const FS = { resolve, dirname, basename, join, realpathSync };
 // #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
-const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 export function editPaths(input, cwd) {
   return [...new Set(core.editTargets(input).flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }
@@ -95,7 +95,7 @@ export function runCodexShim(raw, env = process.env) {
     // #4669: a shell script the command runs is read from the hook's cwd and judged too; ssh to this machine's own name counts
     // stdin: Codex's exec_command keeps a process's input open for write_stdin, which no hook sees (#4626)
     const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths,
-      readScript: readerFor(p.cwd ?? process.cwd()), hosts: [hostname()], stdin: p.tool === 'shell' });
+      readScript: readerFor(p.cwd ?? process.cwd()), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS, stdin: p.tool === 'shell' });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return deny(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

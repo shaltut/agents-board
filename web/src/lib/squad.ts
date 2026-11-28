@@ -7,10 +7,10 @@ export type Role = (typeof ROLES)[number]
 export const REPO_BOUND: readonly Role[] = ['builder', 'reviewer']
 export const CLAUDE_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const
 
-export interface Fallback { agent: string; model: string }
-export interface SeatSpec { agent?: string; model?: string; fallback?: Fallback[] }
+export interface Fallback { agent: string; model: string; effort?: string }
+export interface SeatSpec { agent?: string; model?: string; effort?: string; fallback?: Fallback[] }
 export interface RoleSpec {
-  count?: number | Record<string, number>; model?: string; machine: string; agent?: string; fallback?: Fallback[]
+  count?: number | Record<string, number>; model?: string; machine: string; agent?: string; effort?: string; fallback?: Fallback[]
   seats?: Record<string, SeatSpec>
 }
 export interface MachineSpec { herdr: string | null; repo?: string; board: string; workspace?: string }
@@ -33,6 +33,8 @@ export interface SquadPage {
 export interface SquadOptions {
   roles: Role[]; agents: { agent: string; main: boolean }[]; claude_models: string[]; default_models: Record<string, string>
   limits: { count_min: number; count_max: number; macbook_seats: number; fallbacks: number; session_name: number }
+  /** per agent, the effort levels a seat can be started with; an empty list: that agent takes none */
+  efforts: Record<string, string[]>
   models_used: Record<string, string[]>; machines_used: ({ key: string } & MachineSpec)[]
 }
 export interface RoleTextPage {
@@ -67,7 +69,8 @@ export const agentLabel = (a?: string | null) => AGENT[a ?? 'claude'] ?? 'Anothe
 /** Claude's four names get a capital; other agents' model names are what Ahmed typed, shown as typed. */
 export const modelLabel = (m?: string | null) =>
   !m ? 'its usual model' : (CLAUDE_MODELS as readonly string[]).includes(m) ? m[0]!.toUpperCase() + m.slice(1) : m
-export const setupLabel = (agent?: string | null, model?: string | null) => `${agentLabel(agent)}, ${modelLabel(model)}`
+export const setupLabel = (agent?: string | null, model?: string | null, effort?: string | null) =>
+  `${agentLabel(agent)}, ${modelLabel(model)}${effort ? `, ${effort} effort` : ''}`
 /** A machine as a person knows it: herdr null is the PC the board runs on. */
 export function machineLabel(m?: Pick<MachineSpec, 'herdr'> | null, key?: string) {
   if (!m) return key ? `machine ${key}` : 'an unknown machine'
@@ -178,7 +181,15 @@ export function patchRole(sq: Squad, role: Role, patch: Partial<RoleSpec>, defau
   const spec = next.roles[role]
   if (!spec) return next
   Object.assign(spec, patch)
+  if ('effort' in patch && !patch.effort) delete spec.effort // squad_set refuses a null: no key is the agent's default
   if ('agent' in patch) {
+    // levels differ by agent: the role starts at the new one's default, and so does each seat that would inherit it
+    delete spec.effort
+    for (const [k, s] of Object.entries(spec.seats ?? {})) {
+      if (!s.agent) delete s.effort
+      if (Object.keys(s).length === 0) delete spec.seats![k]
+    }
+    if (spec.seats && Object.keys(spec.seats).length === 0) delete spec.seats
     const claude = (CLAUDE_MODELS as readonly string[]).includes(spec.model ?? '')
     if ((patch.agent ?? 'claude') === 'claude') { delete spec.agent; if (!claude) spec.model = defaults[role] ?? 'sonnet' }
     else if (claude) spec.model = '' // a Claude name never fits another agent: the field asks for one
@@ -210,9 +221,27 @@ export const RX = {
 }
 export const pathOk = (p?: string) => !!p && RX.absolute.test(p) && !RX.forbidden.test(p)
 
-/** Why a model does not fit its agent, or null. */
-export function modelProblem(agent: string | undefined, model: string | undefined): string | null {
+/** The two model names a value is, when it is two known names joined with no separator: the settings field's picker
+ *  slip, where the second click appended to the first instead of replacing it (#4717). null when it is not such a
+ *  pair (a single name, a new name, or a value that does not split into two known ones). */
+export function joinedModels(model: string, known: readonly string[]): [string, string] | null {
+  const v = model ?? ''
+  if (!v) return null
+  for (const a of known) {
+    if (a && v.length > a.length && v.startsWith(a)) {
+      const b = v.slice(a.length)
+      if (known.includes(b)) return [a, b]
+    }
+  }
+  return null
+}
+
+/** Why a model does not fit its agent, or null. known (the names already used for that agent) catches two names joined
+ *  with no separator, which still fit the agent's shape alone (#4717). */
+export function modelProblem(agent: string | undefined, model: string | undefined, known: readonly string[] = []): string | null {
   const m = model ?? ''
+  const joined = joinedModels(m, known)
+  if (joined) return `That is two model names joined (${joined[0]} and ${joined[1]}): pick one.`
   const claudeName = (CLAUDE_MODELS as readonly string[]).includes(m)
   switch (agent ?? 'claude') {
     case 'claude': return claudeName ? null : 'Pick Opus, Sonnet, Haiku or Fable.'
@@ -227,7 +256,7 @@ export interface Problem { where: string; text: string }
 
 /** Everything cb.squad_set would refuse, said plainly and placed by section ('role:<role>', 'machines', 'repos',
  *  'areas', 'squad'). An empty list means the save should pass the server's checks. */
-export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'>): Problem[] {
+export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'> & { models_used?: SquadOptions['models_used'] }): Problem[] {
   const out: Problem[] = []
   const add = (where: string, text: string) => out.push({ where, text })
   const mains = new Set(opts.agents.filter((a) => a.main).map((a) => a.agent))
@@ -276,7 +305,7 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
     const agent = spec.agent ?? 'claude'
     if (!sq.machines[spec.machine]) add(where, `${name}: pick a machine.`)
     if (!mains.has(agent)) add(where, `${agentLabel(agent)} is not ready to run a seat yet. You can list it as a backup.`)
-    const mp = modelProblem(agent, spec.model)
+    const mp = modelProblem(agent, spec.model, opts.models_used?.[agent])
     if (mp) add(where, `${name}: ${mp}`)
     let need: string[] = []
     if (role === 'owner') need = multi ? [...new Set(areas.flatMap((a) => (typeof a === 'string' ? [] : [a.repo])))] : []
@@ -295,12 +324,12 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
       need = home ? [home] : []
     }
     if (multi) for (const r of need) if (sq.repos?.[r] && !sq.repos[r]!.paths[spec.machine]) add(where, `${name}: repo ${r} has no folder on ${machineLabel(sq.machines[spec.machine], spec.machine)}.`)
-    fallbackProblems(spec.fallback, agent, spec.model, name).forEach((t) => add(where, t))
+    fallbackProblems(spec.fallback, agent, spec.model, name, opts.models_used).forEach((t) => add(where, t))
     for (const [k, s] of Object.entries(spec.seats ?? {})) {
       const label = seatKeyLabel(sq, role, k), sa = s.agent ?? agent, sm = s.model ?? spec.model
       if (s.agent && !mains.has(s.agent)) add(where, `${label}: ${agentLabel(s.agent)} is not ready to run a seat yet.`)
-      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm); if (p) add(where, `${label}: ${p}`) }
-      fallbackProblems(s.fallback, sa, sm, label).forEach((t) => add(where, t))
+      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm, opts.models_used?.[sa]); if (p) add(where, `${label}: ${p}`) }
+      fallbackProblems(s.fallback, sa, sm, label, opts.models_used).forEach((t) => add(where, t))
     }
     if (sq.machines[spec.machine]?.herdr === 'macbook') mac += seatCount(sq, role)
   }
@@ -316,13 +345,13 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
   return out
 }
 
-function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string): string[] {
+function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string, used?: SquadOptions['models_used']): string[] {
   if (!fb) return []
   const out: string[] = []
   if (fb.length > 5) out.push(`${label}: at most 5 backups.`)
   const seen = new Set<string>()
   fb.forEach((f, i) => {
-    const p = modelProblem(f.agent, f.model)
+    const p = modelProblem(f.agent, f.model, used?.[f.agent])
     if (p) out.push(`${label}, backup ${i + 1}: ${p}`)
     const pair = `${f.agent} ${f.model}`
     if (f.agent === agent && f.model === model) out.push(`${label}, backup ${i + 1} is the same as the seat itself.`)
@@ -358,7 +387,10 @@ function countWords(sq: Squad, role: Role): string {
   if (typeof spec.count === 'object') return Object.entries(spec.count).map(([r, n]) => `${n} in ${r}`).join(', ')
   return plural(spec.count ?? 0, 'seat')
 }
-const fbWords = (fb?: Fallback[]) => (fb?.length ? fb.map((f) => setupLabel(f.agent, f.model)).join('; ') : 'none')
+const fbWords = (fb?: Fallback[]) => (fb?.length ? fb.map((f) => setupLabel(f.agent, f.model, f.effort)).join('; ') : 'none')
+/** A seat's effort: its own, else its role's when it runs the role's agent (as seatSpec, cli/squad-up.ts). */
+export const seatEffort = (role: { agent?: string; effort?: string }, seat: { agent?: string; effort?: string }) =>
+  seat.effort ?? ((seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude') ? role.effort : undefined)
 
 /** A saved squad as lines a person reads (the history's "view"). */
 export function summarizeSquad(sq: Squad | null): string[] {
@@ -367,11 +399,11 @@ export function summarizeSquad(sq: Squad | null): string[] {
   for (const role of ROLES) {
     const spec = sq.roles[role]
     if (!spec) continue
-    let line = `${ROLE_MANY[role]}: ${countWords(sq, role)} on ${machineLabel(sq.machines[spec.machine], spec.machine)}, ${setupLabel(spec.agent, spec.model)}`
+    let line = `${ROLE_MANY[role]}: ${countWords(sq, role)} on ${machineLabel(sq.machines[spec.machine], spec.machine)}, ${setupLabel(spec.agent, spec.model, spec.effort)}`
     if (spec.fallback?.length) line += `; backup if it stops: ${fbWords(spec.fallback)}`
     lines.push(line + '.')
     for (const [k, s] of Object.entries(spec.seats ?? {})) {
-      lines.push(`${seatKeyLabel(sq, role, k)} runs ${setupLabel(s.agent ?? spec.agent, s.model ?? spec.model)}${s.fallback?.length ? `; backup: ${fbWords(s.fallback)}` : ''}.`)
+      lines.push(`${seatKeyLabel(sq, role, k)} runs ${setupLabel(s.agent ?? spec.agent, s.model ?? spec.model, seatEffort(spec, s))}${s.fallback?.length ? `; backup: ${fbWords(s.fallback)}` : ''}.`)
     }
   }
   const off = ROLES.filter((r) => !sq.roles[r]).map((r) => ROLE_MANY[r])
@@ -394,7 +426,7 @@ export function diffSquads(a: Squad | null, b: Squad | null): string[] {
   for (const role of ROLES) {
     const x = a.roles[role], y = b.roles[role], name = ROLE_MANY[role]
     if (!x && !y) continue
-    if (!x) { out.push(`${name} turned on: ${countWords(b, role)}, ${setupLabel(y!.agent, y!.model)}.`); continue }
+    if (!x) { out.push(`${name} turned on: ${countWords(b, role)}, ${setupLabel(y!.agent, y!.model, y!.effort)}.`); continue }
     if (!y) { out.push(`${name} turned off.`); continue }
     if (role !== 'owner' && !same(x.count, y.count)) {
       if (typeof x.count === 'object' || typeof y.count === 'object') {
@@ -405,7 +437,9 @@ export function diffSquads(a: Squad | null, b: Squad | null): string[] {
       } else out.push(`${name}: ${x.count ?? 0} → ${y.count ?? 0} seats.`)
     }
     if (x.machine !== y.machine) out.push(`${name} moved from ${machineLabel(a.machines[x.machine], x.machine)} to ${machineLabel(b.machines[y.machine], y.machine)}.`)
-    if ((x.agent ?? 'claude') !== (y.agent ?? 'claude') || x.model !== y.model) out.push(`${name}: ${setupLabel(x.agent, x.model)} → ${setupLabel(y.agent, y.model)}.`)
+    if ((x.agent ?? 'claude') !== (y.agent ?? 'claude') || x.model !== y.model || x.effort !== y.effort) {
+      out.push(`${name}: ${setupLabel(x.agent, x.model, x.effort)} → ${setupLabel(y.agent, y.model, y.effort)}.`)
+    }
     if (!same(x.fallback, y.fallback)) out.push(`${name} backups: ${fbWords(x.fallback)} → ${fbWords(y.fallback)}.`)
     if (!same(x.seats, y.seats)) out.push(`${name}: single-seat settings changed.`)
   }

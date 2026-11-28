@@ -13,8 +13,8 @@
 // (#4392): cb squad up always sets both, and core applies no secret or fence rule to a null role.
 // agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
 // every path arg, as given and as resolved (a link named notes.txt can lead to .env).
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -157,14 +157,18 @@ export function checkPath(call, input, mode = 'edit', platform = process.platfor
   const root = real(resolve(root0));
   if (root === null) return SHORT;
   const base = resolve(cwd ?? root0);
-  const roots = [root, ...worktreeRoots(root)];
+  const linked = worktreeRoots(root);
+  const roots = [root, ...linked];
+  // #4743: the deny segments are read below a root, so they never see a linked root that itself sits inside one
+  // (~/.gemini/x, <repo>/.git/x). Such a root grants nothing; below another root's grant it still judges (kit/guard).
+  const grants = [root, ...linked.filter((r) => !r.split(sep).some((s) => WRITE_DENY_SEGMENTS.includes(normSegment(s, platform))))];
   for (const k of given) {
     const v = args[k];
     if (typeof v !== 'string' || !v.trim()) return `the ${mode}'s target path (${k}) is not a non-empty string`;
     const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
     if (abs === null) return `${SHORT} (${k})`;
+    if (!grants.some((r) => below(r, abs) !== null)) return `${verb} outside the workspace and its git worktrees (${k})`;
     const rels = roots.map((r) => below(r, abs)).filter((r) => r !== null);
-    if (rels.length === 0) return `${verb} outside the workspace and its git worktrees (${k})`;
     // every root that holds the path judges it: a worktree nested in the workspace keeps its own kit/guard denied
     for (const rel of rels) {
       const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
@@ -210,7 +214,7 @@ export function editPaths(call, input) {
 }
 
 // #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
-const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_AGENT, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runAgyShim(raw, env = process.env) {
@@ -229,9 +233,11 @@ export function runAgyShim(raw, env = process.env) {
     }
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     // #4669: a shell script the command runs is read from the hook's cwd and judged too; ssh to this machine's own name counts
-    const cwd = isObject(p.input) && typeof p.input.cwd === 'string' && p.input.cwd ? p.input.cwd : process.cwd();
+    const callCwd = p.tool === 'shell' ? p.call.args?.Cwd : undefined;
+    const cwd = typeof callCwd === 'string' && callCwd ? callCwd
+      : isObject(p.input) && typeof p.input.cwd === 'string' && p.input.cwd ? p.input.cwd : process.cwd();
     const v = core.evaluate({ tool: p.tool, command: p.command, role, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1',
-      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined, readScript: readerFor(cwd), hosts: [hostname()] });
+      paths: p.tool === 'edit' ? editPaths(p.call, p.input) : undefined, readScript: readerFor(cwd), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
     if (v?.allow === true) {
       if (p.tool === 'edit') {
         const why = checkEditPath(p.call, p.input) ?? secretTarget(p.call, p.input, 'edit');
