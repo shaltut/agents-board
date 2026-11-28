@@ -1833,11 +1833,65 @@ const SESSION_INTERP = {
   julia: { s: { code: 'eEvh', inter: 'i', arg: 'pJt' }, l: { code: ['--eval', '--print', '--version', '--help'], inter: ['--interactive'], arg: ['--project', '--threads'] } },
   r: { s: { code: 'efh', inter: '', arg: '' }, l: { code: ['--version', '--help', '--file'] } },
   expect: { s: { code: 'cfv', inter: 'i', arg: '' }, l: {} },
+  tclsh: { s: { code: '', inter: '', arg: '' }, l: {} }, // #4658 I3: a script is a one-shot, none is a REPL
+  wish: { s: { code: '', inter: '', arg: '' }, l: {} },
 };
+// #4658 I1: a one-shot whose own code opens a session. For a shell, a call whose first string is the bare shell: the
+// string closes right after the name (or -i follows, in it or as the next string, or an options object comes next), so
+// system('sh build.sh') and ['bash', '-c', ...] pass. Blanks are bounded, so a long run of them stays linear. Code that
+// builds these names is not read: --disable unified_exec_tty is what stops a seat typing into what it starts (PR 104).
+const SHELL_PATH = String.raw`(?:\/(?:usr\/)?(?:local\/)?bin\/)?(?:(?:ba|z|da|k|c|tc|fi)?sh|(?:pwsh|powershell|cmd)(?:\.exe)?)`;
+const SPAWNS_SHELL = new RegExp(String.raw`(?<!\w)(?:exec\w*|system|spawn\w*|popen|Popen|call|check_call|check_output|run)[ \t]{0,4}\(?[ \t]{0,4}\[?[ \t]{0,4}(["'])${SHELL_PATH}(?:[ \t]{1,4}-i)?\1[ \t]{0,4}(?:$|[)\];}]|,[ \t]{0,4}(?:\{|(["'])(?:-i\2|(?:ba|z)?sh\2[ \t]{0,4}[)\]])))`);
+const CODE_OPENS = {
+  python: /\b(?:pty\.spawn|code\.interact|InteractiveConsole|InteractiveInterpreter|pdb\.(?:set_trace|run\w{0,8}|pm|post_mortem))[ \t]{0,4}\(|(?<![\w.'"])breakpoint[ \t]{0,4}\(/,
+  node: /\brequire[ \t]{0,4}\([ \t]{0,4}["'](?:node:)?repl["']|\bfrom[ \t]{1,4}["'](?:node:)?repl["']/,
+  ruby: /\bbinding\.(?:irb|pry)\b|\b(?:IRB|Pry)\.start\b/,
+};
+const REPL_MODULES = new Set(['code', 'pdb', 'asyncio', 'IPython', 'bpython', 'ptpython']);
+// the module python -m runs: options are read up to the script or -c
+function pythonModule(args) {
+  for (let i = 0; i < args.length && args[i].startsWith('-'); i++) {
+    const m = /^-[bBdEhiIOPqRsSuvx]*([mcWX])(.*)$/.exec(args[i]);
+    if (!m) continue;
+    if (m[1] === 'm') return m[2] || args[i + 1] || null;
+    if (m[1] === 'c') return null;
+    if (!m[2]) i++;
+  }
+  return null;
+}
+// #4658 I2: a package runner starts the command that follows. sub: the subcommands that do; before: options with a value
+// ahead of the subcommand; val: options with a value ahead of the command; call: options whose value is a command string
+const SESSION_RUNNERS = {
+  npx: { val: new Set(['-p', '--package', '-w', '--workspace']), call: new Set(['-c', '--call']) },
+  bunx: { val: new Set(['-p', '--package']) },
+  npm: { sub: new Set(['exec', 'x']), before: new Set(['--prefix', '-w', '--workspace']), val: new Set(['-p', '--package', '-w', '--workspace']), call: new Set(['-c', '--call']) },
+  pnpm: { sub: new Set(['exec', 'dlx']), before: new Set(['--filter', '-F', '-C', '--dir']), val: new Set(['--filter', '-F', '-C', '--dir', '--package']) },
+  yarn: { sub: new Set(['exec', 'dlx']), before: new Set(['--cwd']), val: new Set(['-p', '--package']) },
+  uv: { sub: new Set(['run']), before: new Set(['--directory', '--project']), val: new Set(['--with', '--python', '-p', '--project', '--directory', '--env-file', '--extra', '--group']) },
+  poetry: { sub: new Set(['run']), before: new Set(['-C', '--directory', '-P', '--project']), val: new Set() },
+  pipenv: { sub: new Set(['run']), before: new Set(), val: new Set() },
+  bundle: { sub: new Set(['exec']), before: new Set(), val: new Set() },
+};
+// what a runner starts: { text } (a command string), { words }, or null when this call starts nothing the guard reads
+function runnerStarts(spec, args) {
+  let i = 0;
+  if (spec.sub) {
+    i = firstWord(args, 0, spec.before);
+    if (i < 0 || !spec.sub.has(args[i])) return null;
+    i++;
+  }
+  for (; i < args.length && args[i].startsWith('-'); i++) {
+    if (args[i] === '--') { i++; break; }
+    if (spec.call?.has(args[i])) return { text: args[i + 1] ?? '' };
+    if (spec.val.has(args[i])) i++;
+  }
+  return i < args.length ? { words: args.slice(i) } : null;
+}
+const FIND_RUNS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 const INTERP_OF = (n) => (PYTHON.test(n) ? 'python' : n === 'nodejs' ? 'node' : n === 'luajit' ? 'lua' : n === 'rscript' ? null : SESSION_INTERP[n] ? n : null);
 // always a session, unless --version or --help comes first
 const SESSION_ALWAYS = new Set(['tmux', 'screen', 'byobu', 'script', 'irb', 'pry', 'ghci', 'jshell', 'erl', 'scala', 'sbcl', 'guile', 'racket', 'clj',
-  'clojure', 'ocaml', 'utop', 'swipl', 'telnet', 'mosh', 'rlogin', 'ftp', 'lftp', 'vim', 'vi', 'nvim', 'view', 'vimdiff', 'nano', 'pico', 'micro',
+  'clojure', 'ocaml', 'utop', 'swipl', 'groovysh', 'jdb', 'evcxr', 'gore','telnet', 'mosh', 'rlogin', 'ftp', 'lftp', 'vim', 'vi', 'nvim', 'view', 'vimdiff', 'nano', 'pico', 'micro',
   'joe', 'ed', 'ex', 'less', 'more', 'most', 'pg', 'man', 'info', 'mc', 'lldb', 'pdb', 'mongo', 'bc', 'dc']);
 // clients: a session unless one of these options (a query, a file, an exit) is given; '-' as a value reads the input
 const SESSION_CLIENT = {
@@ -1858,7 +1912,8 @@ const SESSION_CLIENT = {
 const SESSION_POSITIONAL = {
   sqlite3: { need: 2, arg: new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-init', '-mmap']), exit: /^-(?:version|help)$/ },
   duckdb: { need: 2, arg: new Set(['-cmd', '-separator', '-newline', '-nullvalue', '-init']), exit: /^-(?:version|help|c)$/ },
-  'redis-cli': { need: 1, arg: new Set(['-h', '-p', '-s', '-a', '-u', '-n', '-r', '-i', '-d', '--user', '--pass', '--eval']), exit: /^--(?:version|help|eval)$/ },
+  nslookup: { need: 1, arg: new Set(), exit: /^-version$/ }, // #4658 I3
+  'redis-cli': { need: 1,arg: new Set(['-h', '-p', '-s', '-a', '-u', '-n', '-r', '-i', '-d', '--user', '--pass', '--eval']), exit: /^--(?:version|help|eval)$/ },
 };
 // a wrapper runs the next command: opts take a value; shell = options that open a shell when no command follows
 const SESSION_WRAP = {
@@ -1875,7 +1930,7 @@ const PASS_THROUGH = new Set(['cat', 'tac', 'tee', 'dd', 'head', 'tail', 'tr', '
 const PASS_FILES = new Set(['cat', 'tac', 'base64', 'xxd', 'rev', 'nl', 'sort', 'uniq', 'fold', 'paste']); // every plain word is a file
 const RUNS_INPUT = new Set([...POSIX_SHELLS, 'pwsh', 'powershell', 'cmd', 'node', 'nodejs', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'luajit', 'julia', 'r',
   'rscript', 'iex', 'invoke-expression', 'xargs', 'awk', 'gawk', 'mawk', 'nawk', 'source', '.', 'psql', 'mysql', 'mariadb', 'sqlite3', 'sqlcmd',
-  'mongosh', 'redis-cli', 'ssh', 'su', 'sudo', 'doas', 'expect']);
+  'mongosh', 'redis-cli', 'ssh', 'su', 'sudo', 'doas', 'expect', 'tclsh', 'wish']);
 const STDIN_DEV = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
 const STDIN_REDIR = /\d*<&[ \t]*\d+|\d*<[ \t]*(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)(?![\w/])/g;
 // a redirect word (<&0, 2>&1, >out, and a bare < or > whose target is the next word): never an argument to judge
@@ -1908,7 +1963,8 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
   if (depth > SESSION_DEPTH) return 'a command nested deeper than the guard reads';
   // B2: a stdin copy (<&0, exec 3<&0; <&3, < /dev/stdin) goes before the split (its & would cut the segment): removing it
   // only takes a feed away, never adds one
-  const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(STDIN_REDIR, ' ');
+  // #4658: find's {} is a word of its own, not a brace that ends the command (-exec bash {} runs each file as a script)
+  const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(STDIN_REDIR, ' ').replace(/(?<=[ \t])\{\}(?=[\s;+\\]|$)/g, '__found__');
   if (PS_READ.test(text.replace(/'[^']*'/g, "''").replace(/"(?:\\.|[^"\\$`])*"/g, '""'))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
   const segs = [...text.matchAll(SEGMENT)].map((m) => ({ start: m.index, end: m.index + m[0].length, s: m[0] }));
   const n = segs.length;
@@ -2123,6 +2179,24 @@ function judge(name, args, fed, depth, vars = new Map()) {
   const inner = (text) => (text === null || !text.trim() ? null : sessionIn(text, fed, depth + 1, vars));
   if (name === 'eval') return inner(args.join(' ')); // B1: eval's words are a command
   if (SESSION_TTY.has(name)) return name; // B3: fed or not
+  // #4658 I2: a runner or find -exec starts a command that gets this one's input, so it is judged the same way
+  const started = (words) => (depth >= SESSION_DEPTH ? 'a command nested deeper than the guard reads'
+    : judge(cmdName(words[0].replace(/(?<=.)@[^@/]*$/, '')), words.slice(1), fed, depth + 1, vars));
+  if (Object.hasOwn(SESSION_RUNNERS, name)) {
+    const r = runnerStarts(SESSION_RUNNERS[name], args);
+    if (r) return r.words ? started(r.words) : inner(r.text);
+  }
+  if (name === 'find') {
+    for (let i = 0; i < args.length; i++) {
+      if (!FIND_RUNS.has(args[i])) continue;
+      let end = i + 1;
+      while (end < args.length && args[end] !== ';' && args[end] !== '+') end++;
+      const hit = end > i + 1 ? started(args.slice(i + 1, end)) : null;
+      if (hit) return hit;
+      i = end; // each word is read once
+    }
+    return null;
+  }
   if (name === 'read' || name === 'mapfile' || name === 'readarray' || name === 'select') return fed ? null : name;
   if (POSIX_SHELLS.has(name)) {
     for (let i = 0; i < args.length; i++) {
@@ -2227,7 +2301,13 @@ function judge(name, args, fed, depth, vars = new Map()) {
   }
   if (name === 'crontab') return args.some((a) => /^-[A-Za-z]*e/.test(a)) ? 'crontab -e' : null;
   const interp = INTERP_OF(name);
-  if (interp) return interpMode(SESSION_INTERP[interp], args) === 'session' ? name : null;
+  if (interp) {
+    if (interpMode(SESSION_INTERP[interp], args) === 'session') return name;
+    const module = interp === 'python' ? pythonModule(args) : null; // #4658 I1
+    if (module && REPL_MODULES.has(module)) return `${name} -m ${module}`;
+    const code = args.join(' ');
+    return SPAWNS_SHELL.test(code) || CODE_OPENS[interp]?.test(code) ? `${name} code that opens a shell, REPL or debugger` : null;
+  }
   if (name === 'deno' || name === 'bun') {
     const sub = args.find((a) => !a.startsWith('-'));
     return sub === 'repl' || (name === 'deno' && sub === undefined) ? `${name}${sub ? ` ${sub}` : ''}` : null;
