@@ -96,8 +96,8 @@ test('with the seat\'s relay running, the hook asks the board through it, not on
     assert.equal(r.status, 0, r.stderr);
     const resume = cb(pane, ['resume']), role = cb(pane, ['role', 'reviewer']); // these go through the relay too
     assert.equal(contextOf(r), `${hint}\n\nAgents Board, after this compact: what \`cb resume\` and \`cb role reviewer\` print now.\n\n${resume}\n\n${role}`);
-    assert.match(served[0] ?? '', /cb\.resume_for_pane\(/);
-    assert.match(served[1] ?? '', /cb\.role_text\(/);
+    assert.equal(served[0], 'resume_for_pane');
+    assert.equal(served[1], 'role_text');
   } finally {
     await stop();
     await relaySql.end();

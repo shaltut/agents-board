@@ -322,7 +322,7 @@ test('the Stop hook reports through its seat\'s relay bridge when one is up', { 
     writeFileSync(f, text);
     const h = await hookAsync({ hook_event_name: 'Stop', session_id: 'syn-bridge', transcript_path: f }, { HERDR_PANE_ID: pane, CB_USAGE_STATE_DIR: d });
     assert.deepEqual([h.code, h.out, h.err], [0, '', '']);
-    assert.ok(served.some((t) => /cb\.usage_report\(/.test(t)), `served: ${served.join(' | ')}`);
+    assert.ok(served.includes('usage_report'), `served: ${served.join(' | ')}`);
     const [row] = await sql`select * from cb.session_usage where session_id = 'syn-bridge'`;
     assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens, row.cache_write_tokens].map(Number), want);
   } finally { await stop(); }

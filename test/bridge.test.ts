@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { connect } from '../server/db.ts';
 import { freshDb, stranger, TEST_URL } from './helpers.ts';
 import { serveBridge, openBridge, bridgeFiles, seatKey } from '../cli/bridge.ts';
+import { call } from '../cli/board.ts';
+import v8 from 'node:v8';
 import { claudeEndpointPath } from '../cli/agents/claude.ts';
 
 const clients: any[] = [];
@@ -38,23 +40,78 @@ async function served(url = TEST_URL, opts: any = {}) {
   return { sql, key, files, stop };
 }
 
-test('a query through the bridge: params, IN lists, jsonb, dates, and Postgres errors with their code', async () => {
+test('a call through the bridge: arguments, jsonb, dates, and Postgres errors with their code', async () => {
   const { sql, key, stop } = await served();
   try {
-    await sql`select cb.task_add(project => 'demo', title => 'first', actor => 'W1')`;
-    await sql`select cb.task_add(project => 'demo', title => 'second', actor => 'W1')`;
+    await sql`select cb.ensure_project('demo')`;
     const db: any = await openBridge(key, TEST_URL);
     assert.ok(db, 'bridge opened');
-    const rows = await db`select id, title, created_at from cb.tasks where id in ${db([1, 2])} order by id`;
-    assert.deepEqual(rows.map((r: any) => [r.id, r.title]), [[1, 'first'], [2, 'second']]);
-    assert.ok(rows[0].created_at instanceof Date);
-    const [{ j }] = await db.unsafe(`select $1::jsonb as j`, [{ a: [1, 2] }]) // as callFn passes jsonb;
-    assert.deepEqual(j, { a: [1, 2] });
-    await assert.rejects(db`select cb.task_move(${'999'}, 'done', 'x', 'W1')`, (e: any) => /task #999 not found/.test(e.message) && typeof e.code === 'string');
-    // concurrent queries each get their own answer
-    const [a, b] = await Promise.all([db`select ${'a'}::text as v`, db`select ${'b'}::text as v`]);
-    assert.deepEqual([a[0].v, b[0].v], ['a', 'b']);
+    const id = await call('task_add', { project: 'demo', title: 'first', actor: 'W1' }, db);
+    await call('task_tag', { id, add: ['a', 'b'], remove: [], actor: 'W1' }, db); // lists travel as jsonb
+    const over = await call('task_row', { id }, db), direct = await call('task_row', { id }, sql);
+    assert.deepStrictEqual(over.map((r: any) => ({ ...r })), direct.map((r: any) => ({ ...r })));
+    assert.ok(over[0].created_at instanceof Date);
+    await assert.rejects(call('task_move', { id: '999', status: 'done', note: 'x', actor: 'W1' }, db),
+      (e: any) => /task #999 not found/.test(e.message) && typeof e.code === 'string');
+    // concurrent calls each get their own answer
+    const second = await call('task_add', { project: 'demo', title: 'second', actor: 'W1' }, db);
+    const [x, y] = await Promise.all([call('task_row', { id }, db), call('task_row', { id: second }, db)]);
+    assert.deepEqual([x[0].title, y[0].title], ['first', 'second']);
     await db.end();
+  } finally { await stop(); }
+});
+
+/** A client that speaks the bridge's frames itself, as anything holding the token could. */
+async function rawClient(files: { info: string }, url: string, v: number) {
+  const info = JSON.parse(fs.readFileSync(files.info, 'utf8'));
+  const sock = net.connect(info.socket);
+  const waiting: ((m: any) => void)[] = [];
+  let buf = Buffer.alloc(0);
+  sock.on('error', () => {});
+  sock.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32BE(0)) {
+      const n = buf.readUInt32BE(0);
+      waiting.shift()?.(v8.deserialize(buf.subarray(4, 4 + n)));
+      buf = buf.subarray(4 + n);
+    }
+  });
+  const ask = (m: unknown) => new Promise<any>((res) => {
+    waiting.push(res);
+    const body = v8.serialize(m), head = Buffer.alloc(4);
+    head.writeUInt32BE(body.length);
+    sock.write(Buffer.concat([head, body]));
+    setTimeout(() => res({ noAnswer: true }), 3000).unref();
+  });
+  await new Promise((r) => sock.once('connect', r));
+  const hello = await ask({ v, token: info.token, url: createHash('sha256').update(url).digest('hex') });
+  return { hello, ask, end: () => sock.destroy() };
+}
+
+test('the bridge carries a board function and its arguments, nothing else: SQL text is refused and never runs', async () => {
+  const { sql, files, stop } = await served();
+  try {
+    const old = await rawClient(files, TEST_URL, 1);
+    assert.equal(old.hello.ok, false, 'a cb that would send SQL connects itself instead');
+    old.end();
+    const c = await rawClient(files, TEST_URL, 2);
+    assert.equal(c.hello.ok, true);
+    const text = `select cb.ensure_project('by-sql')`;
+    const bad: Record<string, unknown>[] = [
+      { text, values: [] }, { strings: [text], values: [] }, { fn: 'users_overview', args: {}, text }, // SQL, in each old form
+      { fn: 'ensure_project', args: { slug: 'by-sql' } }, { fn: '_actor_ok', args: {} }, // not on the list
+      { fn: 'task_add', args: { "title => 'x'); select cb.ensure_project('by-sql') --": 'x' } }, // SQL as an argument's name
+      { fn: 'users_overview', args: [text] }, { fn: 'users_overview' }, { fn: 7, args: {} },
+    ];
+    let id = 0;
+    for (const m of bad) {
+      const r = await c.ask({ ...m, id: ++id });
+      assert.ok(r.error && r.rows === undefined && r.result === undefined, `${JSON.stringify(m)} got ${JSON.stringify(r)}`);
+    }
+    assert.equal((await sql`select 1 from cb.projects where slug = 'by-sql'`).length, 0);
+    const good = await c.ask({ id: ++id, fn: 'users_overview', args: {} });
+    assert.ok(Array.isArray(good.result), JSON.stringify(good));
+    c.end();
   } finally { await stop(); }
 });
 
@@ -256,13 +313,20 @@ test('cb falls back to legacy sha1(SOCKET) bridge key during rolling upgrade', {
   } finally { await stop(); }
 });
 
-test('a sql`` fragment passed as a value is refused with a clear error, not "#<Promise> could not be cloned"', async () => {
-  const { key, stop } = await served();
+test('cb tick runs through the relay too', { timeout: 30_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-tick-${process.pid}`, ran: string[] = [];
+  const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
+  const stop = await serveBridge(relaySql, seatKey('testbox', pane), TEST_URL, undefined,
+    { binding: () => ({ actor: 'L1@testbox', project: 'demo' }), served: (fn: string) => ran.push(fn) });
   try {
-    const db: any = await openBridge(key, TEST_URL);
-    const frag = db`select 1`; frag.catch(() => {}); // a postgres.js fragment is a Promise
-    await assert.rejects(db`select ${frag}`, /cannot carry a sql`` fragment/);
-    assert.equal((await db`select ${2}::int as n`)[0].n, 2, 'plain values still work');
+    // not spawnSync: the bridge lives in this process and must answer cb meanwhile
+    const child = spawn('node', ['cli/cb.ts', 'tick', 'demo'], { env: seatEnv(pane), stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = ''; child.stderr!.on('data', (d) => { err += d; });
+    const code = await Promise.race([new Promise((r) => child.on('exit', r)), wait(20_000).then(() => { child.kill(); return 'timeout'; })]);
+    assert.equal(code, 0, err);
+    assert.ok(ran.includes('tick'), `the relay ran: ${ran.join(', ')}`);
   } finally { await stop(); }
 });
 
