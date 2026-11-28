@@ -7,7 +7,7 @@ import { freshDb, onProject, TEST_URL } from './helpers.ts'; // sets CB_DATABASE
 
 const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
-const { closeWorker } = await import('../server/worker.ts');
+const { closeWorker, failure, wire } = await import('../server/worker.ts');
 
 const clients: any[] = [];
 after(() => Promise.all([...clients.map((c) => c.end()), closeWorker(), serverSql.end()]));
@@ -187,11 +187,49 @@ test('each key has its own rate limit', async () => {
   const key = await issue(sql), other = await issue(sql, 'boxb');
   process.env.CB_API_RATE = '3';
   try {
-    const codes = [];
-    for (let i = 0; i < 5; i++) codes.push((await call(key, 'resume', { actor: 'W1@boxa' })).status);
-    assert.deepEqual(codes, [200, 200, 200, 429, 429]);
+    const replies = [];
+    for (let i = 0; i < 5; i++) replies.push(await call(key, 'resume', { actor: 'W1@boxa' }));
+    assert.deepEqual(replies.map((r) => r.status), [200, 200, 200, 429, 429]);
+    const after = Number(replies[4]!.headers.get('retry-after'));
+    assert.ok(after >= 1 && after <= 60, `retry-after ${after}`);
     assert.equal((await call(other, 'resume', { actor: 'W1@boxb' })).status, 200);
   } finally { delete process.env.CB_API_RATE; }
+});
+
+// The contract with the client (S3, #4913)
+test('a time or bytes in the result or in a row\'s own column is tagged; nothing deeper is', () => {
+  const at = new Date('2026-01-02T03:04:05.000Z'), bytes = Buffer.from('synthetic');
+  const tagged = [{ $date: '2026-01-02T03:04:05.000Z' }, { $bytes: bytes.toString('base64') }];
+  assert.deepEqual([wire(at, false), wire(bytes, false), wire(null, false), wire(7, false)], [...tagged, null, 7]);
+  assert.deepEqual(wire([{ id: 1, at, data: bytes, links: { seen: '2026-01-02', list: [1] } }], true),
+    [{ id: 1, at: tagged[0], data: tagged[1], links: { seen: '2026-01-02', list: [1] } }]);
+});
+
+test('over the API a row\'s time arrives tagged, and a database error keeps its code', async () => {
+  const { sql } = await board();
+  const key = await issue(sql);
+  const id = await result(await call(key, 'task_add', task));
+  const [row] = await result(await call(key, 'task_row', { id }));
+  assert.equal(new Date(row.created_at.$date).getUTCFullYear() >= 2026, true, JSON.stringify(row.created_at));
+  const bad = await call(key, 'task_move', { id: String(id), status: 'nope', actor: 'W1@boxa' });
+  const body = await bad.json() as any;
+  assert.deepEqual([bad.status, body.ok, body.code, bad.headers.get('x-cb-proto')], [400, false, 'P0001', '1'], JSON.stringify(body));
+  assert.ok(body.error && !('never_ran' in body));
+  // an argument the function does not have
+  assert.equal(((await (await call(key, 'task_add', { ...task, nope: 'x' })).json()) as any).code, '42883');
+  for (const raw of ['', 'not json', '[]', '{"args":[]}', '{"args":"x"}', 'null']) {
+    const res = await app.request('/w/v1/call/task_add', { method: 'POST', headers: bearer(key), body: raw });
+    assert.equal(res.status, 400, raw);
+  }
+});
+
+test('never_ran is said only when the call cannot have run', () => {
+  const lost = Object.assign(new Error('write CONNECTION_CLOSED db:5432'), { code: 'CONNECTION_CLOSED' });
+  assert.deepEqual([failure(lost, false).status, failure(lost, false).body.never_ran], [503, true]);
+  assert.deepEqual([failure(lost, true).status, 'never_ran' in failure(lost, true).body], [500, false]);
+  for (const sent of [false, true]) assert.ok(!JSON.stringify(failure(lost, sent).body).includes('db:5432'), 'no address in the reply');
+  const refused = Object.assign(new Error('no such task'), { name: 'PostgresError', code: 'P0001', detail: 'd', hint: 'h', query: 'select secret', parameters: ['secret'] });
+  assert.deepEqual(failure(refused, true), { status: 400, body: { ok: false, code: 'P0001', error: 'no such task', detail: 'd', hint: 'h' } });
 });
 
 /** An open event stream, read in the background. */
