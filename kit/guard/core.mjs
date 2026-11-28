@@ -1213,11 +1213,19 @@ const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', 
 // position is judged whole by the command-position rule, so its later words are arguments too
 const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'jq', 'cmp', 'diff', 'stat', 'sha256sum', 'md5sum',
   'get-content', 'gc', 'select-string', 'sls', 'test-path', 'get-item', 'gi']);
+// #4622: a word with a space of its own and nothing else filled in but plain variables ("$A log", "$C d") is one argument
+// that names no git command. ${X:-push}, $(...) and a backtick can supply a whole word, so those still count.
+const PLAIN_VAR = /\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})|%[A-Za-z_]\w*%/g;
+const isPhrase = (v) => {
+  const own = v.replace(PLAIN_VAR, '');
+  return /[ \t]/.test(own) && !/[$\x60]/.test(own);
+};
 // a filled word at raw[k] (any position): true when it is a git call that writes. Its options are judged as git's, not
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
-// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
-function filledWrites(raw, k, judge) {
+// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5). After a launcher
+// (eval, ssh, xargs: they read their words again) a phrase counts too.
+function filledWrites(raw, k, judge, launched) {
   const after = filledEnd(raw, k);
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
@@ -1232,7 +1240,7 @@ function filledWrites(raw, k, judge) {
       if (GIT_OPT_ARG.has(v)) j++;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
+    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v) && (launched || !isPhrase(v)));
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
     return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
@@ -1251,7 +1259,7 @@ const gitWrites = (seg, inQuote = false) => {
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
       if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
-      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
+      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge, launched)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
       noRun = false;
       afterClose = t === ')' || t === '}' || (t === '`' && ticks % 2 === 0);
@@ -1278,11 +1286,11 @@ const gitWrites = (seg, inQuote = false) => {
     // a $( or ${ group in command position: the subcommand slot is the word after the whole group (round 4, I4); inside
     // a quoted line ("$(git rev-parse --show-toplevel)/x", "$USER reading x") a filled first word takes the filledWrites test
     const words = () => (u === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? ['$', ...rest(filledEnd(raw, k))] : rest(k));
-    if (filled && start && inQuote) { if (filledWrites(raw, k, judge)) return true; }
+    if (filled && start && inQuote) { if (filledWrites(raw, k, judge, launched)) return true; }
     else if ((isGit || filled) && judge(words, start && isGit)) return true;
     // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
     // behind), judged by the word after it (GIT_COMMANDS)
-    if (isFilled(u) && !noRun && filledWrites(raw, k, judge)) return true;
+    if (isFilled(u) && !noRun && filledWrites(raw, k, judge, launched)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
