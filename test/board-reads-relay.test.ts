@@ -25,7 +25,8 @@ test('inbox_ping returns what inbox returns and sends the pane\'s ping, built on
   await other.listen('cb_bind', (p) => { heard.push(p); });
   const i = await call('inbox_ping', { machine: 'pc', pane: 'p1', after_event: 0, session: null, n: 7 }, sql);
   assert.deepEqual([i.actor, i.project], ['B1@pc', 'demo']);
-  assert.deepEqual(Object.keys(i).sort(), Object.keys(await call('inbox', { machine: 'pc', pane: 'p1', after_event: 0 }, sql)).sort());
+  const [{ plain }] = await sql`select cb.inbox('pc', 'p1', 0) as plain`;
+  assert.deepEqual(Object.keys(i).sort(), Object.keys(plain).sort());
   for (const end = Date.now() + 5000; !heard.includes('ping:pc:p1#7') && Date.now() < end;) await new Promise((r) => setTimeout(r, 25));
   assert.ok(heard.includes('ping:pc:p1#7'), `heard ${JSON.stringify(heard)}`);
 });

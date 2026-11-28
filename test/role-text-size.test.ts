@@ -22,7 +22,7 @@ test('the hook\'s numbers: the role gets what the cards leave (CAP - RESUME_KEEP
   assert.ok(CAP > 0 && RESUME_KEEP > 0, 'the hook still says const CAP = <n>; and const RESUME_KEEP = <n>;');
   assert.equal(ROLE_ROOM, 6000);
   assert.match(hook, /Math\.min\(role\.length, CAP - Math\.min\(resume\.length, RESUME_KEEP\)\)/);
-  assert.match(hook, /cb\.role_text\(\$\{r\.role\}, \$\{r\.project \?\? null\}, \$\{r\.actor \?\? null\}\)/, 'the hook reads the text with the seat\'s project and name, as cb role does');
+  assert.match(hook, /call\('role_text', \{ role: r\.role, project: r\.project \?\? null, actor: r\.actor \?\? null \}, sql\)/, 'the hook reads the text with the seat\'s project and name, as cb role does');
 });
 
 test('every role, with the longest project addition and ask-first line, fits what the hook re-injects', async () => {
