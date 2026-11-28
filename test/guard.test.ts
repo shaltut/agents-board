@@ -2111,6 +2111,26 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
 });
 
+test('#4828: a PowerShell variable that takes a git command\'s output is not the word git', () => {
+  const allowed = ['$x = git rev-parse main', '$x =git rev-parse main', '$tip = git rev-parse origin/main; git log --oneline $tip',
+    '$base = git merge-base HEAD main\ngit diff $base main', '$x, $y = git rev-parse main develop', '$a, $b, $c = git rev-parse HEAD main develop'];
+  for (const role of ['builder', 'reviewer', 'lead'] as const) {
+    for (const c of allowed) assert.equal(kindOf(c, role), 'allow', `${role}: ${c}`);
+  }
+  // a comparison of that variable is no git subcommand of a read-only role
+  assert.equal(kindOf('$h = git rev-parse HEAD; if ($h -eq "abc") { echo same }', 'reviewer'), 'allow');
+  // the git call after the = is still judged, and so is the variable used as the program
+  for (const c of ['$x = git push origin main', '$x =git push -f origin feat/my-card', '$r = git push origin HEAD']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.notEqual(kindOf('$x = git commit -m x', 'reviewer'), 'allow');
+  // a variable that does hold the name is still read out: quoted, a POSIX assignment, and used behind a launcher
+  for (const c of ["$g = 'git'; & $g push origin main", 'g=git; $g push origin main', 'g=git; caffeinate $g push origin main',
+    "$g='git'; caffeinate $g push origin main", '$g = git; & $g push origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+});
+
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
 // seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
 test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
