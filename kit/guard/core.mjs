@@ -43,7 +43,9 @@ const PS_STRING_AT = /"(?:\\.|[^"\\$`])*"/y;
 const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|bug|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
-const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
+const MESSAGE_AT = new RegExp(MESSAGE_HEAD, 'g');
+const ARG_BLANKS = /[ \t]+/y;
+const ARG_PIECE = new RegExp(String.raw`(${QUOTED})|\\.|[^\s;&|"'\\]+`, 'y'); // a quoted run, an escaped pair or bare text
 // Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell. A header line holds <<'ID'
 // or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), which may be the
 // line right after the header (#4768: an empty body). A body is dropped only where bash reads a heredoc (bashReader).
@@ -77,6 +79,8 @@ const PLAIN_TAIL = /[^\x22\x27\x60\\$()<\u2018-\u201f\r\n]*(?=\r?\n|$)/y; // the
 const PLAIN_ESCAPED = /(?![\x22\x24\x5c\x60])[\x20-\x7e]/y;
 const inQuotes = (top) => top === '"' || top === 'g';
 const CASE_AT = /case[ \t\r\n]/y;
+// #4774: outside quotes, a \ before one of these is a Windows path (cd C:\w\x): both shells read the quoting alike
+const BARE_ESCAPE = /\\[A-Za-z0-9_.-]/y;
 const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
 function bashReader(text) {
   let i = 0;
@@ -135,6 +139,7 @@ function bashReader(text) {
           PLAIN_TAIL.lastIndex = i;
           if (PLAIN_TAIL.test(text)) plainTo = PLAIN_TAIL.lastIndex; else lost();
         }
+        if (c === '\\') { BARE_ESCAPE.lastIndex = i; if (BARE_ESCAPE.test(text)) { i += 2; continue; } }
         if (c === '(') push(c);
         else if (c === ')') { if (open.length) close(); else lost(); }
         else if (c !== '\r' && !PLAIN_CODE.test(c)) lost();
@@ -152,23 +157,23 @@ const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)\x60])/g;
 const LONE_CR = /\r(?!\n)/;
 const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
 const LINE_START = /^/gm;
-function replaceHeredocs(text, fn) {
-  // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
-  const index = (re) => {
-    const map = new Map();
-    for (const m of text.matchAll(re)) {
-      const e = map.get(m[1]) ?? { at: [], k: 0 };
-      e.at.push([m.index, m.index + m[0].length]);
-      map.set(m[1], e);
-    }
-    return map;
-  };
-  const ends = index(END_LINE), closings = index(CLOSING_LINE);
-  // the first line of a word's list whose \n is at or after `from`; callers ask with a growing `from`
-  const lineFrom = (e, from) => {
+// word -> its lines as re matches them: (word, from) gives [the \n before the line, the end of the line's word and blanks]
+// for the first one whose \n is at or after `from`; callers ask with a growing `from`, so all asks together are one pass
+function lineIndex(text, re) {
+  const map = new Map();
+  for (const m of text.matchAll(re)) {
+    const e = map.get(m[1]) ?? { at: [], k: 0 };
+    e.at.push([m.index, m.index + m[0].length]);
+    map.set(m[1], e);
+  }
+  return (word, from) => {
+    const e = map.get(word);
     while (e && e.k < e.at.length && e.at[e.k][0] < from) e.k++;
     return e?.at[e.k];
   };
+}
+function replaceHeredocs(text, fn, docs = []) { // docs: filled with the heredocs bash reads, as offsets in the answer
+  const ends = lineIndex(text, END_LINE), closings = lineIndex(text, CLOSING_LINE);
   const bash = bashReader(text);
   // whether bash reads the heredoc found at `at` on the line ending at nl, with its body ending where the guard's does
   const isHeredoc = (at, nl, f) => {
@@ -185,7 +190,7 @@ function replaceHeredocs(text, fn) {
     bash.skip(at + f.header);
     bash.read(nl);
     if (bash.unsure || bash.at() !== nl || bash.open.length !== depth || bash.low < depth) return false;
-    const closing = lineFrom(closings.get(f.id), nl);
+    const closing = closings(f.id, nl);
     if (closing && closing[0] < f.before) { bash.unsure = true; return false; }
     // Git Bash drops every carriage return, so a lone one in the body may spell an earlier end line (\rEOF, E\rOF)
     if (LONE_CR.test(text.slice(nl, f.before + 1))) { bash.unsure = true; return false; }
@@ -205,15 +210,17 @@ function replaceHeredocs(text, fn) {
     for (let at = line.lastIndexOf('<<'); at >= 0 && !found; at = at > 0 ? line.lastIndexOf('<<', at - 1) : -1) {
       HEADER_AT.lastIndex = at;
       const h = HEADER_AT.exec(line);
-      const e = h && ends.get(h[2]);
-      if (!e) continue;
-      const end = lineFrom(e, nl); // from the header line's own \n: the very next line may end it
+      const end = h && ends(h[2], nl); // from the header line's own \n: the very next line may end it
       if (end) found = { id: h[2], before: end[0], end: end[1], at: s + at, header: h[0].length, dash: h[0][2] === '-' };
     }
     if (found && !isHeredoc(found.at, nl, found)) found = null;
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
-    out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id);
+    out += text.slice(pos, s);
+    const kept = fn(text.slice(s, found.end), line, found.id);
+    const base = out.length - s;
+    docs.push({ at: base + found.at, header: found.header, nl: base + nl, end: out.length + kept.length, lost: bash.unsure });
+    out += kept;
     pos = found.end;
     LINE_START.lastIndex = pos;
     const next = LINE_START.exec(text);
@@ -222,6 +229,65 @@ function replaceHeredocs(text, fn) {
   }
   return out + text.slice(pos);
 }
+// #4777: the command with every comment that holds a quote blanked, positions kept. A shell pairs no quote with one in a
+// comment; the rules that pair quotes would, and lose the lines between. It is judged beside the command as written, never
+// instead of it, so a wrong guess here can only add a block. Read as bash reads it ('..', $'..', "..", $( ), heredoc
+// bodies), plus PowerShell's <# #>. One pass: a search that failed is not run again.
+const COMMENT_QUOTE = /["'`\u2018-\u201f]/;
+const ANSI_QUOTED = /\$'(?:\\[\s\S]|[^'\\])*'/y;
+const ANY_HEADER = /<<-?[ \t]*(["']?)\\?([A-Za-z_]\w*)\1/y;
+export function uncommented(text) {
+  if (!text.includes('#')) return text;
+  const ends = lineIndex(text, END_LINE), open = [], pending = [];
+  let out = '', done = 0, i = 0, ansi = true, block = true;
+  const comment = (to) => {
+    const said = text.slice(i, to);
+    if (COMMENT_QUOTE.test(said)) { out += text.slice(done, i) + said.replace(/[^\r\n]/g, ' '); done = to; }
+    i = to;
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\n' && pending.length) { // the heredoc bodies start here: their quotes are not the command's
+      let at = i;
+      for (const id of pending) at = ends(id, at)?.[1] ?? at;
+      pending.length = 0;
+      i = at > i ? at : i + 1;
+      continue;
+    }
+    if (c === '\\') { i += 2; continue; }
+    if (c === '$' && text[i + 1] === '(') { open.push('('); i += 2; continue; }
+    if (open.at(-1) === '"') { if (c === '"') open.pop(); i++; continue; }
+    if (c === '$' && text[i + 1] === "'" && ansi) {
+      ANSI_QUOTED.lastIndex = i;
+      ansi = ANSI_QUOTED.test(text);
+      if (ansi) { i = ANSI_QUOTED.lastIndex; continue; }
+    }
+    if (c === "'") { const end = text.indexOf("'", i + 1); i = end < 0 ? i + 1 : end + 1; continue; }
+    if (c === '<') {
+      if (text[i + 1] === '#' && block) {
+        const end = text.indexOf('#>', i + 2);
+        block = end >= 0;
+        if (block) { comment(end + 2); continue; }
+      }
+      if (text.startsWith('<<<', i)) { i += 3; continue; }
+      ANY_HEADER.lastIndex = i;
+      const h = ANY_HEADER.exec(text);
+      if (h) { pending.push(h[2]); i = ANY_HEADER.lastIndex; continue; }
+    }
+    if (c === '#' && (i === 0 || WORD_START.test(text[i - 1]))) {
+      const nl = text.indexOf('\n', i);
+      comment(nl < 0 ? text.length : nl);
+      continue;
+    }
+    if (c === '"' || c === '(') open.push(c);
+    else if (c === ')' && open.at(-1) === '(') open.pop();
+    i++;
+  }
+  return done ? out + text.slice(done) : text;
+}
+// the command, and where it differs the reading without its comment quotes
+const withUncommented = (text) => { const bare = uncommented(text); return bare === text ? [text] : [text, bare]; };
+
 const TEXT_WRITER = /^[ \t]*(?:cb[ \t]|cat[ \t]*>>?[ \t]*\S|git[ \t]+commit\b.*-F[ \t]+-)/;
 const SUBST_CAT = /\$\([ \t]*cat[ \t]*$/;
 const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[^;&|\n]*"$`);
@@ -238,19 +304,72 @@ function writesText(line) {
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
+// #4774: inner = cmd is the inside of a quoted word, which a rule reads as a command of its own. The word may have been
+// in double quotes, where a $( ) or backtick runs whatever quotes this reading sees around it, so text holding one stays
 let stripLast = null;
-export function stripMessages(cmd) {
-  if (stripLast && stripLast.in === cmd) return stripLast.out;
-  const out = stripMessagesOnce(cmd);
-  stripLast = { in: cmd, out };
+const SUBSTITUTES = /\$\(|\x60/;
+// in a word read again, a backtick may already stand as $ (the push and kill rules read it so), so there any $ counts
+const SUBSTITUTES_INNER = /[$\x60]/;
+const substitutes = (text, inner) => (inner ? SUBSTITUTES_INNER : SUBSTITUTES).test(text);
+export function stripMessages(cmd, inner = false) {
+  if (stripLast && stripLast.in === cmd && stripLast.inner === inner) return stripLast.out;
+  const out = stripMessagesOnce(cmd, inner);
+  stripLast = { in: cmd, inner, out };
   return out;
 }
-function stripMessagesOnce(cmd) {
-  return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
-    .replace(MESSAGE_CMD, (_all, head, args) =>
-      // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
-      head + replaceQuoted(args, (q) =>
-        ((/^herdr/.test(head) && /^["']!/.test(q)) || (/^"/.test(q) && /\$\(|`/.test(q)) ? q : '""')));
+function stripMessagesOnce(cmd, inner) {
+  const docs = [];
+  const drops = (all, line) => writesText(line) && !(inner && substitutes(all, true));
+  const text = replaceHeredocs(cmd, (all, line, id) => (drops(all, line) ? `${line}\n${id}` : all), docs);
+  return stripMessageArgs(text, docs, inner);
+}
+
+// #4774: a message's text is dropped only where the shell reads it as one. The message command, and each quote that opens
+// its text, must be code to bashReader: not in a comment, not inside a quoted word, and not past something the reader
+// cannot follow (from there the text is judged as commands). docs: the heredocs already read, which it steps over.
+function stripMessageArgs(text, docs, inner) {
+  const bash = bashReader(text);
+  let k = 0;
+  const isCode = (at) => {
+    for (; k < docs.length && docs[k].at < at && !bash.unsure; k++) {
+      const d = docs[k];
+      bash.read(d.at);
+      if (bash.unsure) break;
+      bash.skip(d.at + d.header);
+      bash.read(d.nl);
+      if (bash.unsure) break;
+      bash.skip(d.end);
+      bash.unsure = d.lost;
+    }
+    bash.read(at);
+    return !bash.unsure && bash.at() === at && !inQuotes(bash.open.at(-1));
+  };
+  let out = '', done = 0;
+  MESSAGE_AT.lastIndex = 0;
+  for (let m; (m = MESSAGE_AT.exec(text));) {
+    if (!isCode(m.index)) continue;
+    const head = m[0];
+    let next = MESSAGE_AT.lastIndex; // the end of the args read so far; the next command is looked for from there
+    args: for (;;) {
+      ARG_BLANKS.lastIndex = next;
+      if (!ARG_BLANKS.test(text)) break;
+      let i = ARG_BLANKS.lastIndex;
+      const from = i;
+      for (let piece; (ARG_PIECE.lastIndex = i, piece = ARG_PIECE.exec(text)); i = next = ARG_PIECE.lastIndex) {
+        const q = piece[1];
+        if (!q) continue;
+        if (!isCode(i)) break args;
+        // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
+        if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && substitutes(q, inner))) continue;
+        out += text.slice(done, i) + '""';
+        done = i + q.length;
+        bash.skip(done);
+      }
+      if (i === from) break;
+    }
+    MESSAGE_AT.lastIndex = next;
+  }
+  return out + text.slice(done);
 }
 
 // PowerShell and cmd (#4002): a recursive delete whose target is a root, a drive root or the home folder. The command,
@@ -500,7 +619,7 @@ function scanKills(text, seen, inArgs) {
         || (name[i - 1] === 'done' && w[i].startsWith('<<<')))) fed = true;
       const args = segArgs || i <= argsEnd;
       // a quoted here-string of a lookup is fed to the loop's earlier stop: done <<< "$(pgrep node)"
-      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args || (fed && seen.stop))) return true;
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i], true), seen, args || (fed && seen.stop))) return true;
       const n = name[i], prev = name[i - 1];
       // CIM/WMI Terminate, quoted or not: Invoke-CimMethod -MethodName "Terminate", -Name Terminate, @{ MethodName = 'Terminate' }
       // (-MethodName:Terminate too); its arguments, like any stop's, hold its source: -MethodName Terminate -Query "..."
@@ -632,10 +751,10 @@ function scannedName(raw, names) {
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
 // command (bash -c "...", ssh host '...') is read as a command too when quoted says so. Throws past
 // MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block). isHit(w, name, i) says whether word i is one: by its name,
-// unless the caller reads more words as the command (gitOrFilled, #4815).
+// unless the caller reads more words as the command (gitOrFilled, #4815). nested: cmd is the inside of a quoted word.
 const byName = (names) => (_w, name, i) => names.has(name[i]);
-function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names)) {
-  const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
+function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names), nested = false) {
+  const text = stripMessages(String(cmd ?? ''), nested).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map((x) => scannedName(x, names)) };
@@ -666,7 +785,7 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(name
     const isCommand = quoted(raw, w, name, piped[k]);
     for (let i = 0; i < w.length; i++) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
-        const inner = scanCommands(w[i], names, fn, quoted, isHit);
+        const inner = scanCommands(w[i], names, fn, quoted, isHit, true);
         if (inner) return inner;
       }
     }
@@ -700,7 +819,7 @@ const PAST_PUSH = new Set(['push', 'send-pack', 'http-push', 'subtree']);
 const filledPart = (x) => isFilled(x) || /[$`%]/.test(x);
 // the program's name is what the shell fills in: not a path that ends in a literal name ($HOME/bin/tool); a default in
 // braces (${GIT:-/x/y}) says nothing about what the variable holds
-const filledName = (x) => isFilled(x) && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
+const filledName = (x) => isFilled(x) && !x.endsWith(',') && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
 function filledOptions(w, i) {
   let j = i + 1;
   let aliased = false;
@@ -873,7 +992,7 @@ function gitHides(w, i, j, role, text) {
   if (!READ_ONLY_ROLES.includes(role)) return null;
   if (RO_GIT_WRITES.has(sub) || (sub === 'hash-object' && w.slice(j + 1).some((x) => /^-[^-]*w/.test(x)))) return `git ${sub}: ${readsOnly(role)}`;
   // git as the command: first in its segment, or after assignments, launchers (sudo git ci) and $( (x=$(git ci))
-  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub.toLowerCase())) {
+  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub)) { // as written (#4833): git's own names are case-sensitive
     return `git ${sub} is not a git command (an alias, or a word the shell fills in): a ${role} runs git subcommands by their own names; ${readsOnly(role)}`;
   }
   return null;
@@ -972,7 +1091,9 @@ function subtreePush(w, j, hit) {
 function aliasPush(w, i, j, hit) {
   const sub = w[j];
   if (sub === undefined || !isCommandWord(w, i)) return null;
-  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
+  // as written (#4833): git runs its own commands by their exact names, but finds an alias in any case, so PUSH is an
+  // alias named push, not git push
+  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub)) return null;
   // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
   const words = stopArgs(w.slice(j + 1));
   const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
@@ -993,7 +1114,7 @@ function hiddenPushes(text, hit, list) {
     if (!filledName(w[i]) || w[i].endsWith('=')) return -1;
     const read = filledOptions(w, i);
     const word = read === -1 ? undefined : w[read.j];
-    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word.toLowerCase())) return -1;
+    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word)) return -1;
     if (!lastNamed.has(w)) lastNamed.set(w, w.findLastIndex((x) => namesBranch([x], hit) !== null));
     return lastNamed.get(w) > read.j && isProgram(w, i) ? read.j : -1;
   };
@@ -1427,8 +1548,37 @@ function filledEnd(raw, k) {
   if (open === '`') { const j = nextTick[k]; return j < 0 ? raw.length : j + 1; }
   return ends[k + 1];
 }
-// a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
-const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
+// a word the shell fills in: $X, ${...}, $(...), cmd's %X% (round 4, I2), or a quoted word that starts with a backtick
+// (#4795: a bare backtick is its own token, judged as an opener)
+const isFilled = (u) => u.startsWith('$') || (u.length > 1 && u.startsWith('`')) || /^%[A-Za-z_]\w*%/.test(u);
+// #4798/#4802 (PR 181 review): where a substitution ends is not worked out (a ) in ${ }, a heredoc, a comment or a case
+// label fakes it). Only a CLEAN one is taken as ended: nothing in it can fake its closer (no quote, bracket, #, <, \,
+// no $( or ${ inside, not the word case). What is left of a word once those are out is DIRTY when anything is still open
+const CLEAN_PIECE = /\$\((?:[^()"'`#<\\{}$]|\$(?![({]))*\)|`(?:[^()"'`#<\\{}$]|\$(?![({]))*`|\$\{[A-Za-z_]\w*(?::?[-=?+](?:[^()"'`#<\\{}$]|\$(?![({]))*)?\}/g;
+const withoutClean = (v) => v.replace(CLEAN_PIECE, (m) => (/\bcase\b/.test(m) ? m : ' '));
+const DIRTY = /\$[({]|`/;
+// a slash makes a filled word a path only when it is outside every substitution, which is known only for a word with
+// nothing left open
+const isPathWord = (v) => { const left = withoutClean(v); return !DIRTY.test(left) && /[\\/]/.test(left); };
+// is the word at raw[j] a substitution, or does it hold one, that is not clean? A bare one is read for at most
+// CLEAN_REACH tokens and counts as open past that (linear)
+const CLEAN_REACH = 64;
+// a bare $( or ${, alone or glued after other text (""$( check$( --git-dir=$(): the tokens split it from what follows
+const bareDollar = (raw, j) => (raw[j] ?? '').endsWith('$') && /^[({]$/.test(raw[j + 1] ?? '');
+// the tokens do not say whether a word touches the backtick after it, so an opening one is read as if it did
+const gluedTick = (raw, j) => raw[j] !== '`' && raw[j + 1] === '`' && !shape(raw).closingTick[j + 1];
+// the index just past a bare substitution that starts in raw[j], else just past raw[j]
+const pastBare = (raw, j) => (bareDollar(raw, j) ? shape(raw).ends[j + 1] : raw[j] === '`' ? filledEnd(raw, j) : j + 1);
+function opensUnknown(raw, j) {
+  if (gluedTick(raw, j)) return opensUnknown(raw, j + 1);
+  const x = raw[j] ?? '', dollar = bareDollar(raw, j);
+  if (x !== '`' && !dollar) return DIRTY.test(withoutClean(x));
+  const end = pastBare(raw, j);
+  if (end - j > CLEAN_REACH) return true;
+  const inner = raw.slice(j + (dollar ? 2 : 1), end - 1).join(' ');
+  const closer = !dollar ? '`' : raw[j + 1] === '(' ? ')' : '}';
+  return raw[end - 1] !== closer || DIRTY.test(withoutClean(`${dollar ? x + raw[j + 1] : x}${inner}${closer}`));
+}
 // git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
 const MAX_FILLED_OPTS = 32;
 const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', '--exec-path', '--html-path', '--man-path', '--info-path',
@@ -1443,8 +1593,8 @@ const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', '
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
 // (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
-function filledWrites(raw, k, judge) {
-  const after = filledEnd(raw, k);
+function filledWrites(raw, k, judge, cut) {
+  const after = filledEnd(raw, k), head = ['git'];
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
     if (x === ')' || (x === '`' && shape(raw).closingTick[j])) return false; // the filled word's command ended
@@ -1455,12 +1605,20 @@ function filledWrites(raw, k, judge) {
       if (!GIT_GLOBAL_OPTS.has(v.split('=')[0]) && !/^-C./.test(v)) return false;
       const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
       if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
+      // the option's value, the next word or attached to this one; a bare substitution there is skipped whole, and
+      // stands in the judged words as one filled word
+      head.push(v);
       if (GIT_OPT_ARG.has(v)) j++;
+      if (cut && opensUnknown(raw, j)) cut();
+      const bare = bareDollar(raw, j) || (raw[j] === '`' && !shape(raw).closingTick[j]);
+      if (GIT_OPT_ARG.has(v)) head.push(bare ? '$' : unquote(raw[j] ?? ''));
+      if (bare) j = pastBare(raw, j) - 1;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
+    const filledSub = x === '`' || gluedTick(raw, j) ||(x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !isPathWord(x)); // x as written: a quoted ) must be seen
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
-    return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
+    if (cut && filledSub && opensUnknown(raw, j)) cut();
+    return judge(() => [...head, ...raw.slice(j).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
   return false;
 }
@@ -1518,7 +1676,31 @@ const gitWrites = (seg, inQuote = false) => {
   }
   return false;
 };
-const FORMAT_WRITE = /(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
+// #4802: SEGMENTS cuts at ; & | and newline even inside a substitution. When the subcommand place (or a git option's
+// value) after a filled word opens one that is not clean, nothing tells where that git call ends: the rest of the
+// command, with the path it writes, may be part of it. A quoted command line is read as one too (bash -c '...'), each
+// time with a layer of quotes off, so it always shrinks
+function cutsGitCall(seg) {
+  const raw = seg.match(GIT_TOKEN) ?? [];
+  let hit = false, ticks = 0;
+  const cut = () => { hit = true; };
+  const unread = () => false;
+  for (let k = 0; k < raw.length && !hit; k++) {
+    const t = raw[k];
+    if (t === '`') {
+      if (ticks++ % 2 === 0) filledWrites(raw, k, unread, cut);
+      continue;
+    }
+    const u = unquote(t);
+    if (/["']/.test(t) && /[\s;&|]/.test(u)) {
+      const inner = u === t ? t.replace(/["']/g, '') : u;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(cutsGitCall)) return true;
+    }
+    if (isFilled(u)) filledWrites(raw, k, unread, cut);
+  }
+  return hit;
+}
+const FORMAT_WRITE =/(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
 const writes = (seg) => FENCE_WRITER.test(seg) || gitWrites(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
@@ -2047,13 +2229,13 @@ const countLost = (text) => MISCOUNTS.test(text) || REDEFINES.test(text) || left
 // One seen before was walked and passed: a block would have ended the whole walk
 function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set()) {
   return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
-    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
+    ?? (countLost(stripMessages(String(command ?? ''), depth > 0)) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
 // flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
 // A string it follows gets the second reading only, so the readings never multiply from one level to the next
 function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
-  const stripped = stripMessages(String(command ?? ''));
+  const stripped = stripMessages(String(command ?? ''), depth > 0); // past 0 it is the inside of a followed string
   const raw = flat ? stripped : blankComments(stripped);
   const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
   // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
@@ -2327,6 +2509,7 @@ function fenceWriteOne(command) {
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
   if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
+  if ((text.match(SEGMENTS) ?? []).some(cutsGitCall)) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
@@ -2456,7 +2639,8 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
       const read = readings(text); // #4776: bash drops a script's carriage returns too
-      for (const t of read.flatMap((r) => unredirected(r))) {
+      // #4803, #4777: without redirects, and each again without the comments that hold a quote
+      for (const t of read.flatMap((r) => unredirected(r)).flatMap(withUncommented)) {
         const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
         if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
       }
@@ -2567,14 +2751,27 @@ const SPLIT_NAME = new RegExp(String.raw`(?<![\w{$])\^?(?:g${GAP}*i${GAP}*t|g${G
 const GAPS = new RegExp(GAP, 'g');
 const NAME_SET = /(?<![\w$-])\$?([a-z_]\w*)[ \t]*=[ \t]*(["']?)(git|gh|az)\2(?![\w=./\\-])/gi;
 const VAR_USE = /\$(?:\{(\w+)\}|(\w+))/g;
+// #4828: $x = git rev-parse main (PowerShell; no shell reads it as a string) runs git and $x takes the output, so it
+// does not hold the name: a $ target, no quotes, and more words in the same statement. The call itself is still judged,
+// and one glued to the = ($x =git push) is set apart so that it is
+const MORE_WORDS = /^[ \t]{1,64}[^\s;&|#)}<>]/;
+const takesOutput = (match, quote, text, end) => match.startsWith('$') && !quote && MORE_WORDS.test(text.slice(end, end + 65));
 export function revealed(command) {
   const text = command.replace(ANSI_C, (_all, body) => requote(ansiText(body)))
     .replace(ECHOED, (_all, _q, a, _p, b) => a ?? b)
     .replace(EMPTY_BRACE, '$1')
     .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''))
     .replace(/\$(?=(["'])(?:git|gh|az)\1)/gi, ''); // $"git" is git: the dollar goes with the locale quote
-  const set = new Map([...text.matchAll(NAME_SET)].map((m) => [m[1], m[3]]));
-  return set.size ? text.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : text;
+  const set = new Map();
+  const spaced = text.replace(NAME_SET, (all, name, quote, tool, at, whole) => {
+    if (!takesOutput(all, quote, whole, at + all.length)) {
+      set.set(name, tool);
+      return all;
+    }
+    const head = all.slice(0, -tool.length);
+    return /[ \t]$/.test(head) ? all : `${head} ${tool}`;
+  });
+  return set.size ? spaced.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : spaced;
 }
 
 // One decision for one tool call. req: { tool: 'shell' | 'edit' | 'ask' | 'unknown'; command?; role?; protectedBranches?;
@@ -3351,7 +3548,8 @@ export function evaluate(req) {
       for (const written of spellings) {
         // #4737: judged as written, then with split and built names read out (only when that changes something)
         const shown = revealed(written);
-        for (const text of shown === written ? [written] : [written, shown]) {
+        // #4777: and each again without the comments that hold a quote
+        for (const text of (shown === written ? [written] : [written, shown]).flatMap(withUncommented)) {
           const danger = check(text);
           if (danger) return block('dangerous', danger);
           const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
