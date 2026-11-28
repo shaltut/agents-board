@@ -1487,6 +1487,8 @@ test('long commands stay fast', () => {
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, (again: number) => unknown][] = [
+    // #4834: the heredoc reader marks each place a command may start; a run of ; gives one per character
+    ['#4834, 600 KB of ; on a heredoc line, as a builder', asBuilder(';'.repeat(600000) + " cat > f <<'EOF'\nx\nEOF")],
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
     // earlier < feed is a running flag, not a look-back from every by-name lookup
     // secret files (#4347): names everywhere, with and without a reader, and one 200 KB word ending in .key
