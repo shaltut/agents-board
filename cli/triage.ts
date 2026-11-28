@@ -2,14 +2,15 @@
 // wrong use, the board being unreachable), searches the board for cards that may already hold each remaining fault,
 // asks one read-only judge (cli/triage-agent.ts) for a verdict per group, and files the real ones on claude-board.
 // Ahmed's rulings: cb files what the judge decided, after a final redaction check, under a Postgres advisory lock on
-// the template, with the fault:ft-… marker so two machines never file twice (Q2999); any session may run it, and it
-// writes only claude-board cards carrying the marker, one filing run per machine per 6 h (Q3001); never scheduled
-// (Q3002). --dry-run writes nothing: no card, no note, no triage.json.
+// the template (cb.fault_file), with the fault:ft-… marker so two machines never file twice (Q2999); any session may
+// run it, and it writes only claude-board cards carrying the marker, one filing run per machine per 6 h (Q3001); never
+// scheduled (Q3002). --dry-run writes nothing: no card, no note, no triage.json.
 import { hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { renameSync, writeFileSync, mkdirSync } from 'node:fs';
 import { faultsHome, readFaults, releaseOf, V } from '../kit/fault-line.mjs';
 import { machine } from '../server/db.ts';
+import { call } from './board.ts';
 import { help } from './help.ts';
 import { groupFaults, readMarker, sinceMs, type Group, type Marker } from './faults.ts';
 import { DEFAULT_MODEL, runJudge } from './triage-agent.ts';
@@ -49,8 +50,8 @@ export function ruleFor(g: Group, judged: Marker['groups'][string] | undefined, 
 const searchWords = (msg: string) => msg.replace(new RegExp(V, 'g'), ' ').match(/[A-Za-z]{3,}/g)?.slice(0, 6).join(' ') ?? '';
 
 async function candidates(sql: any, g: Group) {
-  const find = (q: string) => (q ? sql`select cb.task_find(${q}, ${PROJECT}, false, 5) as r` : Promise.resolve([{ r: { cards: [] } }]))
-    .then((rows: any[]) => rows[0]?.r?.cards ?? [])
+  const find = (q: string) => (q ? call('task_find', { q, project: PROJECT, notes: false, lim: 5 }, sql) : Promise.resolve({ cards: [] }))
+    .then((r: any) => r?.cards ?? [])
     .catch((e: any) => { if (/^unknown project /.test(e?.message ?? '')) return []; throw e; });
   const seen = new Map<number, any>();
   // a wrong use names its command only in the cmd field (the message masks it): cards about it say "cb <command>"
@@ -166,32 +167,21 @@ function facts(g: Group) {
     `- releases: ${g.releases.join(', ') || 'unknown'}`, `- message: ${g.msg || '(none)'}`, markerOf(g.tmpl)].join('\n');
 }
 
-/** Files one decision under the template's advisory lock: a note on the open claude-board card that carries this
- *  marker, or a new bug. Never any other card or project (Q3001). */
+/** Files one decision (cb.fault_file: one transaction under the template's lock): a note on the open claude-board card
+ *  that carries this marker, or a new bug. Never any other card or project (Q3001). */
 async function fileOne(sql: any, d: Decision, actor: string) {
-  const g = d.group, marker = markerOf(g.tmpl);
-  return sql.begin(async (tx: any) => {
-    await tx`select pg_advisory_xact_lock(hashtext(${'cb-fault:' + g.tmpl}))`;
-    const [hit] = await tx`select id, status, done_at from cb.tasks where project = ${PROJECT} and strpos(body, ${marker}) > 0
-      order by status in ('done', 'cancelled'), id desc limit 1`;
-    const seen = `seen ${g.count} more time${g.count === 1 ? '' : 's'} by ${g.seats} session${g.seats === 1 ? '' : 's'} from ${utc(g.first)} to ${utc(g.last)} UTC, release ${g.releases.join(', ') || 'unknown'} (cb triage)`;
-    if (hit && !['done', 'cancelled'].includes(hit.status)) {
-      const bad = redactionProblem(seen);
-      if (bad) return { action: 'held', id: Number(hit.id), why: bad };
-      await tx`select cb.log(${PROJECT}, ${seen}, ${String(hit.id)}, '{}'::jsonb, ${actor})`;
-      return { action: 'noted', id: Number(hit.id) };
-    }
-    if (hit?.status === 'cancelled') return { action: 'cancelled', id: Number(hit.id) };
-    if (hit?.status === 'done' && hit.done_at && Date.parse(g.last) <= +new Date(hit.done_at)) return { action: 'fixed', id: Number(hit.id) };
-    if (!d.title || !d.body) return { action: 'none', id: hit ? Number(hit.id) : null };
-    const body = `${d.body}\n\n${hit ? `Seen again after #${hit.id} was done.\n\n` : ''}${facts(g)}`;
-    // the last gate: board text cannot be edited, and the facts carry the message read back from the log
-    const bad = redactionProblem(`${d.title}\n${body}`);
-    if (bad) return { action: 'held', id: null, why: bad };
-    const [{ id }] = await tx`select cb.task_add(project => ${PROJECT}, title => ${d.title}, body => ${body}, status => 'next',
-      priority => 'P2', actor => ${actor}, type => 'bug') as id`;
-    return { action: 'filed', id: Number(id) };
-  });
+  const g = d.group;
+  const seen = `seen ${g.count} more time${g.count === 1 ? '' : 's'} by ${g.seats} session${g.seats === 1 ? '' : 's'} from ${utc(g.first)} to ${utc(g.last)} UTC, release ${g.releases.join(', ') || 'unknown'} (cb triage)`;
+  // the last gate: board text cannot be edited, and the facts carry the message read back from the log. A text that
+  // fails it is not sent; the board decides which of the two it would have written
+  const badSeen = redactionProblem(seen);
+  const badCard = d.title && d.body ? redactionProblem(`${d.title}\n${d.body}\n\n${facts(g)}`) : null;
+  const card = !!(d.title && d.body) && !badCard;
+  const r: any = await call('fault_file', { tmpl: g.tmpl, seen: badSeen ? null : seen, last: g.last,
+    title: card ? d.title : null, body: card ? d.body : null, facts: facts(g), actor }, sql);
+  if (r.action === 'held') return { action: 'held', id: r.id, why: badSeen };
+  if (r.action === 'none' && badCard) return { action: 'held', id: null, why: badCard };
+  return r;
 }
 
 function writeMarker(m: Marker) {
