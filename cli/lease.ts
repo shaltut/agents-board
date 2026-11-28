@@ -61,11 +61,17 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
 /** The renewal on its own timer. The board saying the lease is not ours: the tick is aborted, then lost (which exits). A
  *  board that does not answer is not that (a restart, a deploy): asked again next time, and the tick is aborted once the
  *  lease can no longer be counted on. Answers the function that stops it. */
-export function keepAlive(lease: Lease, o: { every?: number; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
+export function keepAlive(lease: Lease, o: { every?: number; silent?: () => boolean; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
   const every = o.every ?? RENEW_MS;
-  let asking = false;
+  let asking = false, quiet = false;
   const timer = setInterval(async () => {
     if (asking || !lease.holds()) return;
+    if (o.silent?.()) { // the one it renews for is hung: the lease runs out, so another can take over
+      if (!quiet) { o.say("nothing from the supervisor's main thread for too long: the lease is not renewed until it speaks again"); o.abort(); }
+      quiet = true;
+      return;
+    }
+    quiet = false;
     asking = true;
     try {
       const why = await lease.keep();
@@ -79,11 +85,12 @@ export function keepAlive(lease: Lease, o: { every?: number; abort: () => void; 
 }
 
 /** keepAlive on a thread of its own, for a held lease's token. A seat's start holds the main thread (its herdr calls and
- *  pauses are synchronous), longer than the lease lasts when the first prompt stalls. What the thread reports is acted on
- *  when the main thread is free again. A thread that fails or ends is a lease nobody renews: abort, then lost. Answers
- *  the function that stops it; nothing is reported after that. */
-export function keepAliveApart(token: string, o: { app: string; every?: number; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
-  const thread = new Worker(new URL('./lease-worker.ts', import.meta.url), { workerData: { token, app: o.app, every: o.every } });
+ *  pauses are synchronous), longer than the lease lasts when the first prompt stalls. It renews only while the main
+ *  thread speaks (beat(), which gets through even from a thread about to be held): after silentMs with no word it stops,
+ *  until the next one. What the thread reports is acted on when the main thread is free again. A thread that fails or
+ *  ends is a lease nobody renews: abort, then lost. After stop() nothing is reported. */
+export function keepAliveApart(token: string, o: { app: string; every?: number; silentMs: number; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
+  const thread = new Worker(new URL('./lease-worker.ts', import.meta.url), { workerData: { token, app: o.app, every: o.every, silentMs: o.silentMs } });
   let over = false;
   const gone = (why: string) => { if (over) return; over = true; o.abort(); o.lost(why); };
   thread.on('message', ([what, line]: [string, string]) => {
@@ -94,5 +101,8 @@ export function keepAliveApart(token: string, o: { app: string; every?: number; 
   });
   thread.on('error', (e) => gone(`the lease renewal thread failed: ${msg(e)}`));
   thread.on('exit', (code) => gone(`the lease renewal thread ended (${code})`));
-  return async () => { over = true; await thread.terminate(); };
+  return {
+    beat: () => { thread.postMessage('beat'); },
+    stop: async () => { over = true; await thread.terminate(); },
+  };
 }

@@ -11,14 +11,17 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
-import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, type Launch, type Runner } from './squad-up.ts';
+import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, START_MAX_MS, type Launch, type Runner } from './squad-up.ts';
 import { mayBeLeaving, nextBackup, onBackups, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import { keepAliveApart, supervisorLease } from './lease.ts';
 import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
 
-const TICK_MS = 20 * 60_000;
+export const TICK_MS = 20 * 60_000;
+// #4895: the lease is renewed only while the main thread speaks (each tick, each herdr call, so each step of a seat
+// start). Silent longer than the longest start, it is hung: the renewal stops and another supervisor can take over
+export const SILENT_MS = START_MAX_MS + 5 * 60_000;
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
   CLOSE_RETRY = 10 * 60_000;
 const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC: the runner tab's folder
@@ -522,16 +525,18 @@ if (import.meta.main) {
     closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), unreadTold: new Set(), sighted: new Map() };
   // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
   let current: AbortController | undefined; // the running tick's
-  let stopRenewing: (() => Promise<void>) | undefined;
-  const giveBack = async () => { await stopRenewing?.(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
+  let renewal: ReturnType<typeof keepAliveApart> | undefined;
+  const run: Runner = (m, args, timeout) => { renewal?.beat(); return realRun(m, args, timeout); };
+  const giveBack = async () => { await renewal?.stop(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
   if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
     process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); giveBack().finally(() => process.exit(0)); });
   }
   let code = 0;
   for (;;) {
     try {
+      renewal?.beat();
       await takeOrExit(say);
-      if (lease) stopRenewing ??= keepAliveApart(lease.token()!, { app, say, lost: (why) => { say(why); process.exit(1); },
+      if (lease) renewal ??= keepAliveApart(lease.token()!, { app, silentMs: SILENT_MS, say, lost: (why) => { say(why); process.exit(1); },
         abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')) });
       const now = ((await withDeadline(sql`select cb.board_now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
@@ -540,7 +545,7 @@ if (import.meta.main) {
       // it stops at its next step instead of acting on with its log writes failing (review I1, I2)
       const stop = current = new AbortController();
       try {
-        for (const line of await withDeadline(tick({ sql, run: realRun, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
+        for (const line of await withDeadline(tick({ sql, run, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
       } finally { stop.abort(); }
       code = 0;
     } catch (e) {

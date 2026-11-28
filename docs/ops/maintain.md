@@ -573,7 +573,9 @@ on any machine: it holds the supervisor lease on the board (`cb.leases`, #3222 S
 30 s. A second says `another supervisor is running`, who holds the lease and for how long, and exits. Stopping it
 (Ctrl-C, closing its pane) gives the lease back; one killed outright leaves it to run out, at most 180 s. The board
 saying the lease is another's ends the process. A board that does not answer does not: it keeps trying, and after
-150 s without a renewal the running tick stops. **At the upgrade that brings the lease, stop the old supervisor before
+150 s without a renewal the running tick stops. The renewal runs on its own thread, so a long seat start does not
+stop it. A supervisor that is hung (no tick and no `herdr` call for about 25 minutes) is not renewed: its lease runs
+out, at most 180 s later, and another can start. **At the upgrade that brings the lease, stop the old supervisor before
 you start the new one:** an older one holds a database lock the new one does not look at, so both would run.
 Check the plan first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing, takes
 no lease); `cb supervise --once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with

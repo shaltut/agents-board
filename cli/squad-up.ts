@@ -299,6 +299,11 @@ function promptOnScreen(screen: string, text: string): boolean {
   const want = flat(text);
   return shown.includes(want.slice(0, 24)) || shown.includes(want.slice(-24));
 }
+// #4895: the longest one seat's start takes by the timeouts in this file and its caller's, every herdr call at its own:
+// the supervisor's check that the seat is not running (30 s); workspace list, create, prestart's process-info and run
+// (180 s each, realRun's) and its wait (40 s); the agent start (180 s) after busy refusals' pauses (2 x 5 x 2 s); then
+// the longer end, a failed start's pane read and close (10 + 180 s), over a stalled first prompt (93 s). A test pins it
+export const START_MAX_MS = (30 + 4 * 180 + 40 + 180 + 20 + 190) * 1000;
 /** 'ok' once the agent took the prompt; 'unconfirmed' when that is not known (a person checks the pane). Other herdr
  *  errors throw (the prompt was not sent). */
 function sendFirstPrompt(l: Launch, text: string, pane: string, run: Runner, pause: (ms: number) => void): 'ok' | 'unconfirmed' {
