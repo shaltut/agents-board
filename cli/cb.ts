@@ -900,7 +900,7 @@ ${body}`, json: pg };
     }
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
-    case 'key': return { out: await keyCmd(args) }; // #3222 S3: this machine's board key; never the database
+    case 'key': return keyCmd(args); // #3222 S3: this machine's board key; never the database
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>

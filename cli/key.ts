@@ -22,7 +22,7 @@ function kindOf(word: string): Kind {
   return word as Kind;
 }
 
-export async function keyCmd(args: string[], o: Opts = {}): Promise<string> {
+export async function keyCmd(args: string[], o: Opts = {}): Promise<{ out: string; json: Record<string, unknown> }> {
   const env = o.env ?? process.env, file = o.file ?? dotenv;
   const [sub, word, ...rest] = args;
   if (sub === 'install' && word !== undefined) {
@@ -34,7 +34,7 @@ export async function keyCmd(args: string[], o: Opts = {}): Promise<string> {
     const path = installKey(kind, await (o.input ?? stdin)(), env);
     const address = env.CB_BOARD_URL || file('CB_BOARD_URL') ? ''
       : '\nSet CB_BOARD_URL, the board\'s https address, in .env: without it this machine does not use the key.';
-    return `stored the ${kind} key in ${path}. Check it: cb key check ${kind}${address}`;
+    return { out: `stored the ${kind} key in ${path}. Check it: cb key check ${kind}${address}`, json: { kind, path } };
   }
   if (sub === 'check' && !rest.length) {
     const kind = kindOf(word ?? 'machine');
@@ -48,9 +48,10 @@ export async function keyCmd(args: string[], o: Opts = {}): Promise<string> {
     } finally { await board.end(); }
     if (who.kind !== kind) throw new Error(`the key in ${target.keyFile} is a ${who.kind} key, not a ${kind} key: install the right one with cb key install ${kind}`);
     const mine = (env.CB_MACHINE || machine()).toLowerCase();
-    return [`the board at ${target.url} takes key ${who.key}: kind ${who.kind}, machine ${who.machine}${who.runner ? `, runner ${who.runner}` : ''} (board release ${who.release})`,
+    const lines = [`the board at ${target.url} takes key ${who.key}: kind ${who.kind}, machine ${who.machine}${who.runner ? `, runner ${who.runner}` : ''} (board release ${who.release})`,
       ...(kind === 'machine' && who.machine !== mine
-        ? [`This machine calls itself ${mine}, so the board would refuse its writes: set CB_MACHINE=${who.machine} in .env.`] : [])].join('\n');
+        ? [`This machine calls itself ${mine}, so the board would refuse its writes: set CB_MACHINE=${who.machine} in .env.`] : [])];
+    return { out: lines.join('\n'), json: { url: target.url, key: who.key, kind: who.kind, machine: who.machine, runner: who.runner, release: who.release, this_machine: mine } };
   }
   throw new Error(USE);
 }

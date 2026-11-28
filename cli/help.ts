@@ -674,6 +674,8 @@ READS: the rows or the record the text is made from
 
 THIS MACHINE
   faults        {machine, since, home, lines, groups}
+  key install   {kind, path}; key check: {url, key, kind, machine, runner, release, this_machine} (key is the id,
+                never the key itself)
   doctor        {root, checkout_sha, release, files, guard, wiring, agents, ok, problems}; files not compared:
                 files null, files_error says why (release may be missing)
   triage        {machine, since, model, cost_usd, seconds, dry_run, decisions}

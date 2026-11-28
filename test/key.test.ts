@@ -39,10 +39,11 @@ test('install stores the key from stdin and says where, never what', async () =>
   const d = temp('keys');
   const r = await keyCmd(['install', 'machine'], { input: input(`${KEY}\n`), tty: false, env: { CB_KEY_DIR: d, CB_BOARD_URL: 'https://board.example' }, file: noFile });
   assert.equal(readFileSync(join(d, 'machine.key'), 'utf8'), `${KEY}\n`);
-  assert.ok(r.includes(join(d, 'machine.key')) && /cb key check machine/.test(r) && !r.includes(SECRET.slice(0, 20)), r);
-  assert.doesNotMatch(r, /CB_BOARD_URL/);
+  assert.ok(r.out.includes(join(d, 'machine.key')) && /cb key check machine/.test(r.out) && !JSON.stringify(r).includes(SECRET.slice(0, 20)), r.out);
+  assert.doesNotMatch(r.out, /CB_BOARD_URL/);
+  assert.deepEqual(r.json, { kind: 'machine', path: join(d, 'machine.key') });
   const alone = await keyCmd(['install', 'runner'], { input: input(KEY), tty: false, env: { CB_KEY_DIR: d }, file: noFile });
-  assert.match(alone, /CB_BOARD_URL/);
+  assert.match(alone.out, /CB_BOARD_URL/);
 });
 
 test('install takes a key on stdin only: not typed at a terminal, never as an argument', async () => {
@@ -60,13 +61,14 @@ test('check asks the board who the key is, even where cb still uses the database
   const url = await board(200, who());
   const env = { CB_KEY_DIR: withKey(), CB_BOARD_URL: url, CB_DATABASE_URL: 'postgres://x@127.0.0.1:1/db', CB_MACHINE: 'boxa' };
   const r = await keyCmd(['check'], { env, file: noFile });
-  for (const part of [url, '0123456789', 'machine boxa', 'r42']) assert.ok(r.includes(part), `${part}: ${r}`);
-  assert.doesNotMatch(r, /CB_MACHINE/);
+  for (const part of [url, '0123456789', 'machine boxa', 'r42']) assert.ok(r.out.includes(part), `${part}: ${r.out}`);
+  assert.doesNotMatch(r.out, /CB_MACHINE/);
+  assert.deepEqual(r.json, { url, key: '0123456789', kind: 'machine', machine: 'boxa', runner: null, release: 'r42', this_machine: 'boxa' });
 });
 
 test('check says so when this machine goes by another name than its key: its writes would be refused', async () => {
   const env = { CB_KEY_DIR: withKey(), CB_BOARD_URL: await board(200, who()), CB_MACHINE: 'Laptop' };
-  assert.match(await keyCmd(['check'], { env, file: noFile }), /calls itself laptop.*CB_MACHINE=boxa/s);
+  assert.match((await keyCmd(['check'], { env, file: noFile })).out, /calls itself laptop.*CB_MACHINE=boxa/s);
 });
 
 test('check fails on a key of another kind, a refused key, no key, no address and no board', async () => {
@@ -94,6 +96,8 @@ test('cb key install runs with no database, prints no key and writes none to the
   });
   const ok = run(['key', 'install', 'machine'], `${KEY}\n`);
   assert.equal(ok.status, 0, ok.stderr);
+  const asJson = run(['key', 'install', 'machine', '--json'], KEY);
+  assert.deepEqual(JSON.parse(asJson.stdout), { kind: 'machine', path: join(d, 'machine.key') }, asJson.stderr);
   assert.ok(existsSync(join(d, 'machine.key')));
   const bad = run(['key', 'install', 'runner', KEY], '');
   assert.equal(bad.status, 1, bad.stdout);
