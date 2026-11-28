@@ -566,3 +566,16 @@ test('cb iam --agent and $CB_AGENT store agent; default claude omits agent param
   assert.equal(bad.code, 1);
   assert.match(bad.err, /agent must be one of claude, codex, opencode, agy/);
 });
+
+// #4738: cb edit -s printed "updated" and changed nothing
+test('cb edit refuses a status and changes nothing: cb move does that', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'before')`;
+  const [{ id, status }] = await sql`select id, status from cb.tasks`;
+  for (const flag of [['-s', 'review'], ['--status=review']]) {
+    const r = cb(['edit', String(id), '--title', 'after', ...flag]);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.err, new RegExp(`cb edit does not change status, nothing was changed\. Run: cb move ${id} review`));
+  }
+  assert.deepEqual({ ...(await sql`select title, status from cb.tasks`)[0] }, { title: 'before', status });
+});
