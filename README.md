@@ -53,7 +53,7 @@ flowchart LR
   SUP -- "starts, restores, closes seats" --> S
   SUP --> PG
   SUP -- "restarts if it stops" --> RUN
-  RUN -- "claims queued jobs, finishes them" --> PG
+  RUN -- "claims and finishes jobs (SQL, or the worker API)" --> PG
   PG --> SRV
   SRV --> WEB
   SRV <--> TG
@@ -70,7 +70,7 @@ flowchart LR
   into the running agent session through that agent's adapter.
 - **The server** (`server/main.ts`) serves the web UI, the HTTP API (including `/api/rpc/<function>`), live updates
   over server-sent events and `/healthz`. It also runs the Telegram poller and a GitHub watch. It serves the **worker
-  API** (`/w/v1`, a key per machine; no worker uses it yet: [docs/ops](docs/ops/README.md#who-can-do-what)).
+  API** (`/w/v1`, a key per machine; the job runner can work on it: [docs/ops](docs/ops/README.md#who-can-do-what)).
 - **The web dashboard** (`web/`, React + Vite) and **Telegram** are how the owner reads questions and answers them.
   Teammates can sign in with a member role and see only what is handed to them.
 - **Squads** are a lead plus role seats (architect, owner, builder, reviewer, qa, investigator) described by a squad
@@ -79,7 +79,8 @@ flowchart LR
   seats for waiting cards, restores a seat that went down holding cards, closes seats idle for 20 minutes that hold
   nothing, and restarts the runner when it stops beating.
 - **The job runner** (`cb runner`, `cli/runner.ts`) runs test and build recipes for queued jobs in slot clones on one
-  machine, so heavy checks do not run inside the agent sessions. Sessions queue them with `cb run`.
+  machine, so heavy checks do not run inside the agent sessions. Sessions queue them with `cb run`. It reaches the board
+  through Postgres, or through the worker API with a key of its own.
 - **The command guard** (`kit/guard/`) is a fail-closed check on an agent's shell commands, with per-role rules.
 
 ## Features

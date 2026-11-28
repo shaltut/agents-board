@@ -413,7 +413,8 @@ lock at once. Removing someone, or a new link for a member, is on the Users page
 
 ## Worker keys (#3222)
 
-What a machine will sign in to the worker API with ([README.md](README.md#who-can-do-what)); no worker uses one yet.
+What a machine signs in to the worker API with ([README.md](README.md#who-can-do-what)); the job runner can use its
+([below](#the-job-runner-on-the-worker-api-3222)).
 Making and revoking a key is Ahmed's, from the VPS shell. `<machine>` is the name the board knows the machine by (its
 `CB_MACHINE`, else its hostname), in lower case.
 
@@ -488,6 +489,8 @@ a new volume and a restore, never just a new image tag.
 | The worker API answers 429 "too many requests with this key" or "in flight" or "open streams" | one key made over 1200 requests in a minute, or holds too much at once ([README.md](README.md#security-in-one-place)) | the log names the key id; find what loops, or raise `CB_API_RATE` |
 | The worker API answers 429 "too many failed sign-ins from this address" | something there keeps sending a revoked or mistyped key, so a newly installed one is not looked up | stop it (the log's 401 lines name the key id); it clears within a minute |
 | The worker API answers 413 to `cb ask` with pictures | over 16 MB for the request | fewer or smaller pictures |
+| `cb runner` exits: "this machine's runner key is ... and this runner is ..." | the installed key was issued for another runner name or kind | issue one for this runner's name and install it ([the runner on the worker API](#the-job-runner-on-the-worker-api-3222)) |
+| The runner's pane repeats "the board refused the notice stream" or "claim failed: the board refused this machine's key" | its key was revoked or mistyped | install a live one; no restart |
 | A worker's `cb` errors "function cb.x(...) does not exist" | the worker's code is older or newer than the VPS's schema | update the worker's checkout (Upgrade) |
 | No Telegram pushes | no token, or another server polls with it (409 in the logs) | `TELEGRAM_BOT_TOKEN` in `.env`; stop the other server |
 | Log: "another board server polls Telegram and GitHub" | a second server (the PC's?) holds the poller lock | stop it; this one takes over within a minute |
@@ -565,6 +568,25 @@ Set up, once, on the PC:
      `~/.claude-board/runner/state` are orphaned: delete them by hand. The first job in each slot clones and installs again.
    - Jobs still queued as `main` at the switch are never claimed by the new runner: cancel them (`cb job cancel <id>`)
      and queue them again.
+
+### The job runner on the worker API (#3222)
+
+The runner picks its way to the board at each start (`cli/transport.ts`): `CB_DATABASE_URL` in its environment, the
+database; else `CB_BOARD_URL` (environment or `.env`), the worker API with this machine's runner key; else `.env`'s
+`DATABASE_URL`. On the API it opens no database connection, follows the `cb_jobs` stream instead of `LISTEN`, and its
+start line ends `on the worker API`. A job's environment gets neither address nor key. (A job runs as the runner's own
+user, so it could read the key file, as it can read `.env`.)
+
+1. Issue its key ([Worker keys](#worker-keys-3222)): kind `runner`, with the name `runner.json` gives the runner
+   (`name`, else the machine's). A key for any other name stops the runner at its start, and the message says so.
+2. On the runner's machine, pipe it into `cb key install runner`; `cb key check runner` names the runner.
+3. Set `CB_BOARD_URL` and restart `cb runner`. **In `.env` it moves every `cb` on that checkout**, not only the runner,
+   and each kind then needs its own key: install the machine key first. A variable set only in one pane is lost when the
+   supervisor restarts the runner in a new tab.
+
+To go back, remove `CB_BOARD_URL`, or start the runner with `CB_DATABASE_URL` set. Removing only the key does not: a
+runner with a board address and no key refuses to start. To replace a key, install the new one, then revoke the old: no
+restart (the file is read for every request; a refused stream is tried again every 30 s).
 
 What each result means:
 

@@ -43,8 +43,8 @@ his PC and MacBook and the people he shares it with all use one board.
   - the **Telegram bot** (`server/telegram.ts`): pushes Ahmed's open questions, takes his answers;
   - the **GitHub watch** (`server/github.ts`): every 3 minutes, `gh api` for each repo `cb github` lists; one card per
     PR, one short message per poll to orch. GitHub text is always marked untrusted.
-- **The worker API** (`server/worker.ts`, `/w/v1` on the same server, #3222; no worker uses it yet): what workers will
-  call instead of Postgres. `GET /w/v1/hello`; `POST /w/v1/call/<function>` with `{"args": {...}}`, for the functions
+- **The worker API** (`server/worker.ts`, `/w/v1` on the same server, #3222): what workers call instead of Postgres;
+  of them, the job runner can so far ([maintain.md](maintain.md#the-job-runner-on-the-worker-api-3222)). `GET /w/v1/hello`; `POST /w/v1/call/<function>` with `{"args": {...}}`, for the functions
   `server/ops.ts` lists for the key's kind (anything else is 404, code `42883`); `GET /w/v1/events?ch=<channel>`,
   server-sent events (a machine key: `cb`, and `cb_bind` for its own panes; a runner key: `cb_jobs`) with a ping every
   25 s. A time or bytes in a result, or in a row's own column, arrives as `{"$date": ...}` or `{"$bytes": ...}`.
@@ -92,7 +92,13 @@ signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ah
 - **reads the whole board**: a read may name any session or project. `reply_to` (where an answer is delivered) is the
   caller's own text, as it is today.
 
-A runner key and a supervisor key can call nothing yet.
+A runner key calls only the runner's own functions (hello, claim, finish, beat, reconcile, its settings, and which
+jobs were cancelled). Each of its writes is held to the key's runner; its two reads answer for any runner name or job id
+(slot counts, cancelled ids). **Whoever has it is that runner:** they can publish its recipes, take the jobs queued for
+them and report any result, a false pass included, with a summary that reaches the requester marked as job output.
+`cb job log` fetches a runner's log address only when it is a Tailscale one.
+
+A supervisor key can call nothing yet.
 
 ## Security, in one place
 

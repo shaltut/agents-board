@@ -116,7 +116,8 @@ A dump a night in `/var/backups/claude-board`, 14 kept. Restoring: [maintain.md]
 
 ## 7. Workers: point the sessions' cb at the VPS
 
-(The worker API and its keys, [maintain.md](maintain.md#worker-keys-3222), will replace this once `cb` can use it.)
+(The worker API and its keys, [maintain.md](maintain.md#worker-keys-3222), will replace this. The job runner can
+already work on it: [maintain.md](maintain.md#the-job-runner-on-the-worker-api-3222).)
 
 Each machine whose Claude sessions use the board needs the database URL (Tailscale address, port 5434):
 
