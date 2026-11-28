@@ -15,7 +15,8 @@ everyone signs in, you included.
 
 **Users** (key 7) → **Add user**: display name, a short name (`cai`), and the role.
 
-- A **member** gets a private link with a Copy button. Send it in a direct message, never a group chat. Then **put
+- A **member** gets a private link with a Copy button. **It is shown only then:** the board keeps just a fingerprint
+  (hash) of it. Send it in a direct message, never a group chat. Then **put
   them on their projects** with **+ Project** on their card: questions and tasks reach a person only on their
   projects (handing one anywhere else is refused, and the For picker offers to add them to the project). Optional:
   **Set password** on their card, so they can sign in by name and password too. Send the password separately from
@@ -23,7 +24,11 @@ everyone signs in, you included.
 - An **admin** is added with a password (they have no link). Send them the board's address, their name and the
   password; they change it after signing in (their name at the top, then Change password).
 
-A session can add members too (`cb user add cai "Cai"`) but never sees the link, and can't make admins.
+A session can add members too (`cb user add cai "Cai"`) but gets no link, and can't make admins: their card says **No
+link yet** until you press **New link**.
+
+**To send a link again,** press **New link**. It makes another one, ends the old one and signs that member out
+everywhere. The same applies to a member who was an admin before: they have no link until you make one.
 
 **Make admin / Make member** on a card changes the role. The last admin can't be demoted or removed.
 
@@ -47,7 +52,7 @@ Questions handed to someone move from "Waiting on you" to "Waiting on others" an
   for 2 minutes (same message, even with the right password). Someone else failing elsewhere never locks you out.
 - Everyone can **change their password** and **sign out** (admins: their name at the top; members: the buttons at the top). A member who signed in by link sets a
   first password there without a current one. An admin who changes their password is signed out of every other
-  browser (a member's link keeps working).
+  browser (a member's link keeps working). A password sign-in lasts 90 days.
 - Forgot the password: an admin resets a member's on the Users page (**Reset password**); only you reset another
   admin's. Yours, if you can't sign in: from the VPS shell ([ops/maintain.md](ops/maintain.md#users)).
 - **Sign out everywhere** on an admin's card ends every browser signed in as them (a lost laptop); their password

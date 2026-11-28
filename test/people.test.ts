@@ -19,14 +19,15 @@ const remote = (path: string, init: RequestInit & { cookie?: string } = {}) =>
   app.request(path, { ...init, headers: { 'x-forwarded-for': '1.2.3.4', host: 'abc.ngrok-free.app',
     ...(init.cookie ? { cookie: `cb_user=${init.cookie}` } : {}), ...(init.headers as any) } });
 
-test('People: only this PC reads the tokens; a guest or a stranger never does', async () => {
+test('People: only this PC reads the Users page, which holds no link; a guest or a stranger never reads it', async () => {
   const sql = await db();
   const [{ token }] = await sql`select cb.user_add('cai', 'Cai') as token`;
   await onProject(sql, 'cai', 'iris');
   await sql`select cb.ask(project => 'iris', body => 'E1 scope?', blocking => true, to_user => 'cai', actor => 'orch@shaltoot')`;
 
   const local = await (await app.request('/api/people', { headers: PAGE })).json();
-  assert.equal(local.people[0].token, token);
+  assert.equal(local.people[0].has_link, true);
+  assert.ok(!('token' in local.people[0]) && !JSON.stringify(local).includes(token), 'a link is not shown again (#4868)');
   assert.equal((await app.request('/api/people', { headers: SESSION })).status, 403, 'a session on this PC (no Sec-Fetch-Site)');
   assert.equal((await app.request('/api/people', { headers: { ...SESSION, 'sec-fetch-site': 'cross-site' } })).status, 403);
   assert.equal(local.people[0].name, 'cai');
@@ -124,8 +125,7 @@ test('People: only the dashboard rotates or removes; a session cannot, with or w
       assert.match((await r.json()).error, /only Ahmed (can|'s dashboard can)/);
     }
   }
-  const [u] = await sql`select token from cb.users where name = 'cai'`;
-  assert.equal(u.token, token, 'nothing changed');
+  assert.equal((await remote('/api/me', { cookie: token })).status, 200, 'nothing changed');
 });
 
 test('People: user_add hands the token only to the dashboard', async () => {

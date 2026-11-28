@@ -203,6 +203,27 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4622 (PR 77 round 6, m1): a quoted phrase ("$A log", "$C d") names no git command. It is let through only where the
+// whole command is one plain echo or printf line: an allow list, so nothing can run or pass on what the line prints
+test('#4622: only a lone echo or printf line may hold a quoted phrase after a variable', () => {
+  passes('builder', ['echo "$A b" "$C d" opencode.json', "  echo '$A b' \"$C d\" opencode.json",
+    'printf "%s" "${A} b" "$C d" opencode.json', 'printf "%s\n" "$A b" "$C d" opencode.json',
+    'echo "$USER said" "$A hello there" opencode.json', 'echo %A% "%C% d" opencode.json']);
+  const line = 'echo "$A b" "$C d" opencode.json';
+  blocksByRole('builder', [
+    // any other command word, or a word before the echo
+    'caffeinate "$A log" "$A log" opencode.json', `nice ${line}`, `VAR=1 ${line}`,
+    // anything beside the line: a pipe, another command, a second line, a group
+    `${line} | cat`, `${line}; true`, `${line} && true`, `true || ${line}`, `${line} &`, `${line}\ntrue`, `(${line})`, `{ ${line}; }`,
+    // anything in it that is not plain text or a plain variable
+    'echo "$(true) b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
+    'echo $A x$B opencode.json',
+    // m2, kept: two whole variables may be git and a writing command
+    'python3 tools/check.py $A $B opencode.json',
+    // PR 172 review (R2), as written there: what echo prints is parsed again by sh; ssh behind another word reads its
+    // words again
+    'G=$(which git); X=eckout; echo $G "ch$X --" opencode.json | sh', 'caffeinate ssh host $GIT "$X now" opencode.json']);
+});
 // #4768, #4770: the guard drops a heredoc body only where bash reads one. In each of these bash 5.2 runs the line the
 // guard dropped as file text (checked in a shell with a harmless echo in its place)
 const hiddenByHeredoc: [string, (c: string) => string][] = [
@@ -251,7 +272,7 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # inside $(( ))', (c) => `echo $(( 1 # )) '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside (( ))', (c) => `(( 1 # )); echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
-  ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside a [[ =~ ]] pattern', (c) => `[[ a =~ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   // PR 161 review (R2): PowerShell refuses a << only where it starts a token. Glued to a word it is part of that word
   ...['cat > a', 'cat', 'cb log 1 -b -', 'cb log 1 0', 'git commit -F -', 'cat =', 'cat > a -'].map((head): [string, (c: string) => string] =>
@@ -867,8 +888,37 @@ const secretReads = [
   // bash comment's trailing \)
   'Get-ChildItem C:\\work\\\ncat .env', 'echo a\\\ncat .env', 'ls # x\\\ncat .env',
   'Set-Location C:\\tmp\\\nGet-Content .env', 'Get-ChildItem C:\\work\\\r\ncat .env',
+  // #4882: the relay's bridge file holds the token its local socket runs any SQL for: by full path, by the temp
+  // variable, and by every glob that reaches it; the seat's token file by a glob too
+  'cat /tmp/cb-relay-ab12cd34ef56.bridge', `cat "$TMPDIR/cb-relay-ab12cd34ef56.bridge"`, String.raw`type %TEMP%\cb-relay-ab12cd34ef56.bridge`,
+  String.raw`Get-Content $env:TEMP\cb-relay-ab12cd34ef56.bridge`, String.raw`type C:\Temp\cb-relay-ab12cd34ef56.bridge`, 'cp /tmp/cb-relay-ab12cd34ef56.bridge /tmp/x',
+  String.raw`Copy-Item "$env:TEMP\cb-relay-*.bridge" .`, 'cat /tmp/cb-relay-*.bridge', 'cat /tmp/cb-relay-????????????.bridge',
+  'cat /tmp/cb-relay-[0-9a-f]*.bridge', 'cat /tmp/cb-relay-*', String.raw`gc $env:TEMP\cb-relay-ab12*`, 'head /tmp/cb-relay-ab12cd34ef56.*',
+  'grep token $TEMP/*.bridge', 'base64 < /tmp/cb-relay-ab12cd34ef56.bridge', 'cat /tmp/cb-relay-*.bridge*', `cat "$TMPDIR"/cb-seat-*.claude.json`,
+  String.raw`Get-Content $env:TEMP\cb-seat-*.opencode.json`,
+  // PR 203 review: a glob typed without the hyphen reaches the same files, and so does one ending at .json
+  'tail -n 50 /tmp/cb-relay*', String.raw`Get-Content $env:TEMP\cb-relay* -Tail 20`, String.raw`type %TEMP%\cb-relay*`, 'tail /tmp/cb-relay*.bridge',
+  'cat /tmp/cb-relay*.br*', 'cat /tmp/cb-seat*', String.raw`type %TEMP%\cb-seat*`, 'cat /tmp/cb-seat*.json', 'cat /tmp/cb-seat-????????????.json',
+  'cat /tmp/cb-seat*.claude.json', 'cat /tmp/cb-seat*.js*',
+  // PR 203 second review: a glob that stops before the name is spelled out reaches both token files
+  'cat /tmp/cb-*', 'cat /tmp/cb*', 'cat /tmp/cb-r*', 'cat /tmp/cb-rel*', String.raw`type %TEMP%\cb*`, 'head -n 5 /tmp/cb-s*', 'cat /tmp/cb*.json',
+  'cat /tmp/cb-*.bridge', 'cat /tmp/cb-rel?y*',
+  // #4903: the braced temp variable, the usual macOS spelling, with no slash after it
+  'cat ${TMPDIR}cb-seat-ab12.claude.json', 'cat "${TMPDIR}cb-relay-ab12cd34ef56.bridge"', 'cat ${TMPDIR}cb-relay*', 'tail ${TMPDIR}cb*',
 ];
 const secretUses = [
+  // #4882: the relay's other files stay readable, and so does the code that names the bridge file
+  'tail -n 50 /tmp/cb-relay-ab12cd34ef56.log', 'tail -f /tmp/cb-relay-*.log', String.raw`Get-Content $env:TEMP\cb-relay-*.log -Tail 20`,
+  'cat /tmp/cb-relay-ab12cd34ef56.pid', 'cat /tmp/cb-relay-*.log*', 'ls /tmp/cb-relay-*', 'rm /tmp/cb-relay-ab12cd34ef56.bridge',
+  'cat cli/bridge.ts', 'grep -n "files.bridge" cli/bridge.ts', 'grep -rn "cb-relay-" cli', 'grep -n "cb-relay-bridge-" cli/bridge.ts',
+  // PR 203 review: a glob over the other files stays readable, a cut-short extension too; so do the markers squad up reads
+  'cat /tmp/cb-relay-*.lo*', 'tail /tmp/cb-relay*.log', 'cat /tmp/cb-relay*.pid', 'cat /tmp/cb-relay-*.he*', 'grep -n "cb-relay" cli/relay.ts',
+  'grep -rn "cb-seat-ready" cli', 'grep -rn "cb-seat-refused" cli/agents', 'ls /tmp/cb-seat*',
+  // names that cannot reach a token file, globs that end in another file's extension, and a look at the folder
+  'cat /tmp/cbor*', 'cat /tmp/cb-job-7*', 'tail /tmp/cb-*.log', 'cat /tmp/cb-r*.log', 'cat /tmp/cb*.pid', 'cat /tmp/cb-*.lo*', 'ls /tmp/cb-*', 'rm /tmp/cb*',
+  String.raw`grep -n "cb\.next" db/schema.sql`, 'cat ${TMPDIR}cb-relay-ab12cd34ef56.log',
+  // an escaped star in a search for the rule itself is no glob
+  String.raw`grep -c "cb-relay-\*.bridge" kit/permissions/builder.json`,
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
   'docker compose --env-file .env up -d', 'cat ~/.ssh/id_ed25519.pub', 'cat src/env.ts', 'grep -rn process.env src',
   'cat environment.md', `cb log 1 "the key lives in deploy/.env: cat it yourself"`, 'ls -la', 'cat key.txt', 'cat monkey.ts',
@@ -1610,6 +1660,7 @@ test('long commands stay fast', () => {
     ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['#4622, a 200 KB echo line that a pipe disqualifies, as a builder', asBuilder('echo ' + kb200('"a b" ') + '$X opencode.json | cat')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
@@ -2226,6 +2277,58 @@ test('#4803: a redirect target is read to its end however it nests, and one that
   }
 });
 
+// #4825: the refusal does not read the shell's options: a quoted target the guard cannot place refuses wherever the
+// command names a shell
+const unplaced4825 = "'>$(case a in a) echo log;; esac) sudo codex'";
+const refused4825 = (command: string, extra: Record<string, unknown> = {}) => {
+  for (const role of ['builder', null]) assert.notEqual(judged4803(command, role, extra), 'allow', `${role}: ${command.slice(0, 200)}`);
+};
+test('#4825: no spelling of a shell\'s options keeps a string from being read as shell text', () => {
+  for (const shell of ['bash -c -O extglob', 'bash -c -o pipefail --', "bash --rcfile 'rc' -c", "bash -O 'extglob' -c", 'bash -O "extglob" -c', `bash ${'-o pipefail '.repeat(40)}-c`,
+    'Bash.exe -c', 'BASH.EXE -c', 'SH -c', "'/usr/bin/bash' -c", 'bash -c \\\n', 'ba""sh -c', 'ssh box', 'EVAL']) refused4825(`${shell} ${unplaced4825}`);
+});
+
+// PR 187 lead review: every shell the guard knows by name counts, and a held string's own words name none
+test('#4825: every shell the guard knows counts, however it is named', () => {
+  for (const shell of ['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'yash', 'fish', 'csh', 'tcsh', 'MKSH.EXE', '/usr/bin/yash', 'busybox ash']) {
+    for (const command of [`${shell} -c ${unplaced4825}`, `echo ${unplaced4825} | ${shell}`, `${shell} <<< ${unplaced4825}`, `${shell} <<'EOF'\n>$(case a in a) echo log;; esac) sudo codex\nEOF`]) refused4825(command);
+  }
+});
+
+test('#4825: the words of the string itself name no shell, up to its last one', () => {
+  const ends = (words: string) => `'>$(case a in a) echo log;; esac) ${words}'`;
+  for (const command of [`printf '%s' ${ends('see the sh docs')} | cat`, `echo ${ends('ask bash')} | cat`, `echo ${ends('eval')} ${ends('run ssh')} | tee log`]) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+  // a shell named right after it, or between two such strings, still counts
+  for (const command of [`echo ${ends('x')} | sh`, `echo ${ends('x')}|ash`, `echo ${ends('x')} | tee ${ends('y')} | mksh`]) refused4825(command);
+});
+
+test('#4825: the string is held to it however it reaches the shell', () => {
+  for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `echo ${unplaced4825} | tee log | sudo -u x bash -x`,
+    `cat > >(bash -c ${unplaced4825})`, `bash 2>&1 -c ${unplaced4825}`]) refused4825(command);
+  // a heredoc fed to a shell is that shell's text; one fed to another program is not
+  const body = '>$(case a in a) echo log;; esac) sudo codex';
+  for (const shell of ['bash', 'bash -s -- x', 'sh -eu', 'BASH.EXE', 'ssh box']) refused4825(`${shell} <<'EOF'\n${body}\nEOF`);
+  assert.equal(judged4803("python3 - <<'EOF'\ns = \"x -> y'\"\nEOF"), 'allow');
+  const script = (text: string) => ({ readScript: (p: string) => (p.endsWith('run.sh') ? text : null) });
+  assert.equal(judged4803('./run.sh now', 'builder', script(`bash -o pipefail -c -- ${unplaced4825}\n`)), 'role');
+  // a script's #! line names its own interpreter, and hands no string to a shell
+  assert.equal(judged4803('./run.sh now', 'builder', script('#!/bin/bash\necho "step 1 -> don\'t stop"\n')), 'allow');
+});
+
+test('#4825: a quoted arrow where no shell is named, or a message about one, is only text', () => {
+  for (const command of ['echo "step 1 -> don\'t stop"', 'grep -rn "->\'" src', 'ls build.sh && echo "a -> don\'t"', 'npm run lint && echo "ok -> it\'s done"',
+    'git commit -m "bash: a -> don\'t"', 'cb log 1 "eval -> it\'s fixed"', 'bash build.sh && echo done > out.txt', 'bash -c "ls > out.txt"',
+    // only the pipeline or command that holds the string: a shell named in another one is none of its business
+    'bash build.sh; echo "a -> don\'t"', 'bash build.sh && echo "a -> don\'t"', 'echo "a -> don\'t" || bash fix.sh', 'echo "a -> don\'t"\nbash fix.sh']) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+  // as in git's own scripts: a substitution with its own quotes inside a message, in a script that uses eval elsewhere
+  const text = 'eval "$setup"\necho "a symbolic link -> \'$(cat "$1")\'"\n';
+  assert.equal(judged4803('./run.sh now', 'builder', { readScript: (p: string) => (p.endsWith('run.sh') ? text : null) }), 'allow');
+});
+
 test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
@@ -2310,7 +2413,8 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
     ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
     ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
     ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
-    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
+    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")],
+    ['shell names before unplaced strings', 'echo ' + kb200("bash '>$(case' ")], ['unplaced strings with no shell', 'echo ' + kb200("'>$(case' ")], ['split shell names', 'echo ' + kb200('ba""sh \'>$(case\' ')], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
     withinBudget(name, (again) => judged4803(command + ' '.repeat(again)), budget);
   }
 });

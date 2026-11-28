@@ -1391,10 +1391,24 @@ function ghRuns(w, i, j) {
 // input redirect (< .env) is a read; the bootstrap copy of a template (cp .env.example .env) and --exclude=.env pass.
 // Quote pairs inside a word (.e""nv) count. kit/permissions/<role>.json denies the same files to Read (a closed list:
 // it can only name files). Linear: every name starts at a path boundary, so a long word is read once.
-const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{;|&>$` + '`' + String.raw`])`;
+// } closes a braced variable written against the name, ${TMPDIR}cb-seat-x (#4903)
+const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{};|&>$` + '`' + String.raw`])`;
 const SECRET_END = String.raw`(?=[\s"';&|)<>*?[{},:` + '`' + String.raw`]|$)`;
 const SOURCE_EXT = String.raw`(?:md|mdx|ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|txt|html|css)`;
-const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.-]*\.(?:claude|opencode)\.json)` + SECRET_END, 'i');
+// #4882: the relay's bridge file (cli/bridge.ts) holds the token its local socket runs any SQL for, and the seat's
+// endpoint files hold its messaging token or password. Each is named in full, by a glob in the name, or by a glob that
+// ends the word and so reaches it (cb-relay*, not cb-relay*.log or a cut-short .lo*); the bridge file also as *.bridge.
+// No hyphen is needed after the first words (PR 203 review). The name's characters hold none that can start another
+// name, so each is read once
+const NAME_REST = String.raw`[\w.*?[\]-]*`;
+const ENDING_STAR = String.raw`\*(?![\w.*?[\]-])`;
+const SEAT_NAME = String.raw`cb-seat${NAME_REST}(?:\.json|${ENDING_STAR})`;
+const OTHER_RELAY_FILE = String.raw`\.(?:lo?g?|pi?d?|he?l?d?|re?f?u?s?e?d?)`;
+const BRIDGE_NAME = String.raw`cb-relay${NAME_REST}(?:\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})|(?<!cb-relay-\\)\*\.bridge`;
+// a glob that starts before either name is spelled out (cb*, cb-*, cb-r*): what stands before it must be able to start
+// cb-relay or cb-seat, so cbor* and cb-job-7* are other files (PR 203 second review)
+const SHORT_NAME = String.raw`cb(?:-(?:r(?:e(?:la?)?)?|s(?:ea?)?)?)?(?=[*?[])${NAME_REST}(?:\.json|\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})`;
+const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|` + SEAT_NAME + '|' + BRIDGE_NAME + '|' + SHORT_NAME + ')' + SECRET_END, 'i');
 const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
   'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
   'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',
@@ -1405,7 +1419,7 @@ const SECRET_READER = new RegExp(String.raw`(?<![\w.$\\/-])(?:${SECRET_READERS.j
 const TEMPLATE_COPY = /^\s*(?:cp|copy|copy-item|cpi)\s+(?:-\S+\s+)*["']?[^\s"']+\.(?:example|sample|template|dist)["']?\s+["']?[^\s"']+["']?\s*$/i;
 const EXCLUDE = /--exclude(?:-dir)?=\S*/gi;
 const dequote = (t) => t.replace(/""|''/g, '');
-const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials or a seat token file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials, a seat token file or the relay\'s bridge file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
   return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
@@ -1635,11 +1649,23 @@ const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', 
 // position is judged whole by the command-position rule, so its later words are arguments too
 const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'jq', 'cmp', 'diff', 'stat', 'sha256sum', 'md5sum',
   'get-content', 'gc', 'select-string', 'sls', 'test-path', 'get-item', 'gi']);
+// #4622: in one plain echo or printf line, a word with a space of its own and nothing filled in but plain variables
+// ("$A log", "$C d") is only printed. An allow list for the whole command: no pipe, redirect, second command or line,
+// group, substitution or other backslash, so nothing can run or pass on what the line prints. Anything else is judged
+// as before.
+const PLAIN_VAR = /\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})|%[A-Za-z_]\w*%/g;
+const LONE_PRINT = /^[ \t]*(?:echo|printf)(?:[ \t]+(?:"[\w ./:=,%+@-]*(?:\\[nt][\w ./:=,%+@-]*)*"|\x27[\w ./:=,%+@-]*\x27|[\w./:=,%+@-]+))*[ \t]*$/;
+const lonePrint = (command) => LONE_PRINT.test(command.replace(PLAIN_VAR, 'v'));
+const isPhrase = (v) => {
+  const own = v.replace(PLAIN_VAR, '');
+  return /[ \t]/.test(own) && !/[$\x60]/.test(own);
+};
 // a filled word at raw[k] (any position): true when it is a git call that writes. Its options are judged as git's, not
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
-// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
-function filledWrites(raw, k, judge, cut) {
+// (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5). printed: the command is
+// a lone echo or printf line (lonePrint), where a phrase is no subcommand.
+function filledWrites(raw, k, judge, printed, cut) {
   const after = filledEnd(raw, k), head = ['git'];
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
@@ -1661,14 +1687,14 @@ function filledWrites(raw, k, judge, cut) {
       if (bare) j = pastBare(raw, j) - 1;
       continue;
     }
-    const filledSub = x === '`' || gluedTick(raw, j) ||(x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !isPathWord(x)); // x as written: a quoted ) must be seen
+    const filledSub = x === '`' || gluedTick(raw, j) ||(x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !isPathWord(x) && !(printed && isPhrase(v))); // x as written: a quoted ) must be seen
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
     if (cut && filledSub && opensUnknown(raw, j)) cut();
     return judge(() => [...head, ...raw.slice(j).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
   return false;
 }
-const gitWrites = (seg, inQuote = false) => {
+const gitWrites = (seg, inQuote = false, printed = false) => {
   const raw = seg.match(GIT_TOKEN) ?? [];
   let start = true, runsEnv = false, launched = false, noRun = false, afterClose = false, ticks = 0;
   const rest = (k) => raw.slice(k).filter((x) => !GIT_OPENER.test(x)).map(unquote);
@@ -1681,7 +1707,7 @@ const gitWrites = (seg, inQuote = false) => {
     if (GIT_OPENER.test(t)) {
       // a backtick in command position runs what it prints: an unknown program whose first word is the subcommand slot
       if (t === '`' && start && !inQuote && judge(() => ['`', ...rest(k + 1)], true)) return true;
-      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge)) return true; // anywhere: caffeinate `which git` checkout
+      if (t === '`' && ticks++ % 2 === 0 && filledWrites(raw, k, judge, printed)) return true; // anywhere: caffeinate `which git` checkout
       start = true;
       noRun = false;
       afterClose = t === ')' || t === '}' || (t === '`' && ticks % 2 === 0);
@@ -1708,11 +1734,11 @@ const gitWrites = (seg, inQuote = false) => {
     // a $( or ${ group in command position: the subcommand slot is the word after the whole group (round 4, I4); inside
     // a quoted line ("$(git rev-parse --show-toplevel)/x", "$USER reading x") a filled first word takes the filledWrites test
     const words = () => (u === '$' && /^[({]$/.test(raw[k + 1] ?? '') ? ['$', ...rest(filledEnd(raw, k))] : rest(k));
-    if (filled && start && inQuote) { if (filledWrites(raw, k, judge)) return true; }
+    if (filled && start && inQuote) { if (filledWrites(raw, k, judge, printed)) return true; }
     else if ((isGit || filled) && judge(words, start && isGit)) return true;
     // a shell-filled word in ANY position (caffeinate $GIT, arch -arm64 $GIT, time -p $GIT, . $GIT: no wrapper list to fall
     // behind), judged by the word after it (GIT_COMMANDS)
-    if (isFilled(u) && !noRun && filledWrites(raw, k, judge)) return true;
+    if (isFilled(u) && !noRun && filledWrites(raw, k, judge, printed)) return true;
     if (start && !SHELL_KEYWORD.has(u.toLowerCase())) {
       start = false;
       if (LAUNCHERS.has(cmdName(t))) launched = true;
@@ -1734,7 +1760,7 @@ function cutsGitCall(seg) {
   for (let k = 0; k < raw.length && !hit; k++) {
     const t = raw[k];
     if (t === '`') {
-      if (ticks++ % 2 === 0) filledWrites(raw, k, unread, cut);
+      if (ticks++ % 2 === 0) filledWrites(raw, k, unread, false, cut);
       continue;
     }
     const u = unquote(t);
@@ -1742,12 +1768,12 @@ function cutsGitCall(seg) {
       const inner = u === t ? t.replace(/["']/g, '') : u;
       if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(cutsGitCall)) return true;
     }
-    if (isFilled(u)) filledWrites(raw, k, unread, cut);
+    if (isFilled(u)) filledWrites(raw, k, unread, false, cut);
   }
   return hit;
 }
 const FORMAT_WRITE =/(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
-const writes = (seg) => FENCE_WRITER.test(seg) || gitWrites(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
+const writes = (seg, printed) => FENCE_WRITER.test(seg) || gitWrites(seg, false, printed) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
 const WRITE_CALL = /write|append|unlink|rename|copy|move|remove|delete|rmdir|rmsync|truncate|chmod|replace|dump|mkdir|\bopen\s*\([^),]{0,300},\s*["'][wax+]|-i\b|--in-place/i;
@@ -2667,6 +2693,7 @@ function fenceWriteOne(command) {
   if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
   if ((text.match(SEGMENTS) ?? []).some(cutsGitCall)) return FENCE;
   let inFence = false;
+  const printed = lonePrint(command);
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
     if (CD.test(seg)) {
@@ -2677,7 +2704,7 @@ function fenceWriteOne(command) {
     const names = fencePath(seg);
     if (!names && !inFence) continue;
     if (redirects(seg, inFence && !names)) return FENCE;
-    if (writes(seg)) return FENCE;
+    if (writes(seg, printed)) return FENCE;
   }
   return null;
 }
@@ -3541,24 +3568,69 @@ function wordEnd(text, i, powershell) {
   }
   return open.length ? -1 : Math.min(i, text.length);
 }
-// a string handed to a shell, as the text just before its quote shows: the shell (or its .exe), any unquoted words, the
-// option holding c and any options after it; or eval. The c option splits at its first c, so a long one is read once
-const SHELL_STRING = /(?<![\w-])(?:(?:ba|da|z|k)?sh(?:\.[eE][xX][eE])?["']?(?:[ \t]+[^\s"';&|<>()]+)*?[ \t]+-[abd-zA-Z0-9_]*c\w*(?:[ \t]+-[^\s"';&|<>()]*)*|eval(?:[ \t]+--)?)[ \t]+$/;
-const SHELL_STRING_REACH = 300; // how far back the shell's name is looked for
-// as bash counts quotes: each redirect goes with its whole target. A quoted piece that is no target is read the same way
-// inside, a few deep: a command string's own redirects go too. At a target that does not end the reading stops and, for
-// shell text (this command's, or a string handed to a shell), says so (lost.found). A target that does not close under
-// bash's count is read with PowerShell's, switching at most once, so it stays linear
+// #4825: a string can reach a shell after any options, by <<< or down a pipe, so no option is read: a quoted target
+// that cannot be placed refuses where its command, or a later one in its pipeline, names a shell (POSIX_SHELLS, ssh or
+// eval; in any case)
+const SHELL_NAMED = new RegExp(`(?<![\\w.-])(?:${[...POSIX_SHELLS, 'ssh', 'eval'].join('|')})(?:\\.exe)?(?![\\w.-])`, 'i');
+// as written, and with quotes and backslashes taken out, so a split name is seen and a Windows path still is
+const namesShell = (text) => SHELL_NAMED.test(text) || SHELL_NAMED.test(text.replace(/["'\\]/g, ''));
+const NAME_OVERLAP = 64; // a name split over quotes is looked for this far back
+// follows the commands of a pipeline through the unquoted text, to tell when a string lost inside one reaches a shell
+// (lost.handed). Each character is looked at once, plus the overlap at each call
+function pipelines(text, lost) {
+  let from = 0, checked = 0, lostEnd = 0, named = false, held = false;
+  // names are read only while a lost string waits for a shell, so a text that loses nothing costs nothing. The look back
+  // for a split name stops at the last lost string: its own words are never read
+  const look = (to) => {
+    if (!held || to <= checked) return;
+    if (!named) named = namesShell(text.slice(Math.max(from, lostEnd, checked - NAME_OVERLAP), to));
+    checked = to;
+    if (named) lost.handed = true;
+  };
+  return {
+    look,
+    gap(start, end) {
+      if (end <= start) return;
+      const piece = text.slice(start, end);
+      if (!/[;&\n|]/.test(piece)) return;
+      for (const s of piece.matchAll(/\|\||&&|\|&|[;&\n|]/g)) {
+        look(start + s.index);
+        named = false;
+        if (s[0] !== '|' && s[0] !== '|&') held = false;
+        from = checked = start + s.index + s[0].length;
+      }
+    },
+    // a string with a lost target, from start to end: what is before it is read now, its own words name no shell
+    hold(start, end) {
+      held = true;
+      lost.quoted = true;
+      look(start);
+      checked = lostEnd = Math.max(checked, end);
+    },
+  };
+}
+// as bash counts quotes: each redirect goes with its whole target. A quoted piece, or a target that holds a command or a
+// here-string, is read the same way inside, a few deep. At a target that does not end the reading stops and says so
+// (lost.found); lost.quoted: that happened further inside; lost.handed: there, and a shell gets that string. A target that
+// does not close under bash's count is read with PowerShell's, switching at most once, so it stays linear
 function shellUnredirected(text, left, depth = 0, lost = {}) {
-  const next = new RegExp(SHELL_NEXT, 'g');
-  let out = '', done = 0, powershell = false;
+  const next = new RegExp(SHELL_NEXT, 'g'), pipe = pipelines(text, lost);
+  let out = '', done = 0, powershell = false, plain = 0;
+  const within = (piece) => {
+    const inside = {};
+    const bare = shellUnredirected(piece, left, depth + 1, inside);
+    if (inside.handed) lost.handed = true;
+    return { bare, lost: Boolean(inside.found || inside.quoted) };
+  };
   for (let m = next.exec(text); m; m = next.exec(text)) {
     const [match, quoted] = m;
     let swap = match, end = next.lastIndex;
+    pipe.gap(plain, m.index);
     if (quoted !== undefined) {
       if (depth < 3 && /[<>]/.test(quoted)) {
-        const handed = SHELL_STRING.test(text.slice(Math.max(0, m.index - SHELL_STRING_REACH), m.index));
-        swap = quoted[0] + shellUnredirected(quoted.slice(1, -1), left, depth + 1, handed ? lost : {}) + quoted[0];
+        const inner = within(quoted.slice(1, -1));
+        swap = quoted[0] + inner.bare + quoted[0];
+        if (inner.lost) pipe.hold(m.index, end);
       }
     } else if (!match.startsWith('\\')) {
       let to = wordEnd(text, end, powershell);
@@ -3567,14 +3639,25 @@ function shellUnredirected(text, left, depth = 0, lost = {}) {
         lost.found = true;
         break;
       }
-      if (to > end) { swap = left(text.slice(m.index, to), m.index, text); end = to; }
+      if (to > end) {
+        const word = text.slice(end, to);
+        if (depth < 3 && /[<>]/.test(word)) {
+          const inner = within(word); // a here-string is the command's input; a >( ) target runs its own commands
+          if (inner.lost) { if (match.includes('<<<')) pipe.hold(m.index, to); else lost.quoted = true; }
+        }
+        swap = left(text.slice(m.index, to), m.index, text);
+        end = to;
+      }
     }
+    plain = end;
     if (swap !== match || end !== next.lastIndex) {
       out += text.slice(done, m.index) + swap;
       done = end;
       next.lastIndex = end;
     }
   }
+  pipe.gap(plain, text.length);
+  pipe.look(text.length);
   return done === 0 ? text : out + text.slice(done);
 }
 // bash takes a heredoc header before the command word too (<<x cmd), and reads the same with it at the line's end
@@ -3585,13 +3668,14 @@ function headersLast(line) {
   const after = line.slice(line.indexOf(headers[0])).replace(HEREDOC_ANY, ' ');
   return /^[ \t]*[^ \t;&|<>()#]/.test(after) ? `${line.replace(HEREDOC_ANY, ' ')} ${headers.join(' ')}` : line;
 }
-// a redirect of this shell's whose target does not end: the command behind it cannot be found. Heredoc bodies are another
-// program's text, and comments are none
+// a redirect whose target does not end: the command behind it cannot be found. A heredoc body counts only where its
+// command line names a shell, and comments never do
 function unplacedRedirect(text) {
   if (!/[<>]/.test(text)) return false;
   const lost = {};
-  shellUnredirected(blankComments(replaceHeredocs(stripMessages(text), (_all, line, id) => `${line}\n${id}`)), () => ' ', 0, lost);
-  return lost.found === true;
+  const own = blankComments(replaceHeredocs(stripMessages(text), (all, line, id) => (namesShell(line) ? all : `${line}\n${id}`)));
+  shellUnredirected(own, () => ' ', 0, lost);
+  return lost.found === true || lost.handed === true;
 }
 // a shell's script by its #! line, or with none by its name: .sh and the like, or no extension at all
 const shellScript = (path, text) => (text.startsWith('#!') ? /^#![^\n]*[/ \t](?:ba|da|z|k)?sh(?=\s|$)/.test(text) : /(?:\.(?:sh|bash|zsh|ksh)|(?:^|[\\/])[^\\/.]+)$/i.test(path));
