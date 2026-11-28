@@ -138,6 +138,19 @@ test('a renewal the board refuses aborts the tick and then exits', async () => {
   } finally { await mine.release(); }
 });
 
+// found reading the diff: the timer could renew a lease being deleted (read as "another took it", exit 1), and the loop
+// could take it again between the delete and the exit, leaving the next start to wait it out
+test('a lease being given back is not renewed or taken again', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  const going = mine.release();
+  assert.equal(mine.holds(), false, 'the timer asks nothing');
+  await assert.rejects(mine.keep(), /given back/);
+  await going;
+  assert.equal(await row(sql), undefined);
+});
+
 test('a board that does not answer is no refusal: the tick is aborted only once the lease cannot be counted on', async () => {
   await setup();
   let now = 1_000_000, broken = false;
