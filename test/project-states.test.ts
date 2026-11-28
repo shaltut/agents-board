@@ -259,6 +259,58 @@ test('runner: cb run is refused in words, job_claim skips the project\'s jobs an
   assert.equal(Number((await claim()).id), Number(waiting.id));
 });
 
+// two cedar jobs waiting and one running, one atlas job waiting
+async function jobs() {
+  const s = await setup();
+  const runner = conn('cb-runner/test');
+  const recipe = (p: string) => ({ project: p, recipe: 'test', params: { files: { min: 1, max: 20 } }, db: false });
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1', ${runner.json([recipe('cedar'), recipe('atlas')] as any)}, 4, 2)`;
+  const add = async (actor: string, p: string, file: string) => Number((await s.session`select cb.job_add(${p}, 'test', 'abcdef1234', ${s.session.json({ files: [file] })}, null, ${actor}) as r`)[0].r.id);
+  const claim = () => runner`select cb.job_claim('pc', true) as j`.then((r: any) => r[0].j);
+  const running = await add('W1@pc', 'cedar', 'a.ts');
+  assert.equal(Number((await claim()).id), running);
+  const first = await add('W1@pc', 'cedar', 'b.ts'), second = await add('W2@pc', 'cedar', 'c.ts'), other = await add('A1@pc', 'atlas', 'd.ts');
+  const why = async (id: number) => (await s.sql`select cb.runner_queue() as q`)[0].q.waiting.find((w: any) => Number(w.id) === id)?.why;
+  const job = async (id: number) => ({ ...(await s.sql`select state, summary, finished_at is not null as ended from cb.jobs where id = ${id}`)[0] });
+  return { ...s, runner, claim, why, job, running, first, second, other };
+}
+
+test('runner_queue: a waiting job of a project that gets no work says so, ahead of a hold and the runner\'s state', async () => {
+  const { sql, set, why, first, other } = await jobs();
+  await set('disabled');
+  const w = await why(first);
+  assert.deepEqual([w.reason, w.state], ['project', 'disabled']);
+  assert.match(w.words, /^Cedar is disabled by Ahmed since .+ UTC: no work is handed out there$/);
+  assert.equal((await why(other)).reason, 'next', 'another project\'s job is not touched');
+  await sql`insert into cb.job_holds (project, held_by) values ('cedar', 'L1@pc')`;
+  await sql`update cb.runners set mode = 'paused'`;
+  assert.equal((await why(first)).reason, 'project', 'releasing the hold or resuming the runner would not start it');
+  await sql`delete from cb.job_holds`;
+  await sql`update cb.runners set mode = 'on'`;
+  await set('enabled');
+  assert.equal((await why(first)).reason, 'next');
+});
+
+test('disable keeps the waiting jobs; archive cancels them, tells who asked and counts them; a running one finishes', async () => {
+  const { sql, runner, set, why, job, claim, running, first, second, other } = await jobs();
+  assert.equal((await set('disabled')).jobs_cancelled, 0);
+  assert.equal((await job(first)).state, 'queued');
+  assert.equal((await set('archived')).jobs_cancelled, 2);
+  for (const id of [first, second]) assert.deepEqual(await job(id), { state: 'cancelled', summary: 'cancelled: the project was archived', ended: true });
+  assert.equal((await job(running)).state, 'running');
+  assert.equal((await job(other)).state, 'queued', 'another project\'s job');
+  assert.equal(await why(first), undefined);
+  for (const [who, id] of [['W1@pc', first], ['W2@pc', second]] as const) {
+    const told = await sql`select summary from cb.events where kind = 'message' and data ->> 'to' = ${who} and summary like ${`%job #${id} %cancelled%`}`;
+    assert.equal(told.length, 1, `${who} is told about job #${id}`);
+  }
+  assert.equal((await runner`select cb.job_finish(${running}, 'pc', 'passed', 0, 'ok') as ok`)[0].ok, true, 'the running job still ends');
+  assert.equal((await set('disabled')).jobs_cancelled, 0, 'unarchive cancels nothing');
+  await set('enabled');
+  assert.equal((await job(first)).state, 'cancelled', 'a cancelled job stays cancelled');
+  assert.equal(Number((await claim()).id), other);
+});
+
 test('supervise_state: a disabled project is not supervised and says its state', async () => {
   const { sql, set } = await setup();
   await sql`select cb.project_pipeline('cedar', true, 'ahmed')`;
