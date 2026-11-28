@@ -24,6 +24,24 @@ const take = async (sup: any, holder: string) => (await sup`select cb.lease_take
 const renew = async (sup: any, token: string) => (await sup`select cb.lease_renew('supervisor', ${token}) as ok`)[0].ok;
 const client = () => connect(TEST_URL, { app: 'cb-supervisor/test', max: 1 });
 const lease = (holder: string, clock?: () => number) => supervisorLease({ connect: client, holder, clock });
+const hold = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+/** every renewal of the lease, by the database's clock (this machine's); answers the function that removes the log */
+async function logWrites(sql: any) {
+  await sql`create table if not exists public.lease_writes (at_ms double precision)`;
+  await sql`truncate public.lease_writes`;
+  await sql.unsafe(`create or replace function public.lease_write() returns trigger language plpgsql as
+    $$ begin insert into public.lease_writes values (extract(epoch from clock_timestamp()) * 1000); return new; end $$;
+    create trigger lease_write after update on cb.leases for each row execute function public.lease_write()`);
+  return () => sql.unsafe('drop trigger if exists lease_write on cb.leases; drop function if exists public.lease_write(); drop table if exists public.lease_writes');
+}
+const writesBetween = async (sql: any, from: number, to: number) => (await sql`select count(*)::int as n from public.lease_writes where at_ms > ${from} and at_ms < ${to}`)[0].n as number;
+async function writesAfter(sql: any, from: number) {
+  for (let i = 0; i < 200; i++) {
+    if (await writesBetween(sql, from, Date.now() + 60_000)) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail('the lease was not renewed');
+}
 const until = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 25)); assert.ok(done(), 'it never happened'); };
 
 test('a lease is taken for 180 s; another is refused with who holds it and for how long, until it runs out', async () => {
@@ -144,21 +162,15 @@ test('the lease is renewed while the main thread is held, and a refusal reaches 
   const { sql } = await setup();
   const mine = lease('pc pid 1');
   assert.equal(await mine.keep(), null);
-  await sql`create table if not exists public.lease_writes (at_ms double precision)`;
-  await sql`truncate public.lease_writes`;
-  await sql.unsafe(`create or replace function public.lease_write() returns trigger language plpgsql as
-    $$ begin insert into public.lease_writes values (extract(epoch from clock_timestamp()) * 1000); return new; end $$;
-    create trigger lease_write after update on cb.leases for each row execute function public.lease_write()`);
+  const unlog = await logWrites(sql);
   const did: string[] = [];
-  const stop = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
+  const renewal = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
   try {
-    const writes = async () => (await sql`select count(*)::int as n from public.lease_writes`)[0].n as number;
-    for (let i = 0; i < 200 && !(await writes()); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(await writes(), 'the thread is up');
+    await writesAfter(sql, 0);
     const from = Date.now();
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000); // as a seat's start holds it
+    hold(2000); // as a seat's start holds it
     const to = Date.now(); // nothing on this thread has run since `from`
-    const [{ n }] = await sql`select count(*)::int as n from public.lease_writes where at_ms > ${from + 300} and at_ms < ${to - 300}`;
+    const n = await writesBetween(sql, from + 300, to - 300);
     assert.ok(n >= 3, `renewed ${n} times while held`);
     assert.deepEqual(did, []);
     await sql`update cb.leases set holder = 'mac pid 2', token = gen_random_uuid()`; // another took it
@@ -168,8 +180,43 @@ test('the lease is renewed while the main thread is held, and a refusal reaches 
     assert.equal(did[0], 'abort', 'the tick first');
     assert.match(did[1]!, /no longer this supervisor's/);
   } finally {
-    await stop();
-    await sql.unsafe('drop trigger if exists lease_write on cb.leases; drop function if exists public.lease_write(); drop table if exists public.lease_writes');
+    await renewal.stop();
+    await unlog();
+    await mine.release();
+  }
+});
+
+// the lead's bound on #4895: a thread that renewed on its own for ever would keep the lease for a supervisor whose main
+// thread is hung, and no other could take over
+test('the thread stops renewing when the main thread says nothing past the limit, and goes on at its next word', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  const unlog = await logWrites(sql);
+  const did: string[] = [], said: string[] = [];
+  const renewal = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 1500, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
+  try {
+    await writesAfter(sql, 0);
+    // a start of several steps, longer than the limit in all, with a word before each step: renewed to its end
+    const from = Date.now();
+    for (let i = 0; i < 4; i++) { renewal.beat(); hold(700); }
+    const steps = Date.now();
+    assert.ok(await writesBetween(sql, from + 1900, steps - 100) >= 2, 'a word before each step keeps it going');
+    renewal.beat();
+    const quiet = Date.now();
+    hold(4000); // hung: no word
+    const woke = Date.now();
+    assert.ok(await writesBetween(sql, quiet, quiet + 1300) >= 1, 'renewed within the limit');
+    assert.equal(await writesBetween(sql, quiet + 2200, woke - 100), 0, 'not past it: the lease runs out and another can take it');
+    await until(() => did.includes('abort'));
+    assert.deepEqual(did, ['abort'], 'the held tick is aborted once; the process stays');
+    assert.match(said.join(' '), /nothing from the supervisor/);
+    const back = Date.now();
+    renewal.beat();
+    await writesAfter(sql, back);
+  } finally {
+    await renewal.stop();
+    await unlog();
     await mine.release();
   }
 });
