@@ -95,6 +95,11 @@ What NPM must do, and does by default (its `proxy.conf`): pass `Host`, set `X-Fo
 and POST is refused as cross-site. NPM on vps2 also adds a strict Content-Security-Policy to every site; the board
 loads nothing from other origins, so it is unaffected (tested).
 
+The worker API is under `/w/` on the same address and needs two more things of a proxy: pass a request body of 16 MB
+(plain nginx stops at 1 MB: `client_max_body_size 16m;`), and don't buffer `/w/v1/events` (the board asks for that with
+`X-Accel-Buffering: no`). No sign-in of the proxy's own may sit in front of `/w/`: a worker has only its key. Neither
+was checked against NPM on vps2.
+
 **Without NPM** (another VPS): any reverse proxy that does the same (Caddy: `reverse_proxy 127.0.0.1:4747`), or the
 Cloudflare tunnel moved from the PC (copy `config.yml` and `<tunnel-id>.json` to `/etc/cloudflared/`, ingress
 `http://localhost:4747`, no `httpHostHeader`, set `CB_BEHIND_CLOUDFLARE=1`). Set `CB_PROXY_NETWORK` to the proxy's
@@ -110,6 +115,8 @@ sudo crontab -e
 A dump a night in `/var/backups/claude-board`, 14 kept. Restoring: [maintain.md](maintain.md#restore).
 
 ## 7. Workers: point the sessions' cb at the VPS
+
+(The worker API and its keys, [maintain.md](maintain.md#worker-keys-3222), will replace this once `cb` can use it.)
 
 Each machine whose Claude sessions use the board needs the database URL (Tailscale address, port 5434):
 

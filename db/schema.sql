@@ -7012,9 +7012,6 @@ begin
   end if;
   if p <> '' then select s.actor, s.project into ba, bp from cb.sessions s where s.machine = m and s.pane = p; end if;
   existed := exists (select 1 from cb.session_usage u where u.session_id = sid);
-  if exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
-    raise exception 'usage_report: session % is recorded from another machine', sid;
-  end if;
   insert into cb.session_usage as u (session_id, machine, pane, actor, project, model, input_tokens, output_tokens,
                                      cache_read_tokens, cache_write_tokens, cost_usd)
   values (sid, m, p, ba, bp, mo, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
@@ -7028,7 +7025,8 @@ begin
         cache_write_tokens = greatest(u.cache_write_tokens, excluded.cache_write_tokens),
         cost_usd = coalesce(excluded.cost_usd, u.cost_usd),
         updated_at = now()
-    where (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+    where u.machine = excluded.machine -- judged on the row it waited for, if another report was still committing it
+      and (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
            u.cache_write_tokens, u.cost_usd)
           is distinct from
           (coalesce(u.actor, excluded.actor), coalesce(u.project, excluded.project),
@@ -7036,6 +7034,10 @@ begin
            greatest(u.output_tokens, excluded.output_tokens), greatest(u.cache_read_tokens, excluded.cache_read_tokens),
            greatest(u.cache_write_tokens, excluded.cache_write_tokens), coalesce(excluded.cost_usd, u.cost_usd));
   get diagnostics n = row_count;
+  -- asked after the write, which saw every row it could collide with: a row left alone because it is another machine's
+  if n = 0 and exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
+    raise exception 'usage_report: session % is recorded from another machine', sid;
+  end if;
   return case when not existed then 'new' when n = 0 then 'same' else 'updated' end;
 end $$;
 
@@ -7476,6 +7478,151 @@ create function cb.question_state(id bigint) returns table(status text, assigned
    where q.id = question_state.id
 $$;
 
+-- ---------------------------------------------------------------- the relay, the hooks, jobs, update, stage words (#3222 S1b)
+-- What the relay, the SessionStart hook, cb job log, cb update and cb mine used to say in their own SQL (cli/board.ts).
+drop function if exists cb.inbox_ping cascade;
+drop function if exists cb.refusal_targets cascade;
+drop function if exists cb.resume_for_pane cascade;
+drop function if exists cb.job_log_url cascade;
+drop function if exists cb.stage_words_for cascade;
+drop function if exists cb.schema_check cascade;
+
+-- The relay's read: the inbox and, in the same transaction, its ping on cb_bind, built here from the pane it reads. The
+-- notice goes out after any cb_bind notice the read itself sent, and arrives after every change committed before the
+-- read: the relay keeps the binding it read once it hears its ping (cli/relay.ts bindNotice).
+create function cb.inbox_ping(machine text, pane text, after_event bigint default 0, session text default null, n bigint default 0)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare i jsonb := cb.inbox(machine, pane, after_event, session);
+begin
+  perform pg_notify('cb_bind', 'ping:' || trim(machine) || ':' || trim(pane) || '#' || n);
+  return i;
+end $$;
+
+-- A relay that cannot start (#4429): the name and project bound in its pane, and who hears it. Null: the pane has no row.
+create function cb.refusal_targets(machine text, pane text) returns jsonb language sql stable as $$
+  select jsonb_build_object('actor', s.actor, 'project', s.project,
+                            'to', case when s.project is not null then to_jsonb(cb.triagers(s.project)) end)
+    from cb.sessions s where s.machine = lower(trim($1)) and s.pane = trim($2)
+$$;
+
+-- cb resume for whoever the pane is bound as, for the SessionStart hook. Null: not bound to a project.
+create function cb.resume_for_pane(machine text, pane text) returns jsonb language sql stable as $$
+  select cb.resume(s.actor) from cb.sessions s where s.machine = $1 and s.pane = $2 and s.project is not null
+$$;
+
+create function cb.job_log_url(runner text) returns text language sql stable as $$
+  select r.log_url from cb.runners r where r.name = $1
+$$;
+
+-- The stage words of a list of cards in one read (#4512): for each [project, stage] pair, in order, cb._stage_words while
+-- that project's pipeline is on, else null.
+create function cb.stage_words_for(pairs jsonb) returns jsonb language sql stable as $$
+  select coalesce(jsonb_agg(case when cb._pipeline(x.pair ->> 0) then cb._stage_words(x.pair ->> 1) end order by x.i), '[]'::jsonb)
+    from jsonb_array_elements($1) with ordinality as x(pair, i)
+$$;
+
+-- cb update's question before it installs: does the board's database have the schema `need`, and which one does it run.
+-- plpgsql: cb.schema_applied is created by db/setup.ts after this file (as in cb.schema_covers).
+create function cb.schema_check(need text) returns jsonb language plpgsql stable as $$
+begin
+  return jsonb_build_object('covers', cb.schema_covers(need), 'current', cb.schema_applied() ->> 'current');
+end $$;
+
+-- ===========================================================================
+-- Worker keys (#3222 S2): what a machine signs in to the worker API with (server/worker.ts). One kind each, and at
+-- most two live ones per machine and kind, so a new one is installed before the old one is revoked. Only the sha256 of
+-- the secret is stored. key_issue returns the key once; the board's history gets its id alone.
+-- ===========================================================================
+drop function if exists cb.key_issue cascade;
+drop function if exists cb.key_check cascade;
+drop function if exists cb.key_revoke cascade;
+drop function if exists cb.keys_list cascade;
+drop function if exists cb._actor_ok cascade;
+
+create table if not exists cb.worker_keys (
+  id             text primary key,
+  kind           text not null check (kind in ('machine', 'runner', 'supervisor')),
+  machine        text not null,
+  runner         text,
+  hash           bytea not null,
+  created_at     timestamptz not null default now(),
+  created_by     text not null,
+  last_used_at   timestamptz,
+  last_used_from text,
+  revoked_at     timestamptz,
+  revoked_by     text,
+  note           text
+);
+-- every write through the API names the key it came with (the API sets cb.client for its transaction)
+alter table cb.events add column if not exists client text default nullif(current_setting('cb.client', true), '');
+
+create function cb.key_issue(machine text, kind text, runner text default null, note text default null, actor text default 'ahmed')
+returns text language plpgsql as $$
+#variable_conflict use_variable
+declare m text := lower(trim(coalesce(machine, ''))); r text := nullif(trim(runner), ''); kid text; secret text;
+begin
+  perform cb.dashboard_only('Workers');
+  if m !~ '^[a-z0-9][a-z0-9._-]{0,62}$' then
+    raise exception 'machine: the name the board knows the machine by (its CB_MACHINE, else its hostname)';
+  end if;
+  if kind is null or kind not in ('machine', 'runner', 'supervisor') then raise exception 'kind: machine, runner or supervisor'; end if;
+  if (kind = 'runner') <> (r is not null) then raise exception 'a runner key names its runner, and no other key does'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('cb.worker_keys ' || m || ' ' || kind, 0));
+  if (select count(*) from cb.worker_keys k where k.machine = m and k.kind = kind and k.revoked_at is null) >= 2 then
+    raise exception '% already has 2 live % keys: revoke one first (cb.keys_list, cb.key_revoke)', m, kind;
+  end if;
+  kid := encode(public.gen_random_bytes(5), 'hex');
+  secret := rtrim(translate(encode(public.gen_random_bytes(32), 'base64'), '+/', '-_'), '=');
+  insert into cb.worker_keys (id, kind, machine, runner, hash, created_by, note)
+  values (kid, kind, m, r, sha256(convert_to(secret, 'UTF8')), cb.set_actor(actor), note);
+  insert into cb.events (actor, kind, summary, data)
+  values (cb.set_actor(actor), 'note', format('worker key %s issued: %s key for %s', kid, kind, m), jsonb_build_object('key', kid));
+  return 'cbk1_' || kid || '_' || secret;
+end $$;
+
+-- Who a key is: its kind, machine and runner. 28000 for an unknown or revoked one. When and from where it was used is
+-- kept to the minute, and never waited for: a long call must not hold up the key's other calls.
+create function cb.key_check(id text, hash bytea, from_addr text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare k cb.worker_keys;
+begin
+  select * into k from cb.worker_keys w where w.id = id and w.revoked_at is null;
+  if not found or k.hash is distinct from hash then
+    raise exception 'unknown or revoked worker key' using errcode = '28000';
+  end if;
+  if k.last_used_at is null or k.last_used_at < now() - interval '1 minute' then
+    update cb.worker_keys w set last_used_at = now(), last_used_from = from_addr
+     where w.id = (select s.id from cb.worker_keys s where s.id = k.id for update skip locked);
+  end if;
+  return jsonb_build_object('kind', k.kind, 'machine', k.machine, 'runner', k.runner);
+end $$;
+
+create function cb.key_revoke(id text, actor text default 'ahmed') returns void language plpgsql as $$
+#variable_conflict use_variable
+declare k cb.worker_keys;
+begin
+  perform cb.dashboard_only('Workers');
+  update cb.worker_keys w set revoked_at = now(), revoked_by = cb.set_actor(actor)
+   where w.id = id and w.revoked_at is null returning * into k;
+  if not found then raise exception 'no live worker key % (cb.keys_list)', id; end if;
+  insert into cb.events (actor, kind, summary, data)
+  values (cb.set_actor(actor), 'note', format('worker key %s revoked: %s key for %s', k.id, k.kind, k.machine), jsonb_build_object('key', k.id));
+end $$;
+
+create function cb.keys_list() returns jsonb language sql stable as $$
+  select coalesce(jsonb_agg(to_jsonb(k) - 'hash' order by k.created_at, k.id), '[]') from cb.worker_keys k
+$$;
+
+-- The names a key may write as: a machine's key its own seats (name@machine, never the owner), the supervisor's key the
+-- supervisor. A runner's key writes under no name yet (S4 says which).
+create function cb._actor_ok(kind text, machine text, actor text) returns boolean language sql immutable as $$
+  select coalesce(case kind
+    when 'machine' then actor ~ '^[^\s@]+@[^\s@]+$' and split_part(actor, '@', 2) = machine and not cb.ahmed_like(actor)
+    when 'supervisor' then actor = 'supervisor'
+  end, false)
+$$;
+
 -- ---------------------------------------------------------------- The runner's and cb triage's own SQL (#3222 S1c)
 drop function if exists cb.runner_settings cascade;
 drop function if exists cb.jobs_cancelled cascade;
@@ -7532,3 +7679,25 @@ begin
     status => 'next', priority => 'P2', actor => actor, type => 'bug');
   return jsonb_build_object('action', 'filed', 'id', made);
 end $$;
+
+-- ---------------------------------------------------------------- The supervisor's own reads (#3222 S1c part 2)
+drop function if exists cb.supervised_projects cascade;
+drop function if exists cb.sessions_live cascade;
+drop function if exists cb.squad_history cascade;
+
+-- every project with a squad; which of them the supervisor acts on, cb.supervise_state says
+create function cb.supervised_projects() returns table(slug text) language sql stable as $$
+  select p.slug from cb.projects p where p.squad is not null order by p.slug
+$$;
+
+-- the sessions the board saw in the last 90 s, any project: the cap on live sessions of one machine counts them
+create function cb.sessions_live() returns table(actor text, machine text) language sql stable as $$
+  select s.actor, s.machine from cb.sessions s where s.last_seen > now() - interval '90 seconds'
+$$;
+
+-- a project's last 20 saved squads, newest first (#3770: the seat names its earlier versions generated)
+create function cb.squad_history(project text) returns table(squad jsonb) language sql stable as $$
+  select e.data -> 'squad' from cb.events e
+   where e.project = squad_history.project and e.kind = 'updated' and e.summary = 'squad updated'
+   order by e.id desc limit 20
+$$;

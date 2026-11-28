@@ -162,6 +162,30 @@ test('cb.usage_report: one cumulative row per session; the same totals again cha
   assert.deepEqual([(await row('sid-6')).actor, (await row('sid-6')).project], ['W3@pc', 'demo']);
 });
 
+// PR 208 review H1: a worker key may call cb.usage_report, bound to its machine. Two machines reporting the same new
+// session id at once: the second must not see "no such row", wait for the first and then write over it.
+test('a report that waits behind another machine\'s first report of the same session is refused and changes nothing', { timeout: 60_000 }, async () => {
+  const sql = await freshDb(); clients.push(sql);
+  const first = connect(TEST_URL, { max: 1 }), second = connect(TEST_URL, { max: 1, app: 'cb-test/second-report' });
+  clients.push(first, second);
+  let later!: Promise<string>;
+  await first.begin(async (tx: any) => {
+    await tx`select cb.usage_report('box-a', 'w1:p1', 'sid-race', 'model-a', 5, 5, 5, 5, 1)`;
+    later = second`select cb.usage_report('box-b', 'w1:p1', 'sid-race', 'model-b', 900, 900, 900, 900, 9) as r`
+      .then(([x]: any) => `written: ${x.r}`, (e: any) => `refused: ${e.message}`);
+    let waiting = false;
+    for (const end = Date.now() + 20_000; !waiting && Date.now() < end;) {
+      waiting = !!(await sql`select 1 from pg_stat_activity where datname = current_database()
+        and application_name = 'cb-test/second-report' and wait_event_type = 'Lock'`).length;
+      if (!waiting) await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(waiting, 'the second report is waiting for the first');
+  });
+  assert.match(await later, /^refused: .*another machine/);
+  const rows = await sql`select machine, model, input_tokens, output_tokens, cost_usd from cb.session_usage where session_id = 'sid-race'`;
+  assert.deepEqual(rows.map((r: any) => [r.machine, r.model, r.input_tokens, r.output_tokens, r.cost_usd]), [['box-a', 'model-a', '5', '5', '1.0000']]);
+});
+
 const cb = (args: string[], env: Record<string, string> = {}) => {
   const r = spawnSync(process.execPath, ['cli/cb.ts', ...args], { encoding: 'utf8', timeout: 60_000,
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: 'orch', HERDR_PANE_ID: '', CB_MACHINE: 'testbox', ...env } });

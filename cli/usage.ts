@@ -2,6 +2,8 @@
 // (hooks/usage-stop.mjs → cb.usage_report); this only reads cb.usage_summary. Logic here, cb.ts only dispatches.
 // Not in the web's RPC list: nothing on the web reads it, and with no project it covers every project.
 
+import { call } from './board.ts';
+
 const UNITS: Record<string, string> = { m: 'minutes', h: 'hours', d: 'days', w: 'weeks' };
 
 /** --since 24h | 30m | 7d | 2w → a Postgres interval. */
@@ -16,7 +18,7 @@ const usd = (v: unknown) => (v == null ? '' : `$${Number(v).toFixed(2)}`);
 const tokens = (r: any) => `in ${n(r.input_tokens)} · out ${n(r.output_tokens)} · cache read ${n(r.cache_read_tokens)} · cache write ${n(r.cache_write_tokens)}`;
 
 export async function usageCmd(sql: any, project: string | null, since: string | undefined): Promise<{ out: string; json: unknown }> {
-  const [{ s }]: any = await sql`select cb.usage_summary(${project}, ${sinceInterval(since)}::interval) as s`;
+  const s = await call('usage_summary', { project, since: sinceInterval(since) }, sql);
   const t = s.totals;
   const where = s.project ? `in ${s.project}` : 'on every project';
   const head = `${t.sessions} session${t.sessions === 1 ? '' : 's'} ${where} active in the last ${since ?? '24h'} (each row is that session's total so far, not only the window)`;

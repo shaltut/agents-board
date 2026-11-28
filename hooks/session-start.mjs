@@ -43,21 +43,20 @@ async function reinject(pane, source, ms) {
     const { connect, machine, databaseUrl } = await import('../server/db.ts');
     const { openBridge, seatKey } = await import('../cli/bridge.ts');
     const { resumeText } = await import('../cli/resume-text.ts');
+    const { call } = await import('../cli/board.ts');
     // through the seat's relay when it runs (after a compaction it does): its connection is open, which saves the
     // ~800 ms a new connection to a board on another machine costs; else a connection of its own
     sql = await openBridge(seatKey(machine(), pane), databaseUrl(), undefined, { machine: machine(), pane }).catch(() => null)
       ?? connect(undefined, { max: 1, app: 'cb-hook' });
     // bound = the pane's row names a project (cb iam); the relay's own row before cb iam has none (cb start)
-    const [row] = await sql`select cb.resume(s.actor) as r from cb.sessions s
-      where s.machine = ${machine()} and s.pane = ${pane} and s.project is not null`;
-    if (!row?.r) return '';
-    const r = row.r;
+    const r = await call('resume_for_pane', { machine: machine(), pane }, sql);
+    if (!r) return '';
     const resume = resumeText(r);
     // with the seat's project and name: its addition and who it asks first, as cb role prints them (#4525). If that
     // fails (a board whose schema predates it, a project gone), the board-wide text alone: the role is never dropped
-    const text = ([x]) => String(x?.t ?? '');
-    const role = r.role ? await sql`select cb.role_text(${r.role}, ${r.project ?? null}, ${r.actor ?? null}) as t`.then(text,
-      () => sql`select cb.role_text(${r.role}) as t`.then(text, () => '')) : '';
+    const text = (t) => String(t ?? '');
+    const role = r.role ? await call('role_text', { role: r.role, project: r.project ?? null, actor: r.actor ?? null }, sql).then(text,
+      () => call('role_text', { role: r.role }, sql).then(text, () => '')) : '';
     // the role text is the point; the cards keep at least RESUME_KEEP characters (the size test fits the texts in the rest)
     const roleN = role ? Math.min(role.length, CAP - Math.min(resume.length, RESUME_KEEP)) : 0;
     return [`Agents Board, after this ${source}: what \`cb resume\`${role ? ` and \`cb role ${r.role}\` print` : ' prints'} now.`,
