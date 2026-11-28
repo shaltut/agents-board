@@ -7012,9 +7012,6 @@ begin
   end if;
   if p <> '' then select s.actor, s.project into ba, bp from cb.sessions s where s.machine = m and s.pane = p; end if;
   existed := exists (select 1 from cb.session_usage u where u.session_id = sid);
-  if exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
-    raise exception 'usage_report: session % is recorded from another machine', sid;
-  end if;
   insert into cb.session_usage as u (session_id, machine, pane, actor, project, model, input_tokens, output_tokens,
                                      cache_read_tokens, cache_write_tokens, cost_usd)
   values (sid, m, p, ba, bp, mo, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
@@ -7028,7 +7025,8 @@ begin
         cache_write_tokens = greatest(u.cache_write_tokens, excluded.cache_write_tokens),
         cost_usd = coalesce(excluded.cost_usd, u.cost_usd),
         updated_at = now()
-    where (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+    where u.machine = excluded.machine -- judged on the row it waited for, if another report was still committing it
+      and (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
            u.cache_write_tokens, u.cost_usd)
           is distinct from
           (coalesce(u.actor, excluded.actor), coalesce(u.project, excluded.project),
@@ -7036,6 +7034,10 @@ begin
            greatest(u.output_tokens, excluded.output_tokens), greatest(u.cache_read_tokens, excluded.cache_read_tokens),
            greatest(u.cache_write_tokens, excluded.cache_write_tokens), coalesce(excluded.cost_usd, u.cost_usd));
   get diagnostics n = row_count;
+  -- asked after the write, which saw every row it could collide with: a row left alone because it is another machine's
+  if n = 0 and exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
+    raise exception 'usage_report: session % is recorded from another machine', sid;
+  end if;
   return case when not existed then 'new' when n = 0 then 'same' else 'updated' end;
 end $$;
 
@@ -7475,6 +7477,57 @@ create function cb.question_state(id bigint) returns table(status text, assigned
   select q.status, q.assigned_to, u.display from cb.questions q left join cb.users u on u.name = q.assigned_to
    where q.id = question_state.id
 $$;
+
+-- ---------------------------------------------------------------- the relay, the hooks, jobs, update, stage words (#3222 S1b)
+-- What the relay, the SessionStart hook, cb job log, cb update and cb mine used to say in their own SQL (cli/board.ts).
+drop function if exists cb.inbox_ping cascade;
+drop function if exists cb.refusal_targets cascade;
+drop function if exists cb.resume_for_pane cascade;
+drop function if exists cb.job_log_url cascade;
+drop function if exists cb.stage_words_for cascade;
+drop function if exists cb.schema_check cascade;
+
+-- The relay's read: the inbox and, in the same transaction, its ping on cb_bind, built here from the pane it reads. The
+-- notice goes out after any cb_bind notice the read itself sent, and arrives after every change committed before the
+-- read: the relay keeps the binding it read once it hears its ping (cli/relay.ts bindNotice).
+create function cb.inbox_ping(machine text, pane text, after_event bigint default 0, session text default null, n bigint default 0)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare i jsonb := cb.inbox(machine, pane, after_event, session);
+begin
+  perform pg_notify('cb_bind', 'ping:' || trim(machine) || ':' || trim(pane) || '#' || n);
+  return i;
+end $$;
+
+-- A relay that cannot start (#4429): the name and project bound in its pane, and who hears it. Null: the pane has no row.
+create function cb.refusal_targets(machine text, pane text) returns jsonb language sql stable as $$
+  select jsonb_build_object('actor', s.actor, 'project', s.project,
+                            'to', case when s.project is not null then to_jsonb(cb.triagers(s.project)) end)
+    from cb.sessions s where s.machine = lower(trim($1)) and s.pane = trim($2)
+$$;
+
+-- cb resume for whoever the pane is bound as, for the SessionStart hook. Null: not bound to a project.
+create function cb.resume_for_pane(machine text, pane text) returns jsonb language sql stable as $$
+  select cb.resume(s.actor) from cb.sessions s where s.machine = $1 and s.pane = $2 and s.project is not null
+$$;
+
+create function cb.job_log_url(runner text) returns text language sql stable as $$
+  select r.log_url from cb.runners r where r.name = $1
+$$;
+
+-- The stage words of a list of cards in one read (#4512): for each [project, stage] pair, in order, cb._stage_words while
+-- that project's pipeline is on, else null.
+create function cb.stage_words_for(pairs jsonb) returns jsonb language sql stable as $$
+  select coalesce(jsonb_agg(case when cb._pipeline(x.pair ->> 0) then cb._stage_words(x.pair ->> 1) end order by x.i), '[]'::jsonb)
+    from jsonb_array_elements($1) with ordinality as x(pair, i)
+$$;
+
+-- cb update's question before it installs: does the board's database have the schema `need`, and which one does it run.
+-- plpgsql: cb.schema_applied is created by db/setup.ts after this file (as in cb.schema_covers).
+create function cb.schema_check(need text) returns jsonb language plpgsql stable as $$
+begin
+  return jsonb_build_object('covers', cb.schema_covers(need), 'current', cb.schema_applied() ->> 'current');
+end $$;
 
 -- ===========================================================================
 -- Worker keys (#3222 S2): what a machine signs in to the worker API with (server/worker.ts). One kind each, and at

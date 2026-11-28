@@ -2,6 +2,7 @@
 // so the wording and the tell live here, where tests reach them.
 import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { getAdapter, isAgentKind, type AgentKind } from './agents/index.ts';
+import { call } from './board.ts';
 
 type Opts = { env?: NodeJS.ProcessEnv; installed?: ReadonlySet<AgentKind> };
 
@@ -15,8 +16,6 @@ export function refusalWords(kind: string, o: Opts = {}): string | null {
   return gateOnly ? `the MCP check for ${kind} is not done on this seat's machine (CB_MCP_GATE_OK does not name ${kind} there)`
     : `the board does not run ${kind} seats yet`;
 }
-
-type Sql = (strings: TemplateStringsArray, ...values: any[]) => Promise<any[]>;
 
 const DAY_MS = 24 * 3600_000;
 
@@ -40,16 +39,15 @@ export function claimTell(memo: string, mark: string, now = Date.now()): boolean
 /** Tells the seat's project, as a new bug is routed (cb.triagers: its leads seen today, else its recent sessions), that
  *  this seat has no relay. Once a day per seat, bound name and reason (claimTell); the claim is dropped when the tell
  *  fails, and none is made with nobody to tell, so the next refusal tries again. Returns a log line. */
-export async function tellRefusal(sql: Sql, seat: { machine: string; pane: string }, words: string, memo: string): Promise<string> {
-  const [row] = await sql`select actor, project from cb.sessions where machine = lower(trim(${seat.machine})) and pane = trim(${seat.pane})`;
+export async function tellRefusal(sql: any, seat: { machine: string; pane: string }, words: string, memo: string): Promise<string> {
+  const row = await call('refusal_targets', { machine: seat.machine, pane: seat.pane }, sql);
   if (!row?.project) return 'nobody told: the pane is not bound to a project yet';
-  const [{ to }] = await sql`select cb.triagers(${row.project}) as to`;
-  const leads = (to as string[]).filter((a) => a !== row.actor);
+  const leads = (row.to as string[]).filter((a) => a !== row.actor);
   if (!leads.length) return `nobody told: ${row.project} has no other session seen today`;
   const mark = `${row.actor}\n${words}`;
   if (!claimTell(memo, mark)) return 'already told';
   const text = `${row.actor}'s relay did not start: ${words}. Until it runs, that seat gets no answers, messages or task changes pushed; fix that, then run cb relay in its pane.`;
-  try { for (const a of leads) await sql`select cb.tell(${a}, ${text}, ${row.actor})`; }
+  try { for (const a of leads) await call('tell', { to_actor: a, message: text, actor: row.actor }, sql); }
   catch (e) { clearRefusal(memo); throw e; }
   return `told ${leads.join(', ')}`;
 }
