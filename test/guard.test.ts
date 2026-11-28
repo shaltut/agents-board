@@ -695,6 +695,48 @@ test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the 
     'tmux new -d codex', 'sudo codex', 'mosh "$VPS"']) assert.equal(ev(c, 'lead').kind, 'role', `lead: ${c}`);
 });
 
+// #4775: double quotes do not stop a substitution from running, so the seat variables are judged inside one too
+test('#4775: a seat variable changed inside a double-quoted substitution is blocked', () => {
+  for (const command of [
+    'echo "$(unset CB_ROLE; cb mine)"', 'echo "$(env -u CB_ROLE cb mine)"', 'echo "`unset CB_ROLE; cb mine`"', 'x="$(CB_ROLE=lead cb mine)"',
+    'echo "a $(date) b $(unset CB_AGENT) c"', 'echo "$(echo ")"; unset CB_ROLE)"', 'echo "$(echo "$(unset CB_ROLE)")"',
+    'echo "$( (cd x); export CB_ROLE=lead )"', 'echo "n: $(unset CB_ROLE\ncb mine)"', 'cb log 1 "$(unset CB_ROLE; cb mine)"',
+  ]) {
+    const out = evaluate({ tool: 'shell', command, role: 'builder' });
+    assert.equal(out.allow, false, `must block: ${JSON.stringify(command)}`);
+  }
+  for (const command of [
+    'echo "$(date)" "unset CB_ROLE is blocked"', 'cb log 1 "$(date): never unset CB_ROLE"', "echo '$(unset CB_ROLE)'",
+    'echo "\\$(unset CB_ROLE)"', 'echo "role: $(printenv CB_ROLE)"', 'echo "$(git log -1 --format=%s) (unset CB_ROLE)"',
+  ]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
+// #4775 (PR 178 lead review): a message written as "$(cat <<'EOF' ...)" is text, also to the second reading
+test('#4775: a commit, PR or log message from a quoted heredoc may name a change', () => {
+  const body = (text: string) => `"$(cat <<'EOF'\n${text}\nEOF\n)"`;
+  for (const command of [
+    `git commit -m ${body('fix(guard): unset CB_ROLE inside quotes is refused')}`,
+    `git commit -m ${body('fix(guard): env -i bash is refused')}`,
+    `gh pr create --title t --body ${body('Pinned:\n\nCB_ROLE=lead cb next is refused')}`,
+    `cb log 4775 ${body('Pinned: export CB_ROLE=lead now blocked')}`,
+    `git add -A && git commit -q -m ${body('subject\n\nunset CB_ROLE (inside "$( )") is refused')} && git push origin fix/x`,
+  ]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+  // a body something runs is not a message, and what stands after the body still runs
+  for (const command of [
+    'echo "$(bash <<\'EOF\'\nunset CB_ROLE\nEOF\n)"',
+    'echo "$(cat <<\'EOF\' | bash\nunset CB_ROLE\nEOF\n)"',
+    'git commit -m "$(cat <<\'EOF\'\nsubject\nEOF\nunset CB_ROLE)"',
+    `git commit -m ${body('subject')} -m "$(unset CB_ROLE; cb mine)"`,
+  ]) {
+    const out = evaluate({ tool: 'shell', command, role: 'builder' });
+    assert.equal(out.allow, false, `must block: ${JSON.stringify(command)}`);
+  }
+});
+
 // #4669: a shell script the seat wrote (or found) and then runs is judged for the same two rules, from its text: the
 // shim passes readScript, which reads a local file (none: nothing to judge)
 test('#4669: running a shell script that changes the seat variables or starts a fresh environment is blocked', () => {
@@ -1554,6 +1596,8 @@ test('long commands stay fast', () => {
     ["#4777, 200 KB of $' with escaped ends", () => uncommented("echo $'\\' ".repeat(20000) + '# "')],
     ['#4777, 200 KB of heredoc openers with no end line', () => uncommented('cat <<EOF # "\n'.repeat(14000))],
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
+    ['#4775, 200 KB of quoted substitution openers, as a builder', asBuilder('echo "$('.repeat(25000))],
+    ['#4775, 200 KB of quoted substitutions, as a builder', asBuilder('echo "$(date)";'.repeat(13000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
     // #4813: the seg/../ fold started a match after any ( and rescanned the run from each: 27 s, then ALLOW
