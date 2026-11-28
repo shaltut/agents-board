@@ -2131,14 +2131,15 @@ const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-co
 const PS_SWITCH = (f) => /^-(?:vb|db)$/i.test(f) || ['-verbose', '-debug'].some((s) => f.length > 1 && s.startsWith(f.toLowerCase()));
 // #4789: where Windows PowerShell's bare command starts, past its options; args.length when it has none (-File runs a
 // script, -Command is read above). An option that takes a value takes the next word, unless it holds it after a colon
-const PS_VALUED = ['executionpolicy', 'windowstyle', 'version', 'outputformat', 'inputformat', 'configurationname', 'psconsolefile', 'encodedcommand', 'encodedarguments'];
+const PS_VALUED = ['executionpolicy', 'windowstyle', 'version', 'outputformat', 'inputformat', 'configurationname', 'psconsolefile', 'encodedcommand', 'encodedarguments', 'workingdirectory'];
 function psBare(args) {
   for (let k = 0; k < args.length; k++) {
     const x = shellValue(args[k]);
     if (!/^(?:--?|\/)./.test(x)) return k;
     const flag = x.replace(/^(?:--?|\/)/, '').toLowerCase();
     if (PS_COMMAND(x) || 'file'.startsWith(flag)) break;
-    if (['ep', 'of', 'if', 'ec'].includes(flag) || PS_VALUED.some((s) => s.startsWith(flag))) k++;
+    // short names that are no prefix of the long one
+    if (['ep', 'of', 'if', 'ec', 'ea', 'wd'].includes(flag) || PS_VALUED.some((s) => s.startsWith(flag))) k++;
   }
   return args.length;
 }
@@ -2146,6 +2147,10 @@ function psBare(args) {
 // so the word before must be a switch that takes none, an option holding its value (=), or a plain word. That word must
 // reach rg as written: a glob, a splat or a variable may turn into -e, and after a redirect it is the target, no
 // argument at all. One character per step, so it stays linear
+// Windows PowerShell puts a word on the native command line unescaped: a double quote inside it, or a backslash before
+// the quote it adds, can swallow the mark however far back the word is. So every word before the mark must be one that
+// cannot: bare with no quote, variable, splat or bracketed expression, or quoted pieces holding no double quote
+const WHOLE_WORD = /^(?:'[^'"]*'(?<!\\')|"[^"$`\\]*"(?!")|[A-Za-z0-9_./\\:=*?!,%+~^[\]<>&|-])+$/;
 const RG_SWITCH = /^(?:-[nNiFwxsSlcoHIUPpqva.uz0L]+|--(?:line-number|no-line-number|ignore-case|fixed-strings|word-regexp|line-regexp|case-sensitive|smart-case|files-with-matches|count|only-matching|hidden|no-ignore|multiline|pcre2|no-heading|json|files|quiet))$/;
 const LITERAL_WORD = /^(?:'[^']*'|"[^"$`\\]*"|[A-Za-z0-9_./:=-])+$/;
 function rgEnds(args, k) {
@@ -2197,10 +2202,10 @@ function codeStrings(name, args, cut) {
   }
   if (name === 'rg') {
     const found = [];
-    for (let k = 0; k < args.length; k++) {
+    for (let k = 0, torn = false; k < args.length; torn ||= !WHOLE_WORD.test(args[k]), k++) {
       const x = shellValue(args[k]);
       // #4789: nothing after the end of the options is one; a cut reading cannot tell where that is, so it reads on
-      if (x === '--' && !cut && rgEnds(args, k)) break;
+      if (x === '--' && !cut && !torn && rgEnds(args, k)) break;
       const m = /^--pre(?:=(.*))?$/.exec(x);
       if (m) found.push(m[1] ?? shellValue(args[k + 1] ?? ''));
     }
