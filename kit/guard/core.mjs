@@ -701,8 +701,7 @@ const filledPart = (x) => isFilled(x) || /[$`%]/.test(x);
 // the program's name is what the shell fills in: not a path that ends in a literal name ($HOME/bin/tool); a default in
 // braces (${GIT:-/x/y}) says nothing about what the variable holds
 const filledName = (x) => isFilled(x) && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
-function filledGit(w, i) {
-  if (!filledName(w[i])) return -1;
+function filledOptions(w, i) {
   let j = i + 1;
   let aliased = false;
   for (let n = 0; j < w.length && w[j].startsWith('-'); n++) {
@@ -713,6 +712,13 @@ function filledGit(w, i) {
     if (ALIAS_KEY.test(cfg)) aliased = true;
     j += GIT_OPT_ARG.has(o) ? 2 : 1;
   }
+  return { j, aliased };
+}
+function filledGit(w, i) {
+  if (!filledName(w[i])) return -1;
+  const read = filledOptions(w, i);
+  if (read === -1) return -1;
+  const { j, aliased } = read;
   const word = w[j];
   if (word === undefined) return -1;
   if (aliased) return j;
@@ -978,11 +984,28 @@ function aliasPush(w, i, j, hit) {
 // (r3-1: cmdName reads a command word without its quotes, so g""it and 'gi''t' are git too)
 const GIT_WORD = /g\W*i\W*t/i;
 function hiddenPushes(text, hit, list) {
-  if (!GIT_WORD.test(text)) return null;
+  if (!GIT_WORD.test(text) && !/[$%]/.test(text)) return null;
+  // #4826: a filled program, then a word that is no git command but could name one (an alias set by an earlier statement
+  // or in the environment, xargs' {}), then a protected branch: as the literal git rule (aliasPush). A script or a path
+  // is no such word, nor what follows a PowerShell assignment. The last branch named is read once per segment (linear)
+  const lastNamed = new WeakMap();
+  const unknownFilled = (w, i) => {
+    if (!filledName(w[i]) || w[i].endsWith('=')) return -1;
+    const read = filledOptions(w, i);
+    const word = read === -1 ? undefined : w[read.j];
+    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word.toLowerCase())) return -1;
+    if (!lastNamed.has(w)) lastNamed.set(w, w.findLastIndex((x) => namesBranch([x], hit) !== null));
+    return lastNamed.get(w) > read.j && isProgram(w, i) ? read.j : -1;
+  };
   return scanCommands(text, GIT, (w, i) => {
+    if (filledName(w[i])) {
+      const j = unknownFilled(w, i);
+      const named = j < 0 ? null : namesBranch(stopArgs(w.slice(j + 1)), hit);
+      return named && `${FILLED_MARK}${w[i]}${FILLED_MARK}${ALIAS_MARK}${w[j]}${ALIAS_MARK}${named}`;
+    }
     const j = gitSub(w, i);
     return aliasPush(w, i, j, hit) ?? valuesPush(w, i, j, list, text);
-  }, runnerArg);
+  }, runnerArg, (w, name, i) => GIT.has(name[i]) || unknownFilled(w, i) >= 0);
 }
 const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
 const SWITCH = /^(?:true|false|yes|no|on|off|[01])?$/i;

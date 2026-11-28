@@ -1429,6 +1429,7 @@ test('long commands stay fast', () => {
     ['#4815, 200 KB of launcher then filled words, as a builder', asBuilder(kb200('timeout $a x '))],
     ['#4815, 200 KB of filled words before a config subcommand, as a builder', asBuilder(kb200('$a config '))],
     ['#4815, 200 KB of assignments then filled pairs, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $b '))],
+    ['#4826, 200 KB of filled words before unknown words and main, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a p ') + ' main')],
     ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
     ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
     ['#4742, escaped quotes after a brace', asBuilder('echo {a} ' + escaped)],
@@ -1934,7 +1935,10 @@ test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
-    'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+    'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+  // #4836: a PowerShell target with a backtick escape is refused by the #4815 filled-program push rule. A false block,
+  // tracked on that card: this row pins what the guard does until it is fixed
+  assert.equal(judged4803('Get-Date > "$name`.txt"'), 'role');
 });
 
 test('#4803: a heredoc header before the command word hides nothing', () => {
@@ -2109,6 +2113,29 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   // a path that ends in the name of another program is that program; a default that could be anything is still read
   assert.equal(kindOf('"$TOOLS/docker" push registry.example/app'), 'allow');
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
+});
+
+test('#4826: a filled program with a word that is no git command and a protected branch is read as git', () => {
+  // an alias set by an earlier statement or in the environment makes the unknown word a push
+  const blocked = ['$G p origin main', '"$GIT" p origin master', '%GIT% p origin main', '& $g p origin main', 'cmd /c %GIT% p origin main',
+    'timeout 5 $G p origin main', 'env A=1 nice -n 5 $G p origin main', '$G -C /x p origin main', '$G --no-pager p origin HEAD:main',
+    '$G p origin refs/heads/main', 'x=$($G p origin main)', '$env:GIT_CONFIG_COUNT = 1; & $g p origin main',
+    'export GIT_CONFIG_PARAMETERS=x; $G p origin main', 'xargs -I{} $G {} origin main', `${'A=1 '.repeat(70)}$G p origin main`];
+  for (const c of blocked) {
+    const r = evaluate({ tool: 'shell', command: c, role: 'builder' });
+    assert.equal(r.allow, false, c);
+    assert.match(r.reason!, /is not a git command.*write the command's own name/, c);
+  }
+  assert.ok(protectedPush('$G p origin develop', ['develop']), 'a configured branch, with or without a role');
+  const allowed = ['$G checkout main', '$G log --oneline main', '$G merge main', '$G p origin feat/my-card', '$G status', 'echo "$G p origin main"',
+    // PowerShell assignments and comparisons, shell tests
+    '$x = "main"', '$x += "main"', '$x= git log main', '[[ -n $x && $branch == main ]]', 'if [ "$b" != main ]; then echo no; fi',
+    'case $b in main) echo y;; esac', 'for f in $A main; do echo $f; done', 'echo $b is main',
+    // a script or a path is no git subcommand; a filled word that is another program's argument is not the program
+    '"$PYTHON" tool.py origin main', '$NODE tools/x.mjs --branch main', 'timeout 5 cp $SRC backup main'];
+  for (const c of allowed) assert.equal(protectedPush(c, ['main', 'master']), null, c);
+  // no read-only rule comes with it: a reviewer's filled program with an unknown word and no protected branch runs
+  assert.equal(kindOf('$NODE report summary', 'reviewer'), 'allow');
 });
 
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
