@@ -21,7 +21,7 @@ const inReview = async (sql: any) => {
 };
 const cb = (args: string[], actor: string, env: Record<string, string> = {}) =>
   spawnSync('node', ['cli/cb.ts', ...args], { encoding: 'utf8', env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: actor, HERDR_PANE_ID: '', ...env } });
-const WORDS = /demo has no pipeline stages.*the lead hands you pull requests \(cb tell\).*cb log <card>.*PR comment.*tell the builder.*Never cb done/;
+const WORDS = /demo has no pipeline stages.*the lead hands you pull requests \(cb tell\).*cb log <card>.*PR comment.*note reaches the builder.*only findings, never a GO again.*Never cb done/;
 
 test('cb next tells a reviewer in a project without stages how review reaches it, and claims nothing', async () => {
   const sql = await db();

@@ -24,8 +24,8 @@ import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
-import { HOLD_MS, holdStep } from './notice-hold.ts';
-import { copyAt, copyCount, readCopies, sortOrphans, sweepHeld, writeCopies, type HeldCopy } from './held-copy.ts';
+import { HOLD_MS, SETTLE_WINDOW_MS, holdStep, keepLines, type HoldClock } from './notice-hold.ts';
+import { copyCount, readCopies, sortOrphans, sweepHeld, writeCopies, type HeldCopy } from './held-copy.ts';
 import { startedAs } from './started-as.ts';
 import { codeSha } from './release.ts';
 
@@ -196,9 +196,13 @@ const SETTLE_MS = 8_000;
 const pendingWork = new Map<number, { t: Work; at: number }>();
 let settleTimer: ReturnType<typeof setTimeout> | undefined;
 const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
-// #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
+// #3221: lines that can wait are held (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold).
+// CB_RELAY_SETTLE_MS sets how long a session's line waits (0: not at all); unset or not a number, the default.
+const SETTLE_ENV = Number(process.env.CB_RELAY_SETTLE_MS?.trim() || NaN);
+const SETTLE_WINDOW = SETTLE_ENV >= 0 ? SETTLE_ENV : SETTLE_WINDOW_MS;
+const holdClock: HoldClock = { seen: new Map(), now: 0, fresh: true };
 let holdTimer: ReturnType<typeof setTimeout> | undefined;
-// the messages, broadcasts and memory changes of the read last held, and whose they were (review I1: a bind to another
+// the messages, broadcasts, memory changes and card lines of the read last held, and whose they were (review I1: a bind to another
 // name or project, below); orphans: such copies when another agent process took the pane, each kept until that one
 // binds (cli/held-copy.ts). #4630: they start with what the last relay in this pane left.
 let heldFor: HeldCopy | undefined, orphans: HeldCopy[] = [];
@@ -206,12 +210,12 @@ const SEAT = `${PANE.trim()}@${M.trim().toLowerCase()}`; // the row's name befor
 /** Pushes what a copy has that the board no longer returns in this read (that rest the read itself delivers). */
 async function pushCopy(was: HeldCopy, i: any) {
   const has = (l: any[] | undefined) => new Set((l ?? []).map((x: any) => Number(x.id)));
-  const ms = has(i.messages), bs = has(i.broadcasts), xs = has(i.memory);
+  const ms = has(i.messages), bs = has(i.broadcasts), xs = has(i.memory), es = has(i.events);
   const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
-  const memory = was.memory.filter((x) => !xs.has(Number(x.id)));
-  if (!messages.length && !broadcasts.length && !memory.length) return;
-  await adapter.deliver(seat, format({ broadcasts, messages, memory, answers: [], events: [], next_work: [] }));
-  log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts, ${memory.length} memory held before a bind`);
+  const memory = was.memory.filter((x) => !xs.has(Number(x.id))), events = (was.events ?? []).filter((e) => !es.has(Number(e.id)));
+  if (!messages.length && !broadcasts.length && !memory.length && !events.length) return;
+  await adapter.deliver(seat, format({ broadcasts, messages, memory, events, answers: [], next_work: [] }));
+  log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts, ${memory.length} memory, ${events.length} events held before a bind`);
 }
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
@@ -380,6 +384,8 @@ async function check() {
       }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
+      // #3221 review I1: the board returns a card line only while the card is still mine; one held stays in the push
+      if (heldFor?.events?.length) i.events = keepLines(i.events, heldFor.events);
       // Ahmed typing from the dashboard (cb.type_to): his exact text as its own prompt, in order, no wrapper.
       // The inbox only marks `raw` for his own events; everything else keeps the indented, labelled format.
       const typed = i.messages.filter((m: any) => m.raw);
@@ -392,23 +398,26 @@ async function check() {
       i.next_work = settled.work;
       clearTimeout(settleTimer);
       if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
-      // #3221: only routine notices in this read, inside their window: push nothing and move no mark (broadcast_seen,
-      // after), so the next read, or a restarted relay's, has them again; the timer reads again when the window ends.
-      // Anything important, or the window's end, delivers all of it below, in one push.
-      const step = holdStep(i, typed);
+      // #3221: only lines that can wait in this read, inside their windows: push nothing and move no mark
+      // (broadcast_seen, after), so the next read, or a restarted relay's, has them again; the timer reads again when the
+      // first window ends. Anything urgent, or a window's end, delivers all of it below, in one push.
+      holdClock.now = Date.now();
+      const step = holdStep(i, typed, holdClock, SETTLE_WINDOW);
       clearTimeout(holdTimer);
       if (step.action === 'hold') {
         if (!i.hold) {
           if (after === Number.MAX_SAFE_INTEGER) after = Number(i.last_event); // a first read has no card events to hold
           await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
-          log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
+          log(`holding ${step.held} lines`);
         }
-        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [], at: copyAt(Date.now(), i.hold) }; // review 106 N2-a: the hold's start
-        holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
+        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [], events: i.events, at: step.since };
+        // a Next offer leaves the settle list once due: put a held one back, due, so the next read checks and offers it again
+        for (const t of i.next_work) pendingWork.set(Number(t.id), { t, at: 0 });
+        if (step.wait !== null) holdTimer = setTimeout(() => { check(); }, step.wait + 100);
         await sendCode(); // a held read still reports the code it runs (#4352)
         continue;
       }
-      heldFor = undefined;
+      if (heldFor) heldFor.events = i.events; // a push that fails keeps its card lines for the next read
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
       const push = i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length;
@@ -418,6 +427,8 @@ async function check() {
         if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length > typed.length || i.next_work.length || i.memory?.length)
           await adapter.deliver(seat, format(i));
       }
+      heldFor = undefined;
+      holdClock.seen.clear();
       // #3221 review I2: the hold ends first, on its own, right after the push (or with nothing left to push): a relay
       // that dies in the bookkeeping below must not leave a hold that makes the next one rewind and push it all again
       if (i.hold) await sql`select cb.relay_hold(${M}, ${PANE}, ${null})`;
@@ -428,7 +439,7 @@ async function check() {
         for (const a of i.answers) await sql`select cb.answer_delivered(${String(a.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${null}, ${a.answered_at ?? null})`;
         // only the send-back pushed: one rewritten (or sent back again) since stays as it is
         for (const s of i.sent_back ?? []) await sql`select cb.answer_delivered(${String(s.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${s.at})`;
-        log(`pushed ${i.hold ? `(held ${step.low}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
+        log(`pushed ${i.hold ? `(held ${step.held}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
       after = Number(i.last_event);
       await sendCode();

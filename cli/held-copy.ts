@@ -8,13 +8,12 @@ import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { HOLD_MS } from './notice-hold.ts';
 
-export type HeldCopy = { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[]; memory: any[]; at: number };
+// events: held card lines (#3221 settle window); a copy a relay from before them left has none. at: when its oldest line
+// on a clock was first held (holdStep's since, review 106 N2-a), never the last held read, which the 30 s poll renews.
+export type HeldCopy = { actor: string; project: unknown; sid: string | null; messages: any[]; broadcasts: any[]; memory: any[]; events?: any[]; at: number };
 
-/** When a copy's hold started (review 106 N2-a): the read's hold age back from now, as the board counts it (hold_at), never
- *  the last held read, which the 30 s poll renews. The first held read starts the hold: no hold yet, so now. */
-export const copyAt = (now: number, hold: { age_ms?: unknown } | null | undefined) => now - Math.max(0, Number(hold?.age_ms) || 0);
-
-export const copyCount = (cs: (HeldCopy | undefined)[]) => cs.reduce((n, c) => n + (c ? c.messages.length + c.broadcasts.length + c.memory.length : 0), 0);
+export const copyCount = (cs: (HeldCopy | undefined)[]) =>
+  cs.reduce((n, c) => n + (c ? c.messages.length + c.broadcasts.length + c.memory.length + (c.events?.length ?? 0) : 0), 0);
 
 /** What a read does with the orphans: push (bound under the copy's name), keep (the row is not bound yet), drop (bound
  *  under another name: dropped counts them), or forget at once (the same session: the board kept the row and returns
@@ -33,7 +32,8 @@ export function sortOrphans(copies: HeldCopy[], i: { actor: unknown }, sid: stri
 }
 
 const isCopy = (c: any): c is HeldCopy => c && typeof c.actor === 'string' && (c.sid === null || typeof c.sid === 'string')
-  && Array.isArray(c.messages) && Array.isArray(c.broadcasts) && Array.isArray(c.memory) && typeof c.at === 'number';
+  && Array.isArray(c.messages) && Array.isArray(c.broadcasts) && Array.isArray(c.memory) && typeof c.at === 'number'
+  && (c.events === undefined || Array.isArray(c.events));
 
 /** Leaves the copies for the next relay in the pane (owner only: they are the seat's notices). None: no file. */
 export function writeCopies(file: string, copies: HeldCopy[]) {

@@ -10,6 +10,9 @@ import { freshDb, onProject, TEST_URL } from './helpers.ts';
 import { bridgeFiles, seatKey } from '../cli/bridge.ts';
 import { claudeEndpointPath, readClaudeEndpoint, relaunchEnv, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
+// these tests are about what is delivered, not the settle window: a session's line goes at once (the window has its own
+// test, which sets it)
+process.env.CB_RELAY_SETTLE_MS = '0';
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 async function db() { const s = await freshDb(); clients.push(s); return s; }

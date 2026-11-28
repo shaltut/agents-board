@@ -304,6 +304,7 @@ drop function if exists cb.mine cascade;
 drop function if exists cb._seat_name cascade;
 drop function if exists cb.iam cascade;
 drop function if exists cb.inbox cascade;
+drop function if exists cb._person cascade;
 drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
@@ -1709,6 +1710,11 @@ begin
   return trim(actor);
 end $$;
 
+-- A person, not a session: the owner, or a signed-in user acting under their own name.
+create function cb._person(a text) returns boolean language sql stable as $$
+  select a = 'ahmed' or exists (select 1 from cb.users u where u.name = a)
+$$;
+
 -- What the relay pushes into a session: answers addressed to its pane, and changes other people
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
 -- session: the agent session the relay serves (#4379; Claude: its session id), or null when its agent names none.
@@ -1763,13 +1769,18 @@ begin
     -- notice (#3221): a routine board message the relay may hold (a digest, a stall or ping nudge); null for every
     -- other message, and for a digest that carries a new P0 or a supervisor problem (data.urgent)
     -- urgent (#3221): never held: marked so (a part freed off me, GitHub lines by Ahmed's login), or about a P0 card (a
-    -- nudge's card, a job's card in data.task), its priority as it is now
+    -- nudge's card, a job's card in data.task), its priority as it is now; (Q3128: a session's line may now wait the
+    -- relay's settle window) a person's line (cb._person), or a direct question: a session's message with a ? that ends
+    -- a sentence (a ? inside a URL is followed by text and does not count)
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
                                                               'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true',
                                                               'notice', case when e.data ->> 'urgent' = 'true' then null
                                                                              when e.data ? 'digest' then 'digest'
                                                                              when e.data ? 'nudge' then 'nudge' end,
                                                               'urgent', coalesce(e.data ->> 'urgent' = 'true', false)
+                                                                        or cb._person(e.actor)
+                                                                        or (e.actor not in ('board', 'github', 'runner', 'supervisor')
+                                                                            and e.summary ~ '[?]($|[[:space:]]|[)"''])')
                                                                         or exists (select 1 from cb.tasks t where t.priority = 'P0'
                                                                                       and t.id = coalesce(e.task_id, case when e.data ->> 'task' ~ '^[0-9]{1,18}$'
                                                                                                                          then (e.data ->> 'task')::bigint end))) order by e.id)
@@ -1814,8 +1825,13 @@ begin
                             where q.status = 'sent_back' and q.sent_back ->> 'delivered_at' is null
                               and ((lower(q.reply_to ->> 'machine') = m and q.reply_to ->> 'pane' = pane)
                                    or (coalesce(q.reply_to ->> 'pane', '') = '' and q.asked_by = me))), '[]'),
+    -- urgent (Q3128): never held for the settle window: a P0 card, a person's line, or my card cancelled, blocked or
+    -- taken off me (#3221 review M1: stop what you are doing)
     'events', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'task_id', e.task_id, 'kind', e.kind, 'summary', e.summary,
-                                                            'actor', e.actor, 'title', t.title, 'status', t.status) order by e.id)
+                                                            'actor', e.actor, 'title', t.title, 'status', t.status,
+                                                            'urgent', coalesce(t.priority = 'P0' or cb._person(e.actor)
+                                                                               or e.data ->> 'to' in ('cancelled', 'blocked')
+                                                                               or e.data -> 'assignee' ->> 'from' = me, false)) order by e.id)
                           from cb.events e join cb.tasks t on t.id = e.task_id
                          where me is not null and e.id > after_event and e.actor <> me
                            and e.kind in ('task_created', 'moved', 'updated', 'done', 'note')
@@ -3833,7 +3849,7 @@ $$;
 create function cb._review_words(project text, a text) returns text language sql stable as $$
   select case when cb._role(a) = 'reviewer' and cb._live($1) and not cb._pipeline($1)
     then format('%s has no pipeline stages, so the board hands out no review there: the lead hands you pull requests (cb tell). '
-                || 'Put your GO or findings in cb log <card> "..." and in a PR comment, and tell the builder. Never cb done a card you reviewed', $1)
+                || 'Put your GO or findings in cb log <card> "..." and in a PR comment: the note reaches the builder, so tell the builder only findings, never a GO again. Never cb done a card you reviewed', $1)
   end
 $$;
 
