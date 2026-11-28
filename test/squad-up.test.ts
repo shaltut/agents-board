@@ -203,6 +203,8 @@ test('squad up: a quiet session that herdr lists is not started a second time', 
   assert.ok(!f.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start' && c.args[2] === 'demo-o-claims-macbook'), out);
   assert.ok(has(f.calls, 'agent', 'get', 'demo-b1-macbook') && has(f.calls, 'agent', 'get', 'demo-r1-macbook'));
   assert.match(out, /skip demo-B1@macbook: running in herdr but not on the board \(not bound\?\)\n  herdr --machine macbook agent prompt demo-b1-macbook "cb iam demo-B1@macbook demo --role builder/);
+  // #4860: a seat started by hand has no relay; the way back is squad up
+  assert.match(out, /if it was started by hand[^\n]*close its pane and run cb squad up demo again: seats start only through cb squad up/);
   assert.match(out, /started demo-B2@macbook/);
   assert.match(out, /refused demo-R1@macbook/); // 7 on the Mac + B2 = the cap of 8
   assert.ok(f.calls.filter((c) => c.args[1] === 'list').every((c) => c.timeout === 30_000));
