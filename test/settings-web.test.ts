@@ -195,6 +195,10 @@ test('no stored codes on screen: role, agent and model names, the squad summary,
   assert.match(seatNote({ ...seat, actor: 'orch@pc', role: 'lead' }, a, true)!, /The lead on This PC .* next start/, 'the lead is never restarted');
   assert.match(seatNote({ ...seat, in_squad: false }, a, true)!, /no longer in this squad: it closes once it is idle/);
   assert.equal(seatNote({ ...seat, same: null }, a, true), null, 'a seat bound without a model is not judged');
+  // #4786: what the seat really runs comes first: the squad's setting says nothing about a model switched inside the agent
+  const drifted = seatNote({ ...seat, agent: 'agy', model: 'claude-opus-5-5-high', running_model: 'gemini-4-neon-high', model_differs: true, same: true }, a, true)!;
+  assert.match(drifted, /^Builder 3 on MacBook was started on .*claude-opus-5-5-high.* and now runs gemini-4-neon-high\.$/);
+  assert.equal(seatNote({ ...seat, same: true, running_model: 'claude-opus-5-5', model_differs: false }, a, true), null);
   const history: SquadPage['history'] = [
     { id: 3, at: '', actor: 'ahmed', version: 3, via: 'page', squad: b },
     { id: 2, at: '', actor: 'ahmed', version: 2, via: 'cli', squad: a },
