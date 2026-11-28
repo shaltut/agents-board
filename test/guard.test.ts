@@ -900,6 +900,7 @@ test('long commands stay fast', () => {
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
   const asBuilder = (command: string) => () => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: ['development'] });
   const kb200 = (s: string) => s.repeat(Math.ceil(200000 / s.length));
+  const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, () => unknown][] = [
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
@@ -978,6 +979,15 @@ test('long commands stay fast', () => {
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
+    // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
+    ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
+    ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
+    ['#4742, escaped quotes after a brace', asBuilder('echo {a} ' + escaped)],
+    ['#4742, escaped quotes after a fence path', asBuilder('cat ~/.claude/settings.json ' + escaped)],
+    ['#4742, escaped quotes after a variable', asBuilder('echo $x ' + escaped)],
+    ['#4742, escaped quotes, one per line', asBuilder('echo ' + '\\"\n'.repeat(66000))],
+    ["#4742, escaped quotes with a quoted 'a' after each", asBuilder('echo ' + "\\\"'a'".repeat(40000))],
+    ['#4742, escaped quotes, as a seat with a stdin', () => evaluate({ tool: 'shell', command: 'echo ' + escaped, role: 'builder', stdin: true })],
   ];
   for (const [name, run] of cases) {
     const t = performance.now();

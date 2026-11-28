@@ -13,6 +13,34 @@ export const ROLES = Object.freeze(['lead', 'architect', 'owner', 'builder', 're
 export const READ_ONLY_ROLES = Object.freeze(['reviewer', 'qa', 'investigator']);
 
 const QUOTED = String.raw`"(?:\\.|[^"\\])*"|'[^']*'`;
+// #4742: text.replace(<a global QUOTED pattern>, fn) in linear time. A global replace tries a " with no close again from
+// every later one: 100,000 \" took 6 to 43 s, past a hook's timeout, and a hook that times out allows. Those later ones
+// need no try: each is the second half of a \ pair the failed read walked over, so a read from it stops at the same
+// place and closes nowhere either. `at` is the pattern, sticky; `body` reads what its double quotes may hold.
+const QUOTED_AT = new RegExp(QUOTED, 'y');
+const DQ_BODY = /(?:\\.|[^"\\])*/y;
+function replaceQuoted(text, fn, at = QUOTED_AT, body = DQ_BODY) {
+  const starts = /["'{]/g;
+  let out = '', done = 0, dead = 0;
+  for (let m; (m = starts.exec(text));) {
+    const i = m.index;
+    if (text[i] === '"' && i < dead) continue;
+    at.lastIndex = i;
+    const hit = at.exec(text);
+    if (hit) {
+      out += text.slice(done, i) + fn(...hit);
+      starts.lastIndex = done = i + hit[0].length;
+    } else if (text[i] === '"') {
+      body.lastIndex = i + 1;
+      body.exec(text);
+      dead = body.lastIndex;
+    }
+  }
+  return out + text.slice(done);
+}
+const blankQuoted = (text) => replaceQuoted(text, () => '""');
+const PS_STRING_AT = /"(?:\\.|[^"\\$`])*"/y;
+const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
@@ -85,7 +113,7 @@ function stripMessagesOnce(cmd) {
   return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
     .replace(MESSAGE_CMD, (_all, head, args) =>
       // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
-      head + args.replace(new RegExp(QUOTED, 'g'), (q) =>
+      head + replaceQuoted(args, (q) =>
         ((/^herdr/.test(head) && /^["']!/.test(q)) || (/^"/.test(q) && /\$\(|`/.test(q)) ? q : '""')));
 }
 
@@ -701,8 +729,9 @@ function ghApiWrites(w, j) {
 // PR 111 review R1: a group bash and zsh expand ({main,}, {a,b}, {1..3}) is never unbraced: it becomes a word the shell
 // fills in ($BRACE_GROUP), so a push naming it blocks as a shell-filled branch, as git push origin $B does
 // (no brace: the text as it is, one cheap test instead of a pass over a long command)
-const unbrace = (t) => (!String(t ?? '').includes('{') ? String(t ?? '') : String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'),
-  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner)));
+const BRACE_AT = new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'y');
+const unbrace = (t) => (!String(t ?? '').includes('{') ? String(t ?? '') : replaceQuoted(String(t ?? ''),
+  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner), BRACE_AT));
 // word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p)); after
 // any launcher or a shell that runs the rest (timeout 30 git, sudo -u x gh, cmd /c git, B2)
 const RUNS_REST_SHELL = new Set(['cmd', 'pwsh', 'powershell']);
@@ -1231,7 +1260,7 @@ function installerRuns(s) {
 }
 const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && (GUARD_DIR.test(s) || hiddenInstaller(s)) && installerRuns(s) };
 // --check counts only as a word of the command itself: not inside quotes (--target "x --check") or a comment (# --check)
-const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(seg.replace(QUOTED_TEXT, '""').replace(/(?:^|[ \t])#.*$/s, ''));
+const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(blankQuoted(seg).replace(/(?:^|[ \t])#.*$/s, ''));
 // and an install that clears or sets the seat's variables (CB_ROLE= CB_AGENT= node install.mjs, env -u CB_ROLE) is
 // blocked even with --check: those variables are what make the installer itself refuse to run in a seat
 const SEAT_VARS = /CB_(?:ROLE|AGENT)(?![\w])/i;
@@ -1352,7 +1381,7 @@ function nameTakers(seg) {
 }
 function seatVarChangeOne(command) {
   const raw = stripMessages(String(command ?? ''));
-  const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
+  const t = SEAT_RUNS_CODE.test(raw) ? raw : blankQuoted(raw);
   if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
   if (NAME_ASSIGNER.test(raw) && ASSIGN_THROUGH.test(raw) && assignsThrough(raw)) return SEAT_VARS_CHANGE;
   for (const seg of t.match(SEGMENTS) ?? []) {
@@ -1573,9 +1602,8 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
 // a definition in command position: name() {, function name, alias [--] name=, hash -p, PowerShell Set-Alias / New-Alias / sal / nal
-const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
 // judged with quoted text blanked (round 2: grep -E "a|function b" opencode.json is a search, not a definition)
-const QUOTED_TEXT = /"(?:\\.|[^"\\])*"|'[^']*'/g;
+const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
 // #4587: a line continuation, joined as the shell joins it, before anything reads the command (the prefilter too: a
 // split open\<newline>code.json names no fence word). bash drops a backslash-newline with nothing between, so
 // .cla\<newline>ude is .claude: SHELL_ESCAPES's space would leave that split. Only an odd run of backslashes continues
@@ -1607,7 +1635,7 @@ function fenceWriteOne(command) {
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
-  if (DEFINES_FN.test(text.replace(QUOTED_TEXT, '""'))) return FENCE;
+  if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
@@ -1974,7 +2002,7 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
   // only takes a feed away, never adds one
   // #4658: find's {} is a word of its own, not a brace that ends the command (-exec bash {} runs each file as a script)
   const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(STDIN_REDIR, ' ').replace(/(?<=[ \t])\{\}(?=[\s;+\\]|$)/g, '__found__');
-  if (PS_READ.test(text.replace(/'[^']*'/g, "''").replace(/"(?:\\.|[^"\\$`])*"/g, '""'))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
+  if (PS_READ.test(replaceQuoted(text.replace(/'[^']*'/g, "''"), (q) => (q[0] === '"' ? '""' : q), PS_STRING_AT, PS_STRING_BODY))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
   const segs = [...text.matchAll(SEGMENT)].map((m) => ({ start: m.index, end: m.index + m[0].length, s: m[0] }));
   const n = segs.length;
   const piped = new Uint8Array(n), joined = new Uint8Array(n), redir = new Uint8Array(n), loopFed = new Uint8Array(n);
@@ -1988,7 +2016,7 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
     piped[k] = joined[k] && (gap !== '&' || piped[k - 1]);
     // PR 104 review B2: <&0, <&3 (a copy of some descriptor, maybe the input: exec 3<&0) and < /dev/stdin read the seat's
     // own input, so they are no feed (fail closed on any <&N)
-    redir[k] = /</.test(segs[k].s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '').replace(/<\(/g, '').replace(STDIN_REDIR, ''));
+    redir[k] = /</.test(replaceQuoted(segs[k].s, () => '').replace(/<\(/g, '').replace(STDIN_REDIR, ''));
     const w0 = lead(k);
     if (LOOP_START.has(w0)) stack.push(k);
     else if (w0 === 'done' && stack.length) { const j = stack.pop(); loopFed[j] = redir[k] || piped[j]; }

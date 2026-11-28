@@ -98,8 +98,10 @@ const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_M
 let sql: any = direct;
 // doctor and update look at this machine (and the board's web address), never through a relay: they must work on a
 // stale worker and while the database is down (cb update reads the board's schema once, directly, before installing)
-const offline = cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
+// The manual (cb, cb help) too: it is compiled in, so it never asks who this pane is (#4755)
+const manual = cmd === undefined || cmd === 'help';
+const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
+if (pane && !process.env.PGAPPNAME && !offline && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
     if (bridged) { sql = bridged; break; }
@@ -364,6 +366,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
       '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
     return done();
   }
+  const [review] = project ? await sql`select cb._review_words(${project}, ${actor}) as words`.catch(() => [null]) : [null];
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -376,6 +379,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
     out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
+  else if (review?.words) out.push(`  ${review.words}.`); // #4744
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return done();
@@ -830,6 +834,9 @@ ${body}`, json: pg };
         // board without the words (a rolled-back schema) still answers
         const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
         if (w?.words) return { out: w.words, json: null };
+        // #4744: a reviewer in a project without stages: the lead hands out its reviews, so say that, not "nothing"
+        const [v] = await sql`select cb._review_words(cb.resolve(${project}), ${actor}) as words`.catch(() => [null]);
+        if (v?.words) return { out: v.words, json: null };
         // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
         const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
         return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
@@ -1162,7 +1169,8 @@ const HINTS: [RegExp, string][] = [
 function actionable(m: string) {
   for (const [re, hint] of HINTS) if (re.test(m)) m += `. ${hint}`;
   if (namesCommand(m) || /keep working/i.test(m)) return m; // #4515: "Keep working meanwhile." too (a lost read names no check)
-  return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
+  // never "cb help help": it is the command that just failed (#4755). A message that ends a sentence takes no extra dot
+  return `${m}${/[.?!]$/.test(m) ? '' : '.'} Run: cb help${cmd && cmd !== 'help' && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
 }
 
 async function main() {

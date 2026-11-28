@@ -210,9 +210,27 @@ export const RX = {
 }
 export const pathOk = (p?: string) => !!p && RX.absolute.test(p) && !RX.forbidden.test(p)
 
-/** Why a model does not fit its agent, or null. */
-export function modelProblem(agent: string | undefined, model: string | undefined): string | null {
+/** The two model names a value is, when it is two known names joined with no separator: the settings field's picker
+ *  slip, where the second click appended to the first instead of replacing it (#4717). null when it is not such a
+ *  pair (a single name, a new name, or a value that does not split into two known ones). */
+export function joinedModels(model: string, known: readonly string[]): [string, string] | null {
+  const v = model ?? ''
+  if (!v) return null
+  for (const a of known) {
+    if (a && v.length > a.length && v.startsWith(a)) {
+      const b = v.slice(a.length)
+      if (known.includes(b)) return [a, b]
+    }
+  }
+  return null
+}
+
+/** Why a model does not fit its agent, or null. known (the names already used for that agent) catches two names joined
+ *  with no separator, which still fit the agent's shape alone (#4717). */
+export function modelProblem(agent: string | undefined, model: string | undefined, known: readonly string[] = []): string | null {
   const m = model ?? ''
+  const joined = joinedModels(m, known)
+  if (joined) return `That is two model names joined (${joined[0]} and ${joined[1]}): pick one.`
   const claudeName = (CLAUDE_MODELS as readonly string[]).includes(m)
   switch (agent ?? 'claude') {
     case 'claude': return claudeName ? null : 'Pick Opus, Sonnet, Haiku or Fable.'
@@ -227,7 +245,7 @@ export interface Problem { where: string; text: string }
 
 /** Everything cb.squad_set would refuse, said plainly and placed by section ('role:<role>', 'machines', 'repos',
  *  'areas', 'squad'). An empty list means the save should pass the server's checks. */
-export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'>): Problem[] {
+export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'> & { models_used?: SquadOptions['models_used'] }): Problem[] {
   const out: Problem[] = []
   const add = (where: string, text: string) => out.push({ where, text })
   const mains = new Set(opts.agents.filter((a) => a.main).map((a) => a.agent))
@@ -276,7 +294,7 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
     const agent = spec.agent ?? 'claude'
     if (!sq.machines[spec.machine]) add(where, `${name}: pick a machine.`)
     if (!mains.has(agent)) add(where, `${agentLabel(agent)} is not ready to run a seat yet. You can list it as a backup.`)
-    const mp = modelProblem(agent, spec.model)
+    const mp = modelProblem(agent, spec.model, opts.models_used?.[agent])
     if (mp) add(where, `${name}: ${mp}`)
     let need: string[] = []
     if (role === 'owner') need = multi ? [...new Set(areas.flatMap((a) => (typeof a === 'string' ? [] : [a.repo])))] : []
@@ -295,12 +313,12 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
       need = home ? [home] : []
     }
     if (multi) for (const r of need) if (sq.repos?.[r] && !sq.repos[r]!.paths[spec.machine]) add(where, `${name}: repo ${r} has no folder on ${machineLabel(sq.machines[spec.machine], spec.machine)}.`)
-    fallbackProblems(spec.fallback, agent, spec.model, name).forEach((t) => add(where, t))
+    fallbackProblems(spec.fallback, agent, spec.model, name, opts.models_used).forEach((t) => add(where, t))
     for (const [k, s] of Object.entries(spec.seats ?? {})) {
       const label = seatKeyLabel(sq, role, k), sa = s.agent ?? agent, sm = s.model ?? spec.model
       if (s.agent && !mains.has(s.agent)) add(where, `${label}: ${agentLabel(s.agent)} is not ready to run a seat yet.`)
-      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm); if (p) add(where, `${label}: ${p}`) }
-      fallbackProblems(s.fallback, sa, sm, label).forEach((t) => add(where, t))
+      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm, opts.models_used?.[sa]); if (p) add(where, `${label}: ${p}`) }
+      fallbackProblems(s.fallback, sa, sm, label, opts.models_used).forEach((t) => add(where, t))
     }
     if (sq.machines[spec.machine]?.herdr === 'macbook') mac += seatCount(sq, role)
   }
@@ -316,13 +334,13 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
   return out
 }
 
-function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string): string[] {
+function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string, used?: SquadOptions['models_used']): string[] {
   if (!fb) return []
   const out: string[] = []
   if (fb.length > 5) out.push(`${label}: at most 5 backups.`)
   const seen = new Set<string>()
   fb.forEach((f, i) => {
-    const p = modelProblem(f.agent, f.model)
+    const p = modelProblem(f.agent, f.model, used?.[f.agent])
     if (p) out.push(`${label}, backup ${i + 1}: ${p}`)
     const pair = `${f.agent} ${f.model}`
     if (f.agent === agent && f.model === model) out.push(`${label}, backup ${i + 1} is the same as the seat itself.`)

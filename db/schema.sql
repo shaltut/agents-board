@@ -3,6 +3,19 @@
 -- column changes need an explicit "alter table" below the create.
 
 create schema if not exists cb;
+
+-- #4726: every start re-applies this file beside live readers. Dropping and re-adding a check takes ACCESS EXCLUSIVE and
+-- rescans the table, so it happens only when the rule changed: the constraint's comment keeps the text it was made from
+-- (Postgres rewrites the definition itself, so that cannot be compared).
+drop function if exists cb._ensure_check(regclass, text, text) cascade;
+create function cb._ensure_check(tbl regclass, con text, expr text) returns void language plpgsql as $$
+begin
+  if exists (select 1 from pg_constraint c where c.conrelid = tbl and c.conname = con
+             and obj_description(c.oid, 'pg_constraint') = expr) then return; end if;
+  execute format('alter table %s drop constraint if exists %I', tbl, con);
+  execute format('alter table %s add constraint %I check (%s)', tbl, con, expr);
+  execute format('comment on constraint %I on %s is %L', con, tbl, expr);
+end $$;
 -- Guest passwords (bcrypt). Qualified as public.crypt / public.gen_salt wherever used.
 create extension if not exists pgcrypto with schema public;
 
@@ -24,8 +37,7 @@ update cb.projects set name = 'Agents Board' where slug = 'claude-board' and nam
 alter table cb.projects add column if not exists state text not null default 'enabled';
 alter table cb.projects add column if not exists state_by text;
 alter table cb.projects add column if not exists state_at timestamptz;
-alter table cb.projects drop constraint if exists projects_state_check;
-alter table cb.projects add constraint projects_state_check check (state in ('enabled', 'disabled', 'archived'));
+select cb._ensure_check('cb.projects', 'projects_state_check', $c$state in ('enabled', 'disabled', 'archived')$c$);
 -- one-time: a project archived by hand before #4559 is archived. Once a state was set (state_at), archived follows it,
 -- so a re-run never archives a project Ahmed enabled again.
 update cb.projects set state = 'archived', state_at = now(), state_by = 'board' where archived and state = 'enabled' and state_at is null;
@@ -111,8 +123,7 @@ create index if not exists events_actor_at on cb.events (actor, at desc);
 -- "An actor's latest event" (sessions_overview's `last`, order by id desc limit 1): without it the planner walks events_pkey
 -- backwards and, for an actor with no events (a fresh squad session), reads the whole table: 25 s per call, 504s on every page (2026-11-26).
 create index if not exists events_actor_id on cb.events (actor, id desc);
-alter table cb.events drop constraint if exists events_kind_check;
-alter table cb.events add constraint events_kind_check check (kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor'));
+select cb._ensure_check('cb.events', 'events_kind_check', $c$kind in ('task_created','moved','updated','done','note','asked','answered','delivered','withdrawn','broadcast','message','huddle','user','epic','memory','sent_back','rewritten','goal','ask','supervisor')$c$);
 
 alter table cb.questions add column if not exists multi boolean not null default false;
 
@@ -125,8 +136,7 @@ alter table cb.questions add column if not exists if_answer text;
 -- A blocking follow-up that opened: its task's {task, status, blocked_on} before it took the task, so a changed
 -- parent answer that sends it back to dormant can put the task back exactly.
 alter table cb.questions add column if not exists hold_before jsonb;
-alter table cb.questions drop constraint if exists questions_status_check;
-alter table cb.questions add constraint questions_status_check check (status in ('open','answered','delivered','withdrawn','dormant','sent_back'));
+select cb._ensure_check('cb.questions', 'questions_status_check', $c$status in ('open','answered','delivered','withdrawn','dormant','sent_back')$c$);
 create index if not exists questions_parent on cb.questions (parent_id) where parent_id is not null;
 
 -- Send back (#616): Ahmed (or the person it is for) returns an open question to its asker, 'sent_back' until the asker
@@ -143,8 +153,7 @@ alter table cb.questions add column if not exists answer_history jsonb;
 -- What kind of work a task is. 'task' (unclassified) is the default: existing rows were never typed,
 -- and calling them features would be a lie. The list lives in the check and in cb.norm_type.
 alter table cb.tasks add column if not exists type text not null default 'task';
-alter table cb.tasks drop constraint if exists tasks_type_check;
-alter table cb.tasks add constraint tasks_type_check check (type in ('task','bug','feature','change','chore','research'));
+select cb._ensure_check('cb.tasks', 'tasks_type_check', $c$type in ('task','bug','feature','change','chore','research')$c$);
 
 -- Epics (#341): one level of ordered steps (tasks) inside one project. Only Ahmed creates, renames, closes and
 -- deletes them (dashboard_only); sessions add their own tasks. status is Ahmed's close; the status shown
@@ -227,8 +236,7 @@ alter table cb.sessions add column if not exists broadcast_seen bigint not null 
 alter table cb.sessions add column if not exists role text;
 -- the agent CLI the session runs (#4002); every session before it was claude
 alter table cb.sessions add column if not exists agent text not null default 'claude';
-alter table cb.sessions drop constraint if exists sessions_agent_check;
-alter table cb.sessions add constraint sessions_agent_check check (agent in ('claude','codex','opencode','agy'));
+select cb._ensure_check('cb.sessions', 'sessions_agent_check', $c$agent in ('claude','codex','opencode','agy')$c$);
 -- the agent session in this pane (#4379), as its relay last saw it (Claude: the session id its SessionStart hook wrote
 -- with the endpoint). Another id in the same pane is another session: cb.inbox resets the row. Null (a row from before
 -- it, or one a cb iam just bound) takes the next id as it is
@@ -2055,8 +2063,9 @@ begin
   loop
     continue when r.last_at > now() - interval '1 hour';
     -- #4665: an in_progress card nobody holds is asked about once per quiet stretch (the fix is to move it back), not
-    -- every 30 minutes; an update starts a new stretch
-    continue when r.status = 'in_progress' and r.assignee is null and r.last_ping_at >= r.last_at;
+    -- every 30 minutes; an update starts a new stretch. #4679: and again each day, so it is not forgotten
+    continue when r.status = 'in_progress' and r.assignee is null
+              and r.last_ping_at >= r.last_at and r.last_ping_at > now() - interval '24 hours';
     mins := floor(extract(epoch from now() - r.last_at) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
     live := r.assignee is not null and exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
@@ -2068,11 +2077,14 @@ begin
       n := n + 1;
     end if;
     for o in select x from unnest(cb.triagers(r.project)) x where cb._is_lead(x, r.project) and x is distinct from r.assignee
-                 and not (r.stage is not null and cb._pipeline(r.project)) loop  -- a staged card's lead copy is the digest's
+                 -- a staged card's lead copy is the digest's, which never names an unowned in_progress one (#4679)
+                 and (not (r.stage is not null and cb._pipeline(r.project))
+                      or (r.status = 'in_progress' and r.assignee is null
+                          and not exists (select 1 from cb.task_parts tp where tp.task_id = r.id and tp.assignee is not null))) loop
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
               case when r.status = 'in_progress' and r.assignee is null
-                then format('Card #%s "%s" (unassigned, in_progress) has had no update for %s, and nobody holds it: move it back (cb move %s next) or assign it. Asked once until it changes.', r.id, r.title, idle, r.id)
+                then format('Card #%s "%s" (unassigned, in_progress) has had no update for %s, and nobody holds it: move it back (cb move %s next) or assign it. Asked again in a day if nothing changes.', r.id, r.title, idle, r.id)
                 else format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
                      case when r.assignee is null then 'unassigned' else 'assigned to ' || r.assignee end, r.status, idle,
                      case when r.assignee is null or live then '' else ' and its session has not checked in for 10 minutes' end) end,
@@ -3709,8 +3721,10 @@ drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
 drop function if exists cb._agent cascade;
+drop function if exists cb._squad_lacks cascade;
 drop function if exists cb._for_agents cascade;
 drop function if exists cb._for_skipped cascade;
+drop function if exists cb._review_words cascade;
 drop function if exists cb._agents_words cascade;
 drop function if exists cb._kept cascade;
 drop function if exists cb._for_fits cascade;
@@ -3741,16 +3755,14 @@ alter table cb.projects add column if not exists pipeline boolean not null defau
 alter table cb.projects add column if not exists squad jsonb;
 
 alter table cb.tasks add column if not exists stage text;
-alter table cb.tasks drop constraint if exists tasks_stage_check;
-alter table cb.tasks add constraint tasks_stage_check check (stage is null or stage in ('design','approval','build','review','merge','qa'));
+select cb._ensure_check('cb.tasks', 'tasks_stage_check', $c$stage is null or stage in ('design','approval','build','review','merge','qa')$c$);
 -- crew: who designs, builds and reviews this card (keys design, build, review: actor names)
 alter table cb.tasks add column if not exists crew jsonb not null default '{}';
 alter table cb.tasks add column if not exists stage_since timestamptz;
 alter table cb.tasks add column if not exists approved_version int;
 
 alter table cb.sessions add column if not exists role text;
-alter table cb.sessions drop constraint if exists sessions_role_check;
-alter table cb.sessions add constraint sessions_role_check check (role is null or role in ('lead','architect','owner','builder','reviewer','qa','investigator'));
+select cb._ensure_check('cb.sessions', 'sessions_role_check', $c$role is null or role in ('lead','architect','owner','builder','reviewer','qa','investigator')$c$);
 alter table cb.sessions add column if not exists area text;
 alter table cb.sessions add column if not exists model text;
 -- the supervisor marks a session it is about to close: no card may land on it for 5 minutes (#3601)
@@ -3812,6 +3824,16 @@ $$;
 create function cb._role(a text) returns text language sql stable as $$
   select coalesce((select s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1),
                   case when a = 'orch' or a like 'orch@%' then 'lead' end)
+$$;
+
+-- #4744: without pipeline stages nothing hands a reviewer a review card (the board keeps no record of who built it), and
+-- cb pass and cb fail have no stage to move. What a reviewer there does instead (cb next, cb start, cb pass, cb fail); null
+-- for any other role, and for a project with stages or one that gets no work (cb._wait_words says that).
+create function cb._review_words(project text, a text) returns text language sql stable as $$
+  select case when cb._role(a) = 'reviewer' and cb._live($1) and not cb._pipeline($1)
+    then format('%s has no pipeline stages, so the board hands out no review there: the lead hands you pull requests (cb tell). '
+                || 'Put your GO or findings in cb log <card> "..." and in a PR comment, and tell the builder. Never cb done a card you reviewed', $1)
+  end
 $$;
 
 -- Is the actor the lead of this project (#3746): its latest session (the one cb._role reads) is bound to the project and
@@ -3963,8 +3985,11 @@ declare fromst text; kept text[];
 begin
   select t.stage, cb._for_agents(t.labels) into fromst, kept from cb.tasks t where t.id = tid for update;
   -- #4593 review 100 F2 (lead's ruling): a for: label binds the next claim only: a card that passes its stage loses it,
-  -- and the history says so in plain words. Entering its first stage (from none) keeps it
-  if fromst is null or to_stage = fromst then kept := '{}'; end if;
+  -- and the history says so in plain words. Entering its first stage (from none) keeps it. #4679: so does a move into or
+  -- out of approval, which no seat claims: a label set at design holds through to the build
+  -- Nor does cb fail take it off (cb.keep_for, set by cb.stage_fail): the card goes back to the same kind of agent
+  if fromst is null or to_stage = fromst or 'approval' in (fromst, to_stage)
+     or current_setting('cb.keep_for', true) = 'on' then kept := '{}'; end if;
   if cardinality(kept) > 0 then
     note := concat_ws('; ', nullif(note, ''), format('it was kept for %s for one stage only, so any seat may take it now', cb._agents_words(kept)));
   end if;
@@ -3996,7 +4021,9 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
+  if not cb._pipeline(t.project) then
+    raise exception '%', coalesce(cb._review_words(t.project, a), format('pipeline is off for %s: finish it with cb done %s', t.project, tid));
+  end if;
   if t.stage is null then raise exception '#% is not in the pipeline', tid; end if;
   if t.stage = 'approval' then
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
@@ -4118,7 +4145,9 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
+  if not cb._pipeline(t.project) then
+    raise exception '%', coalesce(cb._review_words(t.project, a), format('pipeline is off for %s: finish it with cb done %s', t.project, tid));
+  end if;
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
   select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) into parts from cb.task_parts p where p.task_id = tid;
@@ -4166,7 +4195,9 @@ begin
     -- back to its builder; a merged part reopened by qa needs a new merge commit
     update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null, since = now(), nudged_at = null
      where p.task_id = tid and p.repo = pt.repo;
+    perform set_config('cb.keep_for', 'on', true);
     perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
+    perform set_config('cb.keep_for', '', true);
     -- the card stays in Next and unheld: its builder hears of it only by message (busy or not)
     insert into cb.events (actor, project, task_id, kind, summary, data)
     select 'board', t.project, tid, 'message', format('#%s part %s is back with you at build: %s', tid, pt.repo, trim(why)),
@@ -4174,7 +4205,9 @@ begin
      where nullif(trim(pt.crew ->> 'build'), '') is not null;
     return 'build';
   end if;
+  perform set_config('cb.keep_for', 'on', true);
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
+  perform set_config('cb.keep_for', '', true);
   -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder. Their holders (but
   -- the one sending it back) are told: nothing else reaches them.
   if nxt = 'design' then
@@ -4276,6 +4309,17 @@ create function cb._agents_words(ag text[]) returns text language sql immutable 
   select case when left(w, 1) in ('a', 'e', 'i', 'o', 'u') then 'an ' else 'a ' end || w || ' seat'
     from (select string_agg(case x when 'claude' then 'Claude' when 'codex' then 'Codex' when 'opencode' then 'OpenCode' else x end, ' or ' order by n) w
             from unnest(ag) with ordinality u(x, n)) z
+$$;
+
+-- #4679: the project has a squad and none of its roles or seats runs one of these agents (no squad: nothing to say)
+create function cb._squad_lacks(p text, ag text[]) returns boolean language sql stable as $$
+  select coalesce((select pr.squad is not null and not exists (
+      select 1 from jsonb_each(pr.squad -> 'roles') r
+       cross join lateral (select coalesce(r.value ->> 'agent', 'claude') as agent
+                           union all
+                           select se.value ->> 'agent' from jsonb_each(coalesce(r.value -> 'seats', '{}')) se) s
+       where s.agent = any(ag))
+    from cb.projects pr where pr.slug = p), false)
 $$;
 
 -- #4593 review 100 F1: the waiting cards kept for an agent, counted by the agents they are kept for ("codex", "agy,codex"),
@@ -4569,7 +4613,8 @@ begin
     select 8, t.priority = 'P0', t.id,
            -- #4593 review 100 F3: a card kept for an agent says which seat it waits for, in plain words
            case when cardinality(cb._for_agents(t.labels)) > 0
-                then format('#%s is waiting for %s: start one, or cb edit %s --assignee <session>', t.id, cb._agents_words(cb._for_agents(t.labels)), t.id)
+                then format('#%s is waiting for %s%s, or cb edit %s --assignee <session>', t.id, cb._agents_words(cb._for_agents(t.labels)),
+                            case when cb._squad_lacks(p, cb._for_agents(t.labels)) then ', and the squad has none: add one to the squad' else ': start one' end, t.id)
                 else format('#%s is not staged: cb edit %s --assignee <session>', t.id, t.id) end
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
@@ -4619,7 +4664,8 @@ begin
         union all
         -- an unheld staged card no live session of the project could take, the design wait aside (aged stage_since copy)
         select t.id, t.priority = 'P0', format('#%s (%s, %s)', t.id, cb._stage_words(t.stage),
-               case when cardinality(cb._for_agents(t.labels)) > 0 then 'waiting for ' || cb._agents_words(cb._for_agents(t.labels)) || ': none live can take it'
+               case when cardinality(cb._for_agents(t.labels)) > 0 then 'waiting for ' || cb._agents_words(cb._for_agents(t.labels))
+                         || case when cb._squad_lacks(p, cb._for_agents(t.labels)) then ': the squad has none' else ': none live can take it' end
                     else 'no live session can take it' end)
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null
@@ -5080,6 +5126,7 @@ drop function if exists cb._repo cascade;
 drop function if exists cb._check_repos cascade;
 drop function if exists cb._repo_list cascade;
 drop function if exists cb._check_model cascade;
+drop function if exists cb._models_used cascade;
 drop function if exists cb._check_seat cascade;
 drop function if exists cb._agents_main cascade;
 alter table cb.projects add column if not exists squad jsonb;
@@ -5133,12 +5180,49 @@ begin
   return array(select jsonb_array_elements_text(j));
 end $$;
 
+-- The model names already used for each agent, across every saved squad: the settings page's suggestions, and what
+-- makes a name that is two of them joined detectable on save (#4717). Per agent: {"claude": ["opus", ...], ...}.
+create function cb._models_used() returns jsonb language sql stable as $$
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
+  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
+  specs as (
+    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
+    union all
+    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
+      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
+  ),
+  pairs as (
+    select s.agent, s.model from specs s where s.model is not null
+    union
+    select f->>'agent', f->>'model' from specs s
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
+     where f->>'agent' is not null and f->>'model' is not null
+  )
+  select coalesce((select jsonb_object_agg(z.agent, z.models) from
+                   (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}')
+$$;
+
 -- A model for an agent (#4002), refused naming the field (label) and the shape to give. Claude takes its four names;
 -- codex and agy a model name, never a Claude one (the slip when only the agent was changed); opencode provider/model.
 -- A null model is refused like a wrong one (it would pass not in and !~ silently); a null agent is claude.
-create function cb._check_model(agent text, model text, label text) returns void language plpgsql immutable as $$
+-- A value that is two known names joined with no separator (the settings picker's slip, #4717) is refused too: it still
+-- fits the shape, but it is not one model. stable: it reads the names already used.
+create function cb._check_model(agent text, model text, label text) returns void language plpgsql stable as $$
 #variable_conflict use_variable
+declare
+  known text[]; a text; b text;
 begin
+  if model is not null then
+    known := array(select jsonb_array_elements_text(coalesce(cb._models_used()->coalesce(agent, 'claude'), '[]'::jsonb)));
+    foreach a in array known loop
+      if a <> model and length(model) > length(a) and left(model, length(a)) = a then
+        b := substring(model from length(a) + 1);
+        if b = any(known) then
+          raise exception '% model "%" is two model names joined (% and %): pick one', label, model, a, b;
+        end if;
+      end if;
+    end loop;
+  end if;
   case coalesce(agent, 'claude')
     when 'claude' then
       if model is null or model not in ('opus', 'sonnet', 'haiku', 'fable') then
@@ -5170,7 +5254,7 @@ create function cb._agents_main() returns text[] language sql immutable as $$ se
 -- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
 -- the inherited one (so claude, the default, is never written), the model only when given, the fallback only when it
 -- lists some, as {agent, model} pairs.
-create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql immutable as $$
+create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
 declare a text := ag; m text := mo; fb jsonb := '[]'; cnt int; x record; k text; pair text; pairs text[] := '{}';
 begin
@@ -5520,21 +5604,7 @@ end $$;
 -- paths must match, the model names already used in any squad (per agent, for suggestions) and the machines already
 -- used in any squad (to add one to another project).
 create function cb.squad_options() returns jsonb language sql stable as $$
-  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
-  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
-  specs as (
-    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
-    union all
-    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
-      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
-  ),
-  pairs as (
-    select s.agent, s.model from specs s where s.model is not null
-    union
-    select f->>'agent', f->>'model' from specs s
-      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
-     where f->>'agent' is not null and f->>'model' is not null
-  )
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null)
   select jsonb_build_object(
     'roles', to_jsonb(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']),
     'repo_bound_roles', to_jsonb(array['builder', 'reviewer']),
@@ -5549,8 +5619,7 @@ create function cb.squad_options() returns jsonb language sql stable as $$
                                    'codex_model', '^[a-z0-9][a-z0-9._-]{0,63}$',
                                    'opencode_model', '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$',
                                    'agy_model', '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-    'models_used', coalesce((select jsonb_object_agg(z.agent, z.models) from
-                     (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}'),
+    'models_used', cb._models_used(),
     'machines_used', coalesce((select jsonb_agg(distinct jsonb_build_object('key', m.key) || m.value)
                                  from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'machines') = 'object' then sq.squad->'machines' else '{}' end) m), '[]'))
 $$;
@@ -5830,21 +5899,17 @@ alter table cb.runners add column if not exists slots_set int;
 alter table cb.runners add column if not exists lanes_set int;
 alter table cb.runners add column if not exists set_by text;
 alter table cb.runners add column if not exists set_at timestamptz;
-alter table cb.runners drop constraint if exists runners_mode_check;
-alter table cb.runners add constraint runners_mode_check check (mode in ('on', 'paused', 'draining'));
+select cb._ensure_check('cb.runners', 'runners_mode_check', $c$mode in ('on', 'paused', 'draining')$c$);
 -- the setting's range on the row itself, whatever writes it (the runner builds a slot list of this size; a lane is one
 -- digit in its stack's ports). setting_refused: why the runner could not run the board's setting at its last start
 -- (null = it ran it, or there is none); the page says so in words.
-alter table cb.runners drop constraint if exists runners_slots_set_check;
-alter table cb.runners add constraint runners_slots_set_check check (slots_set between 1 and 64);
-alter table cb.runners drop constraint if exists runners_lanes_set_check;
-alter table cb.runners add constraint runners_lanes_set_check check (lanes_set between 1 and 9);
+select cb._ensure_check('cb.runners', 'runners_slots_set_check', $c$slots_set between 1 and 64$c$);
+select cb._ensure_check('cb.runners', 'runners_lanes_set_check', $c$lanes_set between 1 and 9$c$);
 alter table cb.runners add column if not exists setting_refused text;
 -- #4710: seconds between two of the runner's DB test stack starts (null: the runner's default, 30), read at its start:
 -- Postgres containers that initialise together miss their health deadline
 alter table cb.runners add column if not exists stack_gap_set int;
-alter table cb.runners drop constraint if exists runners_stack_gap_set_check;
-alter table cb.runners add constraint runners_stack_gap_set_check check (stack_gap_set between 0 and 300);
+select cb._ensure_check('cb.runners', 'runners_stack_gap_set_check', $c$stack_gap_set between 0 and 300$c$);
 -- A project's lead (or Ahmed) holds that project's waiting jobs; the shared runner keeps serving every other project.
 create table if not exists cb.job_holds (
   project text primary key references cb.projects(slug) on update cascade on delete cascade,
