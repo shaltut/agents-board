@@ -407,12 +407,17 @@ it still hold the old values, which work until replaced (**New link**, or **Sign
 the new container apply this schema (the [upgrade](#upgrade) does): applied ahead of it, the old server cannot sign
 anyone in once the column is empty.
 
-**Rolling the board back past that change** leaves the older code with an empty column: everyone is signed out and an
-admin cannot sign in. After the rollback, give every user a fresh value, then send members new links:
+**Rolling the board back past that change** leaves the older code without its sign-in column as it expects it: empty
+and without its default, or (on a board first set up after the change) not there at all. Everyone is signed out and an
+admin cannot sign in. **Copy these statements before you roll back** (the older checkout does not have this page), run
+them after the older code is up, then send members new links:
 
 ```bash
 dc exec -T db psql -U cb -d claude_board -v ON_ERROR_STOP=1 -1 <<'SQL'
+alter table cb.users add column if not exists token text;
 update cb.users set token = gen_random_uuid()::text where token is null;
+alter table cb.users alter column token set default gen_random_uuid()::text, alter column token set not null;
+create unique index if not exists users_token_key on cb.users (token);
 SQL
 ```
 

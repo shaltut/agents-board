@@ -1117,6 +1117,7 @@ drop function if exists cb._sign_in_hash cascade;
 drop function if exists cb._sign_in_issue cascade;
 drop function if exists cb.sign_in_user cascade;
 drop function if exists cb.sign_in_new cascade;
+drop function if exists cb.sign_in_password cascade;
 drop function if exists cb.sign_out cascade;
 drop function if exists cb.assignee_on_project cascade;
 drop function if exists cb.question_assign cascade;
@@ -2424,7 +2425,7 @@ create function cb.sign_in_user(token text) returns table (name text, display te
      and case s.kind when 'link' then u.role = 'member' else s.created_at > now() - interval '90 days' end
 $$;
 
--- One more browser signed in (the server has just checked the password): its own value. ends_others: every other way
+-- One more browser signed in (called under a lock on the user, after the password: below, and /api/password): its own value. ends_others: every other way
 -- in goes first (an admin who changes their password). The user's expired sessions are cleared on the way.
 create function cb.sign_in_new(name text, ends_others boolean default false) returns text language plpgsql as $$
 #variable_conflict use_variable
@@ -2433,6 +2434,21 @@ begin
   perform cb.dashboard_only('Users');
   delete from cb.sign_ins s where s.user_name = n and (ends_others or (s.kind = 'session' and s.created_at <= now() - interval '90 days'));
   return cb._sign_in_issue(n, 'session');
+end $$;
+
+-- Sign in with name and password: checked and given its session under one lock on the user. A password change that is
+-- under way is waited for and then judged: the old password gets nothing, so no session appears after a change that
+-- should have ended it. Null = not this name and password.
+create function cb.sign_in_password(name text, password text) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare n text;
+begin
+  perform cb.dashboard_only('Users');
+  select u.name into n from cb.users u
+   where u.name = sign_in_password.name and u.password is not null and u.password = public.crypt(sign_in_password.password, u.password)
+     for no key update;
+  if n is null then return null; end if;
+  return cb.sign_in_new(n);
 end $$;
 
 -- Sign out: this browser's session ends. A link is not ended by it (New link does that).
