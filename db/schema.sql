@@ -2063,8 +2063,9 @@ begin
   loop
     continue when r.last_at > now() - interval '1 hour';
     -- #4665: an in_progress card nobody holds is asked about once per quiet stretch (the fix is to move it back), not
-    -- every 30 minutes; an update starts a new stretch
-    continue when r.status = 'in_progress' and r.assignee is null and r.last_ping_at >= r.last_at;
+    -- every 30 minutes; an update starts a new stretch. #4679: and again each day, so it is not forgotten
+    continue when r.status = 'in_progress' and r.assignee is null
+              and r.last_ping_at >= r.last_at and r.last_ping_at > now() - interval '24 hours';
     mins := floor(extract(epoch from now() - r.last_at) / 60);
     idle := (mins / 60) || 'h ' || (mins % 60) || 'm';
     live := r.assignee is not null and exists (select 1 from cb.sessions s where s.actor = r.assignee and s.last_seen > now() - interval '10 minutes');
@@ -2076,11 +2077,14 @@ begin
       n := n + 1;
     end if;
     for o in select x from unnest(cb.triagers(r.project)) x where cb._is_lead(x, r.project) and x is distinct from r.assignee
-                 and not (r.stage is not null and cb._pipeline(r.project)) loop  -- a staged card's lead copy is the digest's
+                 -- a staged card's lead copy is the digest's, which never names an unowned in_progress one (#4679)
+                 and (not (r.stage is not null and cb._pipeline(r.project))
+                      or (r.status = 'in_progress' and r.assignee is null
+                          and not exists (select 1 from cb.task_parts tp where tp.task_id = r.id and tp.assignee is not null))) loop
       insert into cb.events (actor, project, task_id, kind, summary, data)
       values ('board', r.project, r.id, 'message',
               case when r.status = 'in_progress' and r.assignee is null
-                then format('Card #%s "%s" (unassigned, in_progress) has had no update for %s, and nobody holds it: move it back (cb move %s next) or assign it. Asked once until it changes.', r.id, r.title, idle, r.id)
+                then format('Card #%s "%s" (unassigned, in_progress) has had no update for %s, and nobody holds it: move it back (cb move %s next) or assign it. Asked again in a day if nothing changes.', r.id, r.title, idle, r.id)
                 else format('Card #%s "%s" (%s, %s) has had no update for %s%s. Ask why it is not moving, or reassign it.', r.id, r.title,
                      case when r.assignee is null then 'unassigned' else 'assigned to ' || r.assignee end, r.status, idle,
                      case when r.assignee is null or live then '' else ' and its session has not checked in for 10 minutes' end) end,
@@ -3717,6 +3721,7 @@ drop function if exists cb._approval_answered cascade;
 drop function if exists cb._approval_guard cascade;
 drop function if exists cb._claimable cascade;
 drop function if exists cb._agent cascade;
+drop function if exists cb._squad_lacks cascade;
 drop function if exists cb._for_agents cascade;
 drop function if exists cb._for_skipped cascade;
 drop function if exists cb._review_words cascade;
@@ -3980,8 +3985,11 @@ declare fromst text; kept text[];
 begin
   select t.stage, cb._for_agents(t.labels) into fromst, kept from cb.tasks t where t.id = tid for update;
   -- #4593 review 100 F2 (lead's ruling): a for: label binds the next claim only: a card that passes its stage loses it,
-  -- and the history says so in plain words. Entering its first stage (from none) keeps it
-  if fromst is null or to_stage = fromst then kept := '{}'; end if;
+  -- and the history says so in plain words. Entering its first stage (from none) keeps it. #4679: so does a move into or
+  -- out of approval, which no seat claims: a label set at design holds through to the build
+  -- Nor does cb fail take it off (cb.keep_for, set by cb.stage_fail): the card goes back to the same kind of agent
+  if fromst is null or to_stage = fromst or 'approval' in (fromst, to_stage)
+     or current_setting('cb.keep_for', true) = 'on' then kept := '{}'; end if;
   if cardinality(kept) > 0 then
     note := concat_ws('; ', nullif(note, ''), format('it was kept for %s for one stage only, so any seat may take it now', cb._agents_words(kept)));
   end if;
@@ -4187,7 +4195,9 @@ begin
     -- back to its builder; a merged part reopened by qa needs a new merge commit
     update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null, since = now(), nudged_at = null
      where p.task_id = tid and p.repo = pt.repo;
+    perform set_config('cb.keep_for', 'on', true);
     perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
+    perform set_config('cb.keep_for', '', true);
     -- the card stays in Next and unheld: its builder hears of it only by message (busy or not)
     insert into cb.events (actor, project, task_id, kind, summary, data)
     select 'board', t.project, tid, 'message', format('#%s part %s is back with you at build: %s', tid, pt.repo, trim(why)),
@@ -4195,7 +4205,9 @@ begin
      where nullif(trim(pt.crew ->> 'build'), '') is not null;
     return 'build';
   end if;
+  perform set_config('cb.keep_for', 'on', true);
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
+  perform set_config('cb.keep_for', '', true);
   -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder. Their holders (but
   -- the one sending it back) are told: nothing else reaches them.
   if nxt = 'design' then
@@ -4297,6 +4309,17 @@ create function cb._agents_words(ag text[]) returns text language sql immutable 
   select case when left(w, 1) in ('a', 'e', 'i', 'o', 'u') then 'an ' else 'a ' end || w || ' seat'
     from (select string_agg(case x when 'claude' then 'Claude' when 'codex' then 'Codex' when 'opencode' then 'OpenCode' else x end, ' or ' order by n) w
             from unnest(ag) with ordinality u(x, n)) z
+$$;
+
+-- #4679: the project has a squad and none of its roles or seats runs one of these agents (no squad: nothing to say)
+create function cb._squad_lacks(p text, ag text[]) returns boolean language sql stable as $$
+  select coalesce((select pr.squad is not null and not exists (
+      select 1 from jsonb_each(pr.squad -> 'roles') r
+       cross join lateral (select coalesce(r.value ->> 'agent', 'claude') as agent
+                           union all
+                           select se.value ->> 'agent' from jsonb_each(coalesce(r.value -> 'seats', '{}')) se) s
+       where s.agent = any(ag))
+    from cb.projects pr where pr.slug = p), false)
 $$;
 
 -- #4593 review 100 F1: the waiting cards kept for an agent, counted by the agents they are kept for ("codex", "agy,codex"),
@@ -4590,7 +4613,8 @@ begin
     select 8, t.priority = 'P0', t.id,
            -- #4593 review 100 F3: a card kept for an agent says which seat it waits for, in plain words
            case when cardinality(cb._for_agents(t.labels)) > 0
-                then format('#%s is waiting for %s: start one, or cb edit %s --assignee <session>', t.id, cb._agents_words(cb._for_agents(t.labels)), t.id)
+                then format('#%s is waiting for %s%s, or cb edit %s --assignee <session>', t.id, cb._agents_words(cb._for_agents(t.labels)),
+                            case when cb._squad_lacks(p, cb._for_agents(t.labels)) then ', and the squad has none: add one to the squad' else ': start one' end, t.id)
                 else format('#%s is not staged: cb edit %s --assignee <session>', t.id, t.id) end
       from cb.tasks t
      where t.project = p and t.stage is null and t.status = 'next' and nullif(trim(t.assignee), '') is null and t.type <> 'research'
@@ -4640,7 +4664,8 @@ begin
         union all
         -- an unheld staged card no live session of the project could take, the design wait aside (aged stage_since copy)
         select t.id, t.priority = 'P0', format('#%s (%s, %s)', t.id, cb._stage_words(t.stage),
-               case when cardinality(cb._for_agents(t.labels)) > 0 then 'waiting for ' || cb._agents_words(cb._for_agents(t.labels)) || ': none live can take it'
+               case when cardinality(cb._for_agents(t.labels)) > 0 then 'waiting for ' || cb._agents_words(cb._for_agents(t.labels))
+                         || case when cb._squad_lacks(p, cb._for_agents(t.labels)) then ': the squad has none' else ': none live can take it' end
                     else 'no live session can take it' end)
           from cb.tasks t
          where t.project = p and t.stage is not null and t.stage <> 'approval' and t.status = 'next' and nullif(trim(t.assignee), '') is null

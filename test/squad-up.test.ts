@@ -995,3 +995,16 @@ test('squad up: a disabled project starts nothing and says so (#4559)', async ()
   await assert.rejects(squadUp('demo', false, off, f.run), /Demo is disabled by Ahmed: no work is handed out there; Ahmed enables it on Projects first, then cb squad up demo$/);
   assert.deepEqual(f.calls, [], 'herdr is never asked');
 });
+
+// #4679 (PR 105 R2-1): "Authorization: Bearer <token>" cut the word Bearer and showed an all-letter token
+test('startOne: the token after Authorization: Bearer is cut, whatever it is made of', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText('error: unauthorized, Authorization: Bearer qwertyzzz\nerror: bad Authorization: Basic asdfghjkl rejected\nerror: auth failed: token: secret plmoknijb\n');
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  for (const v of ['qwertyzzz', 'asdfghjkl', 'plmoknijb']) assert.ok(!r.line.includes(v), `"${v}" leaked: ${r.line}`);
+  assert.match(r.line, /unauthorized/);
+  assert.match(r.line, /rejected/);
+});
