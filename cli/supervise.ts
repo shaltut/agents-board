@@ -1,7 +1,7 @@
 // The supervisor (#3601): `node cli/supervise.ts`, started with `cb supervise` in herdr tab `supervisor` on the PC.
 // Every 60 s one tick: per supervised project it starts, restores and closes squad sessions through herdr as planTick
-// says and tells the lead of a seat stopped by its model's quota (#4787), then restarts the PC runner if it stopped
-// beating. One supervisor anywhere: a Postgres advisory lock.
+// says; for every project with a squad that gets work it tells the lead of a seat stopped by its model's quota (#4787);
+// then it restarts the PC runner if it stopped beating. One supervisor anywhere: a Postgres advisory lock.
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import net from 'node:net';
@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, type Launch, type Runner } from './squad-up.ts';
-import { mayBeLeaving, pastSeatNames, planTick, quotaChecks, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { mayBeLeaving, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
@@ -49,10 +49,11 @@ export async function tick(d: Deps): Promise<string[]> {
     try { await sql`select cb.supervise_log(${project}, ${what}, ${session}, ${note ?? null})`; } catch (e) { out.push(`could not log ${what} ${session}: ${msg(e)}`); }
   };
   const states: State[] = [];
-  for (const { slug } of await sql`select slug from cb.projects where squad ->> 'supervise' = 'true' order by slug`) {
+  for (const { slug } of await sql`select slug from cb.projects where squad is not null order by slug`) {
     try {
       const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
-      if (!s.supervised && !s.winding_down) continue;
+      // #4787: every project that gets work is checked for quota stops; only a supervised or winding-down one is acted on
+      if (!s.supervised && !s.winding_down && !quotaWatched(s)) continue;
       // herdr null = the machine the supervisor runs on: a squad that puts it elsewhere is not this supervisor's
       const pc = Object.entries(s.squad.machines).find(([k, m]) => m.herdr === null && k.toLowerCase() !== machine())?.[0];
       if (pc === undefined) { states.push(s); continue; }
@@ -63,7 +64,7 @@ export async function tick(d: Deps): Promise<string[]> {
     } catch (e) { out.push(`${slug}: could not read its state: ${msg(e)}`); }
   }
 
-  // herdr: one agent list per herdr label (null = this PC) used by any supervised squad
+  // herdr: one agent list per herdr label (null = this PC) used by any of those squads
   const keysOf = new Map<string | null, Set<string>>();
   for (const s of states) for (const [k, m] of Object.entries(s.squad.machines)) (keysOf.get(m.herdr) ?? keysOf.set(m.herdr, new Set()).get(m.herdr)!).add(k);
   const herdrLive = new Set<string>(), herdrDown = new Set<string>(), mac = new Set<string>(), herdrStatus: Record<string, string> = {};
@@ -102,6 +103,8 @@ export async function tick(d: Deps): Promise<string[]> {
   for (const state of states) {
     d.signal?.throwIfAborted();
     try {
+      await quotaStops(d, state, { status: herdrStatus, pane: herdrPane, down: herdrDown }, out); // before act: a start can take minutes
+      if (!state.supervised && !state.winding_down) continue; // nothing below is for a squad the supervisor does not run
       const safeToClose = await safeToCloseOf(state, herdrStatus);
       // #3770: the names earlier saved versions of the squad generated (cb.squad_set's 'squad updated' events, the last
       // 20), read only when a live or holding session is one the squad does not want now (events has no project index)
@@ -112,7 +115,6 @@ export async function tick(d: Deps): Promise<string[]> {
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length + plan.restart.length; // a restart's close frees its own Mac slot: macLive stays
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
-      await quotaStops(d, state, { status: herdrStatus, pane: herdrPane, down: herdrDown }, out); // before act: a start can take minutes
       await act(d, state, plan, out, log);
     } catch (e) {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
