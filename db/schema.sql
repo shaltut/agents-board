@@ -6798,12 +6798,14 @@ create function cb.seat_switch(project text, actor text, n int, planned jsonb) r
 declare p text := cb.read_project(project); s record; sq jsonb; k text; list jsonb; b jsonb;
 begin
   perform cb._supervisor_only();
+  -- the lock first, then every check: the switch, the squad and the project's state are all on this row. A change not yet
+  -- committed is waited for and then seen; one made later waits until the backup is recorded
+  select pr.squad into sq from cb.projects pr where pr.slug = p for share;
   if not cb._switching(p) then
     raise exception 'automatic backup is off for %: Ahmed turns it on in its settings, for a squad the supervisor runs', p;
   end if;
   -- planned: the squad the supervisor chose the backup from. n means nothing in another one, so a squad saved since then
-  -- records nothing; the lock holds a save back until this one is recorded, and that save then ends it
-  select pr.squad into sq from cb.projects pr where pr.slug = p for share;
+  -- records nothing (a save that ends the backups runs after this one, so it ends this one too)
   if sq is distinct from planned then
     raise exception 'the squad of % changed since the switch was planned: nothing is recorded, the next check plans again', p;
   end if;
