@@ -412,7 +412,7 @@ const freshEnvFine = [
 ];
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
 const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
-  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
+  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'DEPLOY_HOST=vps2; ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
 test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
   for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) {
     if (role === 'lead' && leadKeeps.includes(c)) continue;
@@ -456,12 +456,13 @@ test('#4669 I2: herdr --machine <m> / -m <m> before a pane run or send-keys is s
   }
 });
 
-// N1 (the lead's ruling on #4669): a lead seat keeps herdr agent prompt, herdr pane send-keys and ssh to the deploy VPS
+// N1 / #4707 R2-1: a lead seat keeps herdr agent prompt, herdr pane send-keys and a resolved variable naming the deploy VPS
 // (deploy/copy-to-vps.sh); every other role is blocked from them, and the lead is not exempt from the rest
 test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the deploy ssh; other roles are blocked', () => {
   const deploy = readFileSync(fileURLToPath(new URL('../deploy/copy-to-vps.sh', import.meta.url)), 'utf8');
+  assert.match(deploy, /^VPS=\$\{VPS:-vps2\}$/m, 'the guard exception must track the deploy script default');
   const readScript = (p: string) => (p.replace(/^.*[\\/]/, '') === 'copy-to-vps.sh' ? deploy : null);
-  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript });
+  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript, deployHost: 'vps2' });
   for (const c of [...leadKeeps, 'bash deploy/copy-to-vps.sh', 'VPS=vps2 deploy/copy-to-vps.sh']) {
     assert.deepEqual(ev(c, 'lead'), { allow: true }, `lead: ${c}`);
     for (const role of ROLES.filter((r) => r !== 'lead')) assert.equal(ev(c, role).kind, 'role', `${role}: ${c}`);
@@ -1089,6 +1090,9 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
     ['#4669 I1, 200 KB of local x; echo "$k=$v"; as a builder', asBuilder(kb200('local x; echo "$k=$v"; '))],
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
+    ['#4707, 200 KB of quoted assignment values, as a builder', asBuilder(kb200('local args="--set $k=$v"; '))],
+    ['#4707, 200 KB of wrapper option values, as a builder', asBuilder(kb200('xargs -a f ') + 'echo hi')],
+    ['#4707, 200 KB of host assignments before SSH, as a lead', () => evaluate({ tool: 'shell', command: kb200('VPS=vps2; ') + 'ssh "$VPS" uptime', role: 'lead' })],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
     // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
@@ -1252,7 +1256,7 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     const bad = join(tmp, 'bad');
     mkdirSync(bad);
     copyFileSync(SHIM, join(bad, 'shim-claude.mjs'));
-    writeFileSync(join(bad, 'core.mjs'), 'export function evaluate() { return { allow: true }; }\n');
+    writeFileSync(join(bad, 'core.mjs'), 'export const localHosts = () => [];\nexport function evaluate() { return { allow: true }; }\n');
     const refused = installGuard(bad, target);
     assert.equal(refused.ok, false);
     assert.equal(refused.failures.length, 4, refused.failures.join('\n'));
@@ -1280,4 +1284,129 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     }
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// #4707, the review of PR 124 at e588da1. Its HIGH 3 (a one-word bash -c or eval launcher) is #4741's
+const mustBlock = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.equal(evaluate({ tool: 'shell', command, role, ...extra }).allow, false, `must block (${role}): ${command}`);
+};
+const mustAllow = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.deepEqual(evaluate({ tool: 'shell', command, role, ...extra }), { allow: true }, `must allow (${role}): ${command}`);
+};
+
+test('#4707 review H1: ssh to this machine in a URI, with two @, as any zero or IPv6 loopback, or through -o', () => {
+  mustBlock(['ssh a@b@localhost codex', 'ssh ssh://localhost', 'ssh ssh://me@localhost:22', 'ssh ssh://[::1]:22', 'ssh 0x0 codex', 'ssh 0.0 codex',
+    'ssh 00 codex', 'ssh ::ffff:127.0.0.1 codex', 'ssh 0:0:0:0:0:0:0:1 codex', 'ssh me@::1%lo codex', 'ssh 0:0:0:0:0:0:0:0 codex',
+    'ssh -o Hostname=localhost foo codex', 'ssh -oHostname=127.0.0.1 foo codex', 'ssh -o "HostName localhost" foo codex',
+    'ssh -o hostname=$H foo codex', 'ssh -o ProxyCommand="nc localhost 22" foo codex', 'ssh -oProxyCommand="nc 127.1 22" foo codex']);
+  mustBlock(['ssh -o HostName=localhost "$VPS" codex'], 'lead', { deployHost: 'vps2' });
+  mustAllow(['ssh ssh://git@github.com:22', 'ssh -o HostName=remote.example box uptime', 'ssh -o BatchMode=yes remote.example uptime',
+    'ssh -o ProxyCommand="ssh -W %h:%p jump.example" box uptime', 'ssh 2001:db8::7 uptime']);
+});
+
+test('#4707 review H2: only a text script over the read limit is refused; a large binary run by path is not', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-guard-big-'));
+  try {
+    const binary = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(300 * 1024, 1)]);
+    const pad = '# padding\n'.repeat(35000);
+    writeFileSync(join(dir, 'app'), binary);
+    writeFileSync(join(dir, 'configure'), '#!/bin/sh\n' + pad);
+    writeFileSync(join(dir, 'plain'), pad);
+    writeFileSync(join(dir, 'named.sh'), binary);
+    writeFileSync(join(dir, 'late-nul'), pad + '\0');
+    const run = (command: string) => runClaudeShim(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: dir }), { CB_ROLE: 'builder' });
+    assert.deepEqual(run('./app --version'), {});
+    for (const c of ['./configure', 'bash plain', 'bash named.sh', 'bash late-nul']) assert.equal(run(c).decision, 'block', c);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#4707 review M1: a lead ssh variable is known only from a plain assignment that the shell keeps', () => {
+  mustBlock([': VPS=vps2; ssh "$VPS" codex', 'VPS=vps2 ssh "$VPS" codex', 'VPS=vps2 true; ssh "$VPS" codex',
+    'VPS=vps2; read VPS <<< localhost; ssh "$VPS" codex', 'VPS=vps2; printf -v VPS %s localhost; ssh "$VPS" codex',
+    'VPS=vps2; VPS+=.localhost; ssh "$VPS" codex', 'VPS=vps2; mapfile -t VPS < f; ssh "$VPS" codex',
+    'declare -n r=VPS; VPS=vps2; r=localhost; ssh "$VPS" codex', 'false && VPS=vps2; ssh "$VPS" codex',
+    'if x; then VPS=vps2; fi; ssh "$VPS" codex', '(VPS=vps2); ssh "$VPS" codex', 'VPS=vps2; eval "$s"; ssh "$VPS" codex',
+    'VPS=vps2; . ./env.sh; ssh "$VPS" codex', 'if x; then :; VPS=vps2; fi; ssh "$VPS" codex',
+    'f() { :; VPS=vps2; }; ssh "$VPS" codex', 'while false; do :; VPS=vps2; done; ssh "$VPS" codex', '(true; VPS=vps2; true); ssh "$VPS" codex',
+    'case $x in a) :; VPS=vps2;; esac; ssh "$VPS" codex', 'VPS=vps2; unset VPS; ssh "$VPS" codex', 'VPS=vps2; for VPS in localhost; do ssh "$VPS" codex; done'], 'lead');
+  mustAllow(['VPS=vps2; ssh "$VPS" uptime', 'export VPS=vps2 && ssh "$VPS" uptime', 'A=1 VPS=vps2; ssh "${VPS}" uptime'], 'lead');
+  mustAllow(['VPS=vps2 ssh "$VPS" uptime'], 'lead', { deployHost: 'vps2' });
+  const readScript = (p: string) => (p === 'd.sh' ? 'VPS=${VPS:-vps2}\nssh "$VPS" uptime\n' : null);
+  mustBlock(['VPS=vps2 true; bash d.sh', 'read VPS <<< localhost; bash d.sh'], 'lead', { readScript, deployHost: 'localhost' });
+  mustAllow(['VPS=vps2 bash d.sh', 'bash d.sh'], 'lead', { readScript });
+  // the deploy script itself, which the lead runs
+  const deploy = readFileSync(join(import.meta.dirname, '..', 'deploy', 'copy-to-vps.sh'), 'utf8');
+  mustAllow(['bash deploy/copy-to-vps.sh', 'VPS=vps2 bash deploy/copy-to-vps.sh --final'], 'lead', { readScript: () => deploy });
+});
+
+test('#4707 review: the new reads stay fast on long commands', () => {
+  const budget = machineBudget();
+  const long = {
+    prints: 'printf '.repeat(30000),
+    evals: Array.from({ length: 20000 }, (_, i) => `v${i}=1`).join(';') + ';eval'.repeat(40000),
+    namerefs: '(declare -n '.repeat(16000) + 'declare -n r=' + 'a'.repeat(50000),
+    envs: 'node -e "spawn(' + ' env'.repeat(50000) + ' '.repeat(50000) + 'env}"',
+    options: 'ssh ' + '-o A=b '.repeat(28000) + 'box uptime',
+    splits: 'env -S '.repeat(25000),
+    joinedSplits: 'env -vS '.repeat(22000),
+    refs: 'declare -n a=b '.repeat(13000),
+    spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
+  };
+  for (const [name, command] of Object.entries(long)) {
+    const from = process.hrtime.bigint();
+    evaluate({ tool: 'shell', command, role: 'lead' });
+    const ms = Number(process.hrtime.bigint() - from) / 1e6;
+    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms, budget ${Math.round(budget)} ms`);
+  }
+});
+
+test('#4707 review M2: an env shorthand anywhere in a child option object is blocked; a copy of process.env is not', () => {
+  mustBlock(['node -e "const env={}; spawn(c,[],{stdio:\'inherit\',env})"', 'node -e "const env={}; spawn(c,[],{cwd, env})"',
+    'node -e "let env={...process.env}; env={}; spawn(c,[],{env})"']);
+  mustAllow(['node -e "const env={...process.env}; spawn(c,[],{env})"', 'node -e "const env = { ...process.env, A: 1 }; spawn(c,[],{cwd, env})"']);
+});
+
+test('#4707 review M3: wrapper options that take a value, and env -S, keep the launcher in command position', () => {
+  mustBlock(["xargs -d '\\n' sudo", 'xargs --delimiter x sudo', 'xargs --process-slot-var S sudo', 'timeout -s 9 5 sudo codex',
+    'timeout -k 1 --signal KILL 5 sudo codex', "env -S 'sudo codex'", "env --split-string='sudo codex'", 'env -S sudo codex', 'env -u FOO sudo codex']);
+  mustAllow(["xargs -d '\\n' echo", 'timeout -s 9 5 echo sudo', "env -S 'echo sudo'", 'env -u FOO echo sudo']);
+});
+
+test('#4707 review M4: scripts reached through -c, env, a leading or numbered redirect, or head are read', () => {
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`bash -c 'bash ${f}'`, `sh -c "cat ${f} | bash"`, `env bash ${f}`, `env A=1 bash ${f}`, `< ${f} bash`,
+    `bash 0< ${f}`, `head ${f} | bash`, `tail -n 5 ${f} | sh`, `timeout -s 9 5 bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
+});
+
+test('#4707 review M5: a nameref to a target the guard cannot read is blocked', () => {
+  mustBlock(['x=CB_ROLE; declare -n r=$x; r=; codex', 'typeset -n r="$x"; r=', 'f() { local -n r=$1; r=; }; f CB_ROLE']);
+  mustAllow(['declare -n r=PATH', 'declare -i n=$x', 'grep -rn "declare -n r=$x" kit']);
+});
+
+// the review of ed4b13a
+test('#4707 review 2 H1: ssh -o HostName with inner quotes or space around this machine\'s name, as OpenSSH reads it', () => {
+  mustBlock(['ssh -o \'HostName="localhost"\' foo codex', 'ssh -o \'HostName localhost \' foo codex', 'ssh -o "HostName=\'127.0.0.1\'" foo codex',
+    'ssh -o \'HostName=local""host\' foo codex', 'ssh -o \'"HostName" localhost\' foo codex', 'ssh -o "HostName=localhost # box" foo codex',
+    'ssh -o \'HostName=\t::1\t\' foo codex']);
+  mustAllow(['ssh -o \'HostName="remote.example"\' box uptime', 'ssh -o "HostName remote.example " box uptime']);
+});
+
+test('#4707 review 2 H2: a nameref command is judged on every operand, not only the first', () => {
+  mustBlock(['x=CB_ROLE; declare -n a=foo r=$x; r=; codex', 'local -n a=PATH b="$1"', 'typeset -g -n a=foo "r=$x"',
+    'declare -n a=\'$lit\' r="a\'$x\'"', 'declare -n $spec', 'declare -n r; r=$x; r=', 'command declare -n a=foo r=`id`', 'declare -gn a=foo r=${x}']);
+  mustAllow(['declare -n a=foo r=PATH', 'declare -n r=\'$literal\'', 'declare -n a=foo; b=$x', 'declare -n', 'declare -p -x',
+    'declare a=foo r=$x', 'declare +n r', 'grep -rn "declare -n a=foo r=$x" kit']);
+});
+
+test('#4707 review 2 H3: a combined short option still takes its value: env -vS, -vu, timeout -vs, xargs -0n', () => {
+  mustBlock(['env -vS \'sudo codex\'', 'env -iS \'codex\'', 'env -vS\'sudo codex\'', 'env -0vS "sudo codex"', 'env -vu FOO sudo codex',
+    'env -vC /tmp sudo codex', 'timeout -vs 9 5 sudo codex', 'timeout -fk 1 5 sudo codex', 'xargs -0n 1 sudo codex', 'xargs -rI {} sudo codex',
+    'stdbuf -oL sudo codex']);
+  mustAllow(['env -vS \'echo sudo\'', 'env -vu SHELL echo sudo', 'env -uSHELL echo sudo', 'timeout -vs 9 5 echo sudo', 'xargs -0n 1 echo sudo']);
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`env -S 'bash ${f}'`, `env -vS "bash ${f}"`, `env --split-string='bash ${f}'`, `timeout -vs 9 5 bash ${f}`, `env -vu FOO bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
 });
