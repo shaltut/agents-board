@@ -8,6 +8,7 @@ import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before
 const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
 const { closeWorker, failure, wire } = await import('../server/worker.ts');
+const { setRelease } = await import('../server/release.ts');
 
 const clients: any[] = [];
 after(() => Promise.all([...clients.map((c) => c.end()), closeWorker(), serverSql.end()]));
@@ -237,6 +238,37 @@ test('never_ran is said only when the call cannot have run', () => {
     assert.deepEqual([failure(full, true).status, 'never_ran' in failure(full, true).body], [400, false], code);
   }
   assert.equal(failure(refused, false).status, 400, 'any other database error says the same again');
+});
+
+test('a database that cannot be reached: 503 never_ran, one log line with the error\'s code and no address', async () => {
+  const { sql } = await board();
+  const key = await issue(sql);
+  const url = process.env.CB_DATABASE_URL!;
+  await closeWorker(); // the next call opens a new pool, at a port nothing listens on
+  process.env.CB_DATABASE_URL = 'postgres://cb@127.0.0.1:1/claude_board_test_nowhere';
+  try {
+    let res!: Response;
+    const log = await logged(async () => { res = await call(key, 'task_add', task); });
+    const body = await res.json() as any;
+    assert.deepEqual([res.status, body.never_ran], [503, true], JSON.stringify(body));
+    assert.match(log, new RegExp(`^worker api: key ${idOf(key)} task_add 503 \\d+ms ECONNREFUSED$`));
+    assert.ok(!JSON.stringify(body).includes('127.0.0.1') && !log.includes('127.0.0.1'), 'no address anywhere');
+  } finally {
+    await closeWorker();
+    process.env.CB_DATABASE_URL = url;
+  }
+});
+
+test('the board names its release only to a signed-in worker', async () => {
+  const { sql } = await board();
+  const key = await issue(sql);
+  setRelease({ manifest: { sha: 'a'.repeat(40) } } as any);
+  try {
+    assert.equal((await app.request('/w/v1/hello')).headers.get('x-cb-code'), null);
+    assert.equal((await app.request('/w/v1/hello', { headers: bearer(key) })).headers.get('x-cb-code'), 'a'.repeat(40));
+  } finally {
+    setRelease(null);
+  }
 });
 
 /** An open event stream, read in the background. */
