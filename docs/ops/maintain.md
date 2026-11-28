@@ -701,6 +701,9 @@ review), and fails closed where it cannot read it:
 
 - A variable, `eval` or a substitution as the command word counts unless a literal assignment earlier in the same
   command says what it runs (`X=python3; $X x.py` passes; `$SHELL`, `$(echo bash)` and `eval $cmd` do not).
+- PowerShell's pipeline item at the start of a filter block is a value (`| Where-Object { $_.role -eq 'x' }`,
+  `ForEach-Object { $PSItem.Name }`, also after `?` and `%`). It must be on one line, right after the `{`; a variable
+  after a `;` or a new line in the block is still refused (#4865).
 - `<&0`, `<&3` (any descriptor copy, since `exec 3<&0` makes one of the input) and `< /dev/stdin` read the seat's own
   input, so they are no feed.
 - Editors, pagers and other full-screen programs count even when piped into (`ls | vim -`, `git log | less`, `fzf`), as
