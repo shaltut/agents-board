@@ -159,6 +159,11 @@ test('a 403 and a 413 keep the board\'s words', async () => {
     : { status: 413, body: { ok: false, code: 'too_big', error: 'the body is over 1 MB' } });
   assert.match((await failure(call('task_add', {}, client(s.url)))).message, /name@thismachine/);
   assert.match((await failure(call('log', {}, client(s.url)))).message, /over 1 MB/);
+  // the server's own refusals (an actor of another machine, too big) carry no code
+  const bare = await stub(() => ({ status: 403, body: { ok: false, error: 'this key is for machine boxa' } }));
+  const e = await failure(call('task_add', {}, client(bare.url)));
+  assert.deepEqual([e.code, e.name, e.message], ['CB_REFUSED', 'Error', 'this key is for machine boxa']);
+  assert.ok(!neverSent(e) && !isNetworkError(e));
 });
 
 test('a board that refuses the connection, or never finishes it, was never sent to', async () => {
