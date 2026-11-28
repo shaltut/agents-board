@@ -26,7 +26,7 @@ export async function readOnly<T>(url: string, work: (sql: any) => PromiseLike<T
 
 const withDb = (url: string, db: string) => { const u = new URL(url); u.pathname = `/${encodeURIComponent(db)}`; return u.toString(); };
 // a name as one printable line: no control characters (a name could carry terminal escapes), at most 160
-const shown = (s: string) => { const one = s.replace(/[\u0000-\u001f\u007f-\u009f  ]/g, '?'); return one.length > 160 ? `${one.slice(0, 157)}...` : one; };
+const shown = (s: string) => { const one = s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '?'); return one.length > 160 ? `${one.slice(0, 157)}...` : one; };
 
 const USER_SCHEMA = `n.nspname !~ '^pg_(toast|temp)'`;
 

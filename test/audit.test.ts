@@ -57,6 +57,7 @@ test('what a superuser left in the database is listed by name', async () => {
     await sql.unsafe(`alter event trigger zz_on_ddl disable`);
     await sql.unsafe(`create function public.zz_row() returns trigger language plpgsql as $$ begin return new; end $$`);
     await sql.unsafe(`create trigger zz_on_user after insert on cb.users for each row execute function public.zz_row()`);
+    await sql.unsafe(`create schema "zz${String.fromCharCode(7)}bell"`); // a name is its maker's text
     await sql.unsafe(`alter table cb.tasks add column zz_backdoor text`);
     await sql.unsafe(`grant select on cb.users to public`);
     await sql.unsafe(`create schema zz_hidden`);
@@ -78,6 +79,8 @@ test('what a superuser left in the database is listed by name', async () => {
   has(r.lines, new RegExp(`^LOOK: a role besides the board's own: ${ROLE}`));
   has(r.lines, new RegExp(`^LOOK: ${ROLE} is a member of pg_execute_server_program`));
   has(r.lines, /^LOOK: a setting stored for a role or database: statement_timeout/);
+  has(r.lines, /^LOOK: added schema zz\?bell/);
+  for (const line of r.lines) assert.doesNotMatch(line, /\p{Cc}/u, 'no control character reaches the terminal');
   assert.ok(r.findings >= 12, String(r.findings));
   assert.doesNotMatch(r.lines.join('\n'), /zzyxbody|zzyxcommand|123456/, 'names only, never a body or a value');
 });
