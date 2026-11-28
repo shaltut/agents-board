@@ -11,8 +11,15 @@ import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
 import { keepAlive, keepAliveApart, supervisorLease, SURE_MS } from '../cli/lease.ts';
 
-const clients: any[] = [];
-after(() => Promise.all(clients.map((c) => c.end())));
+const clients: any[] = [], renewing: (() => unknown)[] = [];
+// every renewal a test starts is stopped here too: one left running after a failed assertion keeps the file's process
+// alive, and the job holds its runner until it is cancelled (job 17535)
+after(async () => {
+  await Promise.all(renewing.map((stop) => stop()));
+  await Promise.all(clients.map((c) => c.end()));
+});
+const timed = (...a: Parameters<typeof keepAlive>) => { const stop = keepAlive(...a); renewing.push(stop); return stop; };
+const apart = (...a: Parameters<typeof keepAliveApart>) => { const r = keepAliveApart(...a); renewing.push(() => r.stop()); return r; };
 const conn = (name: string) => { const c = postgres(TEST_URL, { max: 1, onnotice: () => {}, connection: { application_name: name } }); clients.push(c); return c; };
 async function setup() {
   const sql = await freshDb(); clients.push(sql);
@@ -145,7 +152,7 @@ test('a renewal the board refuses aborts the tick and then exits', async () => {
   const did: string[] = [];
   try {
     assert.equal(await mine.keep(), null);
-    const stop = keepAlive(mine, { every: 25, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
+    const stop = timed(mine, { every: 25, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
     await sql`update cb.leases set holder = 'mac pid 2', token = gen_random_uuid()`; // another took it
     await until(() => did.length >= 2);
     await new Promise((r) => setTimeout(r, 100));
@@ -164,7 +171,7 @@ test('the lease is renewed while the main thread is held, and a refusal reaches 
   assert.equal(await mine.keep(), null);
   const unlog = await logWrites(sql);
   const did: string[] = [];
-  const renewal = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
+  const renewal = apart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
   try {
     await writesAfter(sql, 0);
     const from = Date.now();
@@ -194,7 +201,7 @@ test('the thread stops renewing when the main thread says nothing past the limit
   assert.equal(await mine.keep(), null);
   const unlog = await logWrites(sql);
   const did: string[] = [], said: string[] = [];
-  const renewal = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 1500, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
+  const renewal = apart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 1500, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
   try {
     await writesAfter(sql, 0);
     // a start of several steps, longer than the limit in all, with a word before each step: renewed to its end
@@ -246,7 +253,7 @@ test('a board that does not answer is no refusal: the tick is aborted only once 
   try {
     assert.equal(await mine.keep(), null);
     broken = true;
-    const stop = keepAlive(mine, { every: 25, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
+    const stop = timed(mine, { every: 25, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
     await until(() => said.length >= 2);
     assert.deepEqual(did, [], 'renewed a moment ago: still sure of it');
     now += SURE_MS;
