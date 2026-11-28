@@ -38,9 +38,15 @@ const isLocal = (c: Context<any>) => trustLocal() && !c.req.header('x-forwarded-
 async function userOf(c: Context<any>): Promise<Who | null> {
   const t = getCookie(c, 'cb_user');
   if (!t) return null;
-  const [u] = await sql`select name, display, role from cb.users where token = ${t}`;
+  const [u] = await sql`select name, display, role from cb.sign_in_user(${t})`;
   return (u as Who | undefined) ?? null;
 }
+/** One more signed-in browser (#4868), if name and password match: its value, of which the database keeps the hash only.
+ *  Checked and issued in one SQL function, under a lock on the user. */
+const signInPassword = (name: string, password: string) => sql.begin(async (tx) => {
+  await tx`set local application_name = 'cb-web'`;
+  return (await tx`select cb.sign_in_password(${name}, ${password}) as value`)[0]!.value as string | null;
+});
 // The address a login is counted against: the hop our own proxy added (the last X-Forwarded-For entry), else a direct
 // connection. Cloudflare's cf-connecting-ip only with CB_BEHIND_CLOUDFLARE=1 (a tunnel, or a proxied DNS record): when
 // nginx is reachable directly, a client can send that header itself and get a fresh lockout on every try.
@@ -50,10 +56,11 @@ const clientIp = (c: Context<any>) => (process.env.CB_BEHIND_CLOUDFLARE === '1' 
 app.use('*', async (c, next) => {
   const token = c.req.query('u');
   if (!token) return next();
-  const [u] = await sql`select name, role from cb.users where token = ${token}`;
-  if (!u) return c.text('This link is not valid any more. Ask Ahmed for a new one.', 401);
-  // an admin's token is their cookie, never a link: a link in a chat or a browser history would be the whole board
-  if (u.role === 'admin') return c.text('This link is for members: admins sign in with their password on the login page.', 401);
+  const [u] = await sql`select name, role, kind from cb.sign_in_user(${token})`;
+  // an admin's cookie is never a link: a link in a chat or a browser history would be the whole board
+  if (u?.role === 'admin') return c.text('This link is for members: admins sign in with their password on the login page.', 401);
+  // a member's browser session is not one either: only a link made to be sent opens a browser this way
+  if (u?.kind !== 'link') return c.text('This link is not valid any more. Ask Ahmed for a new one.', 401);
   signIn(c, token);
   return c.redirect('/', 302);
 });
@@ -109,11 +116,10 @@ app.use('/api/*', async (c, next) => {
     f.last = now;
     if (++f.n >= 5) f.until = now + 120_000;
     loginFails.set(key, f);
-    const [u] = name && pw ? await sql`select token from cb.users where name = ${name} and password is not null
-                                         and password = public.crypt(${pw}, password)` : [];
-    if (u) {
+    const value = name && pw ? await signInPassword(name, pw) : null;
+    if (value) {
       loginFails.delete(key);
-      signIn(c, u.token);
+      signIn(c, value);
       return c.json({ ok: true });
     }
     if (loginWaits >= 20) return refuse(429);
@@ -122,6 +128,8 @@ app.use('/api/*', async (c, next) => {
     return refuse(401);
   }
   if (c.req.path === '/api/logout' && c.req.method === 'POST') {
+    const t = getCookie(c, 'cb_user');
+    if (t) await sql`select cb.sign_out(${t})`;
     deleteCookie(c, 'cb_user', { path: '/' });
     return c.json({ ok: true });
   }
@@ -132,17 +140,20 @@ app.use('/api/*', async (c, next) => {
     if (!u) return c.json({ ok: false, error: 'sign in first' }, 401);
     const b = (await c.req.json().catch(() => null)) ?? {};
     if (typeof b.password !== 'string' || b.password.length < 8) return c.json({ ok: false, error: 'password: at least 8 characters' }, 400);
-    const [row] = await sql`select password is not null as has, password = public.crypt(${typeof b.current === 'string' ? b.current : ''}, password) as ok
-                              from cb.users where name = ${u.name}`;
-    if (row?.has && !row.ok) return c.json({ ok: false, error: 'the current password is wrong' }, 400);
-    const fresh = await sql.begin(async (tx) => {
+    const done = await sql.begin(async (tx) => {
       await tx`set local application_name = 'cb-web'`;
+      // checked under the lock the change takes: after another change commits, only its new password is the current one
+      const [row] = await tx`select password is not null as has, password = public.crypt(${typeof b.current === 'string' ? b.current : ''}, password) as ok
+                               from cb.users where name = ${u.name} for no key update`;
+      if (row?.has && !row.ok) return { wrong: true, value: null };
       await callFn('user_password', { name: u.name, password: b.password, actor: u.name }, tx);
       // an admin's cookie is their only credential besides the password: a new one ends every other sign-in (a
-      // stolen cookie included). A member's token is also their link, which keeps working (New link ends it).
-      if (u.role === 'admin') return (await tx`update cb.users set token = gen_random_uuid()::text where name = ${u.name} returning token`)[0].token as string;
+      // stolen cookie included). A member's link and browsers keep working (New link ends them).
+      const value = u.role === 'admin' ? (await tx`select cb.sign_in_new(${u.name}, true) as value`)[0]!.value as string : null;
+      return { wrong: false, value };
     });
-    if (fresh) signIn(c, fresh);
+    if (done.wrong) return c.json({ ok: false, error: 'the current password is wrong' }, 400);
+    if (done.value) signIn(c, done.value);
     return c.json({ ok: true });
   }
   const local = isLocal(c);

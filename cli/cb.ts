@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { callFn, useDb } from '../server/rpc.ts';
-import { tick, dur } from './tick.ts';
+import { tick, dur, noRelayWhy, NO_RELAY_FIX } from './tick.ts';
 import { sql as direct, databaseUrl, machine, dotenv } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
 import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './connect-retry.ts';
@@ -505,7 +505,7 @@ async function run(): Promise<unknown> {
       await callFn('user_add', { name: args[1], display: args[2] ?? null, actor, ...(o.admin ? { role: 'admin' } : {}) });
       const [u] = await sql`select name, display, role from cb.users where name = ${args[1].trim().toLowerCase()}`;
       return { out: u.role === 'admin' ? `added ${u.name} (${u.display}) as admin: set a password (cb user password ${u.name}) and they sign in on the login page`
-        : `added ${u.name} (${u.display}): Ahmed copies their link from the Users page`, json: u };
+        : `added ${u.name} (${u.display}): Ahmed makes their link on the Users page (New link)`, json: u };
     }
     case 'users': {
       const rows = await sql`select u.name, u.display, u.role,
@@ -630,13 +630,15 @@ async function run(): Promise<unknown> {
     case 'sessions': {
       const rows: any = await callFn('sessions_overview', { project: args[0] ?? sessionProject ?? null });
       const idle = (r: any) => (r.last ? (Date.now() - +new Date(r.last.at)) / 60000 : Infinity);
-      const open = rows.filter((r: any) => r.live || r.doing.length || r.queued || r.open_questions);
+      const open = rows.filter((r: any) => r.live || r.doing.length || r.queued || r.open_questions || r.unreachable);
       const out = open.map((r: any) => {
         const head = `${r.actor}${r.role ? ` (${r.role})` : ''} ${r.live ? 'relay live' : 'no relay'}${r.pane ? ` · ${r.pane}` : ''} · idle ${dur(idle(r))}` +
           ` · ${r.queued} queued · ${r.done_24h} done 24h${r.open_questions ? ` · ${r.open_questions} asking Ahmed` : ''}` +
           (!r.live && r.doing.length && idle(r) > 60 ? '  ⚠ holds work, gone quiet' : '');
         const drift = modelDrift(r); // #4786
-        return [head, ...(drift ? [drift] : []), ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.part ? `part ${t.part}: ` : ''}${t.status}]`) : ['  (nothing in progress)'])].join('\n');
+        const u = r.unreachable; // #4860
+        const deaf = u ? [`  ⚠ messages to it wait: ${noRelayWhy(u)}; ${NO_RELAY_FIX}, then cb squad up ${u.project ?? r.project ?? '<project>'}`] : [];
+        return [head, ...deaf, ...(drift ? [drift] : []),...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.part ? `part ${t.part}: ` : ''}${t.status}]`) : ['  (nothing in progress)'])].join('\n');
       });
       const quiet = rows.length - open.length;
       return { out: (out.join('\n') || 'no sessions') + (quiet ? `\n(${quiet} quiet sessions hidden: no relay, nothing open)` : ''), json: rows };

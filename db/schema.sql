@@ -79,7 +79,6 @@ create table if not exists cb.project_aliases (
 create table if not exists cb.users (
   name       text primary key,
   display    text not null,
-  token      text not null unique default gen_random_uuid()::text,
   created_at timestamptz not null default now()
 );
 alter table cb.users add column if not exists password text; -- bcrypt hash; null = sign in by link only
@@ -89,6 +88,30 @@ alter table cb.users add column if not exists role text not null default 'member
 do $$ begin
   alter table cb.users add constraint users_role check (role in ('admin', 'member'));
 exception when duplicate_object then null; end $$;
+
+-- What signs a person in (#4868), kept as a hash only: a member's private link, or one signed-in browser's cookie. The
+-- value itself is handed out once, when it is made, so reading the database gives nothing that signs anyone in.
+create table if not exists cb.sign_ins (
+  hash       bytea primary key,
+  user_name  text not null references cb.users(name) on update cascade on delete cascade,
+  kind       text not null check (kind in ('link', 'session')),
+  created_at timestamptz not null default now()
+);
+create index if not exists sign_ins_user on cb.sign_ins (user_name);
+-- A board from before has one plain value per user in cb.users.token (the cookie, and a member's link): each becomes a
+-- hashed sign-in and the column is emptied (it stays, so older code can run again after a rollback). Only older code
+-- writes it, so a value there is newer than the user's rows: they go first, or a link replaced during a rollback would
+-- come back.
+do $$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'cb' and table_name = 'users' and column_name = 'token') then
+    alter table cb.users alter column token drop not null, alter column token drop default;
+    delete from cb.sign_ins s using cb.users u where s.user_name = u.name and u.token is not null;
+    insert into cb.sign_ins (hash, user_name, kind)
+      select sha256(convert_to(u.token, 'UTF8')), u.name, case when u.role = 'admin' then 'session' else 'link' end
+        from cb.users u where u.token is not null;
+    update cb.users set token = null where token is not null;
+  end if;
+end $$;
 
 -- The projects a person works on (#315). Questions and tasks reach them only on these; a new person has none.
 create table if not exists cb.user_projects (
@@ -343,6 +366,7 @@ drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
 drop function if exists cb._person cascade;
 drop function if exists cb.broadcast cascade;
+drop function if exists cb._unreachable cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
 drop function if exists cb.type_to cascade;
@@ -1089,6 +1113,12 @@ drop function if exists cb.user_project_add cascade;
 drop function if exists cb.user_project_remove cascade;
 drop function if exists cb.user_password cascade;
 drop function if exists cb.user_set_role cascade;
+drop function if exists cb._sign_in_hash cascade;
+drop function if exists cb._sign_in_issue cascade;
+drop function if exists cb.sign_in_user cascade;
+drop function if exists cb.sign_in_new cascade;
+drop function if exists cb.sign_in_password cascade;
+drop function if exists cb.sign_out cascade;
 drop function if exists cb.assignee_on_project cascade;
 drop function if exists cb.question_assign cascade;
 drop function if exists cb.answer cascade;
@@ -2030,6 +2060,39 @@ create function cb._model_differs(launched text, running text) returns boolean l
   select coalesce(position(lower(regexp_replace(launched, '\[[^]]*\]$', '')) in lower(running)) = 0, false)
 $$;
 
+-- #4860: a seat nothing can be pushed to, though something should be. No relay on its latest binding (no check-in for
+-- 90 s, as live below), and either it wrote to the board in the last 30 minutes and more than 90 s past that check-in
+-- (so it runs: a seat started by hand has no relay, and its name stays on the pane that had it before), or messages of
+-- the last 24 h wait for it. A name never bound counts when it writes and holds work. Null: nothing to say, which
+-- includes a seat that stopped with nothing after its last check-in, and one the supervisor is closing
+create function cb._unreachable(who text) returns jsonb language plpgsql stable as $$
+declare s cb.sessions; wrote timestamptz; waits int; held text;
+begin
+  if who is null or who in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner', 'github')
+     or exists (select 1 from cb.users u where u.name = who) then return null; end if;
+  select * into s from cb.sessions x where x.actor = who order by x.last_seen desc limit 1;
+  if s.last_seen > now() - interval '90 seconds' or s.closing_at > now() - interval '5 minutes' then return null; end if;
+  -- as cb._board_active: a follow-up question opening is written as its asker by whoever answered the parent
+  select max(e.at) into wrote from cb.events e
+   where e.actor = who and e.at > now() - interval '30 minutes' and not (e.kind = 'asked' and e.data ? 'opened_by');
+  if wrote <= s.last_seen + interval '90 seconds' then wrote := null; end if;
+  select count(*) into waits from cb.events e
+   where e.kind = 'message' and e.data ->> 'to' = who and e.at > now() - interval '24 hours'
+     and e.id > coalesce(s.broadcast_seen, 0);
+  if s.actor is null then
+    select w.project into held from (
+      select t.project from cb.tasks t where t.assignee = who and t.status in ('in_progress', 'blocked', 'review')
+      union all
+      select t.project from cb._held_parts() h join cb.tasks t on t.id = h.task_id where h.assignee = who and h.status = 'in_progress') w
+     limit 1;
+    if wrote is null or held is null then return null; end if;
+  elsif wrote is null and waits = 0 then return null;
+  end if;
+  return jsonb_build_object('actor', who, 'project', coalesce(s.project, held), 'machine', s.machine, 'pane', s.pane,
+    'relay_mins', floor(extract(epoch from now() - s.last_seen) / 60)::int,
+    'wrote_mins', floor(extract(epoch from now() - wrote) / 60)::int, 'waiting', waits);
+end $$;
+
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
 -- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
@@ -2042,6 +2105,7 @@ begin
     select jsonb_build_object(
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
+      'unreachable', cb._unreachable(a.actor),  -- #4860
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
       'running_model', cb._running_model(s.machine, s.pane),  -- #4786
       'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
@@ -2342,10 +2406,60 @@ begin
    where (p is null or h.project = p) and (h.status = 'open' or h.closed_at > now() - interval '7 days')), '[]');
 end $$;
 
--- People who answer through a guest link (Cai, Ana). The link carries the token.
+-- Sign-ins (#4868). Only the server calls these: none is in server/rpc.ts.
+create function cb._sign_in_hash(token text) returns bytea language sql immutable as $$ select sha256(convert_to(token, 'UTF8')) $$;
+
+-- a new random value for this user: its hash is stored, the value is returned this once
+create function cb._sign_in_issue(who text, how text) returns text language plpgsql as $$
+declare t text := gen_random_uuid()::text;
+begin
+  insert into cb.sign_ins (hash, user_name, kind) values (cb._sign_in_hash(t), who, how);
+  return t;
+end $$;
+
+-- Who a cookie or a ?u= link signs in; no row = nobody. A link is a member's only and lasts until replaced. A browser
+-- session lasts 90 days, as its cookie does.
+create function cb.sign_in_user(token text) returns table (name text, display text, role text, kind text) language sql stable as $$
+  select u.name, u.display, u.role, s.kind from cb.sign_ins s join cb.users u on u.name = s.user_name
+   where s.hash = cb._sign_in_hash(sign_in_user.token)
+     and case s.kind when 'link' then u.role = 'member' else s.created_at > now() - interval '90 days' end
+$$;
+
+-- One more browser signed in (called under a lock on the user, after the password: below, and /api/password): its own value. ends_others: every other way
+-- in goes first (an admin who changes their password). The user's expired sessions are cleared on the way.
+create function cb.sign_in_new(name text, ends_others boolean default false) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare n text := name;
+begin
+  perform cb.dashboard_only('Users');
+  delete from cb.sign_ins s where s.user_name = n and (ends_others or (s.kind = 'session' and s.created_at <= now() - interval '90 days'));
+  return cb._sign_in_issue(n, 'session');
+end $$;
+
+-- Sign in with name and password: checked and given its session under one lock on the user. A password change that is
+-- under way is waited for and then judged: the old password gets nothing, so no session appears after a change that
+-- should have ended it. Null = not this name and password.
+create function cb.sign_in_password(name text, password text) returns text language plpgsql as $$
+#variable_conflict use_variable
+declare n text;
+begin
+  perform cb.dashboard_only('Users');
+  select u.name into n from cb.users u
+   where u.name = sign_in_password.name and u.password is not null and u.password = public.crypt(sign_in_password.password, u.password)
+     for no key update;
+  if n is null then return null; end if;
+  return cb.sign_in_new(n);
+end $$;
+
+-- Sign out: this browser's session ends. A link is not ended by it (New link does that).
+create function cb.sign_out(token text) returns void language sql as $$
+  delete from cb.sign_ins s where s.hash = cb._sign_in_hash(sign_out.token) and s.kind = 'session'
+$$;
+
+-- People who answer through a guest link (Cai, Ana). A new member added on the dashboard gets their link back, once.
 create function cb.user_add(name text, display text default null, actor text default null, role text default 'member') returns text language plpgsql as $$
 #variable_conflict use_variable
-declare a text := cb.set_actor(actor); n text := lower(trim(name)); r text := lower(trim(coalesce(role, 'member'))); t text; was text; now_d text; now_r text;
+declare a text := cb.set_actor(actor); n text := lower(trim(name)); r text := lower(trim(coalesce(role, 'member'))); t text; was text; was_r text; now_d text; now_r text;
 begin
   if n !~ '^[a-z][a-z0-9_-]*$' then raise exception 'user name: lowercase letters, digits, - or _ (e.g. cai)'; end if;
   if r not in ('admin', 'member') then raise exception 'role: admin or member'; end if;
@@ -2353,12 +2467,13 @@ begin
   -- an "ahmed-m" would read as Ahmed in every answer and history line
   if n <> 'ahmed' and n ~ 'ahmed' then raise exception 'names with ahmed in them are reserved for the owner: pick another name'; end if;
   if r = 'admin' then perform cb.dashboard_only('Users'); end if;
-  select u.display into was from cb.users u where u.name = n;
+  select u.display, u.role into was, was_r from cb.users u where u.name = n;
   insert into cb.users (name, display, role) values (n, coalesce(nullif(trim(display), ''), initcap(n)), r)
   on conflict on constraint users_pkey do update set display = coalesce(nullif(trim(user_add.display), ''), cb.users.display),
-    role = case when r = 'admin' then 'admin' else cb.users.role end, -- adding again never demotes
-    token = case when r = 'admin' and cb.users.role <> 'admin' then gen_random_uuid()::text else cb.users.token end
-  returning cb.users.token, cb.users.display, cb.users.role into t, now_d, now_r;
+    role = case when r = 'admin' then 'admin' else cb.users.role end -- adding again never demotes
+  returning cb.users.display, cb.users.role into now_d, now_r;
+  -- promoted by adding again: a member's link or browser must not become an admin's
+  if was_r = 'member' and now_r = 'admin' then delete from cb.sign_ins s where s.user_name = n; end if;
   if was is null or was <> now_d then
     insert into cb.events (actor, kind, summary, data)
     values (a, 'user', case when was is null then 'added ' || now_d || ' (' || n || ')' || case when r = 'admin' then ' as admin' else '' end
@@ -2366,9 +2481,10 @@ begin
             jsonb_build_object('user', n, 'action', case when was is null then 'add' else 'rename' end)
               || case when now_r = 'admin' then '{"role": "admin"}'::jsonb else '{}' end);
   end if;
-  -- The token is a member's whole login: only Ahmed's dashboard gets it back. A session adds people, Ahmed sends the link.
-  -- An admin's token is never handed out: admins sign in by password, and the token is their cookie.
-  return case when current_setting('application_name') = 'cb-web' and now_r = 'member' then t end;
+  -- The link is a member's whole login: only Ahmed's dashboard gets one, when the member is new (it cannot be read
+  -- again: New link makes another). A session adds people, Ahmed makes the link. Admins have none: they sign in by password.
+  if was is null and now_r = 'member' and current_setting('application_name') = 'cb-web' then t := cb._sign_in_issue(n, 'link'); end if;
+  return t;
 end $$;
 
 -- Make a user an admin (the whole board, signing in by password) or a member (their own questions and tasks).
@@ -2386,27 +2502,30 @@ begin
   if was = 'admin' and not exists (select 1 from cb.users u where u.role = 'admin' and u.name <> n) then
     raise exception '% is the last admin: make someone else admin first', n;
   end if;
-  -- a new token: a member's old link (sent over chat) must not become an admin's credential, nor an admin's cookie a member's
-  update cb.users u set role = r, token = gen_random_uuid()::text where u.name = n;
+  -- every sign-in ends: a member's old link (sent over chat) must not become an admin's, nor an admin's browser a member's
+  update cb.users u set role = r where u.name = n;
+  delete from cb.sign_ins s where s.user_name = n;
   insert into cb.events (actor, kind, summary, data)
   values (a, 'user', d || ' (' || n || ') is now ' || r, jsonb_build_object('user', n, 'action', 'role', 'role', r));
 end $$;
 
--- A new link for a user. The old one stops working at once, in signed-in browsers too (the cookie holds the token).
+-- A new link for a user, returned this once. The old one stops working at once, and every browser signed in is signed out.
 create function cb.user_rotate(name text, actor text default null) returns text language plpgsql as $$
 #variable_conflict use_variable
 declare a text; n text := lower(trim(name)); t text; d text; r text;
 begin
   perform cb.dashboard_only();
   a := cb.set_actor(actor);
-  update cb.users u set token = gen_random_uuid()::text where u.name = n returning u.token, u.display, u.role into t, d, r;
-  if t is null then raise exception 'unknown user %: see cb users', name; end if;
+  select u.display, u.role into d, r from cb.users u where u.name = n for update;
+  if d is null then raise exception 'unknown user %: see cb users', name; end if;
+  delete from cb.sign_ins s where s.user_name = n;
+  if r = 'member' then t := cb._sign_in_issue(n, 'link'); end if;
   insert into cb.events (actor, kind, summary, data)
   values (a, 'user', case when r = 'admin' then d || ' (' || n || ') signed out everywhere'
                           else 'new link for ' || d || ' (' || n || '): the old one no longer works' end,
           jsonb_build_object('user', n, 'action', 'rotate'));
-  -- an admin's token is their cookie, never handed out: for them this is "sign out everywhere"
-  return case when r = 'member' then t end;
+  -- an admin has no link: for them this is "sign out everywhere"
+  return t;
 end $$;
 
 -- Hand a person's open work back: open questions to Ahmed, open tasks unassigned (status kept, so a task held
@@ -2657,6 +2776,13 @@ begin
         'for', coalesce(q.assigned_to, 'ahmed'), 'no_options', coalesce(jsonb_array_length(q.options), 0) = 0,
         'status', q.status, 'sent_back', q.sent_back) order by q.id)
       from cb.questions q where q.status in ('open', 'sent_back') and q.asked_by = me and (p is null or q.project = p)), '[]'),
+    -- #4860: seats nothing can be pushed to; only those that wrote lately or have a message waiting can be one
+    'no_relay', case when off then '[]'::jsonb else coalesce((select jsonb_agg(u.j order by u.j ->> 'actor')
+      from (select e.actor as name from cb.events e where e.at > now() - interval '30 minutes'
+            union
+            select e.data ->> 'to' from cb.events e where e.kind = 'message' and e.at > now() - interval '24 hours') c
+     cross join lateral (select cb._unreachable(c.name) as j offset 0) u
+     where u.j is not null and (p is null or u.j ->> 'project' = p) and cb._live(u.j ->> 'project')), '[]') end,
     -- in progress, and the holder has written nothing anywhere for 30 minutes (relay heartbeats don't count)
     'silent', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'last_at', l.at) order by l.at nulls first, t.id)
       from cb.tasks t cross join lateral (select max(e.at) as at from cb.events e where e.actor = t.assignee) l
