@@ -182,6 +182,53 @@ test('filing: a disabled project parks a card in its Backlog; an archived one re
   await assert.rejects(session`select cb.task_update('3', '{"project":"cedar"}'::jsonb, 'A1@pc')`, /Cedar is archived: nothing new goes there\. Move it elsewhere/);
 });
 
+test('#4621: while disabled no question is rewritten, the project is not merged away, and a bound pane takes no new name', async () => {
+  const { sql, session, set } = await setup();
+  const [{ q }] = await session`select cb.ask(project => 'cedar', body => 'which way?', actor => 'W2@pc') as q`;
+  await set('disabled');
+  for (const who of [session, sql]) {
+    await assert.rejects(who`select cb.reask(${q}, 'which way, then?', null, false, null, null, 'W2@pc')`,
+      /Cedar is disabled .*: nothing is asked there until Ahmed enables it/);
+  }
+  assert.equal((await sql`select body from cb.questions where id = ${q}`)[0].body, 'which way?');
+  // merged away, its cards would be handed out again under the other name
+  await assert.rejects(sql`select cb.project_alias('cedar', 'atlas')`, /Cedar is disabled .*: it is not merged into another project until Ahmed enables it/);
+  assert.equal((await sql`select count(*)::int as n from cb.tasks where project = 'cedar'`)[0].n, 2);
+  await sql`select cb.project_alias('never-a-project', 'atlas')`; // a plain alias of a name with no project
+  // a new name on a bound pane is a new seat, whether or not it names the project
+  await assert.rejects(session`select cb.iam('pc', 'p1', 'W9@pc', 'cedar')`, /Cedar is disabled .*: no new seat binds to it/);
+  await assert.rejects(session`select cb.iam('pc', 'p1', 'W9@pc')`, /Cedar is disabled .*: no new seat binds to it/);
+  assert.equal((await sql`select actor from cb.sessions where machine = 'pc' and pane = 'p1'`)[0].actor, 'W1@pc');
+  await session`select cb.iam('pc', 'p1', 'W1@pc')`;          // the same name re-binds
+  await session`select cb.iam('pc', 'p1', 'W9@pc', 'atlas')`; // and the pane may go to a project that gets work
+  await set('enabled');
+  await session`select cb.reask(${q}, 'which way, then?', null, false, null, null, 'W2@pc')`;
+});
+
+test('#4621: a card freed from its question while disabled waits in Next with its holder, however the question ends', async () => {
+  const { sql, session, set } = await setup();
+  for (const title of ['asks and is withdrawn', 'asked by a follow-up']) // #4 and #5
+    await sql`select cb.task_add(project => 'cedar', title => ${title}, status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+  const blocking = async (task: string) =>
+    (await session`select cb.ask(project => 'cedar', body => ${'about ' + task}, blocking => true, task_id => ${task}, actor => 'W1@pc') as q`)[0].q;
+  const answered = await blocking('1'), withdrawn = await blocking('4');
+  // a follow-up that opens on one answer takes #5, and gives it back when the answer is changed to another
+  const parent = (await session`select cb.ask(project => 'cedar', body => 'ship?', options => '["yes","no"]'::jsonb, actor => 'W1@pc') as q`)[0].q;
+  await session`select cb.ask(project => 'cedar', body => 'when?', blocking => true, task_id => '5', parent => ${parent}, if_answer => 'yes', actor => 'W1@pc')`;
+  await set('disabled');
+  await sql`select cb.answer(${parent}, 'yes', 'ahmed')`;
+  assert.equal((await sql`select status from cb.tasks where id = 5`)[0].status, 'blocked', 'the follow-up holds it');
+  await sql`select cb.answer(${parent}, 'no', 'ahmed')`;
+  await sql`select cb.answer(${answered}, 'left', 'ahmed')`;
+  await session`select cb.answer_delivered(${answered}, 'W1@pc', 'W1@pc')`;
+  await session`select cb.withdraw(${withdrawn}, 'W1@pc')`;
+  const cards = await sql`select id::int, status, assignee, blocked_on from cb.tasks where id in (1, 4, 5) order by id`;
+  assert.deepEqual(cards.map((c: any) => ({ ...c })), [1, 4, 5].map((id) => ({ id, status: 'next', assignee: 'W1@pc', blocked_on: null })));
+  // enabled again, its holder takes it back
+  await set('enabled');
+  assert.equal((await session`select * from cb.task_claim('cedar', 'W1@pc')`)[0].assignee, 'W1@pc');
+});
+
 test('a design passed while disabled still asks for its approval: the stage_pass call is the one exempt ask', async () => {
   const { sql, session, set } = await setup();
   await sql`select cb.project_pipeline('cedar', true, 'ahmed')`;
@@ -257,6 +304,58 @@ test('runner: cb run is refused in words, job_claim skips the project\'s jobs an
   for (let i = 0; i < 40 && !heard.length; i++) await new Promise((r) => setTimeout(r, 25));
   assert.ok(heard.length > 0, 'the runner is woken');
   assert.equal(Number((await claim()).id), Number(waiting.id));
+});
+
+// two cedar jobs waiting and one running, one atlas job waiting
+async function jobs() {
+  const s = await setup();
+  const runner = conn('cb-runner/test');
+  const recipe = (p: string) => ({ project: p, recipe: 'test', params: { files: { min: 1, max: 20 } }, db: false });
+  await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1', ${runner.json([recipe('cedar'), recipe('atlas')] as any)}, 4, 2)`;
+  const add = async (actor: string, p: string, file: string) => Number((await s.session`select cb.job_add(${p}, 'test', 'abcdef1234', ${s.session.json({ files: [file] })}, null, ${actor}) as r`)[0].r.id);
+  const claim = () => runner`select cb.job_claim('pc', true) as j`.then((r: any) => r[0].j);
+  const running = await add('W1@pc', 'cedar', 'a.ts');
+  assert.equal(Number((await claim()).id), running);
+  const first = await add('W1@pc', 'cedar', 'b.ts'), second = await add('W2@pc', 'cedar', 'c.ts'), other = await add('A1@pc', 'atlas', 'd.ts');
+  const why = async (id: number) => (await s.sql`select cb.runner_queue() as q`)[0].q.waiting.find((w: any) => Number(w.id) === id)?.why;
+  const job = async (id: number) => ({ ...(await s.sql`select state, summary, finished_at is not null as ended from cb.jobs where id = ${id}`)[0] });
+  return { ...s, runner, claim, why, job, running, first, second, other };
+}
+
+test('runner_queue: a waiting job of a project that gets no work says so, ahead of a hold and the runner\'s state', async () => {
+  const { sql, set, why, first, other } = await jobs();
+  await set('disabled');
+  const w = await why(first);
+  assert.deepEqual([w.reason, w.state], ['project', 'disabled']);
+  assert.match(w.words, /^Cedar is disabled by Ahmed since .+ UTC: no work is handed out there$/);
+  assert.equal((await why(other)).reason, 'next', 'another project\'s job is not touched');
+  await sql`insert into cb.job_holds (project, held_by) values ('cedar', 'L1@pc')`;
+  await sql`update cb.runners set mode = 'paused'`;
+  assert.equal((await why(first)).reason, 'project', 'releasing the hold or resuming the runner would not start it');
+  await sql`delete from cb.job_holds`;
+  await sql`update cb.runners set mode = 'on'`;
+  await set('enabled');
+  assert.equal((await why(first)).reason, 'next');
+});
+
+test('disable keeps the waiting jobs; archive cancels them, tells who asked and counts them; a running one finishes', async () => {
+  const { sql, runner, set, why, job, claim, running, first, second, other } = await jobs();
+  assert.equal((await set('disabled')).jobs_cancelled, 0);
+  assert.equal((await job(first)).state, 'queued');
+  assert.equal((await set('archived')).jobs_cancelled, 2);
+  for (const id of [first, second]) assert.deepEqual(await job(id), { state: 'cancelled', summary: 'cancelled: the project was archived', ended: true });
+  assert.equal((await job(running)).state, 'running');
+  assert.equal((await job(other)).state, 'queued', 'another project\'s job');
+  assert.equal(await why(first), undefined);
+  for (const [who, id] of [['W1@pc', first], ['W2@pc', second]] as const) {
+    const told = await sql`select summary from cb.events where kind = 'message' and data ->> 'to' = ${who} and summary like ${`%job #${id} %cancelled%`}`;
+    assert.equal(told.length, 1, `${who} is told about job #${id}`);
+  }
+  assert.equal((await runner`select cb.job_finish(${running}, 'pc', 'passed', 0, 'ok') as ok`)[0].ok, true, 'the running job still ends');
+  assert.equal((await set('disabled')).jobs_cancelled, 0, 'unarchive cancels nothing');
+  await set('enabled');
+  assert.equal((await job(first)).state, 'cancelled', 'a cancelled job stays cancelled');
+  assert.equal(Number((await claim()).id), other);
 });
 
 test('supervise_state: a disabled project is not supervised and says its state', async () => {

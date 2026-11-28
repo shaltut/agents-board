@@ -56,85 +56,95 @@ const ARG_PIECE = new RegExp(String.raw`(${QUOTED})|\\.|[^\s;&|"'\\]+`, 'y'); //
 
 // #4768, #4770: a body is dropped only where the shell reads a heredoc. Seats run bash and PowerShell and the guard is
 // told neither, so the reader holds a list of what may stand before a marker, all of which both shells read alike: words,
-// ; & | > ( ), plain '...' and "..." strings, $( ), $name, ${name}, and comments. PowerShell has no heredoc (a << in its
-// code runs nothing), so what has to be ruled out is a quote or a comment that only one of them sees. Anything else
-// (a backtick, a backslash, <, a smart quote, $'..', @'..', another heredoc, case, whose ) closes nothing) makes the
+// ; & | > ( ), plain '...' and "..." strings, $( ), $name, and simple ${name} forms. PowerShell has no heredoc (a << in
+// its code runs nothing), so what has to be ruled out is text that moves a quote in one of them only. Anything else (a
+// backtick, a backslash, <, a smart quote, $'..', $[ ], @'..', another heredoc, case, whose ) closes nothing) makes the
 // reader unsure for good: from there nothing is dropped, so the text is judged as commands.
-// read(to) leaves at() === to when `to` is not inside a comment or a '...' word; open holds the " and ( not yet closed.
-const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}-]/;
-const COMMENT_START = /[ \t\n;&|(]/;
+// Comments are never skipped: whether a # starts one differs between the shells and between places in one shell (1# in
+// PowerShell, $(( )), [[ =~ ]], a[ ] in bash). A # may stand only when the rest of its line holds nothing that changes
+// what is read, so that both readings come to the same thing (PLAIN_TAIL).
+// PowerShell also skips the syntax check inside a $( ) that is part of a command's name (x=$( ... ), ./"$( ... )"), so
+// there a << stops nothing. No body is dropped while inside a $( or a " that is glued to the word before it.
+// read(to) leaves at() === to when `to` is not inside a '...' word; open holds the " and ( not yet closed, as g and x
+// where they are glued to the word before them, and unchecked counts those two.
+const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}#-]/;
+const WORD_START = /[ \t\n;&|(]/;
 const PS_QUOTE = /[\u2018-\u201f]/; // PowerShell reads these as ' and "
 const PLAIN_SQ = /\x27[^\x27\u2018-\u201f]*\x27/y;
-const PLAIN_PARAM = /\$\{[^\x22\x27\x60{}\\\u2018-\u201f]*\}/y;
-const ESCAPED_BY_BASH = /[\x22\\\x60$]/; // what a \ changes inside "..."
+// ${name}, ${#name}, ${name:0:7}, ${name:-plain words}: nothing inside that could open a quote, a substitution or a
+// second line
+const PLAIN_PARAM = /\$\{[#!]?\w+(?::?[-=?+][\w ./:-]*|(?::\d+){1,2})?\}/y;
+const PLAIN_TAIL = /[^\x22\x27\x60\\$()<\u2018-\u201f\r\n]*(?=\r?\n|$)/y; // the rest of a line after a #
+// after a \ inside "...": printable ASCII that bash leaves as it is (not " $ \ `, and no line end to join)
+const PLAIN_ESCAPED = /(?![\x22\x24\x5c\x60])[\x20-\x7e]/y;
+const inQuotes = (top) => top === '"' || top === 'g';
 const CASE_AT = /case[ \t\r\n]/y;
-const PLAIN_ESCAPE = /\\[A-Za-z0-9_.-]/y; // a Windows path: the quoting is the same in both shells
+// #4774: outside quotes, a \ before one of these is a Windows path (cd C:\w\x): both shells read the quoting alike
+const BARE_ESCAPE = /\\[A-Za-z0-9_.-]/y;
 const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
 function bashReader(text) {
   let i = 0;
+  let plainTo = 0; // the line already checked for a #, so many of them on one line are checked once
   const r = {
     open: [],
     low: 0, // the fewest open since the caller last set it
+    unchecked: 0,
     unsure: false,
     at: () => i,
     skip(to) { i = to; },
     read(to) {
       const { open } = r;
-      const close = () => { open.pop(); r.low = Math.min(r.low, open.length); };
+      const push = (e) => { open.push(e); if (e === 'g' || e === 'x') r.unchecked++; };
+      const close = () => { const e = open.pop(); if (e === 'g' || e === 'x') r.unchecked--; r.low = Math.min(r.low, open.length); };
       const lost = () => { r.unsure = true; };
+      const startsWord = () => i === 0 || WORD_START.test(text[i - 1]);
       while (i < to && !r.unsure) {
-        const c = text[i], quoted = open[open.length - 1] === '"';
+        const c = text[i], quoted = inQuotes(open.at(-1));
         if (c === '$') {
           const d = text[i + 1];
-          if (d === '(') { open.push('('); i += 2; continue; }
+          if (d === '(') {
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+          }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
             if (PLAIN_PARAM.test(text)) i = PLAIN_PARAM.lastIndex; else lost();
             continue;
           }
-          if (d === "'" && !quoted) lost();
+          if (d === '[' || (d === "'" && !quoted)) lost();
           i += d === '$' ? 2 : 1;
           continue;
         }
+        // Git Bash drops every carriage return (so one can join $ to (), PowerShell ends a line at it
+        if (c === '\r' && text[i + 1] !== '\n') lost();
         if (quoted) {
           if (c === '"') close();
           else if (c === '`' || PS_QUOTE.test(c)) lost();
-          else if (c === '\\') { // PowerShell does not escape with \: only a \ that changes nothing in either may stand
-            if (ESCAPED_BY_BASH.test(text[i + 1] ?? '')) lost();
-            i++;
+          else if (c === '\\') { // PowerShell does not escape with \: the next character is read again on its own
+            PLAIN_ESCAPED.lastIndex = i + 1;
+            if (!PLAIN_ESCAPED.test(text)) lost();
           }
           i++;
           continue;
         }
         if (c === '"' || c === "'") {
           if (text[i - 1] === '@') { lost(); continue; } // a PowerShell here-string
-          if (c === '"') { open.push(c); i++; continue; }
+          if (c === '"') { push(startsWord() ? c : 'g'); i++; continue; }
           PLAIN_SQ.lastIndex = i;
           if (PLAIN_SQ.test(text)) i = PLAIN_SQ.lastIndex;
           else if (text.indexOf("'", i + 1) < 0) i = text.length + 1;
           else lost();
           continue;
         }
-        if (c === '#') {
-          if (i === 0 || COMMENT_START.test(text[i - 1])) {
-            const nl = text.indexOf('\n', i);
-            const end = nl < 0 ? text.length : nl;
-            const cr = text.indexOf('\r', i); // a lone CR ends a comment in PowerShell, not in bash
-            if (cr >= 0 && cr < end - 1) lost();
-            i = end;
-            continue;
-          }
-          if (!/[A-Za-z0-9_]/.test(text[i - 1])) lost(); // after ) , = a shell may or may not start a comment here
-          i++;
-          continue;
+        if (c === '#' && i >= plainTo) {
+          PLAIN_TAIL.lastIndex = i;
+          if (PLAIN_TAIL.test(text)) plainTo = PLAIN_TAIL.lastIndex; else lost();
         }
-        if (c === '\\') { PLAIN_ESCAPE.lastIndex = i; if (PLAIN_ESCAPE.test(text)) { i += 2; continue; } }
-        if (c === '(') open.push(c);
+        if (c === '\\') { BARE_ESCAPE.lastIndex = i; if (BARE_ESCAPE.test(text)) { i += 2; continue; } }
+        if (c === '(') push(c);
         else if (c === ')') { if (open.length) close(); else lost(); }
-        else if (c === '\r') { if (text[i + 1] !== '\n') lost(); }
-        else if (!PLAIN_CODE.test(c)) lost();
+        else if (c !== '\r' && !PLAIN_CODE.test(c)) lost();
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
-        else if (c === 'c' && (i === 0 || COMMENT_START.test(text[i - 1]))) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
+        else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
       }
     },
@@ -168,7 +178,9 @@ function replaceHeredocs(text, fn, docs = []) { // docs: filled with the heredoc
   // whether bash reads the heredoc found at `at` on the line ending at nl, with its body ending where the guard's does
   const isHeredoc = (at, nl, f) => {
     bash.read(at);
-    if (bash.unsure || bash.at() !== at || bash.open.at(-1) === '"') return false;
+    if (bash.unsure || bash.at() !== at || bash.unchecked || inQuotes(bash.open.at(-1))) return false;
+    // PowerShell refuses a << only where it starts a token: in cb log 1 -<<'EOF' it is part of the word, and line 2 runs
+    if (at && !WORD_START.test(text[at - 1])) { bash.unsure = true; return false; }
     // <<'EOF'x: bash's delimiter is EOFx, so its body ends somewhere else
     DELIMITER_END.lastIndex = at + f.header;
     if (!DELIMITER_END.test(text)) { bash.unsure = true; return false; }
@@ -262,7 +274,7 @@ export function uncommented(text) {
       const h = ANY_HEADER.exec(text);
       if (h) { pending.push(h[2]); i = ANY_HEADER.lastIndex; continue; }
     }
-    if (c === '#' && (i === 0 || COMMENT_START.test(text[i - 1]))) {
+    if (c === '#' && (i === 0 || WORD_START.test(text[i - 1]))) {
       const nl = text.indexOf('\n', i);
       comment(nl < 0 ? text.length : nl);
       continue;
@@ -1947,6 +1959,68 @@ function applyWrite(vars, { key, value }) {
     vars.set('VPS', UNKNOWN_HOST);
   } else vars.set(key, value === undefined ? UNKNOWN_HOST : sshValue(key, value, vars.get(key)));
 }
+// #4741: what the walk below does not follow by itself, because the command string is one word, unquoted, behind
+// another option, or glued from pieces: a shell's -c string, eval's and iex's arguments, what follows cmd /c or pwsh -c
+// (any prefix of -Command or -CommandWithArgs, and -cwa), and rg's --pre program. Each is judged like a command line
+const CODE_CARRIER = /sh|eval|iex|invoke-expression|cmd|\brg\b/i;
+const SHELL_PIECE = /\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])|([^'"\\$]+|[\s\S])/g;
+// a word as the shell hands it on: quotes gone, 's'"udo x" joined
+const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, plain) => single ?? double?.replace(/\\(["\\$`])/g, '$1') ?? escaped ?? plain);
+const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-commandwithargs'.startsWith(`-${f}`))(x.replace(/^(?:--?|\/)/, '').toLowerCase());
+// -Verbose and -Debug, however far abbreviated
+const PS_SWITCH = (f) => /^-(?:vb|db)$/i.test(f) || ['-verbose', '-debug'].some((s) => f.length > 1 && s.startsWith(f.toLowerCase()));
+// cut: the second reading split this command inside a quote, so a shell's command string may be every word that is left
+function codeStrings(name, args, cut) {
+  const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
+  if (name === 'eval') return rest(shellValue(args[0] ?? '') === '--' ? 1 : 0);
+  if (name === 'iex' || name === 'invoke-expression') {
+    // it takes -Command and PowerShell's common parameters: two are switches, the rest take a value, any may bind it with a colon
+    let k = 0;
+    while (k < args.length) {
+      const x = shellValue(args[k]);
+      if (x === '--') return rest(k + 1);
+      if (!x.startsWith('-') && !PS_COMMAND(x)) break;
+      const colon = x.indexOf(':'), flag = colon < 0 ? x : x.slice(0, colon);
+      if (PS_COMMAND(flag)) {
+        return colon < 0 ? rest(k + 1) : [[x.slice(colon + 1), ...args.slice(k + 1).map(shellValue)].join(' ').trim()];
+      }
+      k += colon >= 0 || PS_SWITCH(flag) ? 1 : 2;
+    }
+    return rest(k);
+  }
+  if (name === 'cmd') {
+    for (let k = 0; k < args.length; k++) {
+      // a second slash is Git Bash's way to write one
+      const m = /^\/\/?(?:[a-z](?::[^\s/]*)?\/\/?)*[ck](.*)$/i.exec(shellValue(args[k]));
+      if (m) return m[1] ? [[m[1], ...args.slice(k + 1)].map(shellValue).join(' ')] : rest(k + 1);
+    }
+    return [];
+  }
+  if (name === 'pwsh' || name === 'powershell') {
+    const k = args.findIndex((x) => PS_COMMAND(shellValue(x)));
+    return k < 0 ? [] : rest(k + 1);
+  }
+  if (name === 'rg') {
+    return args.flatMap((x, k) => {
+      const m = /^--pre(?:=(.*))?$/.exec(shellValue(x));
+      return m ? [m[1] ?? shellValue(args[k + 1] ?? '')] : [];
+    });
+  }
+  if (!SCRIPT_SHELLS.has(name)) return [];
+  const word = (k) => (cut ? rest(k) : k < args.length ? [shellValue(args[k])] : []);
+  let runs = false;
+  for (let k = 0; k < args.length; k++) {
+    const x = shellValue(args[k]);
+    if (x === '--' || x === '-') return runs ? word(k + 1) : [];
+    const fish = name === 'fish' ? /^--command(?:=([\s\S]*))?$/.exec(x) : null;
+    if (fish?.[1] !== undefined) return [fish[1]];
+    if (fish) runs = true;
+    if (!/^[-+]./.test(x)) return runs ? word(k) : []; // the first operand: the command after -c, else a script file
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(x)) runs = true;
+    if (/^(?:[-+][A-Za-z]*[oO]|--rcfile|--init-file)$/.test(x)) k++;
+  }
+  return [];
+}
 // #4767: reading quotes as bash does is right for plain text only. Where bash and PowerShell count them differently (a
 // smart quote, a backslash before a quote, a here-string, <# #>, --%), where bash nests them ("$( )", "${ }"), where a
 // quote may not be one at all (a comment, a heredoc body, one left open), or where a search runs its own text (an alias
@@ -1990,12 +2064,16 @@ function bodyLeavesQuote(text) {
 }
 const countLost = (text) => MISCOUNTS.test(text) || REDEFINES.test(text) || leftOpen(text)
   || (/grep|\brg\b/i.test(text) && SEARCH_PROGRAM.test(text.replace(/["'\\]/g, ''))) || (text.includes('<<') && bodyLeavesQuote(text));
-function freshRead(command, hosts, role, deployHost, depth = 0) {
-  return freshEnvOne(command, hosts, role, deployHost, depth)
-    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true) : null);
+// walked: the strings already followed, over all levels of one command. Two ways to find one (eval's words joined, and
+// a quoted one of them alone) lead to the same strings below, so without it the work doubles at every level of nesting.
+// One seen before was walked and passed: a block would have ended the whole walk
+function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set()) {
+  return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
+    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
-// flat: the second reading. It follows no string into a nested one (the first reading does), so the two stay linear
-function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) {
+// flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
+// A string it follows gets the second reading only, so the readings never multiply from one level to the next
+function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
   const stripped = stripMessages(String(command ?? ''));
   const raw = flat ? stripped : blankComments(stripped);
@@ -2006,16 +2084,27 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
   for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
-    if (!FRESH_NAME.test(seg) && !FRESH_NAME.test(unhide(seg))) continue;
+    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
+      // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
+      const plain = unhide(seg.replace(/["']/g, ''));
+      if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
+    }
     // flat: a quote the cut left alone is dropped, never read as opening a word that swallows the rest
     const tokens = [...seg.matchAll(flat ? WORD : GIT_TOKEN)], w = tokens.map((m) => m[0]);
     const u = w.map(unquote), names = w.map(cmdName);
     const runsQuote = runnerArg(w, u, names, false);
+    const cut = flat && leftOpen(seg);
+    const follow = (text) => {
+      const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
+      if (walked.has(key)) return null;
+      walked.add(key);
+      return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
+    };
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
-      if (!flat && /["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
-        const why = freshRead(u[i], hosts, role, vars.get('VPS'), depth + 1);
+      if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
+        const why = follow(u[i]);
         if (why) return why;
       }
       if (/^[({`]$/.test(w[i])) { cmd = true; continue; }
@@ -2038,7 +2127,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
           const s = ENV_SPLIT.exec(option);
           if (s) {
             const split = option.slice(s[0].length) || (u[++i] ?? '');
-            const why = flat ? null : freshRead([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
+            const why = follow([split, ...w.slice(i + 1)].join(' '));
             if (why) return why;
             cmd = false;
             break;
@@ -2050,6 +2139,13 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
       if (name === 'timeout') { while (w[i + 1]?.startsWith('-')) { if (TIMEOUT_OPT_ARG.test(u[++i])) i++; } i++; continue; }
       const why = freshLaunch(name, u.slice(i + 1, i + 41), hosts, role, vars);
       if (why) return FRESH_ENV(why);
+      // its arguments end at the next ( ) { } or backtick, where another command word may start: each word is read once
+      let end = i + 1;
+      while (end < w.length && !/^[(){}`]$/.test(w[end])) end++;
+      for (const code of codeStrings(name, w.slice(i + 1, end), cut)) {
+        const inner = follow(code);
+        if (inner) return inner;
+      }
       cmd = false;
     }
   }
@@ -2180,7 +2276,7 @@ export function scriptReader(cwd, fs) {
   };
 }
 
-const SEAT_VARS_CHANGE = 'changing CB_ROLE or CB_AGENT (assigning, unsetting or removing either, or clearing the environment with env -i or the like): those two variables are what make this pane a seat, so a command or a child CLI (codex exec, opencode run, claude -p, agy) started without them runs with the dangerous-command rules only, and the guard installer would run. Reading them is fine (echo $CB_ROLE). A test that needs other values sets them in its own child\'s env inside the test file. A change to your seat: cb ask';
+const SEAT_VARS_CHANGE = 'changing CB_ROLE or CB_AGENT (assigning, unsetting or removing either, or clearing the environment with env -i or the like): those two variables are what make this pane a seat, so a command or a child CLI (codex exec, opencode run, claude -p, agy) started without them runs with the dangerous-command rules only, and the guard installer would run. Reading them is fine (echo $CB_ROLE). A test that needs other values sets them in its own child\'s env inside the test file. Only changing the text of a file? Use your file editing tool: a script run from the shell is judged as code, its quoted strings too, so an ordinary word there (unset, env:) can read as this. A change to your seat: cb ask';
 const FENCE = 'the fence (#4345): the hook settings (.claude/settings*.json), the .claude folder itself, ~/.claude-board (the guard, the runner config) and the other agents\' hook and config files (~/.codex hooks.json and *.toml, .agents/hooks.json, ~/.gemini, opencode.json, OpenCode plugins) are Ahmed\'s; a squad seat never writes them or runs the guard installer. Reading them is fine. A change there is his: cb ask';
 // a hidden spelling as plain text: quote pairs and a backslash between letters go (only ever an extra test: the
 // original is tested too, so a Windows path keeps its separators)
@@ -2381,10 +2477,15 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       if (typeof text !== 'string') continue;
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
-      let why = null;
-      for (const t of withUncommented(text)) why ??= seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
-      if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
-      pending.push(...scriptCalls(text, cwd, vps));
+      const read = readings(text); // #4776: bash drops a script's carriage returns too
+      for (const t of read.flatMap(withUncommented)) { // #4777: and without the comments that hold a quote
+        const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
+        if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
+      }
+      // the scripts it runs, as read without them, so a CRLF script's calls count once; with a CR alone (PowerShell ends
+      // a line there) as written too
+      const named = /\r(?!\n)/.test(text) ? read : read.slice(-1);
+      for (const t of named) pending.push(...scriptCalls(t, cwd, vps));
     }
   }
   const secret = secretRead(String(command ?? ''));
@@ -3052,6 +3153,10 @@ function judge(name, args, fed, depth, vars = new Map()) {
   return null;
 }
 
+// #4776: Git Bash drops every carriage return, quoted ones too, in -c text, a script file and stdin, so a word split by
+// one runs. Text holding any is judged without them as well as as written, never instead: PowerShell ends a line at one
+function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\r', '')] : [text]; }
+
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
@@ -3066,19 +3171,21 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      // #4737: judged as written, then with split and built names read out (only when that changes something)
-      const shown = revealed(command);
-      // #4777: and each again without the comments that hold a quote
-      for (const text of (shown === command ? [command] : [command, shown]).flatMap(withUncommented)) {
-        const danger = check(text);
-        if (danger) return block('dangerous', danger);
-        const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
-        if (branch) return block('dangerous', pushReason(branch));
-        const byRole = checkRole(text, role, { readScript, hosts, deployHost });
-        if (byRole) return block('role', byRole);
+      for (const written of readings(command)) {
+        // #4737: judged as written, then with split and built names read out (only when that changes something)
+        const shown = revealed(written);
+        // #4777: and each again without the comments that hold a quote
+        for (const text of (shown === written ? [written] : [written, shown]).flatMap(withUncommented)) {
+          const danger = check(text);
+          if (danger) return block('dangerous', danger);
+          const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
+          if (branch) return block('dangerous', pushReason(branch));
+          const byRole = checkRole(text, role, { readScript, hosts, deployHost });
+          if (byRole) return block('role', byRole);
+        }
       }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
-      const session = stdin === true && role ? stdinSession(command) : null;
+      const session = stdin === true && role ? readings(command).map((text) => stdinSession(text)).find(Boolean) : null;
       return session ? block('role', SESSION(session)) : { allow: true };
     }
     // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool
