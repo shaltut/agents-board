@@ -203,6 +203,45 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4768, #4770: the guard drops a heredoc body only where bash reads one. In each of these bash 5.2 runs the line the
+// guard dropped as file text (checked in a shell with a harmless echo in its place)
+const hiddenByHeredoc: [string, (c: string) => string][] = [
+  ['an empty heredoc', (c) => `cat > notes.txt <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty <<- heredoc, tab before the end', (c) => `cat >> notes.txt <<-"EOF"\n\tEOF\n${c}\nEOF`],
+  ['an empty heredoc, CRLF', (c) => `cat > notes.txt <<'EOF'\r\nEOF\r\n${c}\r\nEOF`],
+  ['an empty heredoc to cb log', (c) => `cb log 1 -b - <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty heredoc to git commit -F -', (c) => `git commit -F - <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty heredoc in a commit message', (c) => `git commit -m "$(cat <<'EOF'\nEOF\n${c}\nEOF\n)"`],
+  ['the marker in a comment', (c) => `cat > notes.txt # <<'EOF'\n${c}\nEOF`],
+  ['the marker in a quoted word', (c) => `cat > notes.txt "a <<'EOF'"\n${c}\nEOF`],
+  ['the marker in a quoted cb message', (c) => `cb log 1 "see <<'EOF'"\n${c}\nEOF`],
+  ['the marker in a quote opened lines before', (c) => `echo "\ncat > notes.txt <<'EOF'\n" >/dev/null\n${c}\nEOF`],
+  ['a here-string', (c) => `cat > notes.txt <<<'EOF'\n${c}\nEOF`],
+  ['a quote left open after the marker', (c) => `cat > notes.txt <<'EOF' "a\n"; ${c}\nEOF`],
+  ['a line continuation after the marker', (c) => `cat > notes.txt <<'EOF' \\\n; ${c}\nEOF`],
+  ['EOF) ends it in a substitution', (c) => `git commit -m "$(cat <<'EOF'\ntext\nEOF)"\n${c}\nEOF`],
+  ['EOF ) ends it in a substitution', (c) => `git commit -m "$(cat <<'EOF'\ntext\nEOF )"\n${c}\nEOF`],
+  ['after an indented end line bash does not take', (c) => `cat > a <<'EOF'\n  EOF\necho "\nEOF\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
+  ['after an unquoted heredoc with a quote in it', (c) => `cat <<X\n"\nX\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
+];
+const heredocText = [
+  `cat > notes.txt <<'EOF'\ngit reset --hard\nEOF`, `cd /tmp && cat >> notes.txt <<-"EOF"\n\tgit reset --hard\n\tEOF`,
+  `cb log 1 -b - <<'EOF'\ndon't "quote" # git reset --hard\nEOF`, `git commit -F - <<'EOF'\ngit reset --hard\nEOF`,
+  `git commit -m "$(cat <<'EOF'\nfix: it's done; git reset --hard is only described\nEOF\n)"`,
+  `cat > a <<'EOF'\ndon't\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "a # b" 'c <<' # it's a comment <<\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "$(date)" \`date\` $'it\\'s' \\" \ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # don't\ngit reset --hard\nEOF`,
+];
+test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
+  for (const [name, make] of hiddenByHeredoc) {
+    assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
+    assert.ok(evaluate({ tool: 'shell', command: make('unset CB_ROLE'), role: 'builder' }), `builder must block the seat variable: ${name}`);
+  }
+  for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
+});
+
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
 // .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
 const fenceWrites = [
@@ -1161,6 +1200,9 @@ test('long commands stay fast', () => {
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],
     ['600 KB of unterminated quoted heredoc headers, as a builder', asBuilder(heredocHeaders600KB)],
+    // #4768: the shell reader walks the command once, however deep it nests
+    ['#4768, 100,000 open parens then 8,000 empty heredocs, as a builder', asBuilder('( '.repeat(100000) + "\ncat > a <<'EOF'\nEOF".repeat(8000))],
+    ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
