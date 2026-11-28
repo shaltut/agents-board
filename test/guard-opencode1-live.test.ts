@@ -68,9 +68,11 @@ async function session(t: { after: (f: () => Promise<void>) => void }, commands:
   let log = '';
   for (const s of [child.stdout, child.stderr]) s?.on('data', (d) => { log += d; });
   t.after(async () => {
-    // only the server this test started, by its own process id
-    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
-    else try { process.kill(-child.pid!, 'SIGKILL'); } catch {}
+    // only the server this test started, by its own process id, and only while it runs: after that the id can be anyone's (#4922)
+    if (child.exitCode === null && child.signalCode === null) {
+      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+      else try { process.kill(-child.pid!, 'SIGKILL'); } catch {}
+    }
     model.close();
     await sleep(2000);
     try { rmSync(root, { recursive: true, force: true }); } catch {}

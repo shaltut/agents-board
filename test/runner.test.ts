@@ -16,19 +16,17 @@ const WIN = process.platform === 'win32';
 const NAME = 'pc-test';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code !== 'ESRCH'; } };
-const killTree = (pid: number | undefined) => {
-  if (!pid) return;
-  if (WIN) { try { execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {} }
-  else { try { process.kill(pid, 'SIGKILL'); } catch {} }
-};
 const freePort = () => new Promise<number>((ok) => { const s = createServer().listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 
 const kids: ChildProcess[] = [];
-const pids: number[] = []; // slow.mjs processes: on POSIX they outlive a killed runner
 const clients: any[] = [];
 after(async () => {
-  for (const k of kids) killTree(k.pid);
-  for (const p of pids) try { process.kill(p, 'SIGKILL'); } catch {}
+  // #4922: nothing here is ended by a process number, which can be anyone's once its process has ended. A slow job step
+  // still running (on POSIX it outlives a killed runner) leaves when it sees the stop file; this file's own children are
+  // ended through their handles, which does nothing for one that has ended.
+  writeFileSync(STOP, '');
+  for (const k of kids) k.kill('SIGKILL');
+  await sleep(1000); // a slow step looks every 200 ms, and holds its slot's folder until it has left
   await Promise.all(clients.map((c) => c.end()));
   rmSync(TMP, { recursive: true, force: true, maxRetries: 5 }); // the repos, slot clones, homes
 });
@@ -40,6 +38,7 @@ await sql`insert into cb.sessions (machine, pane, actor, project, role) values (
 const session = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'claude-session' } }); clients.push(session);
 
 const TMP = mkdtempSync(join(tmpdir(), 'cbr-'));
+const STOP = join(TMP, 'stop'); // test/fixtures/slow.mjs ends when this file is there
 const ORIGIN = join(TMP, 'origin.git'), WORK = join(TMP, 'work'), HOME = join(TMP, 'home');
 writeFileSync(join(TMP, 'gitconfig'), '');
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: join(TMP, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -55,7 +54,7 @@ git('remote', 'add', 'origin', ORIGIN);
 const MAIN = commit('main', {
   'ok.mjs': "console.log('ok');\n",
   'fail.mjs': "console.log('failing'); process.exitCode = 3;\n",
-  'slow.mjs': "console.log('pid ' + process.pid); setTimeout(() => {}, 60000);\n",
+  'slow.mjs': readFileSync('test/fixtures/slow.mjs', 'utf8').replace("'__STOP__'", () => JSON.stringify(STOP)),
   'env.mjs': "const n = ['CB_DATABASE_URL', 'DATABASE_URL', 'RUNNER_MARKER'].filter((k) => process.env[k]); console.log('CB=' + (n.join(',') || 'none'));\n",
   // 3 MB, no newline; masking lengthens each address, so only a cut applied last keeps the summary short
   'big.mjs': "process.stdout.write('a@b.co '.repeat(450000)); process.exitCode = 1;\n",
@@ -149,7 +148,7 @@ const ended = (id: number, ms = 60_000) => until(`job #${id} to end`, async () =
 const logOf = (id: number) => { try { return readFileSync(join(HOME, 'logs', `${id}.log`), 'utf8'); } catch { return ''; } };
 const pidOf = (id: number) => until(`job #${id} to print its pid`, () => {
   const m = /pid (\d+)/.exec(logOf(id));
-  if (m) { pids.push(Number(m[1])); return Number(m[1]); }
+  if (m) return Number(m[1]);
 }, 20_000, 50);
 const raw = async (project: string, recipe: string, sha: string, params: object = {}) => {
   const [row] = await sql`insert into cb.jobs (project, recipe, params, sha, requester) values (${project}, ${recipe}, ${sql.json(params as any)}, ${sha}, 'B1@mac') returning id`;
@@ -361,7 +360,7 @@ test('the log server answers peers only', async () => {
   const denied = await fetch(`http://127.0.0.1:${port2}/jobs/${id}/log`);
   assert.equal(denied.status, 403);
   assert.match(await denied.text(), /this machine may not read job logs/);
-  killTree(other.child.pid);
+  other.child.kill('SIGKILL');
   await other.exited;
 });
 
@@ -375,19 +374,18 @@ test('a restarted runner ends its running job, kills what it left running and ru
   const id = await add('wrapped');
   const pid = await pidOf(id);
   // the runner alone dies (no tree kill), as in a crash: slow.mjs, under cmd.exe / sh, lives on in the slot
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   await sleep(500);
   assert.ok(alive(pid), 'the orphan is still running before the restart');
   // a decoy record whose pid was reused by another node.exe (an agent session, a relay): on Windows every recorded root
   // is node.exe (the launcher), so only the launcher's own mark (its slot's .nostart path) in the command line counts
   const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
-  pids.push(decoy.pid!);
+  kids.push(decoy);
   writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'node.exe' : 'node'}\n`);
   // a record from before the last boot is never acted on, even when its pid carries the mark
   const stale = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', '--', join(HOME, 'state', 'slot-3.nostart')], { detached: true, stdio: 'ignore', windowsHide: true });
-  pids.push(stale.pid!);
+  kids.push(stale);
   writeFileSync(join(HOME, 'state', 'slot-3.pids'), `${stale.pid} ${WIN ? 'node.exe' : 'node'}\n`);
   utimesSync(join(HOME, 'state', 'slot-3.pids'), new Date('2000-01-01'), new Date('2000-01-01'));
   const ok = await add('ok');
@@ -407,8 +405,7 @@ test('a restarted runner ends its running job, kills what it left running and ru
 test('an over-long pid line does not switch reaping off', async () => {
   const id = await add('wrapped');
   const pid = await pidOf(id);
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   await sleep(500);
   const rec = readFileSync(join(HOME, 'state', 'slot-1.pids'), 'utf8');
@@ -617,8 +614,7 @@ test('the runner reports its slots, and at start runs Ahmed\'s board setting ove
   const row = async () => ({ ...(await sql`select slots, db_lanes from cb.runners where name = ${NAME}`)[0] });
   assert.deepEqual(await row(), { slots: 2, db_lanes: 1 }, 'runner.json\'s counts, reported');
   await sql`select cb.runner_limits_set(${NAME}, 12, null, 'ahmed')`;
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   runner = startRunner();
   await up(runner);
@@ -629,8 +625,7 @@ test('the runner reports its slots, and at start runs Ahmed\'s board setting ove
   // review M3: a setting runner.json cannot take (3 lanes on a file with no laneEnv) keeps the file's counts, and the
   // board learns why, so the page can say so
   await sql`select cb.runner_limits_set(${NAME}, null, 3, 'ahmed')`;
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   runner = startRunner();
   await up(runner);
