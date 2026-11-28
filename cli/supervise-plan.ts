@@ -7,6 +7,7 @@ export type Session = { actor: string; role: string; area: string | null; repo: 
   bound?: string | null; // the project its latest session is bound to (#4559); null or absent: not known
   last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean;
   agent?: string | null; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
+  quota_told?: boolean; // #4787: its quota stop is already on the board, and it has done nothing there since
   model?: string | null }; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
 export type State = { project: string; squad: Squad; supervised: boolean;
   // #4559 slice 3: a supervised squad's project that gets no work (disabled, archived), and since when
@@ -78,6 +79,18 @@ export function pastSeatNames(project: string, squads: unknown[]): Set<string> {
 export function mayBeLeaving(state: State, herdrLive: Set<string>): boolean {
   const now = new Set(wantList(state.project, state.squad).map((w) => w.name));
   return state.sessions.some((s) => s.role !== 'lead' && !now.has(s.actor) && (s.live || s.holds > 0 || herdrLive.has(herdrName(s.actor))));
+}
+
+/** #4787: the seats whose screen is read for a quota stop: this squad's seats and the lead, bound to this project, that
+ *  herdr runs and does not show working (a quota stop ends the turn; a working seat's screen holds its own output). */
+export function quotaChecks(state: State, herdrStatus: Record<string, string>, herdrDown: Set<string>): Session[] {
+  if (!state.supervised) return [];
+  const mine = new Set(wantList(state.project, state.squad).map((w) => w.name));
+  return state.sessions.filter((s) => {
+    const status = herdrStatus[herdrName(s.actor)] ?? '';
+    return (mine.has(s.actor) || s.role === 'lead') && (!s.bound || s.bound === state.project) && !s.closing
+      && !herdrDown.has(s.actor.split('@')[1]!) && (READY.has(status) || status === 'blocked');
+  });
 }
 
 export function planTick(i: TickInput): TickPlan {

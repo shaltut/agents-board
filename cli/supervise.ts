@@ -1,6 +1,7 @@
 // The supervisor (#3601): `node cli/supervise.ts`, started with `cb supervise` in herdr tab `supervisor` on the PC.
 // Every 60 s one tick: per supervised project it starts, restores and closes squad sessions through herdr as planTick
-// says, then restarts the PC runner if it stopped beating. One supervisor anywhere: a Postgres advisory lock.
+// says and tells the lead of a seat stopped by its model's quota (#4787), then restarts the PC runner if it stopped
+// beating. One supervisor anywhere: a Postgres advisory lock.
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, existsSync } from 'node:fs';
 import net from 'node:net';
@@ -8,11 +9,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
-import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
-import { mayBeLeaving, pastSeatNames, planTick, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, type Launch, type Runner } from './squad-up.ts';
+import { mayBeLeaving, pastSeatNames, planTick, quotaChecks, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
-import type { AgentAdapter, SeatHandle } from './agents/types.ts';
+import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
 
 const TICK_MS = 20 * 60_000;
 const MAC = 'macbook', STARTS_PER_TICK = 3, RUNNER_STALE = 3 * 60_000, RUNNER_RETRY = 10 * 60_000, HOUR = 3_600_000, CLOSE_WAIT = 60_000, POLL = 5_000,
@@ -24,9 +25,10 @@ const BOARD = join(import.meta.dirname, '..'); // the board checkout on this PC:
 // elsewhereToldAt: per project, when "its PC is another machine" was last said; runnerPane: the runner tab this run opened
 // leavingTold (#3770): per leaving seat, the reason last said in the log: said again only when it changes
 // restartTried (#4332): per seat, the setting this run closed it to restart on, or refused: planTick's restartTried
+// unreadTold (#4787): seats whose screen could not be checked for a quota stop: said again only after it could be
 export type Memory = { failedAt: Map<string, number>; blockedTold: Set<string>; launched: Set<string>; runnerToldAt: number; runnerStartedAt: number;
   closeSkipAt: Map<string, number>; elsewhereToldAt: Map<string, number>; leavingTold: Map<string, string>; restartTried: Map<string, string>;
-  runnerPane?: { pane: string; terminal?: string } };
+  unreadTold: Set<string>; runnerPane?: { pane: string; terminal?: string } };
 export type Deps = {
   sql: any; run: Runner; dryRun: boolean; now: number; memory: Memory; runnerConfig: string | null;
   probe: (host: string, port: number) => Promise<boolean>; sleep?: (ms: number) => Promise<void>; clock?: () => number;
@@ -38,7 +40,8 @@ export type Deps = {
 const WIND_DOWN_CLOSES = 2;
 const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
 
-/** One tick. Returns the lines to print. Dry run: herdr is only read (agent list), the board is never written. */
+/** One tick. Returns the lines to print. Dry run: herdr is only read (the agent list, and the screens a quota check
+ *  reads), the board is never written. */
 export async function tick(d: Deps): Promise<string[]> {
   const { sql, run, dryRun, now, memory } = d;
   const out: string[] = [];
@@ -64,6 +67,7 @@ export async function tick(d: Deps): Promise<string[]> {
   const keysOf = new Map<string | null, Set<string>>();
   for (const s of states) for (const [k, m] of Object.entries(s.squad.machines)) (keysOf.get(m.herdr) ?? keysOf.set(m.herdr, new Set()).get(m.herdr)!).add(k);
   const herdrLive = new Set<string>(), herdrDown = new Set<string>(), mac = new Set<string>(), herdrStatus: Record<string, string> = {};
+  const herdrPane: Record<string, string> = {};
   let macAgents = 0;
   for (const [label, keys] of keysOf) {
     let agents: any;
@@ -75,6 +79,7 @@ export async function tick(d: Deps): Promise<string[]> {
     }
     for (const a of agents) if (typeof a?.name === 'string') {
       herdrLive.add(a.name); herdrStatus[a.name] = String(a.agent_status);
+      if (typeof a.pane_id === 'string') herdrPane[a.name] = a.pane_id;
       if (label === MAC) mac.add(a.name);
     }
     if (label === MAC) macAgents = agents.length;
@@ -107,6 +112,7 @@ export async function tick(d: Deps): Promise<string[]> {
       const launches = [...plan.restore, ...plan.start];
       startsLeft -= launches.length + plan.restart.length; // a restart's close frees its own Mac slot: macLive stays
       macLive += launches.filter((l) => l.herdr === MAC || l.machine === MAC).length;
+      await quotaStops(d, state, { status: herdrStatus, pane: herdrPane, down: herdrDown }, out); // before act: a start can take minutes
       await act(d, state, plan, out, log);
     } catch (e) {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
@@ -136,6 +142,45 @@ async function safeToCloseOf(state: State, herdrStatus: Record<string, string>):
     } catch { safe[s.actor] = false; }
   }
   return safe;
+}
+// #4787: how much of a seat's screen is read (soft wraps joined), and how many of its last non-empty lines are judged:
+// a stopped CLI's message sits just above its input box and status lines; anything higher is the seat's own output
+const READ_LINES = 40, TAIL_LINES = 15;
+export const paneTail = (text: string) => text.split(/\r?\n/).filter((l) => l.trim()).slice(-TAIL_LINES).join('\n');
+
+/** #4787: reads the screen of each seat that is not working and asks its agent's adapter whether a quota stopped it (a
+ *  rate limit the CLI retries is no stop). A stop is put on the board once, until the seat acts there again or binds
+ *  anew, and the lead is told; the digest carries it too. Nothing is closed or switched. No pane text reaches the board. */
+async function quotaStops(d: Deps, state: State, herdr: { status: Record<string, string>; pane: Record<string, string>; down: Set<string> }, out: string[]) {
+  for (const s of quotaChecks(state, herdr.status, herdr.down)) {
+    d.signal?.throwIfAborted();
+    const m = state.squad.machines[s.actor.split('@')[1]!]?.herdr ?? null, hn = herdrName(s.actor), pane = herdr.pane[hn];
+    try {
+      const a = getAdapter(s.agent ?? 'claude');
+      if (!pane) throw new Error('herdr lists it with no pane');
+      const r = d.run(m, ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(READ_LINES), '--format', 'text'], 15_000);
+      if (r.status !== 0) throw new Error((r.error?.message || r.stderr || 'herdr failed').trim().slice(0, 200));
+      const stop: QuotaSignal | null = a.detectQuotaStop(seatOf(state, s.actor, a.kind, pane, s.machine), { agent_status: herdr.status[hn] }, paneTail(r.stdout ?? ''));
+      d.memory.unreadTold.delete(s.actor);
+      if (stop?.kind !== 'quota' || s.quota_told) continue;
+      if (d.dryRun) { out.push(`would say ${s.actor} looks stopped by its quota`); continue; }
+      // on the board first: if that fails nothing is said, and the next tick tries again; if the tell fails, the digest has it
+      await d.sql`select cb.supervise_log(${state.project}, 'quota', ${s.actor}, ${`herdr pane ${pane}`})`;
+      const lead = leadOf(state), isLead = s.role === 'lead' || s.actor === lead;
+      out.push(`${s.actor} looks stopped by its quota (herdr pane ${pane}${m ? ` on ${m}` : ''})${isLead || !lead ? ': no other lead to tell, it is in the digest' : ''}`);
+      if (isLead || !lead) continue;
+      const seat = wantList(state.project, state.squad).find((w) => w.name === s.actor);
+      const backups = (seat ? seatSpec(state.squad, seat).fallback : undefined)?.map(runsOn).join(', ');
+      await tell(d, lead, `supervisor: ${s.actor} looks stopped by its model's quota: herdr pane ${pane}${m ? ` on ${m}` : ''} shows the CLI's limit message. It holds ${s.holds} card(s).`
+        + (stop.retryAfterSec ? ` The CLI says to retry in about ${Math.ceil(stop.retryAfterSec / 60)} min.` : '')
+        + (backups ? ` Backups named for the seat: ${backups}.` : '')
+        + ' Nothing was switched or closed: check the pane, then restart it on another model or hand its cards over.', out);
+    } catch (e) {
+      if (d.memory.unreadTold.has(s.actor)) continue;
+      d.memory.unreadTold.add(s.actor);
+      out.push(`cannot check ${s.actor} for a quota stop: ${msg(e)}`);
+    }
+  }
 }
 // #4332: why this machine cannot start a launch, as startOne would refuse it before any pane; null when it can
 const startProblem = (l: Launch) => { try { launchSpec(l); return null; } catch (e) { return msg(e); } };
@@ -364,7 +409,7 @@ export const locked = async (lock: any) => (await lock`select pg_try_advisory_lo
 
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/claude.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`;
   let sql = connect(undefined, { app, max: 1 });
@@ -388,7 +433,7 @@ if (import.meta.main) {
   }
   const configPath = process.env.CB_RUNNER_CONFIG || join(homedir(), '.claude-board', 'runner.json');
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
-    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map() };
+    closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), unreadTold: new Set() };
   let code = 0;
   for (;;) {
     try {
