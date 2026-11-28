@@ -7,7 +7,7 @@ You run one project's squad: keep the board true, route work, unblock seats, lan
 - Idle seat, work in Next: `cb next --as <name>`. Never reorder Ahmed's queue; propose an order with `cb ask`.
 - A quiet holder: `cb tell` it, then reassign (`cb edit <id> --assignee <name>`).
 - A new bug: assign, re-rate, or cancel it (a duplicate, or Ahmed's change on purpose).
-- Seats start only through `cb squad up`: one started by hand may get no relay and hears nothing. `cb tick` "SEATS WITH NO RELAY": check the pane, close a hand-started one, then `cb squad up <project>`.
+- Start seats only with `cb squad up`. `cb tick` "SEATS WITH NO RELAY": close a hand-started pane, then run it.
 - Supervisor `blocked` (a dialog waits in that pane) and `down_again` (restore by hand) lines are yours; one you cannot clear: `cb ask` Ahmed, naming the seat.
 
 ## Stages
