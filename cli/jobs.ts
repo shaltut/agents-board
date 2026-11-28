@@ -58,10 +58,11 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
   };
   if (!o.recipe) throw new Error(`usage: cb run <recipe> --sha <sha> [--<param> <value>...] [--wait]. Recipes: ${await known()}`);
   if (!o.sha) throw new Error('give the commit: --sha <sha> (git rev-parse HEAD; push it first)');
-  if (o.card !== undefined && !/^\d+$/.test(o.card)) throw new Error('--card needs a card number');
+  const card = o.card?.replace(/^#/, ''); // #4724: cb prints ids as #42
+  if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number');
   let added: any;
   try {
-    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
+    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
   } catch (e: any) {
     if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}${o.repo ? ` (${o.repo})` : ''}. Recipes: ${await known()}`);
     throw e;
@@ -105,6 +106,7 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
     await sql`select cb.job_hold(${id}, ${sub === 'hold'}, ${actor})`;
     return { out: sub === 'hold' ? `${id}'s waiting jobs are held: running ones carry on (cb job release ${id})` : `${id}'s jobs start again`, json: { project: id, held: sub === 'hold' }, code: 0 };
   }
+  id = id?.replace(/^#/, ''); // after hold and release, whose id is a project
   if (!/^\d+$/.test(id ?? '') || !['show', 'cancel', 'log', 'retry', 'move'].includes(sub ?? '')) throw new Error(usage);
   if (sub === 'cancel') { await sql`select cb.job_cancel(${id!}::bigint, ${actor})`; return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
   if (sub === 'retry') {
