@@ -285,6 +285,72 @@ test('the session rule stays linear: a long command of many segments is judged q
   assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
 });
 
+// #4658 (PR 104 review I1-I3): a one-shot whose own code opens a session, a package runner or find that starts one, and
+// the programs the tables missed
+const CODE_SESSIONS = [
+  // I1: interpreter code that hands the terminal to a shell or starts a REPL or debugger
+  `python -c 'import pty; pty.spawn("/bin/sh")'`, `python3 -c "import code; code.interact()"`, `py -c "import code; code.InteractiveConsole().interact()"`,
+  'python -m code', 'python -m pdb x.py', 'python3 -W ignore -m asyncio', `python -c "import pdb; pdb.set_trace()"`, `python -c "x=1; breakpoint()"`,
+  `python -c "import os; os.system('bash')"`, `python -c "import subprocess; subprocess.call(['/bin/sh', '-i'])"`,
+  `perl -e 'exec "/bin/sh"'`, `perl -e 'system("bash -i")'`, `ruby -e 'exec "sh"'`, `ruby -e 'binding.irb'`, `lua -e 'os.execute("sh")'`,
+  `node -e "require('repl').start()"`, `node -e "require('node:repl').start({})"`, `node -p "require('repl').start()"`,
+  `node -e "require('child_process').spawnSync('bash', { stdio: 'inherit' })"`, `node -e "require('child_process').execSync('sh')"`,
+  `bash -c "python -m code"`,
+  // the Windows shells too: Codex seats run on Windows
+  `python -c "import os; os.system('cmd')"`, `python -c "import subprocess; subprocess.run(['powershell.exe'])"`,
+  `node -e "require('child_process').spawnSync('pwsh', { stdio: 'inherit' })"`,
+  // I2: package runners and find start the command that follows
+  'npx bash', 'npx --yes node', 'npx -p x -- python', 'npx -c "bash"', 'pnpm exec bash', 'pnpm --filter web exec sh', 'pnpm dlx node',
+  'npm exec -- node', 'npm x -- bash', 'yarn exec bash', 'yarn dlx node', 'bunx python', 'uv run python', 'poetry run bash', 'pipenv run python -i',
+  'bundle exec irb', 'find . -exec bash \\;', 'find . -name x -execdir sh \\;', 'find . -exec python -i {} \\;',
+  // PR 147 review: the equals form of a call option, wherever it stands; import(); a shell with no arguments, only
+  // itself as its arguments, or keyword arguments; bun and deno code; bun x
+  'npx --call=bash', 'npx -c=bash', 'npm exec --call=bash', 'npm x -c=python','npm --call=bash exec', 'npm -c bash exec',
+  `node -e "import('repl').then(r => r.start())"`, `node -e "import('node:repl').then(r => r.start())"`,
+  `node -e "require('child_process').spawnSync('bash', [], { stdio: 'inherit' })"`, `python -c "import subprocess; subprocess.run('bash', shell=True)"`,
+  `python -c "import os; os.execv('/bin/sh', ['/bin/sh'])"`, `python -c "import os; os.execv('/bin/sh', ('sh',))"`,
+  `bun -e "require('repl').start()"`, `bun -e "Bun.spawn(['bash'])"`, `bun --print "require('node:repl').start()"`,
+  `deno eval "new Deno.Command('bash').spawn(); import('node:repl')"`, 'bun x bash', 'bun x node',
+  // I3: programs the tables missed
+  'tclsh', 'wish', 'cat | tclsh','groovysh', 'jdb Main', 'evcxr', 'gore', 'nslookup',
+];
+const CODE_ONE_SHOTS = [
+  'npx @types/node', 'pnpm dlx @scope/node@2', 'npx --call="tsc -b"', 'bun x prettier -w .', 'bun run build', `bun -e "console.log(1)"`, 'deno eval "console.log(1)"',
+  `python -c "import subprocess; subprocess.run('bash', input=b'ls')"`, `node -e "require('child_process').spawnSync('bash', ['-c', 'ls'], { stdio: 'inherit' })"`,
+  `python -c "import os; os.execv('/bin/sh', ['/bin/sh', '-c', 'ls'])"`,
+  `python -c "import os; os.system('cmd /c dir')"`, `node -e "require('child_process').execFileSync('cmd', ['/c', 'dir'])"`,
+  `python -c "import subprocess; subprocess.run(['bash', '-c', 'ls'])"`, `python -c "import os; os.system('sh build.sh')"`,
+  `python -c "print('code.interact is a function')"`, 'python -m pytest -q', 'python -m http.server --help', 'python -m pip list', 'python -c "import pty"',
+  `perl -e 'system("ls -la")'`, `ruby -e 'system("ls")'`, `node -e "require('child_process').execSync('git status')"`,
+  `node -e "require('child_process').spawnSync('bash', ['-c', 'ls'])"`, `node -e "console.log('repl')"`,
+  'npx tsc --noEmit', 'npx --yes prettier --write x.ts', 'npx -c "tsc -b"', 'pnpm exec oxlint a.ts', 'pnpm --filter web exec tsc', 'pnpm dlx cowsay hi',
+  'npm exec -- eslint .', 'npm exec node -- x.js', 'pnpm exec node x.js', 'pnpm install', 'pnpm -s build', 'npm test', 'yarn build', 'bunx vite build',
+  'uv run pytest', 'uv run python x.py', 'poetry run pytest -q', 'bundle exec rake', 'pnpm exec bash -c "ls"',
+  'find . -name "*.ts"', 'find . -exec grep -l x {} +', 'find . -name "*.sh" -exec bash {} \\;', 'find . -exec rm {} \\;', 'find . -type f -exec sh -c "wc -l x" \\;',
+  'tclsh x.tcl', 'wish x.tcl', 'nslookup example.com', 'cat q.tcl | tclsh',
+];
+
+test('a board seat may not open a session through one-shot code, a package runner, find or a missed program (#4658)', () => {
+  for (const c of CODE_SESSIONS) {
+    const out = seat(c);
+    assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', c);
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /write_stdin|fresh environment/, c);
+  }
+});
+
+test('everyday one-shots through interpreters, package runners and find stay allowed (#4658)', () => {
+  for (const c of CODE_ONE_SHOTS) assert.deepEqual(seat(c), {}, c);
+});
+
+test('the one-shot code and runner reading stays linear (#4658)', () => {
+  for (const long of ['python -c "' + 'os.system( '.repeat(8000) + '"', 'node -e "' + 'spawn('.padEnd(100000, ' ') + '"',
+    'npx ' + '--yes '.repeat(20000) + 'tsc', 'find . ' + '-exec echo x \\; '.repeat(4000)]) {
+    const t0 = Date.now();
+    seat(long);
+    assert.ok(Date.now() - t0 < 3000, `${long.slice(0, 40)}: ${Date.now() - t0} ms`);
+  }
+});
+
 test('update_plan is allowed; view_image is a read with the secret rule; spawn_agent stays denied (#4626)', () => {
   const b = { CB_ROLE: 'builder', CB_AGENT: 'codex' };
   assert.equal(run(call('update_plan', { plan: [{ step: 'x', status: 'pending' }] }), b).stdout, '{}');

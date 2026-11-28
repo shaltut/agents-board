@@ -636,6 +636,13 @@ review), and fails closed where it cannot read it:
   do git's interactive modes (`add -p`, `add -i`, `checkout -p`, `rebase -i`, `clean -i`, `commit --interactive`) and
   `crontab -e`.
 - grep, sed, head, tail and cut given a file read that file, not the input (`grep foo file | awk` passes).
+- A package runner or `find -exec` is judged by the command it starts (`npx node`, `pnpm exec bash`, `npm exec -- python`,
+  `uv run python`, `find . -exec bash \;` are sessions; `npx tsc` and `find . -exec bash {} \;` pass) (#4658).
+- A one-shot whose code opens a session counts: `python -m code` or `-m pdb`, `pty.spawn`, `code.interact`,
+  `breakpoint()`, Node's `require('repl')`, `binding.irb`, and a call that starts a bare shell (`exec "/bin/sh"`,
+  `os.system('cmd')`, `spawnSync('bash', {stdio: 'inherit'})`; `os.system('sh build.sh')` passes). This reads only the
+  literal spellings. Code that builds the names gets past it; `--disable unified_exec_tty` is what stops a seat typing
+  into a process.
 
 Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
 handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every
