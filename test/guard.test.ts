@@ -1885,7 +1885,10 @@ test('#4803: a redirect target is read to its end however it nests, and one that
   }
   // what the guard cannot place is refused, with no role too: the command behind it cannot be found
   const refused = (command: string) => { for (const role of ['builder', null]) assert.notEqual(judged4803(command, role), 'allow', `${role}: ${command}`); };
-  ['>$(case $x in a) echo f;; esac) sudo codex', '>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(echo # )\n) sudo codex', '>$(echo log;# )\n) sudo codex'].forEach(refused);
+  ['>$(case $x in a) echo f;; esac) sudo codex', '>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(echo log;# )\n) sudo codex'].forEach(refused);
+  // a comment the guard can blank leaves a target it can place, so the command behind it is judged by the usual rules
+  assert.equal(judged4803('>$(echo # )\n) sudo codex'), 'role');
+  assert.equal(judged4803('>$(echo # )\n) git push --force origin main', null), 'dangerous');
   // a shell script a seat runs is held to the same; another language's file is not shell text, so its quotes mean nothing here
   const ran = (path: string, text: string) => judged4803(`./${path} now`, 'builder', { readScript: (p: string) => (p.endsWith(path) ? text : null) });
   const oddQuotes = "// it's here\nif (a > b) x = '<p>'\n";
@@ -1900,7 +1903,9 @@ test('#4803: a redirect target is read to its end however it nests, and one that
     '"C:/Program Files/Git/bin/bash.exe" -c', 'bash -ce', 'bash -c -x', 'eval --', `bash --rcfile /opt/${'long-folder/'.repeat(12)}rc -c`]) {
     refused(`${shell} '>$(case a in a) echo log;; esac) sudo codex'`);
   }
-  // a file or folder whose name has case next to a dot is no case statement
+});
+
+test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
