@@ -90,7 +90,9 @@ function bashReader(text) {
     low: 0, // the fewest open since the caller last set it
     unchecked: 0,
     unsure: false,
-    starts: new Set([0]), // #4834: where a command may start, as read: after a ; & | ( or line break that no quote holds
+    // #4834: 1 where a command may start, as read: after a ; & | ( or line break that no quote holds. One byte a
+    // character: a Set grew faster than the text on a long run of ;
+    starts: new Uint8Array(text.length + 1).fill(1, 0, 1),
     at: () => i,
     skip(to) { i = to; },
     read(to) {
@@ -104,7 +106,7 @@ function bashReader(text) {
         if (c === '$') {
           const d = text[i + 1];
           if (d === '(') {
-            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; r.starts.add(i); continue;
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; r.starts[i] = 1; continue;
           }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
@@ -147,7 +149,7 @@ function bashReader(text) {
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
         else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
-        if (c === ';' || c === '&' || c === '|' || c === '(' || c === '\n') r.starts.add(i);
+        if (c === ';' || c === '&' || c === '|' || c === '(' || c === '\n') r.starts[i] = 1;
       }
     },
   };
@@ -219,7 +221,7 @@ function replaceHeredocs(text, fn, docs = []) { // docs: filled with the heredoc
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
     out += text.slice(pos, s);
-    const kept = fn(text.slice(s, found.end), line, found.id, (o) => bash.starts.has(s + o));
+    const kept = fn(text.slice(s, found.end), line, found.id, (o) => bash.starts[s + o] === 1);
     const base = out.length - s;
     docs.push({ at: base + found.at, header: found.header, nl: base + nl, end: out.length + kept.length, lost: bash.unsure });
     out += kept;
