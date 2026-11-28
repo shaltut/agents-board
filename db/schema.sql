@@ -7527,6 +7527,100 @@ begin
   return jsonb_build_object('covers', cb.schema_covers(need), 'current', cb.schema_applied() ->> 'current');
 end $$;
 
+-- ===========================================================================
+-- Worker keys (#3222 S2): what a machine signs in to the worker API with (server/worker.ts). One kind each, and at
+-- most two live ones per machine and kind, so a new one is installed before the old one is revoked. Only the sha256 of
+-- the secret is stored. key_issue returns the key once; the board's history gets its id alone.
+-- ===========================================================================
+drop function if exists cb.key_issue cascade;
+drop function if exists cb.key_check cascade;
+drop function if exists cb.key_revoke cascade;
+drop function if exists cb.keys_list cascade;
+drop function if exists cb._actor_ok cascade;
+
+create table if not exists cb.worker_keys (
+  id             text primary key,
+  kind           text not null check (kind in ('machine', 'runner', 'supervisor')),
+  machine        text not null,
+  runner         text,
+  hash           bytea not null,
+  created_at     timestamptz not null default now(),
+  created_by     text not null,
+  last_used_at   timestamptz,
+  last_used_from text,
+  revoked_at     timestamptz,
+  revoked_by     text,
+  note           text
+);
+-- every write through the API names the key it came with (the API sets cb.client for its transaction)
+alter table cb.events add column if not exists client text default nullif(current_setting('cb.client', true), '');
+
+create function cb.key_issue(machine text, kind text, runner text default null, note text default null, actor text default 'ahmed')
+returns text language plpgsql as $$
+#variable_conflict use_variable
+declare m text := lower(trim(coalesce(machine, ''))); r text := nullif(trim(runner), ''); kid text; secret text;
+begin
+  perform cb.dashboard_only('Workers');
+  if m !~ '^[a-z0-9][a-z0-9._-]{0,62}$' then
+    raise exception 'machine: the name the board knows the machine by (its CB_MACHINE, else its hostname)';
+  end if;
+  if kind is null or kind not in ('machine', 'runner', 'supervisor') then raise exception 'kind: machine, runner or supervisor'; end if;
+  if (kind = 'runner') <> (r is not null) then raise exception 'a runner key names its runner, and no other key does'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('cb.worker_keys ' || m || ' ' || kind, 0));
+  if (select count(*) from cb.worker_keys k where k.machine = m and k.kind = kind and k.revoked_at is null) >= 2 then
+    raise exception '% already has 2 live % keys: revoke one first (cb.keys_list, cb.key_revoke)', m, kind;
+  end if;
+  kid := encode(public.gen_random_bytes(5), 'hex');
+  secret := rtrim(translate(encode(public.gen_random_bytes(32), 'base64'), '+/', '-_'), '=');
+  insert into cb.worker_keys (id, kind, machine, runner, hash, created_by, note)
+  values (kid, kind, m, r, sha256(convert_to(secret, 'UTF8')), cb.set_actor(actor), note);
+  insert into cb.events (actor, kind, summary, data)
+  values (cb.set_actor(actor), 'note', format('worker key %s issued: %s key for %s', kid, kind, m), jsonb_build_object('key', kid));
+  return 'cbk1_' || kid || '_' || secret;
+end $$;
+
+-- Who a key is: its kind, machine and runner. 28000 for an unknown or revoked one. When and from where it was used is
+-- kept to the minute, and never waited for: a long call must not hold up the key's other calls.
+create function cb.key_check(id text, hash bytea, from_addr text default null) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare k cb.worker_keys;
+begin
+  select * into k from cb.worker_keys w where w.id = id and w.revoked_at is null;
+  if not found or k.hash is distinct from hash then
+    raise exception 'unknown or revoked worker key' using errcode = '28000';
+  end if;
+  if k.last_used_at is null or k.last_used_at < now() - interval '1 minute' then
+    update cb.worker_keys w set last_used_at = now(), last_used_from = from_addr
+     where w.id = (select s.id from cb.worker_keys s where s.id = k.id for update skip locked);
+  end if;
+  return jsonb_build_object('kind', k.kind, 'machine', k.machine, 'runner', k.runner);
+end $$;
+
+create function cb.key_revoke(id text, actor text default 'ahmed') returns void language plpgsql as $$
+#variable_conflict use_variable
+declare k cb.worker_keys;
+begin
+  perform cb.dashboard_only('Workers');
+  update cb.worker_keys w set revoked_at = now(), revoked_by = cb.set_actor(actor)
+   where w.id = id and w.revoked_at is null returning * into k;
+  if not found then raise exception 'no live worker key % (cb.keys_list)', id; end if;
+  insert into cb.events (actor, kind, summary, data)
+  values (cb.set_actor(actor), 'note', format('worker key %s revoked: %s key for %s', k.id, k.kind, k.machine), jsonb_build_object('key', k.id));
+end $$;
+
+create function cb.keys_list() returns jsonb language sql stable as $$
+  select coalesce(jsonb_agg(to_jsonb(k) - 'hash' order by k.created_at, k.id), '[]') from cb.worker_keys k
+$$;
+
+-- The names a key may write as: a machine's key its own seats (name@machine, never the owner), the supervisor's key the
+-- supervisor. A runner's key writes under no name yet (S4 says which).
+create function cb._actor_ok(kind text, machine text, actor text) returns boolean language sql immutable as $$
+  select coalesce(case kind
+    when 'machine' then actor ~ '^[^\s@]+@[^\s@]+$' and split_part(actor, '@', 2) = machine and not cb.ahmed_like(actor)
+    when 'supervisor' then actor = 'supervisor'
+  end, false)
+$$;
+
 -- ---------------------------------------------------------------- The runner's and cb triage's own SQL (#3222 S1c)
 drop function if exists cb.runner_settings cascade;
 drop function if exists cb.jobs_cancelled cascade;

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { call } from '../cli/board.ts';
+import { OPS } from '../server/ops.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -29,6 +30,20 @@ test('inbox_ping returns what inbox returns and sends the pane\'s ping, built on
   assert.deepEqual(Object.keys(i).sort(), Object.keys(plain).sort());
   for (const end = Date.now() + 5000; !heard.includes('ping:pc:p1#7') && Date.now() < end;) await new Promise((r) => setTimeout(r, 25));
   assert.ok(heard.includes('ping:pc:p1#7'), `heard ${JSON.stringify(heard)}`);
+});
+
+// the worker API binds a write to the key by its machine or its actor argument (server/worker.ts bind): one with neither
+// would let any key write for any seat, so it must not be served
+test('every function of this slice that writes and that a key may call names a machine or an actor', async () => {
+  const sql = await board();
+  const mine = ['ask_delivered', 'broadcast_seen', 'inbox_ping', 'job_add', 'job_cancel', 'job_get', 'job_hold', 'job_log_url',
+    'job_move', 'job_retry', 'jobs_ended', 'jobs_list', 'refusal_targets', 'relay_hold', 'resume_for_pane', 'schema_check',
+    'seat_code', 'seat_model', 'stage_words_for', 'usage_report', 'usage_summary', 'work_still_open'];
+  const writes = await sql`select p.proname, coalesce(p.proargnames, '{}') as args from pg_proc p
+    where p.pronamespace = 'cb'::regnamespace and p.provolatile = 'v' and p.proname = any(${mine}::text[])`;
+  const unbound = writes.filter((f: any) => !f.args.includes('machine') && !f.args.includes('actor')).map((f: any) => f.proname);
+  assert.deepEqual(unbound, ['ask_delivered']);
+  assert.deepEqual(unbound.filter((fn: string) => OPS[fn]!.kinds.length), []);
 });
 
 test('work_still_open takes its card numbers through call(), as an array', async () => {

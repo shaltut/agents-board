@@ -11,6 +11,7 @@ import { call, useBoard } from './board.ts';
 import { tick, dur, noRelayWhy, NO_RELAY_FIX } from './tick.ts';
 import { sql as direct, databaseUrl, machine, dotenv } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
+import { keyCmd } from './key.ts';
 import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './connect-retry.ts';
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
@@ -101,7 +102,7 @@ let sql: any = direct;
 // stale worker and while the database is down (cb update reads the board's schema once, directly, before installing)
 // The manual (cb, cb help) too: it is compiled in, so it never asks who this pane is (#4755)
 const manual = cmd === undefined || cmd === 'help';
-const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
+const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults' || cmd === 'key';
 if (pane && !process.env.PGAPPNAME && !offline && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
@@ -899,6 +900,7 @@ ${body}`, json: pg };
     }
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
+    case 'key': return keyCmd(args); // #3222 S3: this machine's board key; never the database
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>

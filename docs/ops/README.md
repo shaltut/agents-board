@@ -43,6 +43,12 @@ his PC and MacBook and the people he shares it with all use one board.
   - the **Telegram bot** (`server/telegram.ts`): pushes Ahmed's open questions, takes his answers;
   - the **GitHub watch** (`server/github.ts`): every 3 minutes, `gh api` for each repo `cb github` lists; one card per
     PR, one short message per poll to orch. GitHub text is always marked untrusted.
+- **The worker API** (`server/worker.ts`, `/w/v1` on the same server, #3222; no worker uses it yet): what workers will
+  call instead of Postgres. `GET /w/v1/hello`; `POST /w/v1/call/<function>` with `{"args": {...}}`, for the functions
+  `server/ops.ts` lists for the key's kind (anything else is 404, code `42883`); `GET /w/v1/events?ch=<channel>`,
+  server-sent events (a machine key: `cb`, and `cb_bind` for its own panes; a runner key: `cb_jobs`) with a ping every
+  25 s. A time or bytes in a result, or in a row's own column, arrives as `{"$date": ...}` or `{"$bytes": ...}`.
+  A 503 with `"never_ran": true` means the call never ran and is safe to send again; no other failure says so.
 - **The `cb` CLI** (`cli/cb.ts`, `cb help`): how sessions use the board. It talks to Postgres directly
   (`CB_DATABASE_URL`), so it runs on the worker machines, not on the VPS.
 - **The relay** (`cli/relay.ts`): one per session, started by the SessionStart hook; LISTENs and pushes answers and
@@ -75,6 +81,19 @@ Postgres listens only on the VPS's Tailscale address.
 **Sessions are named, not authenticated.** A session's actor is `W3@macbook`, `orch@shaltoot` and so on. Only a
 signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ahmed`.
 
+**Worker keys** (the worker API only). A key is `cbk1_<id>_<secret>`, made for one machine and one kind (`machine`,
+`runner`, `supervisor`), at most two live per machine and kind. The board stores only the sha256 of the secret
+(`cb.worker_keys`). A machine key:
+
+- calls only the listed functions, never the owner's: no answering, no users or sign-ins, no GitHub watch settings, no
+  typing into a session, no project states, no keys;
+- writes only as `name@<its machine>`, never as `ahmed`, and for its own machine; each of its events carries the key's
+  id (`cb.events.client`);
+- **reads the whole board**: a read may name any session or project. `reply_to` (where an answer is delivered) is the
+  caller's own text, as it is today.
+
+A runner key and a supervisor key can call nothing yet.
+
 ## Security, in one place
 
 - Passwords: bcrypt (pgcrypto, cost 10), at least 8 characters. The cookie `cb_user` is HttpOnly, SameSite=Lax, and
@@ -82,6 +101,12 @@ signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ah
   pair for 2 minutes (the address is the last X-Forwarded-For hop, the one the proxy adds; `cf-connecting-ip` only
   with `CB_BEHIND_CLOUDFLARE=1`, since a client reaching nginx directly could send it).
 - CSRF: a POST whose `Origin` is not the board's own `Host` is refused. The proxy must pass `Host` through unchanged.
+- **A board key (a worker key) is never logged, printed, copied or put in an error.** `cb.key_issue` returns it once,
+  to the owner. Under `/w` only that key signs a request in: no cookie, link or local trust does, and no CSRF check
+  applies, since a browser never sends the key by itself. Each key gets 1200 requests a minute (`CB_API_RATE`); a
+  failed sign-in is not counted (the secret is 32 random bytes). A request is 1 MB at most (32 MB for a question with
+  pictures), a call 30 s. The board logs one line per request: key id, function, status, time, and for a 5xx the
+  error's code; never an argument, a result or an error's text.
 - An admin's token (their cookie) is never shown or sent anywhere; a member's link is their token, shown only on the
   Users page, to admins.
 - The server trusts "plainly local" requests only on Ahmed's PC (HOST on loopback, no proxy headers). In the container
