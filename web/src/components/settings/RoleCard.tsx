@@ -3,18 +3,21 @@ import { Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
-  CLAUDE_MODELS, REPO_BOUND, agentLabel, homeRepo, isMulti, machineLabel, modelLabel, modelProblem, patchRole, plural, roleLabel,
+  CLAUDE_MODELS, REPO_BOUND, agentLabel, effortChoices, homeRepo, machineModels, isMulti, machineLabel, modelLabel, modelProblem, patchRole, plural, roleLabel,
   seatCount, seatEffort, seatKeyLabel, seatName, seatNote, setCount, setRoleOn, setupLabel,
-  type Fallback, type Role, type Seat, type Squad, type SquadOptions,
+  type Fallback, type ModelList, type Role, type Seat, type Squad, type SquadOptions,
 } from '@/lib/squad'
 import { NativeSelect, Problems, Stepper } from './bits'
 
-/** A model field: Claude's four names in a list; another agent's model typed freely, with the names already used offered
- *  as buttons that replace the value. Never a native datalist: selecting a second suggestion appended it to the first
- *  with no separator (#4717). */
-export function ModelField({ agent, value, onChange, label, options }: {
-  agent: string; value: string; onChange: (m: string) => void; label: string; options: SquadOptions
+const OTHER = '__other__' // never a model name: no agent's shape starts with an underscore
+
+/** A model field. Claude: its four names. Another agent: the list the seat's machine sent, with Other for a name typed by
+ *  hand; with no list, typed freely, with the names already used offered as buttons that replace the value. Never a native
+ *  datalist: selecting a second suggestion appended it to the first with no separator (#4717). */
+export function ModelField({ agent, value, onChange, label, options, list }: {
+  agent: string; value: string; onChange: (m: string) => void; label: string; options: SquadOptions; list: ModelList | null
 }) {
+  const [other, setOther] = useState(false)
   if (agent === 'claude') {
     return (
       <NativeSelect label={label} value={value} onChange={onChange}>
@@ -23,11 +26,22 @@ export function ModelField({ agent, value, onChange, label, options }: {
       </NativeSelect>
     )
   }
-  const used = options.models_used[agent] ?? []
+  const listed = !!list?.models.some((m) => m.id === value)
+  const typed = !list || other || (!!value && !listed)
+  const used = list ? [] : options.models_used[agent] ?? []
   return (
     <>
-      <Input aria-label={label} value={value} onChange={(e) => onChange(e.target.value.trim())} spellCheck={false}
-        placeholder={agent === 'opencode' ? 'provider/model' : 'model name'} className="h-8 w-48 font-mono text-xs" />
+      {list && (
+        <NativeSelect label={label} value={typed ? OTHER : value} onChange={(m) => { setOther(m === OTHER); onChange(m === OTHER ? '' : m) }}>
+          {!typed && !listed && <option value="">Pick a model</option>}
+          {list.models.map((m) => <option key={m.id} value={m.id}>{m.id}</option>)}
+          <option value={OTHER}>Other…</option>
+        </NativeSelect>
+      )}
+      {typed && (
+        <Input aria-label={list ? `${label}, typed` : label} value={value} onChange={(e) => onChange(e.target.value.trim())} spellCheck={false}
+          placeholder={agent === 'opencode' ? 'provider/model' : 'model name'} className="h-8 w-48 font-mono text-xs" />
+      )}
       {used.length > 0 && (
         <span className="inline-flex flex-wrap gap-1" aria-label={`Models already used for ${label}`}>
           {used.map((m) => (
@@ -56,10 +70,10 @@ function AgentField({ value, onChange, label, options, backup }: {
 
 /** How hard the agent thinks, from the levels that agent takes at start; the first choice leaves it to the agent. An
  *  agent that takes none gets a line of text instead of a list. */
-function EffortField({ agent, value, onChange, label, options }: {
-  agent: string; value: string; onChange: (e: string | undefined) => void; label: string; options: SquadOptions
+function EffortField({ agent, model, list, value, onChange, label, options }: {
+  agent: string; model: string; list: ModelList | null; value: string; onChange: (e: string | undefined) => void; label: string; options: SquadOptions
 }) {
-  const levels = options.efforts[agent] ?? []
+  const levels = effortChoices(options, agent, list, model, value || undefined)
   if (levels.length === 0) return <span className="text-[13px] text-muted-foreground">{agentLabel(agent)} takes no effort setting.</span>
   return (
     <NativeSelect label={label} value={value} onChange={(e) => onChange(e || undefined)}>
@@ -70,8 +84,9 @@ function EffortField({ agent, value, onChange, label, options }: {
 }
 
 /** Backups a seat moves to if its agent stops (nothing switches to one yet: it is carried on each start). */
-function Backups({ list, onChange, own, options, label }: {
+function Backups({ list, onChange, own, options, label, modelsOf }: {
   list: Fallback[]; onChange: (l: Fallback[] | undefined) => void; own: Fallback; options: SquadOptions; label: string
+  modelsOf: (agent: string) => ModelList | null
 }) {
   const [agent, setAgent] = useState('codex')
   const [model, setModel] = useState('')
@@ -96,8 +111,8 @@ function Backups({ list, onChange, own, options, label }: {
       {list.length < max && (
         <div className="flex flex-wrap items-center gap-2">
           <AgentField value={agent} onChange={(a) => { setAgent(a); setModel(a === 'claude' ? 'sonnet' : ''); setEffort(undefined) }} label={`Backup agent for ${label}`} options={options} backup />
-          <ModelField agent={agent} value={model} onChange={setModel} label={`Backup model for ${label}`} options={options} />
-          <EffortField agent={agent} value={effort ?? ''} onChange={setEffort} label={`Backup effort for ${label}`} options={options} />
+          <ModelField key={agent} agent={agent} list={modelsOf(agent)} value={model} onChange={setModel} label={`Backup model for ${label}`} options={options} />
+          <EffortField agent={agent} model={model} list={modelsOf(agent)} value={effort ?? ''} onChange={setEffort} label={`Backup effort for ${label}`} options={options} />
           <Button variant="outline" size="sm" disabled={!model || !!problem || dup}
             onClick={() => { onChange([...list, { agent, model, ...(effort ? { effort } : {}) }]); setModel(agent === 'claude' ? 'sonnet' : ''); setEffort(undefined) }}><Plus /> Add a backup</Button>
           {model && problem && <span className="w-full text-[13px] text-destructive">{problem}</span>}
@@ -121,6 +136,9 @@ export function RoleCard({ role, squad, options, seats, supervised, problems, ed
   const notes = live.flatMap((s) => { const n = seatNote(s, squad, supervised); return n ? [{ actor: s.actor, n }] : [] })
   const multi = isMulti(squad)
   const agent = spec?.agent ?? 'claude'
+  const modelsOf = (a: string) => (spec ? machineModels(options, spec.machine, squad.machines[spec.machine], a) : null)
+  const models = modelsOf(agent)
+  const machineName = spec && squad.machines[spec.machine] ? machineLabel(squad.machines[spec.machine], spec.machine) : 'This machine'
 
   return (
     <li className="flex min-w-0 flex-col gap-3 rounded-lg border bg-card p-4">
@@ -162,11 +180,17 @@ export function RoleCard({ role, squad, options, seats, supervised, problems, ed
           <div className="flex flex-wrap items-center gap-2">
             <span className="w-16 text-xs text-muted-foreground">Runs</span>
             <AgentField value={agent} onChange={(a) => edit((s) => patchRole(s, role, { agent: a }, defaults))} label={`Agent for ${name}`} options={options} />
-            <ModelField agent={agent} value={spec.model ?? ''} onChange={(m) => edit((s) => patchRole(s, role, { model: m }, defaults))} label={`Model for ${name}`} options={options} />
-            <EffortField agent={agent} value={spec.effort ?? ''} onChange={(v) => edit((s) => patchRole(s, role, { effort: v }, defaults))} label={`Effort for ${name}`} options={options} />
+            <ModelField key={`${agent}-${spec.machine}`} agent={agent} list={models} value={spec.model ?? ''} onChange={(m) => edit((s) => patchRole(s, role, { model: m }, defaults))} label={`Model for ${name}`} options={options} />
+            <EffortField agent={agent} model={spec.model ?? ''} list={models} value={spec.effort ?? ''} onChange={(v) => edit((s) => patchRole(s, role, { effort: v }, defaults))} label={`Effort for ${name}`} options={options} />
           </div>
           {agent !== 'claude' && <p className="text-[13px] text-muted-foreground">Starts only on machines where its tool check has been confirmed.</p>}
-          <Backups list={spec.fallback ?? []} own={{ agent, model: spec.model ?? '' }} options={options} label={name}
+          {agent !== 'claude' && (
+            <p className="text-[13px] text-muted-foreground">
+              {models ? `The list is what ${agentLabel(agent)} offered on ${machineName} on ${models.at.slice(0, 10)}. To refresh it, run cb models report there.`
+                : `${machineName} has not sent its ${agentLabel(agent)} models yet. Run cb models report there to get a list to pick from.`}
+            </p>
+          )}
+          <Backups list={spec.fallback ?? []} own={{ agent, model: spec.model ?? '' }} options={options} label={name} modelsOf={modelsOf}
             onChange={(l) => edit((s) => patchRole(s, role, { fallback: l }, defaults))} />
           {spec.seats && Object.keys(spec.seats).length > 0 && (
             <div className="space-y-1">

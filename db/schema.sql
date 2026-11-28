@@ -38,6 +38,17 @@ alter table cb.projects add column if not exists state text not null default 'en
 alter table cb.projects add column if not exists state_by text;
 alter table cb.projects add column if not exists state_at timestamptz;
 select cb._ensure_check('cb.projects', 'projects_state_check', $c$state in ('enabled', 'disabled', 'archived')$c$);
+
+-- #4763: the model names one machine's agent CLI listed when it last sent them (cb models report). The settings page
+-- offers the chosen machine's list; squad_set does not depend on it, so a model typed by hand still saves.
+create table if not exists cb.machine_models (
+  machine     text not null,
+  agent       text not null,
+  models      jsonb not null,
+  reported_at timestamptz not null default now(),
+  reported_by text not null,
+  primary key (machine, agent)
+);
 -- one-time: a project archived by hand before #4559 is archived. Once a state was set (state_at), archived follows it,
 -- so a re-run never archives a project Ahmed enabled again.
 update cb.projects set state = 'archived', state_at = now(), state_by = 'board' where archived and state = 'enabled' and state_at is null;
@@ -5128,6 +5139,7 @@ drop function if exists cb._repo_list cascade;
 drop function if exists cb._check_model cascade;
 drop function if exists cb._efforts cascade;
 drop function if exists cb._check_effort cascade;
+drop function if exists cb.machine_models_set cascade;
 drop function if exists cb._models_used cascade;
 drop function if exists cb._check_seat cascade;
 drop function if exists cb._agents_main cascade;
@@ -5321,6 +5333,43 @@ begin
   end if;
   return jsonb_strip_nulls(jsonb_build_object('agent', nullif(a, ag), 'model', case when spec ? 'model' then m end,
                                               'effort', spec->'effort', 'fallback', nullif(fb, '[]')));
+end $$;
+
+-- One machine's model lists (#4763): {"codex"|"opencode"|"agy": [{"id", "efforts"?}]}, as its CLIs printed them. That is
+-- outside text: only a name of the agent's own shape is kept, once, in the CLI's order, with the efforts the agent takes.
+-- A list with no name kept leaves the one saved before. Returns how many were kept per agent.
+create function cb.machine_models_set(machine text, lists jsonb, actor text) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare m text := lower(trim(coalesce(machine, ''))); r record; kept jsonb; shape text; res jsonb := '{}';
+begin
+  if coalesce(trim(actor), '') = '' then raise exception 'actor is required'; end if;
+  perform cb.not_ahmed(actor);
+  if m !~ '^[a-z0-9][a-z0-9._-]{0,63}$' then
+    raise exception 'machine must be a machine name (letters, digits, . _ -, at most 64): give it with --machine';
+  end if;
+  if jsonb_typeof(lists) is distinct from 'object' or lists = '{}' then raise exception 'no model list given'; end if;
+  for r in select * from jsonb_each(lists) loop
+    shape := case r.key when 'codex' then '^[a-z0-9][a-z0-9._-]{0,63}$'
+                        when 'opencode' then '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$'
+                        when 'agy' then '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' end;
+    if shape is null then raise exception 'a model list is for codex, opencode or agy (got %)', r.key; end if;
+    -- an if, not OR: jsonb_array_length errors on a non-array
+    if jsonb_typeof(r.value) is distinct from 'array' then raise exception '% models must be a list of at most 500', r.key; end if;
+    if jsonb_array_length(r.value) > 500 then raise exception '% models must be a list of at most 500', r.key; end if;
+    select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('id', d.v->>'id', 'efforts',
+             (select jsonb_agg(l.x order by l.n) from jsonb_array_elements_text(cb._efforts()->r.key) with ordinality l(x, n)
+               where jsonb_typeof(d.v->'efforts') = 'array' and (d.v->'efforts') ? l.x))) order by d.n), '[]')
+      into kept
+      from (select distinct on (e.v->>'id') e.v, e.n from jsonb_array_elements(r.value) with ordinality e(v, n)
+             where jsonb_typeof(e.v->'id') = 'string' and e.v->>'id' ~ shape and e.v->>'id' not in ('opus', 'sonnet', 'haiku', 'fable')
+             order by e.v->>'id', e.n) d;
+    res := res || jsonb_build_object(r.key, jsonb_array_length(kept));
+    if kept <> '[]' then
+      insert into cb.machine_models as mm (machine, agent, models, reported_by) values (m, r.key, kept, actor)
+        on conflict on constraint machine_models_pkey do update set models = excluded.models, reported_at = now(), reported_by = excluded.reported_by;
+    end if;
+  end loop;
+  return res;
 end $$;
 
 -- Validate, complete (areas always there, every model filled) and save. Ahmed (dashboard) or the lead only.
@@ -5633,6 +5682,9 @@ create function cb.squad_options() returns jsonb language sql stable as $$
                  from unnest(array['claude', 'codex', 'opencode', 'agy']) with ordinality u(g, n)),
     'claude_models', to_jsonb(array['opus', 'sonnet', 'haiku', 'fable']),
     'efforts', cb._efforts(),
+    'machine_models', coalesce((select jsonb_object_agg(z.machine, z.agents) from
+                        (select mm.machine, jsonb_object_agg(mm.agent, jsonb_build_object('models', mm.models, 'at', mm.reported_at)) as agents
+                           from cb.machine_models mm group by mm.machine) z), '{}'),
     'default_models', (select jsonb_object_agg(x, cb._role_model(x)) from unnest(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']) x),
     'limits', jsonb_build_object('count_min', 1, 'count_max', 8, 'lead_count', 1, 'macbook_seats', 8, 'fallbacks', 5,
                                  'session_name', 32, 'protected', 30, 'protected_length', 100, 'workspace_length', 64),
