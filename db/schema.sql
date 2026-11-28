@@ -3724,6 +3724,7 @@ drop function if exists cb._agent cascade;
 drop function if exists cb._squad_lacks cascade;
 drop function if exists cb._for_agents cascade;
 drop function if exists cb._for_skipped cascade;
+drop function if exists cb._review_words cascade;
 drop function if exists cb._agents_words cascade;
 drop function if exists cb._kept cascade;
 drop function if exists cb._for_fits cascade;
@@ -3823,6 +3824,16 @@ $$;
 create function cb._role(a text) returns text language sql stable as $$
   select coalesce((select s.role from cb.sessions s where s.actor = a order by s.last_seen desc limit 1),
                   case when a = 'orch' or a like 'orch@%' then 'lead' end)
+$$;
+
+-- #4744: without pipeline stages nothing hands a reviewer a review card (the board keeps no record of who built it), and
+-- cb pass and cb fail have no stage to move. What a reviewer there does instead (cb next, cb start, cb pass, cb fail); null
+-- for any other role, and for a project with stages or one that gets no work (cb._wait_words says that).
+create function cb._review_words(project text, a text) returns text language sql stable as $$
+  select case when cb._role(a) = 'reviewer' and cb._live($1) and not cb._pipeline($1)
+    then format('%s has no pipeline stages, so the board hands out no review there: the lead hands you pull requests (cb tell). '
+                || 'Put your GO or findings in cb log <card> "..." and in a PR comment, and tell the builder. Never cb done a card you reviewed', $1)
+  end
 $$;
 
 -- Is the actor the lead of this project (#3746): its latest session (the one cb._role reads) is bound to the project and
@@ -4008,7 +4019,9 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
+  if not cb._pipeline(t.project) then
+    raise exception '%', coalesce(cb._review_words(t.project, a), format('pipeline is off for %s: finish it with cb done %s', t.project, tid));
+  end if;
   if t.stage is null then raise exception '#% is not in the pipeline', tid; end if;
   if t.stage = 'approval' then
     select q.id into qid from cb.questions q where q.approval_for = tid and q.status in ('open', 'answered') order by q.id desc limit 1;
@@ -4130,7 +4143,9 @@ declare a text := cb.set_actor(actor); t cb.tasks%rowtype; tid bigint := cb.norm
 begin
   select * into t from cb.tasks x where x.id = tid for update;
   if not found then raise exception 'task #% not found', tid; end if;
-  if not cb._pipeline(t.project) then raise exception 'pipeline is off for %: finish it with cb done %', t.project, tid; end if;
+  if not cb._pipeline(t.project) then
+    raise exception '%', coalesce(cb._review_words(t.project, a), format('pipeline is off for %s: finish it with cb done %s', t.project, tid));
+  end if;
   if coalesce(trim(why), '') = '' then raise exception 'why is required: say in one line what is wrong'; end if;
   if s is not null and s not in ('design', 'build') then raise exception 'to is design (default: build)'; end if;
   select string_agg(p.repo, ', ' order by array_position(t.repos, p.repo), p.repo) into parts from cb.task_parts p where p.task_id = tid;

@@ -364,6 +364,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
       '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
     return done();
   }
+  const [review] = project ? await sql`select cb._review_words(${project}, ${actor}) as words`.catch(() => [null]) : [null];
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -376,6 +377,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
     out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
+  else if (review?.words) out.push(`  ${review.words}.`); // #4744
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return done();
@@ -830,6 +832,9 @@ ${body}`, json: pg };
         // board without the words (a rolled-back schema) still answers
         const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
         if (w?.words) return { out: w.words, json: null };
+        // #4744: a reviewer in a project without stages: the lead hands out its reviews, so say that, not "nothing"
+        const [v] = await sql`select cb._review_words(cb.resolve(${project}), ${actor}) as words`.catch(() => [null]);
+        if (v?.words) return { out: v.words, json: null };
         // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
         const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
         return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
