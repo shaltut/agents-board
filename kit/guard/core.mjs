@@ -631,8 +631,10 @@ function scannedName(raw, names) {
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
 // command (bash -c "...", ssh host '...') is read as a command too when quoted says so. Throws past
-// MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block).
-function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
+// MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block). isHit(w, name, i) says whether word i is one: by its name,
+// unless the caller reads more words as the command (gitOrFilled, #4815).
+const byName = (names) => (_w, name, i) => names.has(name[i]);
+function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names)) {
   const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
@@ -656,19 +658,20 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
   }
   for (const [k, { raw, name }] of segs.entries()) {
     const w = raw.map(unquote);
-    const hits = name.filter((n) => names.has(n)).length;
+    const found = w.map((_x, i) => isHit(w, name, i));
+    const hits = found.filter(Boolean).length;
     if (hits > MAX_COMMANDS_PER_SEGMENT) {
       throw new Error(`${hits} ${[...names].join('/')} commands in one command segment are more than the guard reads (${MAX_COMMANDS_PER_SEGMENT}): split the command`);
     }
     const isCommand = quoted(raw, w, name, piped[k]);
     for (let i = 0; i < w.length; i++) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
-        const inner = scanCommands(w[i], names, fn, quoted);
+        const inner = scanCommands(w[i], names, fn, quoted, isHit);
         if (inner) return inner;
       }
     }
     for (let i = 0; i < w.length; i++) {
-      if (!names.has(name[i])) continue;
+      if (!found[i]) continue;
       const hit = fn(w, i);
       if (hit) return hit;
     }
@@ -682,6 +685,31 @@ function gitSub(w, i) {
   while (j < w.length && w[j].startsWith('-')) j += GIT_OPT_ARG.has(w[j]) ? 2 : 1;
   return j;
 }
+// #4815: a command word the shell fills in ($G, "$GIT", ${GIT:-git}, %GIT%, & $git) can be git, and the push rules read
+// only the word git. It is read as git for those rules: when its subcommand is push, standing as the command or with
+// words after it (echo $HOME push is no push), or when the subcommand is filled in too and the word stands as the
+// command (that counts only if a protected branch is named later). Only git's own options may come between, as the
+// file fence reads such a word (filledWrites); past MAX_FILLED_OPTS of them the command is refused. Both walks are
+// bounded (the command position is looked for in the first FILLED_REACH words), so a long command stays linear.
+// The subcommand's index, or -1: not read as git (the word git itself, quoted or with a path, is gitSub's)
+const FILLED_REACH = 64;
+function filledGit(w, i) {
+  if (!isFilled(w[i]) || cmdName(w[i]) === 'git') return -1;
+  let j = i + 1;
+  for (let n = 0; j < w.length && w[j].startsWith('-'); n++) {
+    if (!GIT_GLOBAL_OPTS.has(w[j].split('=')[0]) && !/^-C./.test(w[j])) return -1;
+    if (n === MAX_FILLED_OPTS) throw new Error(`more git options than the guard reads after ${w[i].slice(0, 40)}, a command the shell fills in: write the command's own name`);
+    j += GIT_OPT_ARG.has(w[j]) ? 2 : 1;
+  }
+  const word = w[j];
+  if (word === undefined || (word !== 'push' && !isFilled(word) && !/[$`%]/.test(word))) return -1;
+  if (i < FILLED_REACH && isCommandWord(w, i)) return j;
+  return word === 'push' && w.length > j + 1 ? j : -1;
+}
+const gitOrFilled = (w, name, i) => GIT.has(name[i]) || filledGit(w, i) >= 0;
+// what the block adds for such a word, and the mark protectedPush puts on its branch so pushReason can add it
+const filledNote = (word) => ` (${word.slice(0, 40)} is filled in by the shell and read as git: write the command's own name)`;
+const FILLED_MARK = '\u0002';
 // a push's words (remote, then refspecs) and options, from the word after push
 function pushArgs(w, j) {
   const words = [], opts = [];
@@ -707,9 +735,7 @@ export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
   const text = unbrace(cmd); // #4661: once, for both scans
-  return scanCommands(text, GIT, (w, i) => {
-    const j = gitSub(w, i);
-    if (w[j] !== 'push') return subtreePush(w, j, hit); // #4661 S1
+  const pushed = (w, j) => {
     const { words, del } = pushArgs(w, j);
     // the shell fills in a $ word: the branch is unknown here. The remote too: an unquoted $R can split into two words
     const filled = words.find((x) => x.includes('$'));
@@ -723,11 +749,23 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  }) ?? hiddenPushes(text, hit, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
+  };
+  return scanCommands(text, GIT, (w, i) => {
+    const filled = filledGit(w, i); // #4815
+    const j = filled < 0 ? gitSub(w, i) : filled;
+    if (filled < 0) return w[j] === 'push' ? pushed(w, j) : subtreePush(w, j, hit); // #4661 S1
+    const named = w[j] === 'push' ? null : namesBranch(stopArgs(w.slice(j + 1)), hit); // the subcommand is filled in too
+    const branch = w[j] === 'push' ? pushed(w, j) : named && `${ALIAS_MARK}${w[j]}${ALIAS_MARK}${named}`;
+    return branch ? `${FILLED_MARK}${w[i]}${FILLED_MARK}${branch}` : null;
+  }, EVERY_QUOTED, gitOrFilled) ?? hiddenPushes(text, hit, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
 }
 
 // The block reason for a protectedPush hit.
 function pushReason(branch) {
+  if (branch.startsWith(FILLED_MARK)) { // #4815
+    const [, word, inner] = branch.split(FILLED_MARK);
+    return pushReason(inner) + filledNote(word);
+  }
   if (branch.startsWith(ALIAS_MARK)) return aliasReason(branch); // #4661
   return branch.includes('$')
     ? `git push to a branch the shell fills in (${branch}) while branches are protected: name the branch literally, e.g. git push -u origin feat/my-card`
@@ -2385,11 +2423,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
   const trust = squadTrustRun(command);
   if (trust) return trust;
   const readOnly = READ_ONLY_ROLES.includes(role);
-  const git = scanCommands(unbrace(command), GIT, (w, i) => {
-    const j = gitSub(w, i);
-    const hides = gitHides(w, i, j, role, command); // #4638: aliases, push and commit plumbing, a read-only role's git ci
-    if (hides) return hides;
-    if (w[j] !== 'push') return null;
+  const pushRules = (w, j) => {
     if (readOnly) return `git push: ${readsOnly(role)}`;
     const { words, opts, del } = pushArgs(w, j);
     if (opts.some((x) => FORCE_OPT.test(x)) || words.some((x) => x.startsWith('+'))) {
@@ -2400,7 +2434,15 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
     const head = words.slice(1).map((r) => destination(r, del)).find((d) => d === 'HEAD' || d === '@');
     if (head) return `git push to ${head} writes the current branch under its own name, maybe main: name the destination, e.g. git push origin HEAD:feat/my-card`;
     return null;
-  }, runnerArg);
+  };
+  const git = scanCommands(unbrace(command), GIT, (w, i) => {
+    const filled = filledGit(w, i); // #4815: only the push rules judge such a word
+    const j = filled < 0 ? gitSub(w, i) : filled;
+    const hides = filled < 0 ? gitHides(w, i, j, role, command) : null; // #4638: aliases, push and commit plumbing, a read-only role's git ci
+    if (hides) return hides;
+    const why = w[j] === 'push' ? pushRules(w, j) : null;
+    return why && filled >= 0 ? why + filledNote(w[i]) : why;
+  }, runnerArg, gitOrFilled);
   if (git) return git;
   const branch = protectedPush(command, ['main', 'master']);
   if (branch) return pushReason(branch);
