@@ -472,7 +472,13 @@ supervisor reach the board through its API with a per-machine key. **Every step 
     `deploy/.env` and `dc up -d board`: the board then reads `cf-connecting-ip`, which Cloudflare writes itself. Set the
     rule at the cloud provider's firewall (a `ufw` rule does not cover a port Docker publishes). It holds for every
     site on that proxy, so each must come through Cloudflare. A tunnel in place of the open ports does the same.
-  - Or stop the proxy reading `X-Real-IP` for the board's host, leave `CB_BEHIND_CLOUDFLARE=0`, and run the check again.
+  - Or, for the board's host only, have Nginx Proxy Manager read the header Cloudflare writes itself: in the proxy
+    host's **Advanced** box, `real_ip_header CF-Connecting-IP;`. Cloudflare overwrites whatever a client sends there,
+    and nginx believes it only from the ranges it trusts. Leave `CB_BEHIND_CLOUDFLARE=0`, then run the check again, with
+    `-H "CF-Connecting-IP: 192.0.2.123"` too: the log must show your own address both times (a request Cloudflare
+    refuses outright is a pass as well: it never reached the proxy). The limits then count per visitor. What is left:
+    the stock list also trusts CloudFront's ranges, so someone who sends crafted requests through CloudFront straight
+    to the server could still make addresses up. The first fix closes that.
 
   Never set `1` while anything but Cloudflare can reach those ports.
 - Every machine has its keys installed, and `cb key check` passes for each kind on each machine.

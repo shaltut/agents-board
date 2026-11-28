@@ -87,6 +87,9 @@ today `board.example.com` points at the PC's Cloudflare tunnel, and one hostname
      Block Common Exploits. Websockets Support can stay off (live updates are server-sent events; the board tells
      nginx not to buffer them). No Access List, and don't put Authelia in front: the board has its own sign-in, and
      members' links must open without another login.
+   - Advanced, when the DNS record is proxied by Cloudflare: `real_ip_header CF-Connecting-IP;`. Without it, NPM's
+     stock config lets a client choose the address the board counts failed sign-ins under
+     ([why, and how to check](maintain.md#cut-over-workers-off-the-database-3222-s7), "Before the day").
    - SSL: Request a new Let's Encrypt certificate; Force SSL; HTTP/2.
 4. **Check** (from anywhere): `curl -s https://board.example.com/healthz` says `{"ok":true}`; the address shows the
    login page.
