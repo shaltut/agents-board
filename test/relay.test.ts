@@ -1402,9 +1402,9 @@ test('a relay on a board without cb.inbox_ping says to deploy the board first, a
   rmSeat(pane);
   const inbox = fakeInbox(path, 'tok');
   await inbox.ready;
-  await sql`alter function cb.inbox_ping(text, text, bigint, text, bigint) rename to inbox_ping_later`;
   let relay: ReturnType<typeof spawn> | undefined;
   try {
+    await sql`alter function cb.inbox_ping(text, text, bigint, text, bigint) rename to inbox_ping_later`; // inside: a failure here must not leave the fake inbox open, which keeps the run alive
     await sql`select cb.ask(project => 'demo', body => 'Old board?', reply_to => ${sql.json({ machine: M, pane })}, actor => 'W9')`;
     writeClaudeEndpoint(M, pane, { socket: path, token: 'tok', sessionId: 'S1' });
     relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
