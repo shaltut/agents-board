@@ -92,7 +92,7 @@ test('projects: a guest sees and answers only what is assigned to them on their 
   assert.equal((await post('/api/rpc/answer', { id: mq, answer: 'yes' }, token)).status, 200);
 });
 
-test('login: name and password set the same cookie as the link; a wrong one waits and says nothing more', async () => {
+test('login: name and password sign a browser in with its own cookie; a wrong one waits and says nothing more', async () => {
   const { sql, token } = await setup();
   await sql`select cb.user_add('ana', 'Ana')`; // no password
   await sql`select cb.user_password('cai', 'correct horse', 'ahmed')`;
@@ -102,8 +102,10 @@ test('login: name and password set the same cookie as the link; a wrong one wait
 
   const ok = await post('/api/login', { name: ' Cai ', password: 'correct horse' });
   assert.equal(ok.status, 200);
-  assert.match(ok.headers.get('set-cookie') ?? '', new RegExp(`cb_user=${token};.*HttpOnly`, 'i'));
-  assert.deepEqual(await (await remote('/api/whoami', { cookie: token })).json(), { role: 'guest', user: { name: 'cai', display: 'Cai' } });
+  assert.match(ok.headers.get('set-cookie') ?? '', /cb_user=[0-9a-f-]{36};.*HttpOnly/i);
+  const cookie = /cb_user=([^;]+)/.exec(ok.headers.get('set-cookie')!)![1];
+  assert.notEqual(cookie, token, 'its own value, not the link (#4868: the link cannot be read back)');
+  assert.deepEqual(await (await remote('/api/whoami', { cookie })).json(), { role: 'guest', user: { name: 'cai', display: 'Cai' } });
 
   for (const [name, pw] of [['cai', 'wrong horse'], ['nobody', 'correct horse'], ['ana', ''], ['ana', 'anything at all']]) {
     const t0 = Date.now();
@@ -115,9 +117,10 @@ test('login: name and password set the same cookie as the link; a wrong one wait
   }
   assert.equal((await post('/api/login', {})).status, 401, 'garbage is a failure, not a crash');
 
-  const out = await post('/api/logout', {}, token);
+  const out = await post('/api/logout', {}, cookie);
   assert.equal(out.status, 200);
   assert.match(out.headers.get('set-cookie') ?? '', /cb_user=;.*Max-Age=0/i);
+  assert.deepEqual(await (await remote('/api/whoami', { cookie })).json(), { role: 'anonymous' }, 'that browser is signed out');
   assert.equal((await remote(`/?u=${token}`)).status, 302, 'the link still signs in with one click');
 });
 
