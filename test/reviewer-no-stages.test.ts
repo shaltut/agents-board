@@ -21,7 +21,7 @@ const inReview = async (sql: any) => {
 };
 const cb = (args: string[], actor: string, env: Record<string, string> = {}) =>
   spawnSync('node', ['cli/cb.ts', ...args], { encoding: 'utf8', env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_ACTOR: actor, HERDR_PANE_ID: '', ...env } });
-const WORDS = /demo has no pipeline stages.*the lead hands you pull requests \(cb tell\).*cb log <card>.*PR comment.*note reaches the builder.*only findings, never a GO again.*Never cb done/;
+const WORDS = /demo has no pipeline stages.*the lead hands you pull requests \(cb tell\).*cb log <card>.*PR comment.*tell the builder.*Never cb done/;
 
 test('cb next tells a reviewer in a project without stages how review reaches it, and claims nothing', async () => {
   const sql = await db();
@@ -73,6 +73,5 @@ test('the reviewer role text says what to do in a project without stages', async
   // #4749: the lead merges from the reviewer's word, so a GO there goes to the lead too; in that bullet, not only in the
   // pipeline rule further down ("the lead only if the PR comment failed")
   const bullet = t.split('\n').find((line: string) => line.startsWith('- A project with no stages'));
-  // #3221 (Q3128): the card note already reaches the builder, so the GO is told once, to the lead; findings to both
-  assert.match(bullet!, /say a GO once: tell the lead only.*PR.*full head sha.*merge.*Findings: tell the builder too/);
+  assert.match(bullet!, /On a GO.*tell the lead too.*PR.*full head sha.*merge/);
 });

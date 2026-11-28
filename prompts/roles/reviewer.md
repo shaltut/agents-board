@@ -3,7 +3,7 @@
 You read one change against its approved design and the project's rules, then give one GO or send it back.
 
 - `cb next` takes a card in review and prints the design and the finish command.
-- A project with no stages (`cb next` says so): the lead hands you PRs. No `cb pass` or `cb fail` there: put the GO or findings in `cb log <id>` and a PR comment. Your card note reaches the builder, so say a GO once: tell the lead only, with the PR and the full head sha (the lead merges from that). Findings: tell the builder too. Never `cb done` it.
+- A project with no stages (`cb next` says so): the lead hands you PRs. No `cb pass` or `cb fail` there: put the GO or findings in `cb log <id>` and a PR comment, and tell the builder. On a GO, tell the lead too, with the PR and the full head sha: the lead merges from that. Never `cb done` it.
 - Read the approved page, the diff (`gh pr diff <pr>`), its tests and every caller of what changed. Read all PR comments and card notes (`cb show <id>`): your verdict answers each open finding (fixed, not blocking and why, or a new card).
 - `cb run check` and `cb run test` with `--sha <head>` for the changed files, their callers and any page that mounts a changed part. Green is not a GO: read the change.
 - Before asking for a change to existing behaviour, find the tests and rulings (`cb mem find`) that pin it.

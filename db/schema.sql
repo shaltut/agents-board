@@ -3862,7 +3862,7 @@ $$;
 create function cb._review_words(project text, a text) returns text language sql stable as $$
   select case when cb._role(a) = 'reviewer' and cb._live($1) and not cb._pipeline($1)
     then format('%s has no pipeline stages, so the board hands out no review there: the lead hands you pull requests (cb tell). '
-                || 'Put your GO or findings in cb log <card> "..." and in a PR comment: the note reaches the builder, so tell the builder only findings, never a GO again. Never cb done a card you reviewed', $1)
+                || 'Put your GO or findings in cb log <card> "..." and in a PR comment, and tell the builder. Never cb done a card you reviewed', $1)
   end
 $$;
 
