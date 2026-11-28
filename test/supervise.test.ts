@@ -961,15 +961,21 @@ test('#4787: the switch on in a squad the supervisor does not run: told, never s
   assert.equal(await said(sql, /Nothing was switched or closed/), 1);
 });
 
-// #4806 supervises a squad with no stages, but a switch still needs them (cb._switching), as the checkbox says
-test('#4787: a supervised squad with no stages: told, never offered or given a switch', async () => {
-  const { sql, sup, h } = await switchSetup();
+// #4877 (Q3232): a squad #4806 supervises with no stages switches too
+test('#4877: a supervised squad with no stages: its quota-stopped seat moves to the backup and the lead is told', async () => {
+  const { sql, h, d } = await switchSetup();
   await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
-  const d = deps(sup, h.run);
-  const out = [...await tick(d), ...await tick(d)];
-  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0], out.join('\n'));
-  assert.deepEqual([await said(sql, /switches it to/), await said(sql, /Nothing was switched or closed/)], [0, 1]);
-  assert.ok(!out.some((l) => l.startsWith('skip closing')), out.join('\n'));
+  await tick(d);
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0], 'one sighting closes nothing');
+  assert.deepEqual([await said(sql, /next check.*switches it to haiku/), await said(sql, /Nothing was switched or closed/)], [1, 0]);
+  const out = await tick(d);
+  assert.deepEqual(exits(h.calls), ['sv-b1-macbook'], out.join('\n'));
+  const [start] = starts(h.calls);
+  assert.ok(start && start.args.join(' ').includes('--model haiku'), out.join('\n'));
+  assert.equal(await holder(sql), 'sv-B1@macbook', 'the card stays its');
+  assert.deepEqual((await events(sql, 'switch')).map((e: any) => [e.data.session, e.data.note]), [['sv-B1@macbook', 'sonnet to haiku']]);
+  assert.equal((await sql`select model from cb.seat_backups where actor = 'sv-B1@macbook'`)[0].model, 'haiku');
+  assert.equal(await said(sql, /switched sv-B1@macbook from sonnet to haiku/), 1);
 });
 
 test("#4787: quota words that are not in the CLI's banner spot are told, never switched", async () => {
