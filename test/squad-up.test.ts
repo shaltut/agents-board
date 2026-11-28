@@ -6,6 +6,14 @@ import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
 import { help } from '../cli/help.ts';
 import { readFileSync } from 'node:fs';
 import { opencodeEnv } from '../cli/agents/opencode.ts';
+import { NO_RELAY_FIX } from '../cli/tick.ts';
+
+// #4860 (PR 199 review): the no-relay line names the OLD pane just before this, so it must say which pane to close
+test('#4860: the no-relay fix sends nobody to the pane the line names', () => {
+  assert.match(NO_RELAY_FIX, /close the pane its agent runs in now/);
+  assert.match(NO_RELAY_FIX, /herdr agent list/);
+  assert.match(NO_RELAY_FIX, /not the pane the board last had/);
+});
 
 // launchFor reads CB_MCP_GATE_OK from this process (#4429): unset here, so a machine that lifts the gate runs these tests the same
 delete process.env.CB_MCP_GATE_OK;

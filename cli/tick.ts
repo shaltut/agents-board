@@ -21,7 +21,7 @@ export const noRelayWhy = (u: any) => [
   u.waiting ? `${u.waiting} message${u.waiting === 1 ? '' : 's'} waiting` : '',
   u.wrote_mins === null ? '' : `wrote to the board ${dur(u.wrote_mins)} ago`,
 ].filter(Boolean).join(', ') + (u.pane ? `; last bound to ${u.pane}@${u.machine} (relay last seen ${dur(u.relay_mins)} ago)` : '; never bound to a pane');
-export const NO_RELAY_FIX = 'if it was started by hand, close that pane first';
+export const NO_RELAY_FIX = 'if its agent was started by hand, first close the pane its agent runs in now (find it with herdr agent list; it is not the pane the board last had)';
 
 type Item = { section: string; who: string; text: string; cmd: string | null; detail?: string };
 type Pr = { state: string; head: string; mergeable: string; merge?: string };

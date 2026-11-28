@@ -677,7 +677,8 @@ that `cb squad up` tells you to restart itself: use the line it prints.
 `cb tick` lists such seats under **SEATS WITH NO RELAY**, and `cb sessions` puts "messages to it wait" under them: no
 relay on the seat's latest binding, and either it wrote to the board in the last 30 minutes past that binding's last
 relay check-in, or messages of the last 24 h wait for it. A name never bound shows while it writes and holds work. To
-replace a hand-started seat, close its pane, then run `cb squad up <project>` (it skips a name herdr already runs). A
+replace a hand-started seat, close the pane its agent runs in now (`herdr agent list` shows it; it is not the old pane
+the line names), then run `cb squad up <project>` (it skips a name herdr already runs). A
 seat whose relay died while it still works is named the same way: `cb relay` in its pane starts one again.
 
 ## Squad file: herdr workspace
