@@ -6,6 +6,7 @@
 // or printing anything other than {} (allow) or {"decision":"block","reason":...} stops the call. As written here (not
 // installed) NODE is no program, so it blocks. judge() is cb-guard.js's: each file is installed on its own.
 import { spawnSync } from 'node:child_process';
+import { renameSync, writeFileSync } from 'node:fs';
 
 const NODE = "__CB_NODE__";
 const SHIM = "__CB_SHIM__";
@@ -22,6 +23,23 @@ function judge(tool, args, sessionID) {
   return 'Blocked: the board guard gave no decision';
 }
 
+// The proof from inside the agent (#4817 slice 2): the board refuses a 2.x seat with no file holding this launch's nonce.
+// Written only once the hook is in place, and only when the shim, run with this process's env, allowed one call and
+// refused another by a role rule (a guard that did not run answers "Blocked: ..." with no role). Neither command runs:
+// they are only judged. It does not show that OpenCode calls the hook for each tool call: only a version with a live
+// proof of that is started. Any failure leaves no marker
+function prove() {
+  const marker = process.env.CB_GUARD_MARKER, nonce = process.env.CB_GUARD_NONCE;
+  if (!marker || !nonce) return;
+  try {
+    if (judge('shell', { command: 'ls' }, 'cb-guard-proof') !== null) return;
+    if (!judge('shell', { command: 'echo x > .claude/settings.json' }, 'cb-guard-proof')?.startsWith('Blocked by role (')) return;
+    const tmp = `${marker}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ nonce, at: Date.now() }), { mode: 0o600 });
+    renameSync(tmp, marker);
+  } catch {}
+}
+
 export default {
   id: 'cb-guard',
   // OpenCode 1.x loads this folder too and reads server() from a default export: no hooks there, cb-guard.js guards it
@@ -31,5 +49,6 @@ export default {
       const why = judge(event?.tool, event?.input, event?.sessionID);
       if (why !== null) throw new Error(why);
     });
+    prove();
   },
 };
