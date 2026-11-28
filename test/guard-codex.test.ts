@@ -303,10 +303,21 @@ const CODE_SESSIONS = [
   'npx bash', 'npx --yes node', 'npx -p x -- python', 'npx -c "bash"', 'pnpm exec bash', 'pnpm --filter web exec sh', 'pnpm dlx node',
   'npm exec -- node', 'npm x -- bash', 'yarn exec bash', 'yarn dlx node', 'bunx python', 'uv run python', 'poetry run bash', 'pipenv run python -i',
   'bundle exec irb', 'find . -exec bash \\;', 'find . -name x -execdir sh \\;', 'find . -exec python -i {} \\;',
+  // PR 147 review: the equals form of a call option, wherever it stands; import(); a shell with no arguments, only
+  // itself as its arguments, or keyword arguments; bun and deno code; bun x
+  'npx --call=bash', 'npx -c=bash', 'npm exec --call=bash', 'npm x -c=python','npm --call=bash exec', 'npm -c bash exec',
+  `node -e "import('repl').then(r => r.start())"`, `node -e "import('node:repl').then(r => r.start())"`,
+  `node -e "require('child_process').spawnSync('bash', [], { stdio: 'inherit' })"`, `python -c "import subprocess; subprocess.run('bash', shell=True)"`,
+  `python -c "import os; os.execv('/bin/sh', ['/bin/sh'])"`, `python -c "import os; os.execv('/bin/sh', ('sh',))"`,
+  `bun -e "require('repl').start()"`, `bun -e "Bun.spawn(['bash'])"`, `bun --print "require('node:repl').start()"`,
+  `deno eval "new Deno.Command('bash').spawn(); import('node:repl')"`, 'bun x bash', 'bun x node',
   // I3: programs the tables missed
   'tclsh', 'wish', 'cat | tclsh','groovysh', 'jdb Main', 'evcxr', 'gore', 'nslookup',
 ];
 const CODE_ONE_SHOTS = [
+  'npx @types/node', 'pnpm dlx @scope/node@2', 'npx --call="tsc -b"', 'bun x prettier -w .', 'bun run build', `bun -e "console.log(1)"`, 'deno eval "console.log(1)"',
+  `python -c "import subprocess; subprocess.run('bash', input=b'ls')"`, `node -e "require('child_process').spawnSync('bash', ['-c', 'ls'], { stdio: 'inherit' })"`,
+  `python -c "import os; os.execv('/bin/sh', ['/bin/sh', '-c', 'ls'])"`,
   `python -c "import os; os.system('cmd /c dir')"`, `node -e "require('child_process').execFileSync('cmd', ['/c', 'dir'])"`,
   `python -c "import subprocess; subprocess.run(['bash', '-c', 'ls'])"`, `python -c "import os; os.system('sh build.sh')"`,
   `python -c "print('code.interact is a function')"`, 'python -m pytest -q', 'python -m http.server --help', 'python -m pip list', 'python -c "import pty"',

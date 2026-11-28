@@ -1837,14 +1837,18 @@ const SESSION_INTERP = {
   wish: { s: { code: '', inter: '', arg: '' }, l: {} },
 };
 // #4658 I1: a one-shot whose own code opens a session. For a shell, a call whose first string is the bare shell: the
-// string closes right after the name (or -i follows, in it or as the next string, or an options object comes next), so
-// system('sh build.sh') and ['bash', '-c', ...] pass. Blanks are bounded, so a long run of them stays linear. Code that
-// builds these names is not read: --disable unified_exec_tty is what stops a seat typing into what it starts (PR 104).
+// string closes right after the name, or what follows still gives it nothing to run (-i; an options object; an argument
+// list that is empty or only the shell or -i; a Python keyword other than input= and stdin=). So system('sh build.sh')
+// and ['bash', '-c', ...] pass. Blanks are bounded, so a long run of them stays linear. Code that builds these names is
+// not read: --disable unified_exec_tty is what stops a seat typing into what it starts (PR 104).
 const SHELL_PATH = String.raw`(?:\/(?:usr\/)?(?:local\/)?bin\/)?(?:(?:ba|z|da|k|c|tc|fi)?sh|(?:pwsh|powershell|cmd)(?:\.exe)?)`;
-const SPAWNS_SHELL = new RegExp(String.raw`(?<!\w)(?:exec\w*|system|spawn\w*|popen|Popen|call|check_call|check_output|run)[ \t]{0,4}\(?[ \t]{0,4}\[?[ \t]{0,4}(["'])${SHELL_PATH}(?:[ \t]{1,4}-i)?\1[ \t]{0,4}(?:$|[)\];}]|,[ \t]{0,4}(?:\{|(["'])(?:-i\2|(?:ba|z)?sh\2[ \t]{0,4}[)\]])))`);
+// the numbered groups count across SPAWNS_SHELL: \1 the shell string's quote, \2 a list item's, \3 the next string's
+const BARE_LIST = String.raw`[\[(][ \t]{0,4}(?:(["'])(?:${SHELL_PATH}|-i)\2[ \t]{0,4},?[ \t]{0,4})?[\])]`;
+const BARE_NEXT = String.raw`\{|${BARE_LIST}|(?!(?:input|stdin)\b)[A-Za-z_]\w{0,30}[ \t]{0,4}=|(["'])(?:-i\3|(?:ba|z)?sh\3[ \t]{0,4}[)\]])`;
+const SPAWNS_SHELL = new RegExp(String.raw`(?<!\w)(?:exec\w*|system|spawn\w*|popen|Popen|call|check_call|check_output|run|Command)[ \t]{0,4}\(?[ \t]{0,4}\[?[ \t]{0,4}(["'])${SHELL_PATH}(?:[ \t]{1,4}-i)?\1[ \t]{0,4}(?:$|[)\];}]|,[ \t]{0,4}(?:${BARE_NEXT}))`);
 const CODE_OPENS = {
   python: /\b(?:pty\.spawn|code\.interact|InteractiveConsole|InteractiveInterpreter|pdb\.(?:set_trace|run\w{0,8}|pm|post_mortem))[ \t]{0,4}\(|(?<![\w.'"])breakpoint[ \t]{0,4}\(/,
-  node: /\brequire[ \t]{0,4}\([ \t]{0,4}["'](?:node:)?repl["']|\bfrom[ \t]{1,4}["'](?:node:)?repl["']/,
+  node: /\b(?:require|import)[ \t]{0,4}\([ \t]{0,4}["'](?:node:)?repl["']|\bfrom[ \t]{1,4}["'](?:node:)?repl["']/,
   ruby: /\bbinding\.(?:irb|pry)\b|\b(?:IRB|Pry)\.start\b/,
 };
 const REPL_MODULES = new Set(['code', 'pdb', 'asyncio', 'IPython', 'bpython', 'ptpython']);
@@ -1864,6 +1868,7 @@ function pythonModule(args) {
 const SESSION_RUNNERS = {
   npx: { val: new Set(['-p', '--package', '-w', '--workspace']), call: new Set(['-c', '--call']) },
   bunx: { val: new Set(['-p', '--package']) },
+  bun: { sub: new Set(['x']), before: new Set(['--cwd']), val: new Set(['-p', '--package']) },
   npm: { sub: new Set(['exec', 'x']), before: new Set(['--prefix', '-w', '--workspace']), val: new Set(['-p', '--package', '-w', '--workspace']), call: new Set(['-c', '--call']) },
   pnpm: { sub: new Set(['exec', 'dlx']), before: new Set(['--filter', '-F', '-C', '--dir']), val: new Set(['--filter', '-F', '-C', '--dir', '--package']) },
   yarn: { sub: new Set(['exec', 'dlx']), before: new Set(['--cwd']), val: new Set(['-p', '--package']) },
@@ -1874,18 +1879,22 @@ const SESSION_RUNNERS = {
 };
 // what a runner starts: { text } (a command string), { words }, or null when this call starts nothing the guard reads
 function runnerStarts(spec, args) {
-  let i = 0;
-  if (spec.sub) {
-    i = firstWord(args, 0, spec.before);
-    if (i < 0 || !spec.sub.has(args[i])) return null;
-    i++;
+  let sub = !spec.sub, i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('-')) {
+      if (sub) break;
+      if (!spec.sub.has(a)) return null;
+      sub = true;
+      continue;
+    }
+    if (a === '--') { i++; break; }
+    // a call option takes its command string as the next word or after =, before or after the subcommand
+    const eq = a.indexOf('=');
+    if (spec.call?.has(eq < 0 ? a : a.slice(0, eq))) return { text: eq < 0 ? args[i + 1] ?? '' : a.slice(eq + 1) };
+    if ((sub ? spec.val : spec.before).has(a)) i++;
   }
-  for (; i < args.length && args[i].startsWith('-'); i++) {
-    if (args[i] === '--') { i++; break; }
-    if (spec.call?.has(args[i])) return { text: args[i + 1] ?? '' };
-    if (spec.val.has(args[i])) i++;
-  }
-  return i < args.length ? { words: args.slice(i) } : null;
+  return sub && i < args.length ? { words: args.slice(i) } : null;
 }
 const FIND_RUNS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 const INTERP_OF = (n) => (PYTHON.test(n) ? 'python' : n === 'nodejs' ? 'node' : n === 'luajit' ? 'lua' : n === 'rscript' ? null : SESSION_INTERP[n] ? n : null);
@@ -2180,8 +2189,12 @@ function judge(name, args, fed, depth, vars = new Map()) {
   if (name === 'eval') return inner(args.join(' ')); // B1: eval's words are a command
   if (SESSION_TTY.has(name)) return name; // B3: fed or not
   // #4658 I2: a runner or find -exec starts a command that gets this one's input, so it is judged the same way
-  const started = (words) => (depth >= SESSION_DEPTH ? 'a command nested deeper than the guard reads'
-    : judge(cmdName(words[0].replace(/(?<=.)@[^@/]*$/, '')), words.slice(1), fed, depth + 1, vars));
+  const started = (words) => {
+    if (depth >= SESSION_DEPTH) return 'a command nested deeper than the guard reads';
+    const word = words[0].replace(/(?<=.)@[^@/]*$/, ''); // node@20 is node
+    // a scoped package (@types/node) is not the program its last part names
+    return /^@[^/\\]+\/[^/\\]+$/.test(word) ? null : judge(cmdName(word), words.slice(1), fed, depth + 1, vars);
+  };
   if (Object.hasOwn(SESSION_RUNNERS, name)) {
     const r = runnerStarts(SESSION_RUNNERS[name], args);
     if (r) return r.words ? started(r.words) : inner(r.text);
@@ -2310,7 +2323,10 @@ function judge(name, args, fed, depth, vars = new Map()) {
   }
   if (name === 'deno' || name === 'bun') {
     const sub = args.find((a) => !a.startsWith('-'));
-    return sub === 'repl' || (name === 'deno' && sub === undefined) ? `${name}${sub ? ` ${sub}` : ''}` : null;
+    if (sub === 'repl' || (name === 'deno' && sub === undefined)) return `${name}${sub ? ` ${sub}` : ''}`;
+    // #4658: code given on the command line is read like Node's
+    const code = args.some((a) => /^(?:-e|-p|--eval|--print|eval)(?:=|$)/.test(a)) ? args.join(' ') : '';
+    return SPAWNS_SHELL.test(code) || CODE_OPENS.node.test(code) ? `${name} code that opens a shell or REPL` : null;
   }
   if (SESSION_CLIENT[name]) return args.includes('-') || !args.some((a) => SESSION_CLIENT[name].test(a)) ? name : null;
   const pos = SESSION_POSITIONAL[name];
