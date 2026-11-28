@@ -2,6 +2,7 @@
 // (cb.leases), taken for 180 s and renewed by its token, so it needs no database session of its own and works the same
 // over an API. Renewed on its own timer, on a thread of its own, apart from the tick.
 import { Worker } from 'node:worker_threads';
+import { call } from './board.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { Runner } from './squad-up.ts';
 
@@ -31,7 +32,7 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
   const clock = o.clock ?? Date.now, sureMs = o.sureMs ?? SURE_MS;
   let sql = o.connect(), token: string | null = o.token ?? null, sureFrom = o.token ? clock() : -Infinity, givenBack = false;
   const ask = async (query: (s: any) => PromiseLike<any>) => {
-    try { return (await withDeadline(Promise.resolve(query(sql)), ANSWER_MS, 'the supervisor lease'))[0]; }
+    try { return await withDeadline(Promise.resolve(query(sql)), ANSWER_MS, 'the supervisor lease'); }
     catch (e) { // #4261: a query that hangs means a connection that may never error: drop it, ask on a fresh one
       if (e instanceof DeadlineError) { const old = sql; sql = o.connect(); old.end({ timeout: 0 }).catch(() => {}); }
       throw e;
@@ -42,9 +43,9 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
       if (givenBack) throw new Error('the supervisor lease was given back: this supervisor is stopping');
       const asked = clock(); // from before the question: the board's 180 s starts no earlier
       if (token) {
-        if (!(await ask((s) => s`select cb.lease_renew('supervisor', ${token}) as ok`)).ok) return "the supervisor lease is no longer this supervisor's: another took it";
+        if (!await ask((s) => call('lease_renew', { name: 'supervisor', token }, s))) return "the supervisor lease is no longer this supervisor's: another took it";
       } else {
-        const { r } = await ask((s) => s`select cb.lease_take('supervisor', ${o.holder}) as r`);
+        const r = await ask((s) => call('lease_take', { name: 'supervisor', holder: o.holder }, s));
         if (!r.token) return `another supervisor is running: ${r.holder} holds the lease, for ${r.left_s} s more unless it renews it`;
         token = r.token;
       }
@@ -58,7 +59,7 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
     async release() { // at exit: the next start need not wait the lease out. A board that is away: it runs out by itself
       const mine = token;
       givenBack = true; token = null; // at once: neither the timer nor the loop asks for it while it goes
-      if (mine) await ask((s) => s`select cb.lease_release('supervisor', ${mine}) as ok`).catch(() => {});
+      if (mine) await ask((s) => call('lease_release', { name: 'supervisor', token: mine }, s)).catch(() => {});
       await sql.end({ timeout: 5 }).catch(() => {});
     },
   };

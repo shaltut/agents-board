@@ -11,6 +11,7 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   ...list(one, `
     answer_delivered ask_post ask_record ask_reply asks_list brief broadcast digest epics_list fault_file github_mute
     job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings
+    board_now jobs_list lease_release lease_renew lease_take seat_switch supervise_log supervise_mark supervise_state
     github_watch_add github_watch_remove github_watches goals_list huddle_add huddle_close huddle_open huddle_say
     huddles_list iam lock_queue lock_release lock_take log machine_models_set mem_add mem_find mem_list mem_pack
     mem_retire mem_rule mem_show mem_supersede next_empty_words next_step page_get page_set project_state_preview
@@ -21,6 +22,7 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   `),
   ...list(rows, `
     answers_pending ask_parent ask_relay bug_filed held_parts_of huddle_lines huddle_member_names huddle_row jobs_cancelled mine
+    sessions_live squad_history supervised_projects
     my_questions question_state questions_brief released_by session_binding session_events session_questions
     session_tasks start_projects task_claim task_filed task_goals task_notes task_queue task_row task_words
     tell_delivery user_show users_overview

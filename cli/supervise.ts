@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
+import { call } from './board.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, seatSpec, startOne, wantList, START_MAX_MS, type Launch, type Runner } from './squad-up.ts';
 import { mayBeLeaving, nextBackup, onBackups, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
@@ -59,14 +60,14 @@ export async function tick(d: Deps): Promise<string[]> {
   const { sql, run, dryRun, now, memory } = d;
   const out: string[] = [];
   const log = async (project: string | null, what: string, session: string, note?: string) => {
-    try { await sql`select cb.supervise_log(${project}, ${what}, ${session}, ${note ?? null})`; } catch (e) { out.push(`could not log ${what} ${session}: ${msg(e)}`); }
+    try { await call('supervise_log', { project, what, session, note: note ?? null }, sql); } catch (e) { out.push(`could not log ${what} ${session}: ${msg(e)}`); }
   };
   const states: State[] = [];
   const sightedBefore = memory.sighted;
   memory.sighted = new Map();
-  for (const { slug } of await sql`select slug from cb.projects where squad is not null order by slug`) {
+  for (const { slug } of await call('supervised_projects', {}, sql)) {
     try {
-      const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
+      const s = await call('supervise_state', { project: slug }, sql) as State;
       if (s.supervised_unstaged) s.supervised = true; // #4806
       // #4787: every project that gets work is checked for quota stops; only a supervised or winding-down one is acted on
       if (!s.supervised && !s.winding_down && !quotaWatched(s)) continue;
@@ -103,7 +104,7 @@ export async function tick(d: Deps): Promise<string[]> {
   }
   // the Mac cap counts every live session there, any project (as cb squad up)
   const macKeys = new Set([MAC, ...(keysOf.get(MAC) ?? [])]);
-  for (const l of await sql`select actor, machine from cb.sessions where last_seen > now() - interval '90 seconds'`) {
+  for (const l of await call('sessions_live', {}, sql)) {
     if (macKeys.has(l.machine) || macKeys.has(String(l.actor).split('@')[1])) mac.add(herdrName(l.actor));
   }
   let macLive = Math.max(mac.size, macAgents), startsLeft = STARTS_PER_TICK;
@@ -126,8 +127,9 @@ export async function tick(d: Deps): Promise<string[]> {
       const safeToClose = await safeToCloseOf(state, herdrStatus);
       // #3770: the names earlier saved versions of the squad generated (cb.squad_set's 'squad updated' events, the last
       // 20), read only when a live or holding session is one the squad does not want now (events has no project index)
-      const pastSeats = mayBeLeaving(state, herdrLive) ? pastSeatNames(state.project, (await sql`select e.data -> 'squad' as squad from cb.events e
-        where e.project = ${state.project} and e.kind = 'updated' and e.summary = 'squad updated' order by e.id desc limit 20`).map((r: any) => r.squad)) : new Set<string>();
+      const pastSeats = mayBeLeaving(state, herdrLive)
+        ? pastSeatNames(state.project, (await call('squad_history', { project: state.project }, sql)).map((r: any) => r.squad))
+        : new Set<string>();
       startsLeft -= switches.length;
       const plan = planTick({ state: asRun, herdrLive, herdrStatus, herdrDown, launched: memory.launched, macLive, startsLeft, failedAt: memory.failedAt, now, safeToClose, pastSeats,
         restartTried: memory.restartTried, startProblem });
@@ -221,7 +223,7 @@ async function quotaStops(d: Deps, state: State, herdr: { status: Record<string,
       const found = what === 'quota' ? 'looks stopped by its quota' : 'has no backup that can start';
       if (d.dryRun) { out.push(`would say ${s.actor} ${found}`); continue; }
       // on the board first: if that fails nothing is said, and the next tick tries again; if the tell fails, the board has it
-      await d.sql`select cb.supervise_log(${state.project}, ${what}, ${s.actor}, ${`herdr pane ${pane}`})`;
+      await call('supervise_log', { project: state.project, what, session: s.actor, note: `herdr pane ${pane}` }, d.sql);
       const where = `herdr pane ${pane}${m ? ` on ${m}` : ''}`;
       out.push(`${s.actor} ${found} (${where})${toTell ? '' : ': no other live lead to tell; it is on the board'}`);
       if (!toTell) continue;
@@ -285,7 +287,7 @@ async function act(d: Deps, state: State, plan: TickPlan, switches: Switch[], ou
     out.push(c.line);
     if (!c.gone) continue;
     // on the board before the start: from here on the seat runs its backup, and a start that fails is restored on it
-    try { await d.sql`select cb.seat_switch(${project}, ${l.name}, ${n}, ${JSON.stringify(squad)}::text::jsonb)`; }
+    try { await call('seat_switch', { project, actor: l.name, n, planned: squad }, d.sql); }
     catch (e) { out.push(`closed ${l.name} but could not record its backup, so it was not started on it: ${msg(e)}`); continue; }
     await log(project, 'switch', l.name, `${from} to ${to}`);
     d.signal?.throwIfAborted();
@@ -346,7 +348,8 @@ async function act(d: Deps, state: State, plan: TickPlan, switches: Switch[], ou
       // #4816: a pipeline lead reads it in cb.digest; with no pipeline there is none. The board event makes it once
       const lead = state.pipeline === false ? leadOf(state) : undefined;
       if (lead && lead !== n.session) {
-        try { await d.sql`select cb.tell(${lead}, ${`${n.session} is down again after a restore and holds work. The supervisor will not restore it again: restore it by hand, or hand its cards over.`}, 'supervisor')`; }
+        const message = `${n.session} is down again after a restore and holds work. The supervisor will not restore it again: restore it by hand, or hand its cards over.`;
+        try { await call('tell', { to_actor: lead, message, actor: 'supervisor' }, d.sql); }
         catch (e) { out.push(`could not tell ${lead}: ${msg(e)}`); }
       }
     }
@@ -379,16 +382,16 @@ async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'di
 }
 
 async function tell(d: Deps, to: string, text: string, out: string[]) {
-  try { await d.sql`select cb.tell(${to}, ${text}, 'supervisor')`; return true; } catch (e) { out.push(`could not tell ${to}: ${msg(e)}`); return false; }
+  try { await call('tell', { to_actor: to, message: text, actor: 'supervisor' }, d.sql); return true; } catch (e) { out.push(`could not tell ${to}: ${msg(e)}`); return false; }
 }
 
 // Mark closing, find its pane, re-check on a fresh statement, /exit (its agent adapter's close), wait for herdr to drop
 // the agent, close its pane. gone: the agent left herdr (#4332: only then does a restart start it again)
 async function closeOne(d: Deps, state: State, name: string, log: Log, switching?: Switch['squad']): Promise<{ line: string; gone?: true; sent?: true }> {
   const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
-  const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
+  const unmark = () => call('supervise_mark', { actor: name, closing: false }, sql).catch(() => {});
   const windDown = !!state.winding_down;
-  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) {
+  if (!await call('supervise_mark', { actor: name, closing: true }, sql)) {
     if (windDown) d.memory.closeSkipAt.set(name, d.now); // it holds a live project's card: not asked again every tick
     return { line: `skip closing ${name}: it holds work or has no session` };
   }
@@ -398,7 +401,7 @@ async function closeOne(d: Deps, state: State, name: string, log: Log, switching
     try { const got = herdrJson(run, m, ['agent', 'get', hn], 30_000); pane = find(got, 'pane_id'); status = find(got, 'agent_status'); } catch {}
     if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return { line: `could not close ${name}: herdr does not show it` }; }
     // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
-    const fresh = (await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State;
+    const fresh = await call('supervise_state', { project: state.project }, sql) as State;
     s = fresh.sessions.find((x) => x.actor === name);
     if (windDown) { // #4559: it may keep cards, but only while the project still gets no work and it is still quiet
       if (!fresh.winding_down) { await unmark(); return { line: `skip closing ${name}: ${state.project} is enabled again` }; }
@@ -443,7 +446,7 @@ async function runnerCheck(d: Deps, out: string[], log: Log, leads: string[]) {
     cfg = { name: typeof raw.name === 'string' ? raw.name : undefined, log: { host: raw.log.host, port: raw.log.port } };
   }
   const name = cfg.name ?? machine();
-  const { runners } = (await d.sql`select cb.jobs_list(null) as j`)[0].j;
+  const { runners } = await call('jobs_list', { project: null }, d.sql);
   const beat = runners.find((r: any) => r.name === name)?.last_seen;
   if (beat && d.now - Date.parse(beat) < RUNNER_STALE) return;
   const tellLeads = async (text: string) => {
@@ -495,7 +498,7 @@ const probe = (host: string, port: number) => new Promise<boolean>((ok) => {
 
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'lease.ts', 'lease-worker.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'lease.ts', 'lease-worker.ts', 'board.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`;
   let sql = connect(undefined, { app, max: 1 });
@@ -537,7 +540,7 @@ if (import.meta.main) {
       await takeOrExit(say);
       if (lease) renewal ??= keepAliveApart(lease.token()!, { app, silentMs: SILENT_MS, say, lost: (why) => { say(why); process.exit(1); },
         abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')) });
-      const now = ((await withDeadline(sql`select cb.board_now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
+      const now = (await withDeadline(call('board_now', {}, sql), 30_000, 'the board clock') as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
       // the whole tick's cap is far above its worst case (3 starts at up to 180 s of herdr each, closes at 60 s each):
       // it catches a hang, not a slow tick; the DB waits above have their own 30 s. A tick given up on is aborted, so
