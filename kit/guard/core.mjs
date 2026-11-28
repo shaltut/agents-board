@@ -2984,12 +2984,21 @@ export function stdinSession(command) {
   return sessionIn(cmd, false, 0, vars);
 }
 
-// #4865: a PowerShell filter block starts with the pipeline's own item ($_.role -eq 'x', $PSItem.Name): a value, not a
-// program. Spared only as the first word right after Where-Object { or ForEach-Object { (? and % too), on one line: bash
-// reads that { as one more argument of the same command, so nothing there runs in either shell. A ; or a new line after
-// the { ends bash's command, a ( or backtick before the word may run it, and name() is a function: all stay refused
-const PS_FILTERS = new Set(['where-object', 'foreach-object', '?', '%']);
-const PS_ITEM = /^\$(?:_|PSItem)(?:\.\w+)*$/i;
+// #4865, #4881: in a PowerShell filter block (after Where-Object {, ForEach-Object {, their Where, foreach, ? and %
+// forms) a statement may start with the pipeline's own item ($_.role -eq 'x', ($_.Id -gt 1), "$($_.Name)"): a value, not
+// a program. On the line of that {, bash reads the words as arguments of the command that took it, or as a syntax error.
+// bash does run a later line or statement, and a $( ) in double quotes, and there its $_ is the last word of the command
+// before: so in those places the item needs a property, and one that could name a program file stays refused, as does a
+// command that sets the item's name. So do $( and <( outside quotes, a backtick, a block inside the filter block that no
+// filter opens, and name() { }, which is a function
+const PS_FILTERS = new Set(['where-object', 'foreach-object', 'where', 'foreach', '?', '%']);
+const PS_ITEM = /^\$(?:_|PSItem)(?:\.[a-z_]\w*)*$/i;
+const PROGRAM_NAME = /\.(?:exe|com|bat|cmd|ps1|sh)$/i;
+const isItem = (x, runs) => PS_ITEM.test(x) && !PROGRAM_NAME.test(x) && (!runs || x.includes('.'));
+// a double-quoted word that holds nothing for a shell to fill in but pipeline items ($_.Name, $($_.Name))
+const ITEM_IN_TEXT = /\$\((\$(?:_|PSItem)(?:\.\w+)*)\)|\$(?:_|PSItem)(?!\w)(?:\.\w+)*/gi;
+const isItemText = (x, runs) => x.length > 1 && x.startsWith('"') && x.endsWith('"') && x.includes('$')
+  && !/["$`]/.test(x.slice(1, -1).replace(ITEM_IN_TEXT, (all, inner) => (isItem(inner ?? all, runs || inner !== undefined) ? '' : '$')));
 
 function sessionIn(cmd, fed, depth, vars = new Map()) {
   if (depth > SESSION_DEPTH) return 'a command nested deeper than the guard reads';
@@ -3016,26 +3025,46 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
     if (LOOP_START.has(w0)) stack.push(k);
     else if (w0 === 'done' && stack.length) { const j = stack.pop(); loopFed[j] = redir[k] || piped[j]; }
   }
+  // inFilter[k]: segment k stands in a block that a filter's { opened (the { right at the end of the filter's segment),
+  // with no & just before it (PowerShell's call operator, which runs the item)
+  // onLine[k]: that { is all that parts them, so bash reads segment k as the filter's own arguments
+  const inFilter = new Uint8Array(n), onLine = new Uint8Array(n), blocks = [];
+  const opensFilter = (j) => !/[()`]/.test(segs[j].s) && PS_FILTERS.has(cmdName(lead(j)));
+  for (let k = 0; k < n; k++) {
+    const gap = text.slice(k ? segs[k - 1].end : 0, segs[k].start);
+    for (let i = 0; i < gap.length; i++) {
+      if (gap[i] === '{') blocks.push(i === 0 && k > 0 && opensFilter(k - 1));
+      else if (gap[i] === '}') blocks.pop();
+    }
+    inFilter[k] = blocks.at(-1) === true && !gap.includes('&') ? 1 : 0;
+    onLine[k] = gap === '{' && blocks.at(-1) === true ? 1 : 0;
+  }
+  const itemSet = [...vars.keys()].some((name) => /^(?:_|psitem)$/i.test(name));
+  const isValue = (k, p) => inFilter[k] === 1 && !itemSet && p.open && p.raw.length > 0
+    && (isItem(p.raw[0], !onLine[k]) || isItemText(p.raw[0], !onLine[k]));
   const loops = [];
   let feeding = 0, pass = null;
   for (let k = 0; k < n; k++) {
-    if (SUBST_CMD.test(segs[k].s)) return 'a command named by a substitution ($(...) or `...` as the command word)';
+    if (SUBST_CMD.test(segs[k].s) && !(pieces[k][0] && isValue(k, pieces[k][0]))) return 'a command named by a substitution ($(...) or `...` as the command word)';
     const w0 = lead(k);
     if (LOOP_START.has(w0)) { loops.push(loopFed[k]); feeding += loopFed[k]; }
     const here = fed || piped[k] || redir[k] || feeding > 0;
     if (w0 === 'done' && loops.length) feeding -= loops.pop();
     if (!joined[k]) pass = null;
     for (const p of pieces[k]) {
-      for (const q of p.inner) { const r = sessionIn(q, here, depth + 1, vars); if (r) return r; }
+      const value = isValue(k, p);
+      // the $( ) of a spared string holds pipeline items only (isItemText), so its entry in inner, the first, is not
+      // judged; a later word's substitution is
+      const spared = value && p.raw[0][0] === '"' && /\$\(/.test(p.raw[0]) ? 1 : 0;
+      for (const q of p.inner.slice(spared)) { const r = sessionIn(q, here, depth + 1, vars); if (r) return r; }
       if (p.w.some((x) => x === '/dev/tty')) return '/dev/tty';
       if (!here && p.w.some((x) => STDIN_DEV.test(x))) return p.w.find((x) => STDIN_DEV.test(x));
+      if (value) continue;
       const at = commandAt(p);
       if (at.shell) { if (!here) return at.shell; continue; }
       if (at.subst) return 'a command named by a substitution ($(...) or `...` as the command word)';
       if (at.i < 0) continue;
       let name = cmdName(p.raw[at.i]), args = dropRedirects(p.w.slice(at.i + 1));
-      if (at.i === 0 && p === pieces[k][0] && PS_ITEM.test(p.w[0]) && k > 0 && text.slice(segs[k - 1].end, segs[k].start) === '{'
-        && segs[k].s.trimStart().startsWith(p.raw[0]) && !/[()`]/.test(segs[k - 1].s) && PS_FILTERS.has(cmdName(lead(k - 1)))) continue;
       if (/[$`]/.test(p.w[at.i])) {
         // B1: $X read through a literal assignment in the command; any other variable or expansion is unreadable
         const v = VAR_WORD.exec(p.w[at.i]), val = v && vars.get(v[1] ?? v[2]);
@@ -3055,15 +3084,26 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
   return null;
 }
 
-// pieces of one segment: { raw, w, inner }; inner holds the text of a double-quoted "$(...)" or "`...`" (a command too)
+// pieces of one segment: { raw, w, inner, open }; inner holds the text of a double-quoted "$(...)" or "`...`" (a command
+// too). open (#4881): the piece starts the segment, or follows bare brackets only: no $( or <( and no backtick before it
 function piecesOf(seg) {
-  const out = [];
-  let cur = { raw: [], w: [], inner: [] }, word = null;
+  const out = [], brackets = []; // for each ( not yet closed: bare or not
+  let ticked = false, last = ' ', dressed = 0; // dressed: how many open brackets are not bare
+  const fresh = (open) => ({ raw: [], w: [], inner: [], open });
+  let cur = fresh(true), word = null;
   const endWord = () => { if (word !== null) { cur.raw.push(word); cur.w.push(unquote(word)); word = null; } };
-  const endPiece = () => { endWord(); if (cur.raw.length || cur.inner.length) out.push(cur); cur = { raw: [], w: [], inner: [] }; };
+  const endPiece = (open = false) => { endWord(); if (cur.raw.length || cur.inner.length) out.push(cur); cur = fresh(open); };
   for (const [t] of seg.matchAll(SESSION_TOKEN)) {
+    const before = last;
+    last = t;
     if (/^\s/.test(t)) endWord();
-    else if (t === '(' || t === ')' || t === '`') endPiece();
+    else if (t === '(') {
+      const bare = /^\s|^\($|-not$/i.test(before);
+      brackets.push(bare);
+      if (!bare) dressed++;
+      endPiece(!ticked && !dressed);
+    } else if (t === ')') { if (brackets.pop() === false) dressed--; endPiece(); }
+    else if (t === '`') { ticked = true; endPiece(); }
     else {
       if (t[0] === '"' && /\$\(|`/.test(t)) cur.inner.push(t.slice(1, t.endsWith('"') && t.length > 1 ? -1 : undefined).replace(/^[^]*?(?:\$\(|`)/, '').replace(/[)`][^)`]*$/, ''));
       word = (word ?? '') + t;

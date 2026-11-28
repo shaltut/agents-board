@@ -392,10 +392,12 @@ test('a pipeline item stays a value in the other ordinary filter forms (#4881)',
     'Get-Process | Where-Object { ($_.CPU -gt 1) }', "Get-Process | Where-Object { ($_.Id -gt 1) -and ($_.Name -like 'n*') }",
     'Get-Process | Where-Object { (($_.CPU) -gt 1) }', 'Get-Process | Where-Object { -not ($_.Responding) }',
     // inside a double-quoted string
-    'Get-Process | ForEach-Object { "$($_.Name)" }', 'Get-Process | ForEach-Object { "$($_.Name): $($PSItem.Id) up" }',
+    'Get-Process | ForEach-Object { "$($_.Name)" }', 'Get-Process | ForEach-Object { "$($_.Name):$($PSItem.Id)" }',
     // over several lines, and more than one statement
     "Get-Process | Where-Object {\n  $_.CPU -gt 1\n}", "Get-Process | ForEach-Object {\n    $_.Name\n    $_.Id\n} | Select-Object -First 5",
     'Get-Process | ForEach-Object { $_.Name; $_.Id }', 'Get-Process | ForEach-Object {\n\n  "$($_.Name)"\n}',
+    // the item itself, on the block's first line
+    "Get-Content names.txt | Where-Object { $_ -like 'n*' }", 'Get-Content names.txt | ForEach-Object { "item: $_" }',
   ];
   for (const c of reads) assert.deepEqual(seat(c), {}, c);
 });
@@ -412,6 +414,17 @@ test('a pipeline item that bash could run as a program stays refused (#4881)', (
     'Where-Object { "$($_.Name; bash)" }', 'Get-Process | ForEach-Object { & { $_.Name } }',
     // a filter's name that is only text, or that another command takes
     'echo Where { $_.Name }', 'echo "Where-Object {"; $_.Name', 'foreach ($p in $list) { $p.Name }',
+    // & is PowerShell's call operator: it runs the item
+    'Where-Object { & $_.Path }', 'Where-Object {& $_.Path}', 'ForEach-Object { $_.Id; & ($_.Path) }', 'ForEach-Object {\n  & "$($_.Path)"\n}',
+    // two subexpressions with a blank between them read as a command and its argument to the push rule (#4815), as before
+    'ForEach-Object { "$($_.Name) $($_.Id)" }',
+    // in bash $_ is the last word of the command before: with no property it can be any program, wherever bash runs it
+    // (a later line or statement, or a $( ) in double quotes); a property starts with a letter, so no version ending
+    'Where-Object {\necho bash\n$_\n}', 'echo bash; true | ForEach-Object { $_.Id; $PSItem }', 'echo bash; Where-Object { "$($_)" }',
+    'ForEach-Object {\n"$_"\n}', 'echo python3; Where-Object {\n$_.11 -i\n}',
+    // a substitution in a later word of the same statement is still judged, beside a spared string
+    'Where-Object { "$($_.Name)" "$(bash)" }', 'ForEach-Object {\n  "$($_.Name)" -f "$(bash)"\n}', 'ForEach-Object { "$($_.Name)" "`bash`" }',
+    'ForEach-Object { "$_" "$(bash)" }', 'ForEach-Object { $_.Name -f "$(bash)" }',
   ];
   for (const c of refused) assert.equal(seat(c).hookSpecificOutput?.permissionDecision, 'deny', c);
 });
