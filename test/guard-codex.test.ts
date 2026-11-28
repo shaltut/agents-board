@@ -370,15 +370,48 @@ test('a variable as the program stays refused outside that one place (#4865)', (
   const refused = [
     // no filter block before it, or another block
     '$_.exe', 'echo x; $_.exe', '& { $_.exe }', 'Get-Process | Sort-Object { $_.Name }', 'function Where-Object { $_.exe }', 'if x; then { $_.exe; }; fi',
-    // bash runs these: a ; or a new line ends the command that took the { as an argument
-    'Where-Object; { $_.exe; }', 'Where-Object {; $_.exe; }', 'Where-Object {\n$_.exe\n}', 'Where-Object { \n $_.exe\n}',
+    // a block that no filter opens
+    'Where-Object; { $_.Name; }', 'Where-Object\n{ $_.Name }',
     // a function by that name: its body runs when it is called
-    'Where-Object() { $_.exe; }; Where-Object',
+    'Where-Object() { $_.Name; }; Where-Object', 'function Where-Object { $_.Name }', 'coproc Where-Object { $_.Name; }',
     // a substitution runs it, and any other variable is still a program the guard cannot read
-    'Where-Object { $($_.exe) }', 'Where-Object { `$_.exe` }', 'Where-Object { $tool }', 'Where-Object { $env:SHELL }', 'Where-Object { ${_}sh }',
-    'Where-Object { $_sh }', 'Where-Object { & $_.Path }',
-    // only the block's first statement
-    'Get-Process | ForEach-Object { $_.Name; $x }',
+    'Where-Object { $($_.Name) }', 'cat <($_.Name)', 'Where-Object { cat <($_.Name) }', 'Where-Object { `$_.Name` }', 'Where-Object { $tool }',
+    'Where-Object { $env:SHELL }', 'Where-Object { ${_}sh }', 'Where-Object { $_sh }', 'Where-Object { & $_.Path }',
+    // another variable in a later statement of the block, and a statement after the block closes
+    'Get-Process | ForEach-Object { $_.Name; $x }', 'Get-Process | ForEach-Object { $_.Name }; $_.Name', 'Get-Process | ForEach-Object {\n$_.Name\n}\n$_.Name',
+  ];
+  for (const c of refused) assert.equal(seat(c).hookSpecificOutput?.permissionDecision, 'deny', c);
+});
+
+// #4881: the forms PR 198 left refused
+test('a pipeline item stays a value in the other ordinary filter forms (#4881)', () => {
+  const reads = [
+    // the Where and foreach aliases
+    "Get-Process | Where { $_.Id -gt 4 }", 'Get-Process | foreach { $_.Name }',
+    // in brackets, one group or several
+    'Get-Process | Where-Object { ($_.CPU -gt 1) }', "Get-Process | Where-Object { ($_.Id -gt 1) -and ($_.Name -like 'n*') }",
+    'Get-Process | Where-Object { (($_.CPU) -gt 1) }', 'Get-Process | Where-Object { -not ($_.Responding) }',
+    // inside a double-quoted string
+    'Get-Process | ForEach-Object { "$($_.Name)" }', 'Get-Process | ForEach-Object { "$($_.Name): $($PSItem.Id) up" }',
+    // over several lines, and more than one statement
+    "Get-Process | Where-Object {\n  $_.CPU -gt 1\n}", "Get-Process | ForEach-Object {\n    $_.Name\n    $_.Id\n} | Select-Object -First 5",
+    'Get-Process | ForEach-Object { $_.Name; $_.Id }', 'Get-Process | ForEach-Object {\n\n  "$($_.Name)"\n}',
+  ];
+  for (const c of reads) assert.deepEqual(seat(c), {}, c);
+});
+
+// bash does run a later line of such a block, and a substitution in double quotes. A property that could name a program
+// file, or a command that sets the item's name itself, keeps the refusal
+test('a pipeline item that bash could run as a program stays refused (#4881)', () => {
+  const refused = [
+    'Where-Object {; $_.exe; }', 'Where-Object {\n$_.exe\n}', 'Where-Object { \n $_.cmd\n}', 'Where-Object { "$($_.exe)" }',
+    'Where-Object { ($_.bat) }', 'Get-Process | ForEach-Object { $_.Name; $PSItem.ps1 }', 'Where-Object { $_.SH }',
+    'PSItem=bash; Where-Object {\n$PSItem\n}', 'export PSItem=python\nWhere-Object { "$($PSItem)" }',
+    // a string that holds more than pipeline items, and a block inside the filter block that no filter opens
+    'Where-Object { "$($_.Name) $($tool)" }', 'Where-Object { "$(iex $_)" }', 'Where-Object { "`$_.Name`" }',
+    'Where-Object { "$($_.Name; bash)" }', 'Get-Process | ForEach-Object { & { $_.Name } }',
+    // a filter's name that is only text, or that another command takes
+    'echo Where { $_.Name }', 'echo "Where-Object {"; $_.Name', 'foreach ($p in $list) { $p.Name }',
   ];
   for (const c of refused) assert.equal(seat(c).hookSpecificOutput?.permissionDecision, 'deny', c);
 });
