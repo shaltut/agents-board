@@ -2275,9 +2275,15 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       if (typeof text !== 'string') continue;
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
-      const why = seatVarChange(text) ?? freshEnv(text, hostList, role, vps);
-      if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
-      pending.push(...scriptCalls(text, cwd, vps));
+      const read = readings(text); // #4776: bash drops a script's carriage returns too
+      for (const t of read) {
+        const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
+        if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
+      }
+      // the scripts it runs, as read without them, so a CRLF script's calls count once; with a CR alone (PowerShell ends
+      // a line there) as written too
+      const named = /\r(?!\n)/.test(text) ? read : read.slice(-1);
+      for (const t of named) pending.push(...scriptCalls(t, cwd, vps));
     }
   }
   const secret = secretRead(String(command ?? ''));
@@ -2945,6 +2951,10 @@ function judge(name, args, fed, depth, vars = new Map()) {
   return null;
 }
 
+// #4776: Git Bash drops every carriage return, quoted ones too, in -c text, a script file and stdin, so a word split by
+// one runs. Text holding any is judged without them as well as as written, never instead: PowerShell ends a line at one
+function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\r', '')] : [text]; }
+
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
@@ -2959,18 +2969,20 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      // #4737: judged as written, then with split and built names read out (only when that changes something)
-      const shown = revealed(command);
-      for (const text of shown === command ? [command] : [command, shown]) {
-        const danger = check(text);
-        if (danger) return block('dangerous', danger);
-        const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
-        if (branch) return block('dangerous', pushReason(branch));
-        const byRole = checkRole(text, role, { readScript, hosts, deployHost });
-        if (byRole) return block('role', byRole);
+      for (const written of readings(command)) {
+        // #4737: judged as written, then with split and built names read out (only when that changes something)
+        const shown = revealed(written);
+        for (const text of shown === written ? [written] : [written, shown]) {
+          const danger = check(text);
+          if (danger) return block('dangerous', danger);
+          const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
+          if (branch) return block('dangerous', pushReason(branch));
+          const byRole = checkRole(text, role, { readScript, hosts, deployHost });
+          if (byRole) return block('role', byRole);
+        }
       }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
-      const session = stdin === true && role ? stdinSession(command) : null;
+      const session = stdin === true && role ? readings(command).map((text) => stdinSession(text)).find(Boolean) : null;
       return session ? block('role', SESSION(session)) : { allow: true };
     }
     // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool

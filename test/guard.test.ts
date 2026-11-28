@@ -1728,6 +1728,45 @@ test('#4734: the reported script and search commands pass; a real launch by that
   for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
 });
+
+// #4776: Git Bash drops every carriage return, quoted ones too, in -c text, a script file and stdin, so a word split by
+// one runs. Each command here was allowed although what bash runs is refused
+const kindOf = (command: string, role: string | null = 'builder', readScript?: (p: string) => string | null) => {
+  const r = evaluate({ tool: 'shell', command, role, readScript });
+  return r.allow ? 'allow' : r.kind;
+};
+test('#4776: a carriage return inside a word hides nothing from the dangerous-command rules or a role', () => {
+  assert.equal(kindOf('git re\rset --hard', null), 'dangerous', 'no role');
+  assert.equal(kindOf('git re\rset --hard'), 'dangerous');
+  assert.equal(kindOf('g\rit reset --hard', null), 'dangerous');
+  assert.equal(kindOf('bash -c "git re\rset --hard"'), 'dangerous', 'inside quotes too');
+  assert.equal(kindOf('gh pr me\rrge 5'), 'role');
+  assert.equal(kindOf('git push origin ma\rin'), 'role');
+  assert.equal(kindOf('unset CB_RO\rLE'), 'role');
+  assert.equal(kindOf('su\rdo codex'), 'role');
+});
+
+test('#4776: the command is still judged as written, and an ordinary CRLF command still passes', () => {
+  assert.equal(kindOf('Write-Host hi\rgit reset --hard'), 'dangerous', 'a lone CR ends a line in PowerShell');
+  assert.equal(kindOf("cat > n.txt <<'EOF'\r\ntext\r\nEOF\r\nunset CB_ROLE\r\n"), 'role', 'a heredoc closed by a CRLF line');
+  assert.equal(kindOf('cd /c/w/x\r\ngit status\r\ngit diff --stat\r\n'), 'allow');
+});
+
+test('#4776: a script the seat runs is read without its carriage returns too', () => {
+  const files: Record<string, string> = {
+    's.sh': 'echo hi\r\nunset CB_RO\rLE\r\n',
+    'outer.sh': 'bash inn\rer.sh\r\n',
+    'inner.sh': 'unset CB_AGENT\n',
+    'plain.sh': 'echo hi\r\ngit status\r\n',
+    'many.sh': Array.from({ length: 20 }, (_, i) => `bash leaf${i}.sh\r\n`).join(''),
+  };
+  const read = (p: string) => files[p] ?? (/^leaf\d+\.sh$/.test(p) ? 'echo ok\r\n' : null);
+  assert.equal(kindOf('bash s.sh', 'builder', read), 'role');
+  assert.equal(kindOf('bash outer.sh', 'builder', read), 'role', 'the script it names, spelled with a CR');
+  assert.equal(kindOf('bash plain.sh', 'builder', read), 'allow');
+  assert.equal(kindOf('bash many.sh', 'builder', read), 'allow', 'a CRLF script counts each script it runs once');
+});
+
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
 // seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
 test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
