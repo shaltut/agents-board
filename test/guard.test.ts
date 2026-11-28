@@ -6,7 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
+import { check, evaluate, foldUp, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
 import { runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
@@ -1254,6 +1254,22 @@ test('#4741: a command string stays judged after text that throws the quote coun
   }
 });
 
+// #4813: foldUp took over from this regex, which stays here as what it must give: the path fence reads its result
+test('#4813: the one-pass seg/../ fold gives what the regex gave', () => {
+  const was = (s: string) => s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+  for (const s of ['~/.codex/x/../hooks.json', 'a/b/c/../../d', ';a/../b', ';a=b/../c', 'x(1)/../y', '$($(a/..', './../a', '../..', 'a/.../b', 'a//..//b', 'a\\..\\b', 'a/..', 'a/..x', '=../..', '(./..', '']) {
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+  // random short paths over the characters either reading treats apart; a fixed seed, so a failure repeats
+  const parts = ['a', 'b', '.', '..', '/', '/', '/..', '\\', ' ', '"', "'", '=', ':', '(', ')', '>', ';', '&', '|', '$', '\n'];
+  let seed = 4813;
+  const next = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  for (let i = 0; i < 60000; i++) {
+    const s = Array.from({ length: next(14) }, () => parts[next(parts.length)]).join('');
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1370,6 +1386,12 @@ test('long commands stay fast', () => {
     ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
+    // #4813: the seg/../ fold started a match after any ( and rescanned the run from each: 27 s, then ALLOW
+    ['#4813, 50,000 nested substitutions, then a path', asBuilder('$('.repeat(50000) + ';' + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, the same with nothing between', asBuilder('$('.repeat(50000) + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, a quoted run of substitution openers after a variable', asBuilder('"$X' + '$('.repeat(50000) + '" ~/.claude/settings.json')],
+    ['#4813, the fold on 200 KB of places a segment may start', () => foldUp('=(:'.repeat(70000) + '/..')],
+    ['#4813, the fold on 200 KB of segments, each followed by a name', () => foldUp('a/..x/'.repeat(34000))],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
