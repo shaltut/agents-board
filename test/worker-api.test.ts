@@ -7,7 +7,7 @@ import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before
 
 const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
-const { closeWorker, failure, wire } = await import('../server/worker.ts');
+const { closeWorker, failure, wire, workerApp } = await import('../server/worker.ts');
 const { setRelease } = await import('../server/release.ts');
 
 const clients: any[] = [];
@@ -322,4 +322,21 @@ test('a stream carries its own machine\'s bindings and its kind\'s channels only
     assert.equal(jobs.ended, false);
     await jobs.close();
   } finally { delete process.env.CB_API_PING_MS; }
+});
+
+// the first stream starts the server's LISTEN, which takes a moment: opens that arrive meanwhile count too
+test('one key holds 64 streams at most, however many it opens at once', async () => {
+  const { sql } = await board();
+  const [key, other] = [await issue(sql), await issue(sql, 'boxb')];
+  const w = workerApp(() => new Promise((r) => setTimeout(r, 300)));
+  const open = (k: string) => w.request('/events?ch=cb', { headers: bearer(k) });
+  const replies = await Promise.all(Array.from({ length: 70 }, () => open(key)));
+  try {
+    assert.deepEqual([200, 429].map((s) => replies.filter((r) => r.status === s).length), [64, 6]);
+    const theirs = await open(other);
+    assert.equal(theirs.status, 200, 'another key is unaffected');
+    replies.push(theirs);
+  } finally {
+    await Promise.all(replies.map((r) => r.body?.cancel()));
+  }
 });
