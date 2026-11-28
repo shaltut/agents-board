@@ -157,14 +157,18 @@ export function checkPath(call, input, mode = 'edit', platform = process.platfor
   const root = real(resolve(root0));
   if (root === null) return SHORT;
   const base = resolve(cwd ?? root0);
-  const roots = [root, ...worktreeRoots(root)];
+  const linked = worktreeRoots(root);
+  const roots = [root, ...linked];
+  // #4743: the deny segments are read below a root, so they never see a linked root that itself sits inside one
+  // (~/.gemini/x, <repo>/.git/x). Such a root grants nothing; below another root's grant it still judges (kit/guard).
+  const grants = [root, ...linked.filter((r) => !r.split(sep).some((s) => WRITE_DENY_SEGMENTS.includes(normSegment(s, platform))))];
   for (const k of given) {
     const v = args[k];
     if (typeof v !== 'string' || !v.trim()) return `the ${mode}'s target path (${k}) is not a non-empty string`;
     const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
     if (abs === null) return `${SHORT} (${k})`;
+    if (!grants.some((r) => below(r, abs) !== null)) return `${verb} outside the workspace and its git worktrees (${k})`;
     const rels = roots.map((r) => below(r, abs)).filter((r) => r !== null);
-    if (rels.length === 0) return `${verb} outside the workspace and its git worktrees (${k})`;
     // every root that holds the path judges it: a worktree nested in the workspace keeps its own kit/guard denied
     for (const rel of rels) {
       const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
