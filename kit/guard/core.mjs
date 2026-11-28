@@ -90,6 +90,9 @@ function bashReader(text) {
     low: 0, // the fewest open since the caller last set it
     unchecked: 0,
     unsure: false,
+    // #4834: 1 where a command may start, as read: after a ; & | ( or line break that no quote holds. One byte a
+    // character: a Set grew faster than the text on a long run of ;
+    starts: new Uint8Array(text.length + 1).fill(1, 0, 1),
     at: () => i,
     skip(to) { i = to; },
     read(to) {
@@ -103,7 +106,7 @@ function bashReader(text) {
         if (c === '$') {
           const d = text[i + 1];
           if (d === '(') {
-            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; r.starts[i] = 1; continue;
           }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
@@ -146,6 +149,7 @@ function bashReader(text) {
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
         else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
+        if (c === ';' || c === '&' || c === '|' || c === '(' || c === '\n') r.starts[i] = 1;
       }
     },
   };
@@ -217,7 +221,7 @@ function replaceHeredocs(text, fn, docs = []) { // docs: filled with the heredoc
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
     out += text.slice(pos, s);
-    const kept = fn(text.slice(s, found.end), line, found.id);
+    const kept = fn(text.slice(s, found.end), line, found.id, (o) => bash.starts[s + o] === 1);
     const base = out.length - s;
     docs.push({ at: base + found.at, header: found.header, nl: base + nl, end: out.length + kept.length, lost: bash.unsure });
     out += kept;
@@ -292,15 +296,42 @@ const TEXT_WRITER = /^[ \t]*(?:cb[ \t]|cat[ \t]*>>?[ \t]*\S|git[ \t]+commit\b.*-
 const SUBST_CAT = /\$\([ \t]*cat[ \t]*$/;
 const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[^;&|\n]*"$`);
 
-// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<.
-function writesText(line) {
+// #4824: the & of an fd duplication (2>&1, >&2, >&-) ends no command, in any shell. Only cb and git commit get this
+// reading: their stdin is text wherever their output goes. A cat's body is its output, which such a redirect can send on
+// (cat >&1 | bash, cat > f >&2 |& bash). &> stays a split: sh reads it as & and then >
+const FD_DUP = /(?<=>)&(?=(?:\d+|-)(?:[ \t<>]|$))/g;
+const MESSAGE_READER = /^[ \t]*(?:cb[ \t]|git[ \t]+commit\b.*-F[ \t]+-)/;
+
+// #4834: a cat's body is its output: text only when that goes to a file. A device may be the pipe itself (/dev/stdout,
+// /proc/self/fd/1), and a command piped on may hand the body to a shell, whatever the target is called ($OUT)
+const CAT = /^[ \t]*cat(?![\w-])/;
+const DEVICE_TARGET = />>?[ \t]*\/+(?:\.\/+)*(?:dev|proc)\/+(?!null(?![\w./-]))/;
+const PIPED_ON = /^[^;&|]*\|(?!\|)/;
+
+// the command segment holding the << at `at`, and where in the line it starts
+function heredocSegment(line, at) {
+  const before = line.slice(0, at);
+  const from = Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1;
+  const after = line.slice(at).search(/[;&|]/);
+  return { from, text: before.slice(from) + (after < 0 ? line.slice(at) : line.slice(at, at + after)) };
+}
+
+// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<, which must start
+// where the shell starts a command (startsAt, #4834): the words after a quoted ; are part of some other command
+function writesText(line, startsAt) {
   if (line.split('<<').length !== 2) return false; // two heredocs on one line: strip neither
   const at = line.indexOf('<<');
   const before = line.slice(0, at);
-  if (SUBST_CAT.test(before)) return MESSAGE_ARG.test(before.replace(SUBST_CAT, '')); // "$(cat <<'EOF' in a message arg
-  const seg = before.slice(Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1);
-  const after = line.slice(at).search(/[;&|]/);
-  return TEXT_WRITER.test(seg + (after < 0 ? line.slice(at) : line.slice(at, at + after)));
+  if (SUBST_CAT.test(before)) { // "$(cat <<'EOF' in a message arg
+    const m = MESSAGE_ARG.exec(before.replace(SUBST_CAT, ''));
+    return m !== null && startsAt(m.index + (/^[;&|(]/.test(m[0]) ? 1 : 0));
+  }
+  const plain = line.replace(FD_DUP, '_');
+  const writes = (re, { from, text }) => re.test(text) && startsAt(from);
+  if (writes(MESSAGE_READER, heredocSegment(plain, at))) return true;
+  const seg = heredocSegment(line, at);
+  if (!writes(TEXT_WRITER, seg)) return false;
+  return !CAT.test(seg.text) || !(DEVICE_TARGET.test(seg.text.replace(/["'\\]/g, '')) || PIPED_ON.test(plain.slice(at)));
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
@@ -319,8 +350,8 @@ export function stripMessages(cmd, inner = false) {
 }
 function stripMessagesOnce(cmd, inner) {
   const docs = [];
-  const drops = (all, line) => writesText(line) && !(inner && substitutes(all, true));
-  const text = replaceHeredocs(cmd, (all, line, id) => (drops(all, line) ? `${line}\n${id}` : all), docs);
+  const drops = (all, line, startsAt) => writesText(line, startsAt) && !(inner && substitutes(all, true));
+  const text = replaceHeredocs(cmd, (all, line, id, startsAt) => (drops(all, line, startsAt) ? `${line}\n${id}` : all), docs);
   return stripMessageArgs(text, docs, inner);
 }
 
@@ -1930,7 +1961,7 @@ function seatVarChangeOne(command) {
 // an interpreter runs: a child given an env of its own (env: {} or env= without process.env or os.environ, clearEnv,
 // unsetenv_others, os.exec*e and os.spawn*e), a delete or pop of a name the guard cannot read, EnvironmentVariables.Clear().
 const FRESH_WRAP = new Set(['nohup', 'time', 'nice', 'command', 'builtin', 'exec', 'xargs', 'setsid', 'stdbuf', 'ionice', 'then', 'do', 'else', 'if', 'while',
-  'until', '!', '{', 'call', 'start', 'start-process', 'saps', 'busybox']);
+  'until', '!', '{', 'call', 'start', 'start-process', 'saps', 'busybox', 'coproc']);
 // a cheap first test: a segment that names none of the launchers is not walked word by word
 const FRESH_NAME = /sudo|doas|su\b|runuser|pkexec|runas|psexec|ssh|mosh|systemd-run|\bat\b|batch|crontab|launchctl|wsl|schtasks|scheduled|explorer|tmux|screen|herdr/i;
 const OTHER_USER = new Set(['sudo', 'doas', 'su', 'runuser', 'pkexec', 'runas', 'psexec', 'psexec64']);
@@ -2246,6 +2277,81 @@ function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set
   return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
     ?? (countLost(stripMessages(String(command ?? ''), depth > 0)) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
+// #4823: the words that reach a shell on its stdin. A segment before a stage that is piped into a shell (or iex) feeds it,
+// whatever lies between (tee, a ( ) or { } group): failing closed costs only a quoted line that starts with a launcher.
+// So does a here-string in a stage that names a shell. Returns (segment index) -> fed. One pass over the words
+const MORE_STDIN_SHELLS = new Set(['fish', 'ash', 'mksh', 'yash', 'tcsh', 'csh', 'posh']);
+// a stage that starts with one of these searches its input for the word sh: it runs none of it (rg --pre runs files)
+const SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'findstr', 'select-string']);
+// a shell given its code by -c reads its stdin as commands only if that code goes on to, and the ways to do that have no
+// end. So a stage is let off only for a shell at its start (after env and assignments, never under xargs) whose code is
+// written out in quotes and is nothing but commands known to take stdin as data
+const CODE_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+const DATA_ONLY = new Set(['cat', 'grep', 'wc', 'head', 'tail', 'sort', 'uniq', 'cut', 'tr', 'tee', 'jq']);
+const takesData = (code) => !/[$\x60(){}<\\\x22\x27]/.test(code) && code.split(/[;&|\n]+/).every((part) => !part.trim() || DATA_ONLY.has(part.trim().split(/\s+/)[0]));
+function runsOwnCode(words) {
+  let i = 0;
+  while (i < words.length && (cmdName(words[i]) === 'env' || ASSIGNMENT.test(words[i]))) i++;
+  if (!CODE_SHELLS.has(cmdName(words[i] ?? ''))) return false;
+  for (i++; /^-./.test(words[i] ?? '') && words[i] !== '--' && words[i] !== '-s'; i++) {
+    if (/^-[a-z]*c$/.test(words[i])) return /^(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27)$/.test(words[i + 1] ?? '') && takesData(words[i + 1].slice(1, -1));
+  }
+  return false;
+}
+const PIPE_END = /(?<!\|)\|&?[\s{}]*$/;
+function stdinFed(raw, segments) {
+  const runs = segments.map((m) => {
+    const names = (m[0].replace(/[<>]+/g, ' ').match(WORD) ?? []).map(cmdName);
+    // script runs a shell on its input; further on in a stage the word is only a name (tee script)
+    const shell = names[0] === 'script' || names.some((n) => PIPE_RUNNERS.has(n) || MORE_STDIN_SHELLS.has(n));
+    return shell && !SEARCHES.has(names[0]) && !runsOwnCode(m[0].match(GIT_TOKEN) ?? []);
+  });
+  let lastPiped = 0, pending = false, end = 0;
+  for (const [k, m] of segments.entries()) {
+    pending ||= PIPE_END.test(raw.slice(end, m.index));
+    end = m.index + m[0].length;
+    if (!m[0].trim()) continue;
+    if (pending && runs[k]) lastPiped = k;
+    // the & of 2>&1 and the braces of xargs -I{} cut a stage in two: its tail is the same stage
+    pending &&= /[<>]$/.test(m[0]) || raw[end] === '{' || raw[end] === '}';
+  }
+  return (k) => k < lastPiped || (runs[k] && segments[k][0].includes('<<<'));
+}
+// the command lines a fed segment hands over: each quoted word, each here-string word (quoted or not), and what echo or
+// printf print. null: a printf whose output is too long to work out
+const FEED_PRINTERS = new Set(['echo', 'printf', 'write-output', 'write-host']);
+// a word as it is handed on: quotes off (the $ of $'..' and $".." too), a written \n a new line, \x the character x
+const handedOn = (x) => unquote(x.replace(/^\$(?=[\x22\x27])/, '')).replace(/\\n/g, '\n').replace(/\\([^\n])/g, '$1');
+const PRINTF_SPEC = /%(?:%|[-+ #0]*[\d*]*(?:\.[\d*]+)?[a-zA-Z])/g;
+// the format is used again while arguments remain. Each round adds its own text, so the room bounds the work
+function printfOutput([format = '', ...args], room) {
+  let out = '', next = 0;
+  for (;;) {
+    const before = next;
+    out += format.replace(PRINTF_SPEC, (s) => (s === '%%' ? '%' : args[next++] ?? ''));
+    if (out.length > room) return null;
+    if (next === before || next >= args.length) return out;
+  }
+}
+function fedLines(seg) {
+  const w = seg.replace(/<<</g, ' <<< ').match(GIT_TOKEN) ?? [];
+  const lines = new Set(w.flatMap((x, i) => (/[\x22\x27]/.test(x) || w[i - 1] === '<<<' ? [handedOn(x)] : [])));
+  const at = w.findIndex((x) => FEED_PRINTERS.has(cmdName(x)));
+  if (at >= 0) {
+    const name = cmdName(w[at]);
+    let from = at + 1;
+    if (name === 'printf') {
+      while (w[from] === '-v' || w[from] === '--') from += w[from] === '-v' ? 2 : 1;
+      const out = printfOutput(w.slice(from).map(handedOn), 4 * seg.length + 1000);
+      if (out === null) return null;
+      lines.add(out);
+    } else {
+      while ((name === 'echo' ? /^-[neE]+$/ : /^-\w+$/).test(w[from] ?? '')) from++;
+      lines.add(w.slice(from).map(handedOn).join(' '));
+    }
+  }
+  return [...lines].join('\n');
+}
 // flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
 // A string it follows gets the second reading only, so the readings never multiply from one level to the next
 function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
@@ -2256,9 +2362,24 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
   const writes = varWrites(blankComments(stripped));
   let written = 0;
-  for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
+  const segments = [...raw.matchAll(flat ? SEGMENTS : SEGMENT)];
+  const fed = raw.includes('|') || raw.includes('<<<') ? stdinFed(raw, segments) : () => false;
+  const followWith = (text) => {
+    const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
+    if (walked.has(key)) return null;
+    walked.add(key);
+    return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
+  };
+  for (const [k, segment] of segments.entries()) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
+    if (fed(k)) {
+      while (written < writes.length && writes[written].at <= segment.index) applyWrite(vars, writes[written++]);
+      const text = fedLines(seg);
+      if (text === null) return FRESH_ENV('a printf into a shell whose output is longer than the guard reads');
+      const why = text && text !== seg ? followWith(text) : null;
+      if (why) return why;
+    }
     if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
       // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
       const plain = unhide(seg.replace(/["']/g, ''));
@@ -2269,12 +2390,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
     const u = w.map(unquote), names = w.map(cmdName);
     const runsQuote = runnerArg(w, u, names, false);
     const cut = flat && leftOpen(seg);
-    const follow = (text) => {
-      const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
-      if (walked.has(key)) return null;
-      walked.add(key);
-      return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
-    };
+    const follow = followWith;
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
@@ -2287,6 +2403,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       const originalName = cmdName(w[i]), name = FRESH_NAME.test(originalName) ? originalName : cmdName(unhide(unquote(w[i])));
       if (!cmd) continue;
       if (ASSIGNMENT.test(u[i])) continue;
+      if (u[i] === '!') continue; // cmdName takes the ! off, so the set below never saw it (#4823)
       if (FRESH_WRAP.has(name)) {
         // Wrapper option values (xargs -a file sudo) are not command words.
         while (u[i + 1]?.startsWith('-')) {
@@ -2460,10 +2577,34 @@ const unhide = (t) => t.replace(/""|''/g, '').replace(/(?<=[a-z])\\(?=[a-z])/gi,
 // (bounded: a few passes, each linear)
 // #4551 (review 68-m3): a segment of three or more dots goes too (Windows drops a segment's trailing dots, so
 // ~/.codex/.../hooks.json is ~/.codex/hooks.json there)
+// seg/../ folded, in one pass. A segment starts after a separator, a blank, a quote, = : ( or >. #4813: as one regex
+// with a lookbehind it tried each of those starts and rescanned the run from every one, quadratic on a long $($($( run
+// (27 s on 150 KB, past the hook's timeout, which counts as allow). Here each run is taken once, and only a run that
+// /.. follows is looked into, for its first start.
+const SEG_RUN = /[^\\/\s"';&|)>]+/g;
+const SEG_UP = /[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/y;
+const BEFORE_SEG = /[\\/\s"'=:(>]/;
+export function foldUp(s) {
+  if (!s.includes('..')) return s; // most commands: nothing to fold
+  let out = '', done = 0;
+  SEG_RUN.lastIndex = 0;
+  for (let run; (run = SEG_RUN.exec(s));) {
+    const end = SEG_RUN.lastIndex;
+    SEG_UP.lastIndex = end;
+    if (!SEG_UP.test(s)) continue;
+    let from = run.index;
+    while (from < end && from > 0 && !BEFORE_SEG.test(s[from - 1])) from++;
+    const left = s.slice(from, Math.min(end, from + 3));
+    if (from === end || left === '.' || left === '..') continue; // no start in it, or . and .. themselves
+    out += s.slice(done, from);
+    done = SEG_RUN.lastIndex = SEG_UP.lastIndex;
+  }
+  return done ? out + s.slice(done) : s;
+}
 const fold = (t) => {
   let s = t.replace(/(?<=[\\/])\.{3,}(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '').replace(/(?<=[\\/])(?:\.[\\/]+)+/g, '');
   for (let i = 0; i < 8; i++) {
-    const n = s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+    const n = foldUp(s);
     if (n === s) break;
     s = n;
   }
