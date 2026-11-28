@@ -69,7 +69,6 @@ test('the confirm dialog says what disabling touches, from the preview, and prom
   assert.doesNotMatch(a.lines.join(' '), /\d/, 'no count: the row and the preview count open cards differently (review N1)');
   assert.match(a.lines.join(' '), /Unarchive brings it back as disabled/);
   for (const t of [d, one, none, a].flatMap((x) => [x.title, x.lead, x.button, ...x.lines])) {
-    assert.doesNotMatch(t, /supervisor|closes? (them|it)/i, 'slice 3 (the supervisor closing idle seats) is not shipped yet');
     assert.doesNotMatch(t, /cancel/i, 'slice 4 (archive cancels waiting jobs) is not shipped yet');
     assert.doesNotMatch(t, RAW, `no stored value in "${t}"`);
   }
