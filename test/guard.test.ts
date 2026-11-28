@@ -1302,28 +1302,77 @@ function machineBudget() {
   return Math.max(1000, Math.round(best * 25));
 }
 
-// #4807: the reference is its best of 5 runs, so one slow run of a case on a busy machine is no regression. A case over
-// budget runs again, twice at most, and its best run counts: a real slowdown is over every time. The guard keeps its last
-// stripped text and its HOME answers between calls, so a rerun gets `again` to change its text by, after a small command
-function bestRun(run: (again: number) => unknown, budget: number, now = () => performance.now()) {
-  let best = Infinity;
-  for (let again = 0; again < 3 && best >= budget; again++) {
+// #4832: a busy runner slows every core for as long as other jobs run, so reruns alone do not help, and the budget above
+// is set once, from a reference too short to show it. A run over that budget is held to the load beside it: the same plain
+// work, six rounds of it, timed right after the run. The budget is 8 times that, never under the machine's own and never
+// over twice it. The quietest reading seen on the PC runner was 139 ms (1.1 s of 1 s), the busiest 275 ms (the cap of
+// 2 s), so a regression under twice the budget can pass while the runner is busy; a quiet run still fails it
+function loadReference() {
+  const s = 'a line of notes\n'.repeat(37500);
+  let n = 0;
+  const from = performance.now();
+  for (let k = 0; k < 30; k++) n += s.split('\n').map((l) => l.trim()).join(' ').replace(/\s+/g, ' ').length + (s.match(/notes/g)?.length ?? 0);
+  assert.ok(n > 0);
+  return performance.now() - from;
+}
+const loadBudget = (base: number, reference: number) => Math.min(2 * base, Math.max(base, Math.round(8 * reference)));
+
+// #4807: one slow run of a case on a busy machine is no regression. A case over budget runs again, twice at most, and the
+// run furthest inside its budget counts: a real slowdown is over every time. The guard keeps its last stripped text and
+// its HOME answers between calls, so a rerun gets `again` to change its text by, after a small command
+function bestRun(run: (again: number) => unknown, base: number, now = () => performance.now(), reference = loadReference) {
+  let best = { ms: Infinity, budget: base, load: 0 };
+  for (let again = 0; again < 3 && best.ms >= best.budget; again++) {
     if (again > 0) evaluate({ tool: 'shell', command: 'ls', role: 'builder' });
     const from = now();
     run(again);
-    best = Math.min(best, now() - from);
+    const ms = now() - from;
+    const load = ms < base ? 0 : reference();
+    const budget = loadBudget(base, load);
+    if (ms - budget < best.ms - best.budget) best = { ms, budget, load };
   }
   return best;
 }
 
+// the one timing assertion: a case that needed the load's allowance says so in the job log
+function withinBudget(name: string, run: (again: number) => unknown, base: number) {
+  const { ms, budget, load } = bestRun(run, base);
+  const said = `${name} took ${Math.round(ms)} ms at best (budget ${budget} ms; this machine's own ${base} ms, load reference ${Math.round(load)} ms)`;
+  if (ms >= base) console.log(`over this machine's own budget: ${said}`);
+  assert.ok(ms < budget, said);
+}
+
+// bestRun on a made-up clock: each run takes the next duration, and the load reference reads the same each time
+function timedAs(durations: readonly number[], reference: number) {
+  let clock = 0, asked = 0;
+  const seen: number[] = [];
+  const got = bestRun((again) => { clock += durations[seen.length]; seen.push(again); }, 1000, () => clock, () => { asked++; return reference; });
+  return { ...got, seen, asked };
+}
+
 test('#4807: a case over budget runs again and its best run counts; one that is slow every time stays over', () => {
   for (const [durations, best, runs] of [[[500], 500, [0]], [[1200, 700], 700, [0, 1]], [[1200, 1100, 900], 900, [0, 1, 2]], [[1900, 1950, 1890, 10], 1890, [0, 1, 2]]] as const) {
-    let clock = 0;
-    const seen: number[] = [];
-    const got = bestRun((again) => { clock += durations[seen.length]; seen.push(again); }, 1000, () => clock);
-    assert.equal(got, best, String(durations));
-    assert.deepEqual(seen, runs, String(durations));
+    const got = timedAs(durations, 100);
+    assert.equal(got.ms, best, String(durations));
+    assert.equal(got.budget, 1000, String(durations));
+    assert.deepEqual(got.seen, runs, String(durations));
   }
+});
+
+test('#4832: a busy machine gets more time, read from the load beside the run; a real slowdown still fails', () => {
+  // inside the machine's own budget: the load is not even read
+  assert.equal(timedAs([999], 500).asked, 0);
+  // the reference is twice a quiet machine's, so a run at 1200 ms is inside the budget the first time
+  assert.deepEqual(timedAs([1200], 200), { ms: 1200, budget: 1600, load: 200, seen: [0], asked: 1 });
+  // the budget never passes twice the machine's own, however slow the reference reads
+  for (const [durations, reference] of [[[2000, 2100, 2050], 900], [[3800, 3700, 3900], 270], [[1900, 1950, 1890], 120]] as const) {
+    const got = timedAs(durations, reference);
+    assert.ok(got.ms >= got.budget && got.budget <= 2000, `${durations} at ${reference}: ${got.ms} within ${got.budget}`);
+    assert.equal(got.seen.length, 3);
+  }
+  // a quiet reference changes nothing
+  assert.equal(loadBudget(1000, 125), 1000);
+  assert.equal(loadBudget(1700, 100), 1700);
 });
 
 // #4767: PR 124 reads quotes as bash does for plain text. Where bash and PowerShell, or a comment or a heredoc body,
@@ -1627,10 +1676,7 @@ test('long commands stay fast', () => {
     ["#4742, escaped quotes with a quoted 'a' after each", asBuilder('echo ' + "\\\"'a'".repeat(40000))],
     ['#4742, escaped quotes, as a seat with a stdin', () => evaluate({ tool: 'shell', command: 'echo ' + escaped, role: 'builder', stdin: true })],
   ];
-  for (const [name, run] of cases) {
-    const ms = bestRun(run, budget);
-    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms at best (this machine's budget: ${budget} ms)`);
-  }
+  for (const [name, run] of cases) withinBudget(name, run, budget);
   // reading every git/gh/az word's arguments to the segment's end is (count x length): past 16 in one segment, block
   passes('builder', ['echo ' + 'git '.repeat(16)]);
   const many = evaluate({ tool: 'shell', command: 'echo ' + 'git '.repeat(17), role: 'builder' });
@@ -1873,8 +1919,7 @@ test('#4707 review: the new reads stay fast on long commands', () => {
     spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
   };
   for (const [name, command] of Object.entries(long)) {
-    const ms = bestRun((again) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'lead' }), budget);
-    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms at best, budget ${Math.round(budget)} ms`);
+    withinBudget(name, (again) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'lead' }), budget);
   }
 });
 
@@ -2204,8 +2249,7 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
     ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
     ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
     ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
-    const ms = bestRun((again) => judged4803(command + ' '.repeat(again)), budget);
-    assert.ok(ms < budget, `${name} took ${Math.round(ms)} ms at best (this machine's budget: ${budget} ms)`);
+    withinBudget(name, (again) => judged4803(command + ' '.repeat(again)), budget);
   }
 });
 
