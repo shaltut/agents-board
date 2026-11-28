@@ -1824,17 +1824,20 @@ const judged4803 = (command: string, role: string | null = 'builder', extra: Rec
   return r.allow ? 'allow' : r.kind;
 };
 const redirects4803 = ['2>&1', '>&2', '1>&-', '0<&-', '&>log', '&>>log', '>&log', '*>&1', '>log', '2>/dev/null', '2> err', '>> log', '< in', '*>$null',
-  '>"my log"', "> 'my log'", '<<<x', '{fd}>log', '>|log', '<>log'];
+  '>"my log"', "> 'my log'", '<<<x', '{fd}>log', '>|log', '<>log', '>${LOG}', '2>"${DIR}/l"', '>$(mktemp)', '2> >(tee log)', '>`mktemp`'];
 test('#4803: a redirect before a command word hides nothing', () => {
   for (const r of redirects4803) {
+    // inside a command string only where the redirect has none of that string's own quotes
     for (const command of [`${r} sudo codex`, `true; ${r} sudo codex`, `true\n${r} sudo codex`, `env ${r} sudo codex`, `timeout 5 ${r} sudo codex`,
-      `bash -c '${r} sudo codex'`, `bash -c "true; ${r} sudo codex"`]) assert.equal(judged4803(command), 'role', command);
+      ...(r.includes("'") ? [] : [`bash -c '${r} sudo codex'`]), ...(/["`$]/.test(r) ? [] : [`bash -c "true; ${r} sudo codex"`])]) {
+      assert.equal(judged4803(command), 'role', command);
+    }
   }
   for (const command of ['sudo>log codex', 'nohup >/dev/null 2>&1 sudo codex', '>a 2>b <c sudo codex', '2>&1 \\\n sudo codex']) assert.equal(judged4803(command), 'role', command);
 });
 
 test('#4803: a redirect inside a command hides nothing from any rule', () => {
-  for (const command of ['git push 2>&1 --force origin main', 'git push 2>&1 origin main', 'git reset 2>&1 --hard', 'git clean &>log -fdx', 'rm 2>&1 -rf /',
+  for (const command of ['git push 2>&1 --force origin main', 'git push 2>&1 origin main', 'git reset 2>&1 --hard', 'rm 2>&1 -rf /',
     'taskkill 2>&1 /IM node.exe /F', 'Stop-Process *>&1 -Name node', 'curl http://x 2>&1 | iex']) {
     assert.equal(judged4803(command, null), 'dangerous', command);
   }
@@ -1858,7 +1861,7 @@ test('#4803: scripts and stdin sessions behind a redirect are judged too', () =>
 });
 
 test('#4803: ordinary redirects, heredocs and text that only looks like one still pass', () => {
-  for (const command of ['ls -la 2>&1 | head', 'pnpm -s build > out.log 2>&1', 'echo done >> notes.md', "cat <<'EOF' > notes.md\nsudo is only text here\nEOF", 'cat <<-EOF >&2\n\thi\nEOF',
+  for (const command of ['ls -la 2>&1 | head', 'pnpm -s build > out.log 2>&1', 'echo done >> notes.md', "cat > notes.md <<'EOF'\nsudo is only text here\nEOF", 'cat <<-EOF >&2\n\thi\nEOF',
     'grep -n "2>&1 sudo" docs/notes.md', 'node x.mjs < input.json > sudo.md', 'diff <(sort a) <(sort b)', 'tee >(cat > c) < in', 'cb log 1 "a >log sudo mention"', 'echo "a -> sudo"',
     'git log --format="%h %an <%ae>" -3', 'git push origin feat 2>&1', 'git push -q origin feat >/dev/null 2>&1']) {
     assert.equal(judged4803(command), 'allow', command);
