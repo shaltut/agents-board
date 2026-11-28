@@ -15,6 +15,7 @@ import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
 import { squadTrust } from './squad-trust.ts';
 import { squadShow } from './squad-show.ts';
+import { makeLister, modelsShow, reportModels } from './models.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
 import { faultHook, commandIndex } from './fault-hook.ts';
@@ -877,6 +878,18 @@ ${body}`, json: pg };
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
       const { version: _v, ...plain } = sq;
       return { out: squadShow(plain), json: sq };
+    }
+    case 'models': { // #4763: this machine's agent CLI model lists, sent for the settings page
+      if (args.length > 1 || (args[0] !== undefined && args[0] !== 'report')) throw new Error('usage: cb models  |  cb models report [--machine <name>]');
+      if (args[0] === 'report') {
+        const name = String(o.machine ?? machine()).toLowerCase();
+        const lines = await reportModels({ machine: name, list: makeLister(),
+          save: async (m, lists) => (await sql`select cb.machine_models_set(${m}, ${JSON.stringify(lists)}::text::jsonb, ${actor}) as r`)[0].r });
+        return { out: lines.join('\n'), json: { machine: name, lines } };
+      }
+      if (o.machine !== undefined) throw new Error('--machine goes with report: cb models report --machine <name>');
+      const all = ((await callFn('squad_options', {})) as any).machine_models ?? {};
+      return { out: modelsShow(all), json: all };
     }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
