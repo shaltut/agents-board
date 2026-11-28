@@ -48,10 +48,14 @@ test('pings_due: stale pinged cards ask their worker and orchestrator every 30 m
   await sql`select cb.log('demo', 'on it, waiting for CI', '1', '{}', 'W1@pc')`;
   assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0);
 
-  // every status but done is asked about (here: review), and turning the option off stops it
+  // #4665: a card in review waits on Ahmed by definition: never asked about; back in progress it is again. Turning the
+  // option off stops it
   await age(120);
   await sql`update cb.task_pings set last_ping_at = null`;
   await sql`select cb.task_move('1', 'review', null, 'W1@pc')`;
+  await age(120);
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 0, 'review: waiting on Ahmed');
+  await sql`select cb.task_move('1', 'in_progress', null, 'W1@pc')`;
   await age(120);
   assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2);
   await sql`update cb.task_pings set last_ping_at = null`;
@@ -78,9 +82,10 @@ test('task_ping_bulk: many cards at once, by ids or a whole project; unassigned 
   await assert.rejects(() => sql`select cb.task_ping_bulk(null, null, true, 'ahmed')`, /say which cards/);
   assert.equal((await sql`select cb.task_ping_bulk(${sql.json([1, 2])}, null, true, 'ahmed') as n`)[0].n, 2);
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed') as n`)[0].n, 1, 'C only: A and B were on, D is done');
-  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 3, 'one line per card to the orchestrator; nobody is assigned');
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2, 'one line per card to the orchestrator; nobody is assigned; #4665: A, unassigned backlog, is parked');
   const m = await sql`select summary from cb.events where data ? 'nudge' order by id`;
-  assert.match(m.find((x) => x.summary.includes('"A"'))?.summary ?? '', /"A" \(unassigned, backlog\) has had no update for 3h 0m\./, 'no "assigned to ," and no session-gone note for a card nobody holds');
+  assert.match(m.find((x) => x.summary.includes('"B"'))?.summary ?? '', /"B" \(unassigned, next\) has had no update for 3h 0m\./, 'no "assigned to ," and no session-gone note for a card nobody holds');
+  assert.ok(!m.some((x) => x.summary.includes('"A"')), '#4665: an unassigned backlog card is parked, not asked about');
   assert.equal((await sql`select cb.task_ping_bulk(null, 'demo', false, 'ahmed') as n`)[0].n, 3);
   assert.equal((await sql`select count(*)::int as n from cb.task_pings`)[0].n, 0);
 });
@@ -116,5 +121,63 @@ for (const [who, role, bound, leads] of [['QO@pc', 'lead', 'p', true], ['QO@pc',
     await sql`select cb.pings_due()`;
     const to = (await sql`select data ->> 'to' as to_ from cb.events where data ? 'nudge' order by id`).map((x: any) => x.to_);
     assert.deepEqual(to.sort(), leads ? ['W1@pc', who].sort() : ['W1@pc']);
+  });
+}
+
+// #4665: an in_progress card nobody holds is asked about once per quiet stretch, with the fix (move it back or assign it),
+// not every 30 minutes; an assigned backlog card is still asked about
+test('pings_due: an unowned in_progress card is asked about once, with the fix; an assigned backlog card still is', async () => {
+  const sql = await freshDb(); clients.push(sql);
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('pc', 'p1', 'W1@pc', 'demo')`;
+  await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Orphan', status => 'in_progress', actor => 'orch@pc')`;
+  await sql`select cb.task_add(project => 'demo', title => 'Mine later', status => 'backlog', assignee => 'W1@pc', actor => 'orch@pc')`;
+  await sql`update cb.tasks set updated_at = now() - interval '3 hours', assignee = case when id = 1 then '' else assignee end`; // task_add gives an in_progress card to its maker; unassigned holds ''
+  await sql`update cb.events set at = now() - interval '3 hours'`;
+  await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed')`;
+  const orphans = async () => (await sql`select count(*)::int as n from cb.events where data ? 'nudge' and summary like '%Orphan%'`)[0].n;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 3, 'orphan: the lead; assigned backlog: the worker and the lead');
+  const [o] = await sql`select summary from cb.events where data ? 'nudge' and summary like '%Orphan%'`;
+  assert.match(o.summary, /nobody holds it: move it back \(cb move 1 next\) or assign it/);
+  await sql`update cb.task_pings set last_ping_at = now() - interval '31 minutes'`;
+  assert.equal((await sql`select cb.pings_due() as n`)[0].n, 2, 'the orphan once only; the assigned backlog card again');
+  assert.equal(await orphans(), 1);
+  // asked (2.5 h ago), then an update (2 h ago), then quiet: a new stretch, asked once more
+  await sql`select cb.log('demo', 'looked at it', '1', '{}', 'orch@pc')`;
+  await sql`update cb.tasks set updated_at = now() - interval '2 hours' where id = 1`;
+  await sql`update cb.events set at = now() - interval '2 hours' where task_id = 1 and not (data ? 'nudge')`;
+  await sql`update cb.task_pings set last_ping_at = now() - interval '150 minutes' where task_id = 1`;
+  await sql`select cb.pings_due()`;
+  assert.equal(await orphans(), 2);
+});
+
+// #4679 (PR 112 N1, N3): an orphan asked once was forgotten for good, and a staged one used its ask without a message
+for (const pipeline of [false, true]) {
+  test(`pings_due: an unowned in_progress card is asked about again after a day (${pipeline ? 'staged, pipeline on' : 'unstaged'})`, async () => {
+    const sql = await freshDb(); clients.push(sql);
+    await sql`select cb.ensure_project('demo')`;
+    await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+    await sql`select cb.task_add(project => 'demo', title => 'Orphan', status => 'in_progress', actor => 'orch@pc')`;
+    if (pipeline) await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+    await sql.begin(async (tx) => {
+      await tx`select set_config('cb.stage_ok', 'on', true)`;
+      await tx`update cb.tasks set assignee = '', stage = ${pipeline ? 'build' : null}, updated_at = now() - interval '30 hours'`;
+    });
+    await sql`update cb.events set at = now() - interval '30 hours'`;
+    await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed')`;
+    const asks = async () => (await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'nudge'`) as any[];
+    await sql`select cb.pings_due()`;
+    let a = await asks();
+    assert.deepEqual(a.map((x) => x.to_), ['orch@pc'], 'the lead is told, staged or not');
+    assert.match(a[0].summary, /nobody holds it: move it back \(cb move 1 next\) or assign it\. Asked again in a day/);
+    await sql`update cb.task_pings set last_ping_at = now() - interval '23 hours'`;
+    await sql`select cb.pings_due()`;
+    assert.equal((await asks()).length, 1, 'not within a day');
+    await sql`update cb.task_pings set last_ping_at = now() - interval '25 hours'`;
+    await sql`select cb.pings_due()`;
+    assert.equal((await asks()).length, 2, 'again after a day');
+    // the fix the line names works on a staged card too
+    await sql`select cb.task_move('1', 'next', null, 'orch@pc')`;
   });
 }

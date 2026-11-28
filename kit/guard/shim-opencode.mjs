@@ -5,7 +5,8 @@
 // unreadable input, an unknown tool or CB_ROLE, a missing or broken core.mjs, or any error blocks. The plugin must forward
 // only bash, powershell, the edit family, the read family (read, grep, glob, list) and question: every other tool name is
 // blocked here, never allowed by default. CB_AGENT without CB_ROLE blocks too (#4002): cb squad up always sets both.
-import { readFileSync, realpathSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -46,25 +47,34 @@ export function parseOpencodeInput(raw) {
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit', args: p.args };
   if (READ_TOOLS.has(name)) return { ok: true, tool: 'read', args: p.args, name };
   if (name === 'question') return { ok: true, tool: 'ask' };
-  return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(p.tool)).slice(0, 80)}: this guard reads bash, powershell, edit, write, patch, apply_patch, multiedit, read, grep, glob, list and question` };
+  return { ok: false, unknown: typeof name === 'string' && name !== '', reason: `unrecognized tool ${String(JSON.stringify(p.tool)).slice(0, 80)}: this guard reads bash, powershell, edit, write, patch, apply_patch, multiedit, read, grep, glob, list and question` };
 }
+
+// #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 
 export function runOpencodeShim(raw, env = process.env) {
   try {
     if (!core) return block(`Blocked: guard failed to load core (${detail(loadErr)})`);
     const p = parseOpencodeInput(raw);
-    if (!p.ok) return block(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
-    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     // CB_AGENT without CB_ROLE blocks (a broken seat launch, #4002); an edit carries its targets for the fence and secret rule
     const agent = String(env.CB_AGENT ?? '').trim() || null;
+    // PR 96 review I3 and its r2 ruling: the plugin is machine-wide, so outside a board seat (neither CB_ROLE nor CB_AGENT)
+    // OpenCode gets exactly what Claude gets there: its other tools (webfetch, task, todowrite, skill, lsp, MCP) pass,
+    // shell commands get the dangerous-command rules only, and a question follows CB_ALLOW_ASK as AskUserQuestion does
+    const seat = !!(role || agent);
+    if (!p.ok) return !seat && p.unknown ? {} : block(`Blocked: ${p.reason}`);
+    const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     const paths = p.tool === 'edit' || p.tool === 'read' ? core.editTargets(p.args ?? null) : undefined;
     // a file glob names files too: grep's include and glob's pattern (grep's own pattern is the text searched for)
     const glob = p.tool === 'read' && isObject(p.args) ? (p.name === 'grep' ? p.args.include : p.name === 'glob' ? p.args.pattern : undefined) : undefined;
     if (typeof glob === 'string' && glob.trim()) paths.push(glob.trim());
     // review 68-I2: each target also resolved against the cwd and through the real path of its nearest existing folder
     const forms = paths && [...new Set(paths.flatMap((t) => core.editPathForms(t, process.cwd(), FS)))];
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms });
+    // #4669: a shell script the command runs is read from OpenCode's cwd and judged too; ssh to this machine's own name counts
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1', agent, paths: forms,
+      readScript: readerFor(process.cwd()), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return block(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

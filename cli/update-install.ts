@@ -16,6 +16,8 @@
 // running from the copy would not, so the update refuses while one runs (--force goes ahead and leaves it on the old
 // code until it is restarted by its pid). Nothing is killed, ever, and never by name.
 // A git checkout (the PC) is refused: git pull --ff-only updates it.
+// The schema gate. Before anything is written, the board's database must have the schema the release needs (the
+// sha256 of its db/schema.sql, cb.schema_covers): otherwise the new cb would call functions the board lacks.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync,
   symlinkSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
@@ -93,23 +95,50 @@ export function processes(): Proc[] {
   if (r.status !== 0) throw new Error(`cannot list processes (${String(r.stderr || r.error?.message || '').trim().slice(0, 200)})`);
   return r.stdout.split(/\r?\n/).map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m![1]), cmd: m![2]! }));
 }
+/** The folder in `lsof -a -p <pid> -d cwd -Fn` output (its n line), or null. */
+export function lsofCwd(out: string): string | null {
+  const n = out.split(/\r?\n/).find((l) => l.startsWith('n/'));
+  return n ? n.slice(1) : null;
+}
+/** A process's working folder (/proc on Linux, lsof on macOS), or null when it cannot be read: another user's
+ *  process, no lsof, or Windows, which does not show another process's folder. Reads only. */
+export function cwdOf(pid: number): string | null {
+  if (win) return null;
+  if (process.platform === 'linux') { try { return readlinkSync(`/proc/${pid}/cwd`); } catch { return null; } }
+  const r = spawnSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 10_000 });
+  return typeof r.stdout === 'string' ? lsofCwd(r.stdout) : null;
+}
 /** The processes running code from this copy, by kind: relays restart themselves; a runner or supervisor does not.
- *  A runner or supervisor started by a relative path (node cli/cb.ts runner) names no folder: counted as this copy's. */
-export function runningFrom(L: Layout, procs: Proc[]) {
+ *  A runner or supervisor started by a relative path (node cli/cb.ts runner) names no folder in its command line: it
+ *  counts when its working folder is the copy (or one of its versions; #4572), not when it is another checkout. One
+ *  whose folder cannot be read is `unsure`: it may be this copy's. */
+export function runningFrom(L: Layout, procs: Proc[], folderOf: (pid: number) => string | null = cwdOf) {
   const norm = (s: string) => (win ? s.replace(/\\/g, '/').toLowerCase() : s);
-  const roots = [norm(L.live) + '/', norm(L.home) + '/'];
+  const roots = [...new Set([L.live, L.home, real(L.live), real(L.home)].filter((r): r is string => !!r).map((r) => norm(r) + '/'))];
   const mine = new Set([process.pid, process.ppid]);
   const DAEMON = /(^|[\s"'/])cli\/(runner|supervise)\.ts\b|(^|[\s"'/])(cli\/cb\.ts|bin\/cb)["']?\s+(runner|supervise)\b/;
-  const RELATIVE = /(^|[\s"'])(\.\/)?(cli|bin)\/(runner\.ts|supervise\.ts|cb\.ts|cb)["']?(\s|$)/;
+  const RELATIVE = /(?:^|[\s"'])((?:\.\/)?(?:cli|bin)\/(?:runner\.ts|supervise\.ts|cb\.ts|cb))["']?(?:\s|$)/;
   const kind = (c: string) => /\/cli\/relay\.ts\b/.test(norm(c)) ? 'relay' : DAEMON.test(norm(c)) ? 'daemon' : 'other';
-  const ours = procs.filter((p) => !mine.has(p.pid)
-    && (roots.some((r) => norm(p.cmd).includes(r)) || (kind(p.cmd) === 'daemon' && RELATIVE.test(norm(p.cmd)))));
-  return { relays: ours.filter((p) => kind(p.cmd) === 'relay'), daemons: ours.filter((p) => kind(p.cmd) === 'daemon'), others: ours.filter((p) => kind(p.cmd) === 'other') };
+  const unsure: Proc[] = [];
+  const ours = procs.filter((p) => {
+    if (mine.has(p.pid)) return false;
+    if (roots.some((r) => norm(p.cmd).includes(r))) return true;
+    const rel = kind(p.cmd) === 'daemon' ? RELATIVE.exec(norm(p.cmd))?.[1] : undefined;
+    if (!rel) return false;
+    const dir = folderOf(p.pid);
+    if (!dir) { unsure.push(p); return false; }
+    return roots.some((r) => norm(resolve(dir, rel)).startsWith(r));
+  });
+  return { relays: ours.filter((p) => kind(p.cmd) === 'relay'), daemons: ours.filter((p) => kind(p.cmd) === 'daemon'), others: ours.filter((p) => kind(p.cmd) === 'other'), unsure };
 }
+const unsureSay = (run: ReturnType<typeof runningFrom>) => `pid ${run.unsure.map((p) => p.pid).join(', ')} runs a runner or supervisor by a relative path `
+  + `and its working folder could not be read${win ? ' (Windows does not show it)' : ''}: it may be this copy's or another checkout's`;
 function refuseDaemons(run: ReturnType<typeof runningFrom>, force: boolean) {
-  if (!run.daemons.length || force) return;
-  throw new Error(`the runner or supervisor runs from this copy (pid ${run.daemons.map((p) => p.pid).join(', ')}) and would stay on the old code: `
+  if (force) return;
+  if (run.daemons.length) throw new Error(`the runner or supervisor runs from this copy (pid ${run.daemons.map((p) => p.pid).join(', ')}) and would stay on the old code: `
     + 'stop it by its pid (never by name), update, then start it again; or pass --force (it keeps the old code until it restarts)');
+  if (run.unsure.length) throw new Error(`${unsureSay(run)}. If it is this copy's it would stay on the old code: stop it by its pid (never by name), `
+    + 'update, then start it again; if it is not, pass --force');
 }
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; } };
@@ -237,7 +266,34 @@ function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.P
   }
 }
 
-export async function install(o: { root: string; from: string; force?: boolean; procs?: () => Proc[]; env?: NodeJS.ProcessEnv; timeoutMs?: number }) {
+/** What the board's database says of a schema: covers, whether it has it (cb.schema_covers); null when it cannot say
+ *  (a board from before the gate); current, the schema it runs. */
+export type SchemaAnswer = { covers: boolean | null; current: string | null };
+/** Asks the database this cb uses (the board's) about the schema `need` (a sha256 of db/schema.sql). */
+export async function askSchema(sql: any, need: string): Promise<SchemaAnswer> {
+  try {
+    const [r] = await sql`select cb.schema_covers(${need}) as covers, cb.schema_applied() ->> 'current' as current`;
+    return { covers: !!r.covers, current: r.current ?? null };
+  } catch (e: any) {
+    if (e?.code === '42883') return { covers: null, current: null }; // undefined_function: the board predates the gate
+    throw new Error(`cannot read the board's schema (${e?.code ?? e?.message ?? e}): cb update checks it before installing; try again when the board answers`);
+  }
+}
+
+/** Refuses, writing nothing, a release whose schema (the sha256 of its db/schema.sql) the board's database does not
+ *  have: the new cb would call functions the board does not have yet. Schema before code (CLAUDE.md, Releasing). */
+async function schemaGate(m: Manifest, ask: (need: string) => Promise<SchemaAnswer>) {
+  const need = m.files['db/schema.sql'];
+  if (!need) return; // a release with no schema needs none
+  const a = await ask(need);
+  const deploy = `deploy release ${short(m.sha)} to the board first (docs/ops/maintain.md, Upgrade: the board and its schema go first), then cb update again`;
+  if (a.covers === null) throw new Error(`the board's database does not say which schema it runs (it runs a board from before cb update's schema check): ${deploy}`);
+  if (!a.covers) throw new Error(`the board's database runs an older schema than release ${short(m.sha)} needs `
+    + `(the release's db/schema.sql ${need.slice(0, 8)}, the board's ${a.current ? a.current.slice(0, 8) : 'unknown'}): ${deploy}`);
+}
+
+export async function install(o: { root: string; from: string; force?: boolean; procs?: () => Proc[]; env?: NodeJS.ProcessEnv; timeoutMs?: number;
+  schema: (need: string) => Promise<SchemaAnswer> }) {
   const L = layout(o.root);
   const repaired = preflight(L);
   const base = boardBase(needAddress(o.from));
@@ -257,6 +313,8 @@ export async function install(o: { root: string; from: string; force?: boolean; 
     }
     return { ok: true, lines: [...lines, `update: already on ${short(m.sha)}`], json: { ok: true, release: m.sha, current: m.sha, changed: false } };
   }
+
+  await schemaGate(m, o.schema);
 
   // packages: reused from the copy when the lockfile is the same; never installed or touched here
   const want = f.served?.deps?.[LOCKFILE];
@@ -299,6 +357,7 @@ function after(run: ReturnType<typeof runningFrom>) {
   const out: string[] = [];
   if (run.relays.length) out.push(`relays: ${run.relays.length} running from this copy restart themselves into the new code within seconds (one that does not: cb relay --restart in its pane)`);
   if (run.daemons.length) out.push(`runner/supervisor: pid ${run.daemons.map((p) => p.pid).join(', ')} still run the old code: restart each by its pid (never by name)`);
+  if (run.unsure.length) out.push(`runner/supervisor: ${unsureSay(run)}; if it is this copy's, restart it by its pid (never by name)`);
   return out;
 }
 

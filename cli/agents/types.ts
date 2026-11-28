@@ -14,12 +14,17 @@ export type AgentStatus = { state: AgentState; safeToClose: boolean; detail?: st
 export type QuotaSignal = { kind: 'quota' | 'rate_limit'; retryAfterSec?: number; raw: string };
 export type GuardInstallSpec = { targetPath: string; shimFile: string; matchers: Record<'win32' | 'darwin' | 'linux', string>; notes: string };
 export type InstructionMapping = { nativeFiles: string[]; extraArgs: string[]; env: Record<string, string>; note: string };
-export type TrustSpec = { dialogHint: string; preseedPath?: string; extraArgs: string[] };
+/** preseed (#4575): how cb squad trust marks a folder trusted in the agent's own config, so its folder-trust dialog never
+ *  shows. file: under the home folder, '/'-separated. state and add are pure over the file's text; add throws a path the
+ *  file cannot hold. 'untrusted': the owner said no for that folder, which is left alone. 'other': the folder is set
+ *  by hand in a form add does not write, also left alone. Absent preseed: no dialog to preseed. */
+export type TrustPreseed = { file: string; state(text: string, path: string): 'trusted' | 'untrusted' | 'other' | 'absent'; add(text: string, path: string): string };
+export type TrustSpec = { dialogHint: string; preseedPath?: string; preseed?: TrustPreseed; extraArgs: string[] };
 export type DisableAskSpec = { toolName: string; mechanism: 'hook' | 'permission'; target: string };
 /** How a seat starts with no MCP server (#4392): `args` and `env` for this run only (buildLaunch adds them; never the
  *  user's own config). What they cannot turn off is the adapter's `mcpGate`. */
 export type McpOffSpec = { args: string[]; env: Record<string, string>; note: string };
-export type LaunchInput = { name: string; role: string; area?: string; repo: string; agent: AgentKind; model: string; board: string; cwd: string; env?: Record<string, string> };
+export type LaunchInput = { name: string; role: string; area?: string; repo: string; agent: AgentKind; model: string; effort?: string; board: string; cwd: string; env?: Record<string, string> };
 
 export interface AgentAdapter {
   readonly kind: AgentKind;
@@ -38,6 +43,9 @@ export interface AgentAdapter {
   detectQuotaStop(seat: SeatHandle, herdrAgent: { agent_status?: string } | null, paneTail?: string): QuotaSignal | null;
   guardInstallSpec(boardDir: string, platform: NodeJS.Platform): GuardInstallSpec;
   instructionMapping(launch: LaunchInput): InstructionMapping;
+  /** #4765: the user-level rules file this agent reads on this machine, for cli/agent-context.ts to copy the owner's
+   *  rules into. Null: it reads the source (Claude Code's user file) itself. */
+  userRulesFile(home: string, env: NodeJS.ProcessEnv): string | null;
   trustSpec(repoPaths: string[], platform: NodeJS.Platform): TrustSpec;
   disableAskSpec(): DisableAskSpec;
   mcpOff(board: string): McpOffSpec;

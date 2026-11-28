@@ -11,7 +11,7 @@ test('project_pipeline: only the dashboard switches it, and roles read from sess
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo')`;
   const session = postgres(TEST_URL, { onnotice: () => {} }); clients.push(session);
-  await assert.rejects(() => session`select cb.project_pipeline('demo', true, 'W1@mac')`, /only Ahmed/);
+  await assert.rejects(() => session`select cb.project_pipeline('demo', true, 'W1@mac')`, /only Ahmed can do this, on the Project settings page/);
   assert.equal((await sql`select cb.project_pipeline('demo', true, 'ahmed') as r`)[0].r, true);
   assert.equal((await sql`select cb._pipeline('demo') as r`)[0].r, true);
   await sql`insert into cb.sessions (machine, pane, actor, project, role, area) values ('mac','p1','W1@mac','demo','builder',null), ('pc','p2','orch@pc','demo',null,null)`;
@@ -662,7 +662,9 @@ test('fix 6, 8, 9, 11: role-less pass, review move, close refusal wording, pipel
   await assert.rejects(() => s`select cb.task_move(${a}::text, 'done', 'x', 'B1@mac')`, /waiting for Ahmed/);
   await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
   await assert.rejects(() => pass(sql, b, 'B1@mac'), /pipeline is off for demo: finish it with cb done \d+/);
-  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'R1@mac')`, /pipeline is off for demo: finish it with cb done \d+/);
+  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'B1@mac')`, /pipeline is off for demo: finish it with cb done \d+/);
+  // #4744: a reviewer is not told to cb done the card it reviews
+  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'R1@mac')`, /demo has no pipeline stages.*the lead hands you pull requests/);
 });
 
 test('fix 12: aliasing a project that has pages moves them, and a dashboard project move follows', async () => {

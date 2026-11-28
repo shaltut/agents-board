@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bug } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { rpc, TASK_TYPES, useProjects, type Status, type Task } from '@/lib/api'
+import { rpc, TASK_TYPES, useLiveProjects, type Status, type Task } from '@/lib/api'
 import { STATUS } from '@/lib/format'
 import { PRIORITIES, Priority, StatusDot } from './Chips'
 import { go } from '@/lib/route'
@@ -18,7 +18,7 @@ export function NewTask({ open, onOpenChange, project, initial, links, onCreated
   initial?: { title?: string; body?: string }; links?: Record<string, string>; onCreated?: (id: number) => void
 }) {
   const qc = useQueryClient()
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const [proj, setProj] = useState(project ?? '')
   const [title, setTitle] = useState(initial?.title ?? '')
   const [body, setBody] = useState(initial?.body ?? '')

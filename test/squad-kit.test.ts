@@ -396,20 +396,17 @@ test('squad_set validates agent gate, per-agent models in fallback, and seats (#
   assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved);
   assert.deepEqual(await set(saved), saved, 'a saved squad saves again unchanged');
 
-  const gate = (label: string, k: string) => new RegExp(`: ${label} agent "${k}" cannot be assigned as a primary seat yet \\(phase 1 supports claude only; non-Claude agents are allowed in fallback\\)$`);
   const fb = (f: any) => mod((s) => { s.roles.builder.fallback = f; });
   const bad: [any, RegExp][] = [
     [mod((s) => { s.roles.builder.agent = 'grok'; }), /: builder agent must be one of claude, codex, opencode, agy \(got "grok"\)$/],
     [mod((s) => { s.roles.builder.agent = 5; }), /: builder agent must be one of claude, codex, opencode, agy/],
-    [mod((s) => { s.roles.builder.agent = 'codex'; s.roles.builder.model = 'gpt-6.1-sol'; }), gate('builder', 'codex')],
-    [mod((s) => { s.roles.owner.agent = 'opencode'; }), gate('owner', 'opencode')],
-    [mod((s) => { s.roles.lead.agent = 'agy'; }), gate('lead', 'agy')],
-    [mod((s) => { s.roles.builder.seats = { '2': { agent: 'codex', model: 'gpt-6.1-sol' } }; }), gate('builder seat 2', 'codex')],
+    [mod((s) => { s.roles.owner.agent = 'opencode'; }), /: owner model for opencode must be provider\/model/],
+    [mod((s) => { s.roles.lead.agent = 'agy'; }), /: lead model for agy must be/],
     [mod((s) => { s.roles.builder.model = null; }), /: builder model must be opus, sonnet, haiku or fable$/],
     [fb({ agent: 'codex', model: 'gpt-6.1-sol' }), /: builder fallback must be a list of at most 5/],
     [fb(Array.from({ length: 6 }, (_, i) => ({ agent: 'codex', model: `gpt-${i}` }))), /: builder fallback must be a list of at most 5/],
     [fb(['codex']), /: builder fallback 1 must be \{"agent": "<agent>", "model": "<model>"\}/],
-    [fb([{ agent: 'codex', model: 'gpt-6.1-sol', effort: 'high' }]), /: builder fallback 1 has an unknown key: only agent and model$/],
+    [fb([{ agent: 'codex', model: 'gpt-6.1-sol', speed: 'high' }]), /: builder fallback 1 has an unknown key: only agent, model and effort$/],
     [fb([{ agent: 'grok', model: 'x' }]), /: builder fallback 1 agent must be one of claude, codex, opencode, agy/],
     [fb([{ model: 'gpt-6.1-sol' }]), /: builder fallback 1 agent must be one of claude, codex, opencode, agy/],
     [fb([{ agent: 'codex', model: 'sonnet' }]), /: builder fallback 1 model for codex must be/],
@@ -422,16 +419,16 @@ test('squad_set validates agent gate, per-agent models in fallback, and seats (#
     [fb([{ agent: 'codex', model: 'gpt-6.1-sol' }, { agent: 'codex', model: 'gpt-6.1-sol' }]), /: builder fallback 2 \(codex gpt-6.1-sol\) is listed twice$/],
     [fb([{ agent: 'claude', model: 'sonnet' }]), /: builder fallback 1 \(claude sonnet\) is the same as its own agent and model: a fallback must be another$/],
     [mod((s) => { s.roles.builder.seats = { '2': { model: 'opus', fallback: [{ agent: 'claude', model: 'opus' }] } }; }), /: builder seat 2 fallback 1 \(claude opus\) is the same as its own agent and model/],
-    [mod((s) => { s.roles.builder.seats = ['opus']; }), /: builder seats must be an object of seats: \{"<seat>": \{"agent", "model", "fallback"\}\}/],
+    [mod((s) => { s.roles.builder.seats = ['opus']; }), /: builder seats must be an object of seats: \{"<seat>": \{"agent", "model", "effort", "fallback"\}\}/],
     [mod((s) => { s.roles.builder.seats = { '4': { model: 'opus' } }; }), /: builder seat 4 is not one of its seats: 1, 2, 3$/],
     [mod((s) => { s.roles.builder.seats = { '01': { model: 'opus' } }; }), /: builder seat 01 is not one of its seats: 1, 2, 3$/],
-    [mod((s) => { s.roles.builder.seats = { '1': {} }; }), /: builder seat 1 is empty: give agent, model or fallback$/],
-    [mod((s) => { s.roles.builder.seats = { '1': 'opus' }; }), /: builder seat 1 must be an object: \{"agent", "model", "fallback"\}$/],
-    [mod((s) => { s.roles.builder.seats = { '1': { machine: 'shaltoot' } }; }), /: builder seat 1 has an unknown key: only agent, model and fallback$/],
+    [mod((s) => { s.roles.builder.seats = { '1': {} }; }), /: builder seat 1 is empty: give agent, model, effort or fallback$/],
+    [mod((s) => { s.roles.builder.seats = { '1': 'opus' }; }), /: builder seat 1 must be an object: \{"agent", "model", "effort", "fallback"\}$/],
+    [mod((s) => { s.roles.builder.seats = { '1': { machine: 'shaltoot' } }; }), /: builder seat 1 has an unknown key: only agent, model, effort and fallback$/],
     [mod((s) => { s.roles.builder.seats = { '1': { model: 'gpt' } }; }), /: builder seat 1 model must be opus, sonnet, haiku or fable$/],
     [mod((s) => { s.roles.owner.seats = { other: { model: 'sonnet' } }; }), /: owner seat other is not one of its seats: claims, preauth$/],
     [mod((s) => { s.roles.lead.seats = { '2': { model: 'sonnet' } }; }), /: lead seat 2 is not one of its seats: 1$/],
-    [mod((s) => { s.roles.builder.extra = 1; }), /: role builder has an unknown key: only count, model, machine, agent, fallback and seats$/],
+    [mod((s) => { s.roles.builder.extra = 1; }), /: role builder has an unknown key: only count, model, machine, agent, effort, fallback and seats$/],
   ];
   for (const [s, re] of bad) await assert.rejects(() => sql`select cb.squad_set('demo', ${sql.json(s)}, 'ahmed')`, re, JSON.stringify(s.roles));
   assert.deepEqual((await sql`select cb.squad_get('demo') as s`)[0].s, saved, 'a refused squad changes nothing');

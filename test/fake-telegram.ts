@@ -4,16 +4,23 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-export type Call = { method: string; body: any };
+export type Call = { method: string; body: any; message_id?: number };
 
 export async function fakeTelegram(port = 0) {
   const calls: Call[] = [];
   const updates: any[] = [];
   let nextUpdate = 1, nextMessage = 100;
   let wake: (() => void) | null = null;
-  const reply = (res: any, result: unknown, status = 200) => {
+  // #4591: the next n sendMessage calls drop the connection (the board sees "0 network error"); dropped counts them
+  const drop = { next: 0, dropped: [] as number[] };
+  // #4629: send(body) picks what a sendMessage gets: 'drop' (the connection drops), a refusal ({ status, description,
+  // retry_after? }, as Telegram answers a 400/403/429), or nothing (sent). attempts records every sendMessage, whatever it got.
+  type Refusal = { status: number; description: string; retry_after?: number };
+  const hook = { send: null as null | ((body: any) => 'drop' | Refusal | null | undefined) };
+  const attempts: { text: string; at: number; got: string }[] = [];
+  const reply = (res: any, result: unknown, status = 200, parameters?: object) => {
     res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(status === 200 ? { ok: true, result } : { ok: false, description: result }));
+    res.end(JSON.stringify(status === 200 ? { ok: true, result } : { ok: false, error_code: status, description: result, ...(parameters ? { parameters } : {}) }));
   };
   const server = createServer(async (req, res) => {
     let raw = '';
@@ -30,14 +37,21 @@ export async function fakeTelegram(port = 0) {
       wake = null;
       return reply(res, ready());
     }
-    calls.push({ method, body });
-    if (method === 'sendMessage') return reply(res, { message_id: nextMessage++, chat: { id: body.chat_id }, text: body.text });
+    if (method === 'sendMessage') {
+      const h = drop.next > 0 ? (drop.next--, 'drop' as const) : hook.send?.(body);
+      attempts.push({ text: String(body.text ?? ''), at: Date.now(), got: h === 'drop' ? 'drop' : h ? String(h.status) : 'sent' });
+      if (h === 'drop') { drop.dropped.push(Date.now()); req.socket.destroy(); return; }
+      if (h) return reply(res, h.description, h.status, h.retry_after ? { retry_after: h.retry_after } : undefined);
+    }
+    const call: Call = { method, body };
+    calls.push(call);
+    if (method === 'sendMessage') { call.message_id = nextMessage; return reply(res, { message_id: nextMessage++, chat: { id: body.chat_id }, text: body.text }); }
     return reply(res, true);
   });
   function push(u: any) { updates.push({ update_id: nextUpdate++, ...u }); wake?.(); }
   await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { url, calls, push, close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
+  return { url, calls, push, drop, hook, attempts, close:() => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
 }
 
 if (import.meta.main) {

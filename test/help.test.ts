@@ -49,7 +49,7 @@ test('cb help is the manual: overview, rules, topics, grouped commands with exam
 // #4450: rule 10 said only "keep working"; the exit codes and the check before a resend are documented
 test('cb help documents exit 3 (did not run) and rule 10 says to run the named check before a resend', () => {
   // #4515: a read is safe to run again too
-  assert.match(OVERVIEW_TEXT, /^ +Exit 2 = cb lock take queued you \(not held\)\. Exit 3 = a board on another machine was unreachable and nothing\n +of the command reached it, or the command only reads: safe to run again unchanged \(this machine's own board\n +never gives 3\)\.$/m);
+  assert.match(OVERVIEW_TEXT, /^ +Exit 2 = cb lock take queued you \(not held\)\. Exit 3 = a board on another machine was unreachable and nothing\n +of the command reached it, or the command only reads: safe to run again unchanged \(this machine's own board\n +never gives 3, except to cb triage\)\.$/m);
   assert.match(help('rules')!, /^10\. Board unreachable: keep working\. .*Did not run, or it only\n +reads \(exit 3, a board on another machine only\): run it again once the board is back\. Otherwise \(exit 1\) it may\n +have run: run the check it names \(cb show <id>, cb search \.\.\.\) first, never a blind resend/m);
 });
 
@@ -68,6 +68,25 @@ test('cb help <topic> and cb help <command> print the detailed page; -h on a com
   assert.match(cb(['help', 'project']).out, /cb iam orch@<machine> <slug>/);
 });
 
+// #4755: in a herdr pane with no CB_ACTOR, help looked the pane's binding up first, so it failed with the board down
+test('cb help never needs the board: a herdr pane with no CB_ACTOR and a closed port still prints the manual', () => {
+  const down = { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_refused', CB_ACTOR: '', HERDR_PANE_ID: P };
+  for (const args of [['help'], ['help', 'jobs'], []]) {
+    const r = cb(args, down);
+    assert.equal(r.code, 0, `cb ${args.join(' ')}: ${r.err}`);
+    assert.match(r.out, /cb /);
+  }
+  const unknown = cb(['help', 'queue'], down);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /no help for "queue"/);
+  assert.doesNotMatch(unknown.err, /Run: cb help help/);
+});
+
+test('a refused board: one punctuation mark before the command to run', () => {
+  const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_refused' });
+  assert.match(r.err, /Is Postgres running there\? Run: cb help mine$/);
+});
+
 test('cb help <unknown> exits 1 and lists the topics and commands', () => {
   const r = cb(['help', 'queue']);
   assert.equal(r.code, 1);
@@ -82,7 +101,8 @@ test('cb help iam documents --agent; cb help squad documents agent, seats and fa
   assert.match(iam.out, /\$CB_AGENT/);
   const squad = cb(['help', 'squad']).out;
   for (const k of ['"agent"', '"fallback"', '"seats"', 'CB_ROLE', 'CB_AGENT']) assert.ok(squad.includes(k), k);
-  assert.match(squad, /phase 1 starts claude only/);
+  assert.match(squad, /"agent" \(claude, the default; codex, opencode or agy start only where CB_MCP_GATE_OK names them\)/);
+  assert.match(squad, /--dry-run only prints the plan, with a would fail line under a seat this machine could not start/);
 });
 
 test('prompts/claude-md-snippet.md is the snippet cb help project prints', () => {
@@ -178,7 +198,7 @@ test('cb relay needs only a pane; another agent is refused by name; claude needs
   await sql`select cb.ensure_project('iris')`;
   await sql`select cb.iam('mac', ${P}, 'W1@test', 'iris')`;
   assert.match(cb(['relay'], { HERDR_PANE_ID: '' }).err, /cb relay needs a herdr pane/);
-  assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P }).err, /agent "codex" is not installed yet/);
+  assert.match(cb(['relay', '--agent', 'codex'], { HERDR_PANE_ID: P, CB_MCP_GATE_OK: '' }).err, /agent "codex" cannot start a seat with MCP off/);
   assert.match(cb(['relay', '--agent', 'nope'], { HERDR_PANE_ID: P }).err, /unknown agent "nope"/);
   assert.match(cb(['relay'], { HERDR_PANE_ID: P }).err, /no session inbox here/);
 });
@@ -192,6 +212,22 @@ test('errors say what to run instead', async () => {
   assert.match(cb(['huddle', 'show', '9']).err, /no huddle #9.*cb huddles/);
   assert.match(cb(['iam', 'W1@x', 'nope'], { HERDR_PANE_ID: P }).err, /unknown project "nope".*cb help project/);
   assert.match(cb(['frobnicate']).err, /unknown command "frobnicate"\. Commands: start, iam,.* Run: cb start/);
+});
+
+// #4725: the commands sessions keep guessing are answered with the real one, before the long list
+test('a guessed command gets a did-you-mean hint before the command list', async () => {
+  await db();
+  const guesses: Record<string, RegExp> = {
+    inbox: /cb pending/, whoami: /cb start.*cb iam/, list: /cb brief.*cb mine/, status: /cb brief.*cb mine/, find: /cb search/,
+    q: /cb ask.*cb pending/, question: /cb ask.*cb pending/, claim: /cb next/, projects: /cb start/, card: /cb show/,
+  };
+  for (const [guess, want] of Object.entries(guesses)) {
+    const r = cb([guess]);
+    assert.equal(r.code, 1, guess);
+    const hint = new RegExp(`^cb: unknown command "${guess}"\\. Did you mean: ([^?]+)\\? Commands: start, iam,`).exec(r.err)?.[1];
+    assert.match(hint ?? '', want, `${guess}: ${r.err}`);
+  }
+  for (const none of ['frobnicate', 'constructor', 'toString']) assert.doesNotMatch(cb([none]).err, /Did you mean/, none);
 });
 
 test('cb ask --free posts, and reminds that a choice needs options', async () => {
@@ -249,4 +285,31 @@ test('cb start exits 0 when the board is down, and does not start Postgres', () 
   const r = cb(['start'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board', HERDR_PANE_ID: P });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out + r.err, /board unreachable: keep working and register this later\. Retry: cb start/);
+});
+
+// #4723: the manual drifted as commands were added: these pin it to what cb.ts does
+test('cb help json names every command that takes --json, and the shapes that are not the plain ones', () => {
+  const page = help('json')!;
+  for (const c of Object.keys(COMMANDS).filter((c) => !['help', 'runner', 'supervise'].includes(c)))
+    assert.match(page, new RegExp(`(?<![\\w-])${c}(?![\\w-])`), `cb help json does not say what cb ${c} --json prints`);
+  for (const s of ['squad trust', 'job retry', 'job move', 'job hold|release', 'update --check', 'update --rollback'])
+    assert.ok(page.includes(s), s);
+  assert.match(page, /\{claimed: null, skipped\}/);
+  assert.match(page, /^ +add .*disabled/m);
+  assert.match(page, /^ +squad set .*version.*changed/m);
+});
+
+test('cb help and cb help json say which results exit 1 or 3 on stdout', () => {
+  for (const page of [OVERVIEW_TEXT, help('json')!]) {
+    for (const c of ['cb doctor', 'cb update --check', 'cb run --wait']) assert.ok(page.includes(c), c);
+    assert.match(page, /on stdout/);
+    assert.match(page, /cb triage/);
+  }
+  assert.doesNotMatch(help('json')!, /An error is still text on stderr \("cb: \.\.\."\), never JSON/);
+});
+
+test('cb help relay covers every agent, how its relay starts, and the held routine notices', () => {
+  const page = help('relay')!;
+  for (const w of ['Claude Code', 'codex', 'opencode', 'agy', '--agent', 'prestart', 'CB_MCP_GATE_OK', '10 minutes'])
+    assert.ok(page.includes(w), w);
 });

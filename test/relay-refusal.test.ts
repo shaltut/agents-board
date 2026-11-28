@@ -25,6 +25,8 @@ const rmSeat = (pane: string) => { for (const f of [...seatFiles(pane), bridgeFi
 const envFor = (pane: string, o: Record<string, string> = {}) => ({ ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: M, HERDR_PANE_ID: pane,
   CB_MCP_GATE_OK: '', CB_AGENT: '', CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: '', CLAUDE_CODE_SESSION_ID: '', ...o });
 const relay = (pane: string, agent: string) => spawnSync('node', ['cli/relay.ts', '--pane', pane, '--agent', agent], { encoding: 'utf8', timeout: 20_000, env: envFor(pane) });
+// #4585: codex is installed, so the relay refuses it for the MCP gate (envFor clears CB_MCP_GATE_OK)
+const GATE_WORDS = "the MCP check for codex is not done on this seat's machine (CB_MCP_GATE_OK does not name codex there)";
 const messages = (sql: any) => sql`select actor, project, summary, data ->> 'to' as to from cb.events where kind = 'message' order by id`;
 /** The refusal is told from a detached child: wait for its outcome line in the seat's log (the n-th such line). */
 async function outcome(pane: string, n = 1) {
@@ -38,7 +40,9 @@ async function outcome(pane: string, n = 1) {
 
 test('refusalWords (#4429): plain words per reason, never the adapter text (config paths) or a raw agent name', () => {
   assert.equal(refusalWords('claude'), null);
-  assert.equal(refusalWords('codex'), 'the board does not run codex seats yet');
+  // #4585: codex is installed; this env's gate decides. A cb without it installed (rolled back) still says so
+  assert.equal(refusalWords('codex', { env: {} }), "the MCP check for codex is not done on this seat's machine (CB_MCP_GATE_OK does not name codex there)");
+  assert.equal(refusalWords('codex', { installed: new Set(['claude'] as const), env: { CB_MCP_GATE_OK: 'codex' } }), 'the board does not run codex seats yet');
   const installed = new Set(['claude', 'codex', 'agy'] as const);
   const gate = refusalWords('codex', { installed, env: {} })!;
   assert.equal(gate, "the MCP check for codex is not done on this seat's machine (CB_MCP_GATE_OK does not name codex there)");
@@ -94,8 +98,8 @@ test('a relay that refuses its agent tells the bound seat\'s project lead once a
     assert.equal(r.status, 1, r.stderr); // an explicit --agent (cb relay): exit 1
     assert.match(await outcome(bound), /told orch$/);
     assert.deepEqual((await messages(sql)).map((m: any) => ({ ...m })),
-      [{ actor: 'W5@testbox', project: 'demo', to: 'orch', summary: text('W5@testbox', 'the board does not run codex seats yet') }]);
-    assert.match(logOf(bound), /not started: the board does not run codex seats yet/);
+      [{ actor: 'W5@testbox', project: 'demo', to: 'orch', summary: text('W5@testbox', GATE_WORDS) }]);
+    assert.ok(logOf(bound).includes(`not started: ${GATE_WORDS}`), logOf(bound));
     // the same refusal again (a hook start, a restart after a code change): nothing new on the board
     assert.equal(relay(bound, 'codex').status, 1);
     assert.match(await outcome(bound, 2), /already told$/);

@@ -2,7 +2,7 @@
 // seatKey(machine, pane). It watches the board (Postgres LISTEN) and writes into the agent's inbox through the agent's
 // adapter (cli/agents/): answers to the session's questions, and changes other people make to its tasks. An idle
 // session gets a new turn; a busy one reads it between tool calls.
-// Claude Code starts it from its SessionStart hook (this file without --child, or hooks/claude-endpoint.mjs) and hands
+// A non-Claude seat's prestart starts it once the seat checks ready (#4610, kit/seat/prestart.*). Claude Code starts it from its SessionStart hook (this file without --child, or hooks/claude-endpoint.mjs) and hands
 // its inbox ($CLAUDE_CODE_MESSAGING_SOCKET and _TOKEN) over in an endpoint file (cli/agents/claude.ts), so the relay
 // needs no Claude in its env, and a new Claude in the same pane is served by the same relay.
 // It stops when the adapter says the agent is gone: from the first dead reading no heartbeat (cb.inbox) and no
@@ -13,16 +13,21 @@ import { spawn } from 'node:child_process';
 import { appendFileSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
+import { HERDR_NAMED, herdrNameForPane, namelessDead, watchdogStep, type Watch } from './relay-seat.ts';
+import { realRun } from './squad-up.ts';
 import { clearRefusal, refusalWords, tellRefusal } from './relay-refusal.ts';
 import { clearClaudeEndpoint, probeSocket, readClaudeEndpoint, relaunchEnv, socketExists, writeClaudeEndpoint } from './agents/claude.ts';
 import type { SeatHandle } from './agents/types.ts';
 import { offerSettled, type Work } from './settle.ts';
+import { HOLD_MS, holdStep } from './notice-hold.ts';
+import { copyAt, copyCount, readCopies, sortOrphans, sweepHeld, writeCopies, type HeldCopy } from './held-copy.ts';
 import { startedAs } from './started-as.ts';
+import { codeSha } from './release.ts';
 
 // the path this relay was started with: a release flip (cb update) changes what it points at (started-as.ts)
 const SELF = startedAs(process.argv[1], import.meta.filename);
@@ -39,6 +44,7 @@ const M = machine();
 const key = seatKey(M, PANE);
 const LOCK = join(tmpdir(), `cb-relay-${key}.pid`);
 const LOG = join(tmpdir(), `cb-relay-${key}.log`);
+const HELD = join(tmpdir(), `cb-relay-${key}.held`); // #4630: the held copy, for the next relay in this pane
 const log = (m: string) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${m}\n`); } catch {} };
 
 const AGENT = flag('--agent') || process.env.CB_AGENT || 'claude';
@@ -71,7 +77,18 @@ const lockPid = () => { try { return Number(readFileSync(LOCK, 'utf8')) || 0; } 
 /** Keeps this relay's lock fresh: a lock counts as held only while touched in the last 15 s (bridge.ts seatLockHolder). */
 const touch = () => { if (lockPid() !== process.pid) return; const now = new Date(); try { utimesSync(LOCK, now, now); } catch {} };
 /** The adapter's answer; an unknown one counts as alive (it never stops a relay, never takes a seat). */
-const aliveNow = async () => { try { return await adapter.isAlive(seat); } catch { return true; } };
+// #4610: codex and agy read liveness and deliver through herdr by the seat's agent name, which this relay learns from this
+// machine's herdr by its pane (the relay runs where the seat runs). Until herdr lists an agent in the pane, it stays unset.
+const learnHerdrName = () => {
+  if (!HERDR_NAMED.has(adapter.kind) || seat.herdrName) return;
+  try { const r = realRun(null, ['agent', 'list'], 10_000); if (r.status === 0) seat.herdrName = herdrNameForPane(JSON.parse(r.stdout ?? ''), PANE, adapter.kind) ?? undefined; } catch {}
+  if (seat.herdrName) log(`herdr agent in this pane: ${seat.herdrName}`);
+};
+const aliveNow = async () => {
+  learnHerdrName();
+  if (namelessDead(adapter.kind, seat.herdrName)) return false; // review 98 I1: no name, no agent to reach
+  try { return await adapter.isAlive(seat); } catch { return true; }
+};
 const relaunch = () => spawn(process.execPath, [SELF, '--child', '--pane', PANE, '--agent', adapter.kind],
   { detached: true, stdio: 'ignore', windowsHide: true, env: relaunchEnv(process.env) }).unref();
 /** The env inbox answers: its socket is there (statSync, never a connect to a Windows pipe) and, on POSIX, accepts a
@@ -115,7 +132,8 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // The files whose change restarts the relay (below); their content names its connections, cb-relay/<version>, so a
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
-  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts')];
+  join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts'),
+  join(HERE, 'notice-hold.ts'), join(HERE, 'held-copy.ts')]; // review 98 L4; #3221: HOLD_MS lives there; #4630
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
@@ -125,6 +143,40 @@ const sessionNow = () => { try { return adapter.sessionId?.(seat) || null; } cat
 let lastSession: string | null | undefined; // the id the last inbox read was made with
 let inboxTakesSession = true; // false once a board older than #4379 (a 3-argument cb.inbox) refused the 4th
 let busy = false, again = false;
+
+// #4352: the commit this relay's code is (the real folder of its path: an installed version's, or a checkout's HEAD),
+// on the seat's row for the Today page's "seats on other code" line. Sent after an inbox read (the row exists then) and
+// again every 5 minutes: a git pull that misses the relay's own files does not restart it, and a row can be made anew.
+// After a cb update flip the relay restarts into the new version within seconds, and its first read sends the new sha.
+const CODE_ROOT = join(HERE, '..');
+let codeDue = 0;
+// git runs (synchronously) only when the checkout's HEAD or index file changed since the last read: a checkout, pull,
+// commit or reset rewrites one of them. A worktree's .git is a file naming its git folder. No git folder: no cache.
+let codeKey: string | null = null, codeLast: string | null = null;
+const gitStamp = () => {
+  try {
+    const dot = join(CODE_ROOT, '.git');
+    const dir = statSync(dot).isDirectory() ? dot : resolve(CODE_ROOT, /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'))![1]!.trim());
+    return ['HEAD', 'index'].map((f) => { try { return statSync(join(dir, f)).mtimeMs; } catch { return 0; } }).join(':');
+  } catch { return null; }
+};
+const codeNow = () => {
+  const k = gitStamp();
+  if (k === null || k !== codeKey) { codeLast = codeSha(CODE_ROOT); codeKey = k; }
+  return codeLast;
+};
+async function sendCode() {
+  if (Date.now() < codeDue) return;
+  try {
+    const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeNow()}) as ok`;
+    if (ok) codeDue = Date.now() + 300_000; // no row yet: the next read tries again
+  } catch (e: any) {
+    // a board from before cb.seat_code: asked again in 5 minutes, so a board deployed after this relay started hears it
+    // without a relay restart (a deploy changes no relay file)
+    if (e?.code === '42883') codeDue = Date.now() + 300_000;
+    else log(`code sha not sent: ${e?.code ?? e?.message}`);
+  }
+}
 
 // This pane's binding (cb iam), handed to its cb calls with the bridge's hello so a call skips its own lookup (#3256).
 // Dropped the moment it may have changed: a cb_bind notice for this pane (any writer: the dashboard, a cb without the
@@ -144,6 +196,23 @@ const SETTLE_MS = 8_000;
 const pendingWork = new Map<number, { t: Work; at: number }>();
 let settleTimer: ReturnType<typeof setTimeout> | undefined;
 const forget = () => { binding = undefined; bindGen++; pendingWork.clear(); };
+// #3221: routine notices wait up to HOLD_MS (cli/notice-hold.ts); the hold itself is on the board (cb.relay_hold)
+let holdTimer: ReturnType<typeof setTimeout> | undefined;
+// the messages, broadcasts and memory changes of the read last held, and whose they were (review I1: a bind to another
+// name or project, below); orphans: such copies when another agent process took the pane, each kept until that one
+// binds (cli/held-copy.ts). #4630: they start with what the last relay in this pane left.
+let heldFor: HeldCopy | undefined, orphans: HeldCopy[] = [];
+const SEAT = `${PANE.trim()}@${M.trim().toLowerCase()}`; // the row's name before a bind (cb._seat_name)
+/** Pushes what a copy has that the board no longer returns in this read (that rest the read itself delivers). */
+async function pushCopy(was: HeldCopy, i: any) {
+  const has = (l: any[] | undefined) => new Set((l ?? []).map((x: any) => Number(x.id)));
+  const ms = has(i.messages), bs = has(i.broadcasts), xs = has(i.memory);
+  const messages = was.messages.filter((m) => !ms.has(Number(m.id))), broadcasts = was.broadcasts.filter((b) => !bs.has(Number(b.id)));
+  const memory = was.memory.filter((x) => !xs.has(Number(x.id)));
+  if (!messages.length && !broadcasts.length && !memory.length) return;
+  await adapter.deliver(seat, format({ broadcasts, messages, memory, answers: [], events: [], next_work: [] }));
+  log(`pushed ${messages.length} messages, ${broadcasts.length} broadcasts, ${memory.length} memory held before a bind`);
+}
 const heldBinding = (who: { machine: string; pane: string }) =>
   who?.machine === M && who?.pane === PANE && binding && Date.now() - binding.at < 35_000
     ? { actor: binding.actor, project: binding.project } : undefined;
@@ -287,6 +356,28 @@ async function check() {
         : await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
+      // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
+      // history): read again from the hold's cursor, so the held memory changes come back, once, before anything goes out
+      if (i.hold && after !== Number(i.hold.from)) { after = Number(i.hold.from); again = true; continue; }
+      // #3221 review I1: the pane was bound to another name or project (cb.iam) while this relay held notices. The board
+      // returns messages only to that name, broadcasts and memory only for that project, and messages and broadcasts
+      // only from its mark, which a takeover by another name resets (and the hold with it); so they go now from this
+      // relay's copy, all but what the board still returns. Round 2 M2: another agent process in the pane (a new session
+      // id: the board starts the row again) gets the copy only once it binds under the same name; under another name
+      // it is dropped, and the log says how many (never what).
+      if (heldFor && (heldFor.actor !== i.actor || heldFor.project !== i.project || heldFor.sid !== sid)) {
+        if (heldFor.sid !== sid) orphans.push(heldFor);
+        else await pushCopy(heldFor, i);
+        heldFor = undefined;
+      }
+      // a copy of the same session: the board kept the row (a read with no id between two of the same, a code restart)
+      if (orphans.length) {
+        const o = sortOrphans(orphans, i, sid, SEAT, Date.now());
+        orphans = o.keep;
+        for (const c of o.push) await pushCopy(c, i);
+        if (o.dropped) log(`dropped ${o.dropped} held notices: the new session bound under another name`);
+        if (o.expired) log(`dropped ${o.expired} held notices: older than the ${Math.round(HOLD_MS / 60_000)} min hold window`); // review 78 N2
+      }
       // the GitHub watch's card writes: its one message a poll (the outbox) already says what happened, so never pushed
       i.events = i.events.filter((e: any) => e.actor !== 'github');
       // Ahmed typing from the dashboard (cb.type_to): his exact text as its own prompt, in order, no wrapper.
@@ -301,22 +392,46 @@ async function check() {
       i.next_work = settled.work;
       clearTimeout(settleTimer);
       if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
+      // #3221: only routine notices in this read, inside their window: push nothing and move no mark (broadcast_seen,
+      // after), so the next read, or a restarted relay's, has them again; the timer reads again when the window ends.
+      // Anything important, or the window's end, delivers all of it below, in one push.
+      const step = holdStep(i, typed);
+      clearTimeout(holdTimer);
+      if (step.action === 'hold') {
+        if (!i.hold) {
+          if (after === Number.MAX_SAFE_INTEGER) after = Number(i.last_event); // a first read has no card events to hold
+          await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
+          log(`holding ${step.low} notices up to ${Math.round(HOLD_MS / 60_000)} min`);
+        }
+        heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [], at: copyAt(Date.now(), i.hold) }; // review 106 N2-a: the hold's start
+        holdTimer = setTimeout(() => { check(); }, step.wait! + 100);
+        await sendCode(); // a held read still reports the code it runs (#4352)
+        continue;
+      }
+      heldFor = undefined;
       const read = [...i.broadcasts, ...i.messages, ...typed, ...(i.huddles ?? [])].map((x: any) => Number(x.id))
         .concat([...(i.answer_copies ?? []), ...(i.bugs ?? [])].map((x: any) => Number(x.event_id)));
-      if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length) {
+      const push = i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length || i.next_work.length || i.memory?.length;
+      if (push) {
         for (const m of typed) await adapter.deliver(seat, String(m.summary), { raw: true });
         // only what is left over gets the board's wrapper (a lone typed line must not add an empty "[Agents Board]")
         if (i.asks?.length || i.answers.length || i.sent_back?.length || i.events.length || read.length > typed.length || i.next_work.length || i.memory?.length)
           await adapter.deliver(seat, format(i));
+      }
+      // #3221 review I2: the hold ends first, on its own, right after the push (or with nothing left to push): a relay
+      // that dies in the bookkeeping below must not leave a hold that makes the next one rewind and push it all again
+      if (i.hold) await sql`select cb.relay_hold(${M}, ${PANE}, ${null})`;
+      if (push) {
         for (const a of i.asks ?? []) await sql`select cb.ask_delivered(${String(a.id)}, ${a.upto}, ${i.actor}, ${a.reminder})`;
         if (read.length) await sql`select cb.broadcast_seen(${M}, ${PANE}, ${Math.max(...read)})`;
         // the answer as pushed (#1346): one changed meanwhile stays answered and goes in the next push
         for (const a of i.answers) await sql`select cb.answer_delivered(${String(a.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${null}, ${a.answered_at ?? null})`;
         // only the send-back pushed: one rewritten (or sent back again) since stays as it is
         for (const s of i.sent_back ?? []) await sql`select cb.answer_delivered(${String(s.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${s.at})`;
-        log(`pushed ${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
+        log(`pushed ${i.hold ? `(held ${step.low}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
       after = Number(i.last_event);
+      await sendCode();
     } while (again);
   } catch (e: any) {
     log(`check failed: ${e?.message}`); // board asleep or inbox busy: the next notify or poll retries
@@ -334,6 +449,10 @@ await sql.listen('cb', soon, soon).catch((e) => log(`listen failed: ${e?.message
 await sql.listen('cb_bind', bindNotice, () => { forget(); check(); })
   .catch((e) => log(`listen cb_bind failed: ${e?.message}`));
 log(`relay ${VERSION} up for ${PANE}@${M}`);
+// #4630: the copies the last relay in this pane left (read once, by the lock holder only), before the first read
+orphans = readCopies(HELD, Date.now());
+sweepHeld(tmpdir(), Date.now()); // review 106 L2: other panes' files too old to push
+if (orphans.length) log(`found ${copyCount(orphans)} held notices from the last relay in this pane`);
 await check();
 // this session's cb calls run on this connection (bridge.ts): no connect of their own
 const unbridge = await serveBridge(sql, key, databaseUrl(), log, {
@@ -347,6 +466,13 @@ const version = () => CODE.map((f) => { try { return statSync(f).mtimeMs; } catc
 const born = version().join();
 
 const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK, ''); } catch {} };
+// #3221 round 3 R1, #4630: a relay that exits leaves its copies in the seat's held file, so the next relay in this pane
+// (a new agent's, started after this one left) still has them. The log says how many, never what.
+const keepCopies = () => {
+  const cs = [...orphans, ...(heldFor ? [heldFor] : [])], n = copyCount(cs);
+  try { writeCopies(HELD, cs); if (n) log(`leaving: kept ${n} held notices for the next relay in this pane`); }
+  catch { if (n) log(`leaving: dropped ${n} held notices (the held file could not be written)`); }
+};
 
 /** The agent is gone: clear what it handed over, free the seat, and hand it to a new agent in the same pane if one
  *  wrote its endpoint meanwhile (its hook's relay child may have left on this relay's lock).
@@ -354,6 +480,7 @@ const release = () => { try { if (lockPid() === process.pid) writeFileSync(LOCK,
  *  and served by that relay, so its endpoint and the lock stay; this relay only closes its own bridge. */
 async function leave(seatTaken = false) {
   log(seatTaken ? 'seat lock taken by another relay; exiting' : 'agent gone; exiting');
+  if (!seatTaken) keepCopies(); // review 106 L1: the relay that took the seat read the file already, and serves this agent
   try {
     if (seatTaken) { await unbridge(); return; }
     if (claude && lastSocket) clearClaudeEndpoint(M, PANE, lastSocket);
@@ -364,24 +491,29 @@ async function leave(seatTaken = false) {
 }
 
 clearInterval(keepFresh); // the watchdog touches the lock from here on
-let leaving = false, ticking = false, dead = 0; // unbridge() is async: one exit, not one per tick
+// #4610: a non-Claude seat's prestart starts this relay before herdr starts the agent: it waits for it (relay-seat.ts).
+// A Claude relay starts from its session's hook, the agent already up: no grace, as before.
+let leaving = false, ticking = false; // unbridge() is async: one exit, not one per tick
+let watch: Watch = { dead: 0, seenAlive: false, startedAt: claude ? -Infinity : Date.now() };
 setInterval(async () => {
   if (leaving || ticking) return;
   ticking = true;
   try {
     if (lockPid() !== process.pid) { leaving = true; await leave(true); return; }
     touch();
-    if (await agentAlive()) {
-      dead = 0;
+    const alive = await agentAlive(), step = watchdogStep(watch, alive, Date.now());
+    if (!alive && step.state.dead === 1 && watch.dead === 0) log('watchdog: agent not alive (leaves if the next reading agrees)');
+    watch = step.state;
+    if (alive) {
       // #4379: another session took the seat (a new Claude in this pane): drop the binding held for the last one at
       // once, so no cb call of the new session is handed it, and let the board reset the row now, not at the next poll
       if (lastSession !== undefined && sessionNow() !== lastSession) { log('a new session in the seat; checking'); forget(); check(); }
     }
-    else if (++dead === 1) log('watchdog: agent not alive (leaves if the next reading agrees)');
-    if (dead >= 2) { leaving = true; await leave(); return; }
+    if (step.leave) { leaving = true; await leave(); return; }
     const v = version();
     if (v.join() !== born && Date.now() - Math.max(...v) > 3000) {
       log('relay code changed; restarting');
+      keepCopies();
       release(); leaving = true;
       unbridge().finally(() => { relaunch(); process.exit(0); });
       return;

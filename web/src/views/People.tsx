@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Copy, KeyRound, LogOut, ShieldCheck, UserPlus, UserX, X } from 'lucide-react'
-import { get, rpc, useProjects, type Task } from '@/lib/api'
+import { get, rpc, useLiveProjects, type Task } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
 import { cn } from '@/lib/utils'
@@ -229,7 +229,7 @@ function PersonCard({ p, base }: { p: Person; base: string }) {
 /** Where a person may take work, and how they sign in. Both are Ahmed's: the database refuses sessions. */
 function Access({ p }: { p: Person }) {
   const qc = useQueryClient()
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // add to enabled projects only (#4559)
   const [off, setOff] = useState<string | null>(null) // asking first: taking them off a project where work waits on them
   const [pw, setPw] = useState<string | null>(null) // the new password while it's being typed
   const free = projects.filter((x) => !p.projects.includes(x.slug))

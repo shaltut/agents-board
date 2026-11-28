@@ -4,7 +4,8 @@
 // It fails closed: empty or unreadable input, an unknown tool or CB_ROLE, a missing or broken core.mjs, or any error
 // blocks; nothing here ever allows by default. No static local imports: core.mjs loads dynamically, so a shim copied
 // without it still blocks. Deploy with node kit/guard/install.mjs.
-import { readFileSync, realpathSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { hostname, networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -39,12 +40,15 @@ export function parseClaudeInput(raw) {
   const name = p.tool_name;
   if (name === undefined || SHELL_TOOLS.has(name)) {
     if (typeof input.command !== 'string') return unreadable(`tool_input.command is ${input.command === undefined ? 'missing' : 'not a string'}`);
-    return { ok: true, tool: 'shell', command: input.command };
+    return { ok: true, tool: 'shell', command: input.command, ...(typeof p.cwd === 'string' && p.cwd ? { cwd: p.cwd } : {}) };
   }
   if (EDIT_TOOLS.has(name)) return { ok: true, tool: 'edit' };
   if (name === 'AskUserQuestion') return { ok: true, tool: 'ask' };
   return { ok: false, reason: `unrecognized tool ${String(JSON.stringify(name)).slice(0, 80)}: this guard reads Bash, PowerShell, Edit, Write, NotebookEdit and AskUserQuestion` };
 }
+
+// #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runClaudeShim(raw, env = process.env) {
@@ -54,7 +58,9 @@ export function runClaudeShim(raw, env = process.env) {
     if (!p.ok) return block(`Blocked: ${p.reason}`);
     const role = String(env.CB_ROLE ?? '').trim();
     const protectedBranches = String(env.CB_PROTECTED_BRANCHES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1' });
+    // #4669: a shell script the command runs is read from the hook's cwd and judged too; ssh to this machine's own name counts
+    const v = core.evaluate({ tool: p.tool, command: p.command, role: role || null, protectedBranches, allowAsk: env.CB_ALLOW_ASK === '1',
+      readScript: readerFor(p.cwd ?? process.cwd()), hosts: core.localHosts(hostname(), networkInterfaces()), deployHost: env.VPS });
     if (v?.allow === true) return {};
     const prefix = v?.kind === 'dangerous' ? 'Blocked dangerous command: ' : v?.kind === 'role' ? `Blocked by role (${role}): ` : 'Blocked: ';
     return block(prefix + (typeof v?.reason === 'string' && v.reason ? v.reason : 'the guard gave no decision'));

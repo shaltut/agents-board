@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAsks, useMemories, useQuestions } from '@/lib/api'
+import { useAsks, useMemories, useProjects, useQuestions } from '@/lib/api'
 import { replyIds } from '@/lib/asks'
 import { headerPages, type Page, type Route } from '@/lib/route'
 import { Kbd } from '@/components/ui/kbd'
@@ -15,7 +15,9 @@ import { GroupMenus, pageLink, tabClass } from './NavMenus'
 
 export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: readonly Page[]; live: 'live' | 'reconnecting'; onSearch: () => void }) {
   const { data: all = [] } = useQuestions(route.project, 'open')
-  const open = all.filter((q) => !q.assigned_to) // questions handed to Cai/Ana aren't waiting on Ahmed
+  // questions handed to Cai/Ana aren't waiting on Ahmed; nor are a disabled project's, until it is enabled (#4559, Q3019)
+  const off = new Set((useProjects().data ?? []).filter((p) => p.state !== 'enabled').map((p) => p.slug))
+  const open = all.filter((q) => !q.assigned_to && !off.has(q.project))
   const { data: mems = [] } = useMemories(route.project)
   const proposed = mems.filter((m) => m.status === 'proposed').length
   useTabLamp(open.length)
@@ -38,7 +40,7 @@ export function TopBar({ route, pages, live, onSearch }: { route: Route; pages: 
           <span className="hidden text-[15px] font-semibold tracking-tight [font-stretch:88%] sm:inline">{NAME}</span>
         </a>
         <span aria-hidden className="hidden h-5 w-px bg-border sm:block" />
-        <ProjectSwitcher project={route.project} />
+        <ProjectSwitcher project={route.project} settings={pages.some((p) => p.view === 'settings')} />
 
         <nav ref={nav} className={cn("order-last -mx-4 flex w-[calc(100%+2rem)] items-center gap-0.5 overflow-x-auto border-t px-2 py-1.5 [scrollbar-width:none] sm:-mx-6 sm:w-[calc(100%+3rem)] sm:px-5 lg:order-none lg:mx-2 lg:w-auto lg:min-w-0 lg:border-t-0 lg:p-0",
           more && "[mask-image:linear-gradient(to_left,transparent,currentColor_3rem)]")} aria-label="Views">

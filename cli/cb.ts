@@ -13,21 +13,23 @@ import { withConnectRetry, neverSent, ranWords, checkFirst, onlyReads } from './
 import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
+import { squadTrust } from './squad-trust.ts';
 import { squadShow } from './squad-show.ts';
+import { makeLister, modelsShow, reportModels } from './models.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
-import { faultHook } from './fault-hook.ts';
+import { faultHook, commandIndex } from './fault-hook.ts';
 import { faultsCmd } from './faults.ts';
 import { triageCmd } from './triage.ts';
 import { stageWordsFor } from './stage-words.ts';
-import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
+import { splitRunArgs, runCmd, jobsCmd, endedCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
-import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { help, unknownHelp, unknownCommand, COMMANDS, flagsOf, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
 import { startedAs } from './started-as.ts';
 import { needAddress, updateCheck } from './update.ts';
-import { install, rollback } from './update-install.ts';
+import { askSchema, install, rollback } from './update-install.ts';
 
 const OPTIONS = {
   as: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -44,6 +46,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
+  ended: { type: 'boolean' }, mine: { type: 'boolean' },
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
 
@@ -56,15 +59,17 @@ const unmark = (v: any): any => typeof v === 'string' ? v.replace(TEXT, '') : Ar
 const fault = faultHook(process.argv.slice(2), () => OPTIONS, () => sql);
 
 // cb run <recipe> --<param> <value>...: the free --<param> flags are split out before parseArgs, which would refuse them
-const split = process.argv[2] === 'run' ? splitRunArgs(process.argv.slice(3), new Set(Object.keys(OPTIONS))) : null;
+const argv = process.argv.slice(2);
+const cmdPos = commandIndex(argv, OPTIONS);
+const split = argv[cmdPos] === 'run' ? splitRunArgs(argv.slice(cmdPos + 1), new Set(Object.keys(OPTIONS))) : null;
 const runParams = split?.params ?? {};
 let parsed;
 try {
   parsed = parseArgs({ allowPositionals: true, options: OPTIONS,
-    args: (split ? ['run', ...split.rest] : process.argv.slice(2)).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
+    args: (split ? [...argv.slice(0, cmdPos + 1), ...split.rest] : argv).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
 } catch (e: any) {
   const name = /Unknown option '([^']+)'/.exec(e?.message)?.[1];
-  const first = process.argv[2] && !process.argv[2].startsWith('-') ? ` ${process.argv[2]}` : '';
+  const first = argv[cmdPos] ? ` ${argv[cmdPos]}` : '';
   console.error(`cb: ${name ? `unknown option ${name}` : e?.message}. Run: cb help${first} (it lists the valid options)`);
   process.exit(1);
 }
@@ -90,10 +95,12 @@ if (isAhmed(actor) || (cmd === 'iam' && isAhmed(args[0]))) {
 const legacyKey = (socket: string) => createHash('sha1').update(socket).digest('hex').slice(0, 12);
 const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET ? [legacyKey(process.env.CLAUDE_CODE_MESSAGING_SOCKET)] : [])];
 let sql: any = direct;
-// doctor and update look at this machine (and the board's web address), never the board's database: they must work on
-// a stale worker and while the database is down
-const offline = cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
+// doctor and update look at this machine (and the board's web address), never through a relay: they must work on a
+// stale worker and while the database is down (cb update reads the board's schema once, directly, before installing)
+// The manual (cb, cb help) too: it is compiled in, so it never asks who this pane is (#4755)
+const manual = cmd === undefined || cmd === 'help';
+const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
+if (pane && !process.env.PGAPPNAME && !offline && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
     if (bridged) { sql = bridged; break; }
@@ -198,8 +205,17 @@ async function mineLines(rows: any[], who: string, indent: string) {
   return { open: shown.filter((_, i) => isOpen[i]), gone: gone.length ? [MOVED_OFF, ...gone] : [], words };
 }
 
+// #4593 review 100 F3: a card's tags, a for:<agent> label in plain words ("for a Codex seat"), never the raw tag
+const AGENT_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', agy: 'agy' };
+function tagWords(labels: string[] | undefined): string {
+  if (!labels?.length) return '';
+  const agents = labels.map((l) => /^for:(.+)$/i.exec(l.trim())?.[1]?.toLowerCase()).filter((a): a is string => !!a && a in AGENT_NAMES).sort();
+  const tags = labels.filter((l) => !/^for:/i.test(l.trim()));
+  const seat = agents.length ? agents.map((a) => AGENT_NAMES[a]).join(' or ') : '';
+  return (tags.length ? ` {${tags.join(', ')}}` : '') + (seat ? ` [for ${/^[aeiou]/i.test(seat) ? 'an' : 'a'} ${seat} seat]` : '');
+}
 const line = (t: any) =>
-  `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${t.labels?.length ? ` {${t.labels.join(', ')}}` : ''}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
+  `#${t.id} [${t.status ?? ''}] ${t.priority} ${t.type && t.type !== 'task' ? `${t.type}: ` : ''}${t.title}${tagWords(t.labels)}${t.assignee ? ` (${t.assignee})` : ''} · ${t.project}`.replace(' [] ', ' ');
 // #4454: a staged card says its stage in words, so an unheld in-progress card at review reads as waiting for review, not
 // as abandoned work. cb brief, cb show and cb mine (#4512) print it the same way.
 const withStage = (t: any) => `${line(t)}${t.stage_words ? ` · ${t.stage_words}` : ''}`;
@@ -239,6 +255,7 @@ function printBrief(b: any) {
     console.log(`${name} (${rows.length})`);
     for (const r of rows) console.log('  ' + fmt(r));
   };
+  if (b.disabled) console.log(`PROJECT DISABLED: ${b.disabled}.`); // #4559: first, before its cards and questions
   sec('GOALS (their cards come right after P0)', b.goals ?? [], goalText);
   sec('IN PROGRESS', b.in_progress, withStage);
   // #4340: a staged card past build waits in Next for the lead (merge) or qa: say so, or it reads as build work
@@ -296,7 +313,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
   const projects = async () => (await sql`select p.slug,
       count(t.id) filter (where t.status = 'next')::int as next, count(t.id) filter (where t.status = 'in_progress')::int as doing,
       (select count(*)::int from cb.sessions s where s.project = p.slug and s.last_seen > now() - interval '90 seconds') as live
-    from cb.projects p left join cb.tasks t on t.project = p.slug group by p.slug order by p.slug`)
+    from cb.projects p left join cb.tasks t on t.project = p.slug where p.state = 'enabled' group by p.slug order by p.slug`) // #4559: only projects that get work
     .map((p: any) => `    ${p.slug.padEnd(16)} ${p.next} next, ${p.doing} in progress, ${p.live} sessions live`).join('\n') || '    (none yet: cb help project)';
   const via = o.as ? '--as' : process.env.CB_ACTOR ? '$CB_ACTOR' : row?.project ? 'bound to this pane' : 'not bound'; // the relay's own row (before cb iam) has no project
   const done = () => {
@@ -338,6 +355,17 @@ async function start(): Promise<{ out: string; json: unknown }> {
     `QUEUE HEAD${project ? ` (${project} Next; cb next takes the first)` : ''}`, ...(queue.length ? queue.map((t: any) => '  ' + line({ ...t, status: '' })) : ['  empty']),
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
+  // #4559: the bound project gets no work: that block replaces the next step (Ahmed's asks and answers still come first)
+  const [off] = project ? await sql`select cb._wait_words(${project}) as words`.catch(() => [null]) : [null];
+  if (off?.words) {
+    out.splice(out.length - 1, 1, 'PROJECT DISABLED', `  ${off.words}.`, '', 'NEXT');
+    for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
+    if (qs.some((q: any) => q.status === 'answered')) out.push('  cb pending                      an answer to your question is waiting: act on it, then cb delivered <qid> <you>');
+    out.push(doing ? `  wrap up #${doing.id}: push your work, cb log ${doing.id} "<where it stands>", release any lock, then wait` : '  wait: take no new card; you will be told when it is enabled',
+      '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
+    return done();
+  }
+  const [review] = project ? await sql`select cb._review_words(${project}, ${actor}) as words`.catch(() => [null]) : [null];
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -350,6 +378,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
     out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
+  else if (review?.words) out.push(`  ${review.words}.`); // #4744
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return done();
@@ -623,8 +652,8 @@ async function run(): Promise<unknown> {
       return { out: out.filter(Boolean).join('\n'), json: { tasks, questions: qs, events: ev } };
     }
     case 'broadcast': {
-      need(1, 'broadcast "<message>" [--project <p>]');
-      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor });
+      need(1, 'broadcast "<message>" --project <p> | --all');
+      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor, everyone: !!o.all });
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: { id: Number(id), project: o.project ?? null } };
     }
     case 'relay': {
@@ -662,10 +691,12 @@ async function run(): Promise<unknown> {
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
-      if (!o.json) return { out: `#${id}` };
-      // --json (#4513): what was stored (a project alias resolved, the default status), read only when asked for
-      const [t] = await sql`select project, status, stage from cb.tasks where id = ${Number(id)}`;
-      return { json: { id: Number(id), project: t.project, status: t.status, stage: t.stage } };
+      // --json (#4513): what was stored (a project alias resolved, the default status). #4559: and whether its project gets
+      // work (a disabled one parks the card in its Backlog), so the filer is told
+      const [t] = await sql`select project, status, stage, cb._state_words(project) as words from cb.tasks where id = ${Number(id)}`;
+      const parked = t.words ? `#${id} filed in ${t.project}'s Backlog: ${t.words}; nobody picks it up until Ahmed enables it` : null;
+      if (!o.json) return { out: parked ?? `#${id}` };
+      return { json: { id: Number(id), project: t.project, status: t.status, stage: t.stage, ...(parked ? { disabled: t.words } : {}) } };
     }
     case 'bug': {
       need(2, 'bug <project> "<title>" -b "what happened, how to reproduce, expected vs actual" [--stage build --why "<why>"] [--repo <repo,repo>]');
@@ -677,10 +708,13 @@ async function run(): Promise<unknown> {
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       // orch: one of those told is the project's lead (the lead role, whatever its name; #3746)
-      const [{ project, all, stage, multi, orch }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
+      const [{ project, all, stage, multi, orch, words }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
         t.repos is null and cb._multi_repo(t.project) as multi,
-        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch
+        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch,
+        cb._state_words(t.project) as words
         from cb.tasks t where t.id = ${id}`;
+      // #4559 (Q3020): a disabled project takes the report but parks it, and nobody triages it there (cb.inbox)
+      if (words) return { out: `#${id} bug filed in ${project}'s Backlog: ${words}; nobody picks it up until Ahmed enables it`, json: { id, project, told: [], stage, disabled: words } };
       const told = all.filter((a: string) => a !== actor);
       if (stage) return { out: stage === 'design' ? `#${id} starts at design; a small fix can skip it: the lead runs cb stage ${id} build${multi ? ' --repo <repo,repo>' : ''} --why "..."` : `#${id} is in build`, json: { id, project, told, stage } };
       const who = told.length ? `told ${told.join(', ')}${orch ? '' : ' (no orchestrator there)'}`
@@ -791,7 +825,18 @@ ${body}`, json: pg };
         if (p !== sessionProject) throw new Error(`this session works in ${sessionProject}; ${p}'s work is for ${p}'s sessions. Run: cb next (takes from ${sessionProject})`);
       }
       const rows: any = await callFn('task_claim', { project, actor });
-      if (!rows.length) return { out: 'nothing to claim', json: null };
+      if (!rows.length) {
+        // #4559: a disabled project hands out nothing: say so, and what to do meanwhile. Read only when nothing came, and a
+        // board without the words (a rolled-back schema) still answers
+        const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
+        if (w?.words) return { out: w.words, json: null };
+        // #4744: a reviewer in a project without stages: the lead hands out its reviews, so say that, not "nothing"
+        const [v] = await sql`select cb._review_words(cb.resolve(${project}), ${actor}) as words`.catch(() => [null]);
+        if (v?.words) return { out: v.words, json: null };
+        // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
+        const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
+        return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
+      }
       const t = rows[0];
       const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
       // a part claim (#3703) leaves the card in Next: show the part taken and its status instead
@@ -803,7 +848,9 @@ ${body}`, json: pg };
       return { out: resumeText(r), json: r };
     }
     case 'squad': {
-      if ((args[0] !== 'show' && args[0] !== 'set' && args[0] !== 'up') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]');
+      if (!['show', 'set', 'up', 'trust'].includes(args[0] ?? '') || args.length !== 2) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]  |  cb squad trust <project> [--machine <m>] [--dry-run]');
+      // #4575: Ahmed's one step per machine; it writes only this machine's agent config files, never the board
+      if (args[0] === 'trust') { const out = await squadTrust(args[1], { machine: o.machine, dryRun: !!o['dry-run'], callFn }); return { out, json: { project: args[1], lines: out.split('\n') } }; }
       if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], callFn); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
       if (args[0] === 'set') {
         if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
@@ -832,15 +879,33 @@ ${body}`, json: pg };
       const { version: _v, ...plain } = sq;
       return { out: squadShow(plain), json: sq };
     }
+    case 'models': { // #4763: this machine's agent CLI model lists, sent for the settings page
+      if (args.length > 1 || (args[0] !== undefined && args[0] !== 'report')) throw new Error('usage: cb models  |  cb models report [--machine <name>]');
+      if (args[0] === 'report') {
+        const name = String(o.machine ?? machine()).toLowerCase();
+        const lines = await reportModels({ machine: name, list: makeLister(),
+          save: async (m, lists) => (await sql`select cb.machine_models_set(${m}, ${JSON.stringify(lists)}::text::jsonb, ${actor}) as r`)[0].r });
+        return { out: lines.join('\n'), json: { machine: name, lines } };
+      }
+      if (o.machine !== undefined) throw new Error('--machine goes with report: cb models report --machine <name>');
+      const all = ((await callFn('squad_options', {})) as any).machine_models ?? {};
+      return { out: modelsShow(all), json: all };
+    }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
-    case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
+    case 'jobs': {
+      const named = args[0] ?? o.project;
+      // a card's jobs are found whatever project this session is bound to
+      if (o.ended) return endedCmd(sql, { project: named ?? (o.card !== undefined ? null : sessionProject), requester: o.mine ? actor : undefined, card: o.card });
+      if (o.mine || o.card !== undefined) throw new Error('--mine and --card go with --ended: cb jobs --ended [--mine] [--card <id>]');
+      return jobsCmd(sql, named ?? sessionProject);
+    }
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>
-      const bare = /^\d+$/.test(args[0] ?? '');
+      const bare = /^#?\d+$/.test(args[0] ?? '');
       return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
@@ -860,7 +925,8 @@ ${body}`, json: pg };
       if (o.rollback) { const r = rollback({ root, force: !!o.force }); return { out: r.lines.join('\n'), json: r.json }; }
       const from = o.from || process.env.CB_PUBLIC_URL || dotenv('PUBLIC_URL') || '';
       if (o.check) { const r = await updateCheck({ root, from: needAddress(from) }); return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 }; }
-      const r = await install({ root, from, force: !!o.force }); // checks the copy before it needs the address
+      // checks the copy before it needs the address; the schema gate is its one read of the board's database
+      const r = await install({ root, from, force: !!o.force, schema: (need) => askSchema(sql, need) });
       return { out: r.lines.join('\n'), json: r.json };
     }
     case 'role': {
@@ -1096,7 +1162,7 @@ ${body}`, json: pg };
       return { out: page };
     }
     default:
-      throw new Error(`unknown command "${cmd}". Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb start (what to do next) or cb help (the manual)`);
+      throw new Error(unknownCommand(cmd!));
   }
 }
 
@@ -1111,11 +1177,31 @@ const HINTS: [RegExp, string][] = [
 function actionable(m: string) {
   for (const [re, hint] of HINTS) if (re.test(m)) m += `. ${hint}`;
   if (namesCommand(m) || /keep working/i.test(m)) return m; // #4515: "Keep working meanwhile." too (a lost read names no check)
-  return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
+  // never "cb help help": it is the command that just failed (#4755). A message that ends a sentence takes no extra dot
+  return `${m}${/[.?!]$/.test(m) ? '' : '.'} Run: cb help${cmd && cmd !== 'help' && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
+}
+
+/** #4754 (and #4738 for edit): a flag the command does not read was dropped and the command ran, so --dry-run did the
+ *  real thing. Refused before the command starts. */
+function refuseUnread() {
+  if (!cmd || !Object.hasOwn(COMMANDS, cmd)) return; // an unknown command has its own message
+  const shorts = Object.fromEntries(Object.entries(OPTIONS).flatMap(([name, v]: [string, any]) => (v.short ? [[v.short, name]] : [])));
+  const takes = flagsOf(cmd, shorts);
+  const sub = cmd === 'squad' && args[0] ? ` ${args[0]}` : '';
+  if (cmd === 'squad' && !['up', 'trust'].includes(args[0] ?? '')) takes.delete('dry-run'); // squad set writes
+  const extra = Object.keys(o).filter((k) => !takes.has(k));
+  if (!extra.length) return;
+  const id = String(args[0] ?? '<id>').replace('#', '');
+  // status and a PR have their own places: say where, since an agent that typed them means them
+  const how = cmd === 'edit' && o.status !== undefined ? `For a status run: cb move ${id} ${o.status} (to finish a card: cb done)`
+    : cmd === 'move' && o.pr !== undefined ? `Put the PR in the note: cb move ${id} review "PR <url>"`
+    : `Run: cb help ${cmd}`;
+  throw new Error(`cb ${cmd}${sub} does not take ${extra.map((k) => `--${k}`).join(', ')}: nothing was changed. ${how}`);
 }
 
 async function main() {
   if (o.help) { console.log(help(cmd) ?? help()); return; }
+  refuseUnread();
   let r: any;
   try {
     r = await run();

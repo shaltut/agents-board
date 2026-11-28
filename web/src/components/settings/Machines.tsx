@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { RX, ROLES, areaName, homeRepo, isMulti, machineLabel, pruneSeats, setAreas, type Area, type Squad, type SquadOptions } from '@/lib/squad'
+import { RX, ROLES, areaName, homeRepo, isMulti, machineLabel, pruneSeats, restoredHerdr, setAreas, type Area, type Squad, type SquadOptions } from '@/lib/squad'
 import { NativeSelect, Problems } from './bits'
 
 const copy = (s: Squad): Squad => JSON.parse(JSON.stringify(s)) as Squad
@@ -12,7 +12,14 @@ export function Machines({ squad, options, problems, edit }: {
   squad: Squad; options: SquadOptions; problems: string[]; edit: (f: (s: Squad) => Squad) => void
 }) {
   const [key, setKey] = useState('')
+  const [herdrBefore, setHerdrBefore] = useState<Record<string, string>>({}) // kept across a switch to This PC and back
   const multi = isMulti(squad)
+  const where = (k: string, v: string) => {
+    const was = squad.machines[k]?.herdr
+    if (v === 'pc' && was) setHerdrBefore((b) => ({ ...b, [k]: was }))
+    const herdr = v === 'pc' ? null : restoredHerdr(k, herdrBefore, options.machines_used)
+    edit((s) => { const n = copy(s); n.machines[k]!.herdr = herdr; return n })
+  }
   const used = (k: string) => ROLES.some((r) => squad.roles[r]?.machine === k) || Object.values(squad.repos ?? {}).some((r) => k in r.paths)
   const others = options.machines_used.filter((m) => !squad.machines[m.key])
   const field = (k: string, f: 'board' | 'repo' | 'workspace', v: string) => edit((s) => {
@@ -45,7 +52,7 @@ export function Machines({ squad, options, problems, edit }: {
             <label className="flex flex-wrap items-center gap-2 text-sm">
               <span className="w-24 text-xs text-muted-foreground">Where</span>
               <NativeSelect label={`Where machine ${k} is`} value={m.herdr === null ? 'pc' : 'other'}
-                onChange={(v) => edit((s) => { const n = copy(s); n.machines[k]!.herdr = v === 'pc' ? null : 'macbook'; return n })}>
+                onChange={(v) => where(k, v)}>
                 <option value="pc">This PC</option>
                 <option value="other">Another machine</option>
               </NativeSelect>

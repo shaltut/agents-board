@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,8 +161,41 @@ test('edit confinement: .git, .agents, .gemini and kit/guard are denied, at any 
   for (const t of ['.git/hooks/pre-commit', join(ws, '.git', 'config'), '.agents/hooks.json', '.gemini/config/hooks.json', 'src/.git/x', 'kit/guard/core.mjs', join(ws, 'kit', 'guard', 'shim-agy.mjs'), 'src/../.agents/hooks.json']) {
     const r = edit({ TargetFile: t });
     assert.equal(r.decision, 'deny', t);
-    assert.match(r.reason ?? '', /not allowed|outside/);
+    assert.match(r.reason ?? '', /not allowed|outside|fence/); // .agents/hooks.json: core's fence (#4652) says it first
   }
+});
+
+// #4652: core's fence (editFence) runs on agy's edit targets too, as on Codex apply_patch and OpenCode write. Before, only
+// the shim's own segments were denied, so a repo's Claude settings, opencode.json or .codex config were writable.
+// #4663 (PR 109 review M1): agy has no patch tool, so a patch header in an edit's content is text, never a target
+test('edit fence (#4663 M1): an apply_patch example in the content of an ordinary file is not a target', () => {
+  assert.deepEqual(edit({ TargetFile: 'test/x.test.ts', CodeContent: '*** Begin Patch\n*** Add File: .codex/hooks.json\n+{}\n*** End Patch\n' }, undefined, 'write_to_file'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/x.md', ReplacementContent: '*** Update File: .claude/settings.json\n' }, undefined, 'replace_file_content'), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: 'docs/y.md', Content: { path: '.claude/settings.json' } }), { decision: 'allow' }, 'a path key inside content is text too');
+  assert.equal(edit({ TargetFile: '.claude/settings.json', CodeContent: 'x' }, undefined, 'write_to_file').decision, 'deny', 'the target itself still counts');
+});
+
+// PR 110 review S1: agy is a Go binary; Go's JSON decoding matches keys in any case, the last one winning. So a second
+// top-level path key in another case is a target too, for the fence (core) and for agy's own .git rule
+test('edit fence (PR 110 S1): a top-level path key in any case is a target', () => {
+  for (const args of [{ TargetFile: 'src/a.ts', targetFile: '.claude/settings.json' }, { TargetFile: 'src/a.ts', TARGETFILE: '.claude/settings.json' },
+    { TargetFile: 'src/a.ts', move_path: '.claude/settings.json' }, { TargetFile: 'src/a.ts', targetfile: '.git/config' }, { TARGETFILE: '.git/config' }])
+    assert.equal(edit(args, undefined, 'write_to_file').decision, 'deny', JSON.stringify(args));
+});
+
+test('edit fence (#4652): the repo-level fence paths are denied for every edit tool and path form; ordinary .claude work passes', () => {
+  for (const t of ['.claude/settings.json', '.claude/settings.local.json', 'opencode.json', '.codex/hooks.json', '.codex/config.toml',
+    '.opencode/plugins/x.js', join(ws, '.claude', 'settings.json'), 'src/../.claude/settings.json', '.CLAUDE/Settings.json', '.claude./settings.json']) {
+    for (const name of EDIT_TOOLS) {
+      const r = edit({ TargetFile: t }, undefined, name);
+      assert.equal(r.decision, 'deny', `${name} ${t}`);
+      assert.match(r.reason ?? '', /fence/, `${name} ${t}`);
+    }
+  }
+  for (const k of PATH_ARGS) assert.equal(edit({ [k]: '.claude/settings.json' }).decision, 'deny', k);
+  // a repo's own .claude skills and agents are ordinary work, as in the shell fence
+  assert.deepEqual(edit({ TargetFile: '.claude/skills/a.md' }), { decision: 'allow' });
+  assert.deepEqual(edit({ TargetFile: '.claude/agents/foo.md' }), { decision: 'allow' });
 });
 
 test('edit confinement: a missing, non-string or empty path denies; so does an unlisted arg name or a missing cwd', () => {
@@ -278,13 +311,144 @@ test('a shim copied without core.mjs, or beside a broken one, still denies', () 
     writeFileSync(join(dir, 'broken', 'core.mjs'), 'export const x = ;\n');
     assert.match(runHook(shell('ls'), seat(), join(dir, 'broken', 'shim-agy.mjs')).reason ?? '', /^Blocked: guard failed to load core/);
     mkdirSync(join(dir, 'mixed')); copyFileSync(SHIM, join(dir, 'mixed', 'shim-agy.mjs'));
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => { throw new Error("boom"); };\n');
+    const hosts = 'export const localHosts = () => [];\n'; // the shim asks core for these before evaluate (#4707)
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => { throw new Error("boom"); };\n');
     const mixed = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
     assert.equal(mixed.decision, 'deny');
     assert.match(mixed.reason ?? '', /^Blocked: guard error \(boom\)/);
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
-    assert.equal(runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs')).decision, 'deny');
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
+    const silent = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
+    assert.equal(silent.decision, 'deny');
+    assert.match(silent.reason ?? '', /gave no decision/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('cleanup', () => { rmSync(ws, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+
+// #4730: a builder works in one worktree per card, outside workspacePaths[0]. The workspace's registered linked worktrees
+// are inside the confinement; a registration counts only when the worktree's .git file points back at that same entry.
+function gitIn(cwd: string, ...args: string[]) {
+  const env: Record<string, string | undefined> = { ...process.env, GIT_CONFIG_GLOBAL: join(outside, 'no-gitconfig'), GIT_CONFIG_NOSYSTEM: '1' };
+  for (const k of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE)$/i.test(k)) delete env[k];
+  const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+}
+function repoWithWorktree() {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'agy-wt-')));
+  const main = join(base, 'main'), wt = join(base, 'card'), wt2 = join(base, 'card2');
+  mkdirSync(main);
+  gitIn(main, 'init', '-q');
+  gitIn(main, 'commit', '-q', '--allow-empty', '-m', 'x');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'one', wt);
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'two', wt2);
+  return { base, main, wt, wt2 };
+}
+const from = (root: string) => ({ cwd: root, workspacePaths: [root] });
+
+test('#4730: reads and edits inside a registered worktree of the workspace are allowed, absolute or relative', () => {
+  const { main, wt } = repoWithWorktree();
+  for (const t of [join(wt, 'src', 'a.ts'), '../card/src/a.ts']) {
+    assert.deepEqual(read({ TargetFile: t }, from(main)), { decision: 'allow' }, t);
+    assert.deepEqual(edit({ TargetFile: t }, from(main)), { decision: 'allow' }, t);
+  }
+  assert.deepEqual(edit({ TargetFile: 'src/a.ts' }, { cwd: wt, workspacePaths: [main] }), { decision: 'allow' });
+});
+
+test('#4730: a workspace that is itself a linked worktree reaches its sibling worktrees, not the main checkout', () => {
+  const { main, wt, wt2 } = repoWithWorktree();
+  assert.deepEqual(edit({ TargetFile: join(wt2, 'a.ts') }, from(wt)), { decision: 'allow' });
+  assert.match(edit({ TargetFile: join(main, 'a.ts') }, from(wt)).reason ?? '', /editing outside the workspace/);
+});
+
+test('#4730: the deny rules hold inside a worktree', () => {
+  const { main, wt } = repoWithWorktree();
+  for (const t of ['.git', '.agents/hooks.json', '.gemini/x', 'kit/guard/core.mjs', 'src/.git/x']) {
+    assert.equal(edit({ TargetFile: join(wt, t) }, from(main)).decision, 'deny', t);
+  }
+  for (const t of ['.agents/x', '.gemini/x', 'kit/guard/core.mjs']) assert.match(read({ TargetFile: join(wt, t) }, from(main)).reason ?? '', /not allowed/, t);
+  assert.deepEqual(read({ TargetFile: join(wt, '.git') }, from(main)), { decision: 'allow' }); // reading .git, as in the workspace
+  assert.match(edit({ TargetFile: join(wt, '.claude', 'settings.json') }, from(main)).reason ?? '', /fence/);
+  assert.match(read({ TargetFile: join(wt, '.env') }, from(main)).reason ?? '', /secret file/);
+  assert.match(edit({ TargetFile: wt }, from(main)).reason ?? '', /outside the workspace/);
+});
+
+test('#4730: a worktree nested in the workspace keeps its own kit/guard denied', () => {
+  const { main } = repoWithWorktree();
+  const nested = join(main, '.worktrees', 'n');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'nested', nested);
+  assert.match(edit({ TargetFile: join(nested, 'kit', 'guard', 'core.mjs') }, from(main)).reason ?? '', /kit\/guard is not allowed/);
+});
+
+test('#4730: only a registration whose worktree points back counts; neighbours and unrelated repos stay outside', () => {
+  const { base, main, wt } = repoWithWorktree();
+  const denied = (t: string) => assert.match(read({ TargetFile: t }, from(main)).reason ?? '', /reading outside the workspace/, t);
+  denied(join(base, 'card-sibling', 'a.ts'));
+  denied(join(base, 'a.ts'));
+  denied(join(repoWithWorktree().wt, 'a.ts'));
+  // a forged entry naming a folder that does not point back
+  const target = join(base, 'private');
+  mkdirSync(target);
+  mkdirSync(join(main, '.git', 'worktrees', 'forged'), { recursive: true });
+  writeFileSync(join(main, '.git', 'worktrees', 'forged', 'gitdir'), `${join(target, '.git')}\n`);
+  denied(join(target, 'a.ts'));
+  writeFileSync(join(target, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'card')}\n`); // points at another entry
+  denied(join(target, 'a.ts'));
+  // a stale entry: the folder was removed and reused without git
+  rmSync(wt, { recursive: true, force: true });
+  mkdirSync(wt);
+  denied(join(wt, 'a.ts'));
+});
+
+// #4743 (PR 127 review): the deny segments are read below each root, so they never saw a root that itself sits inside one.
+test('#4743: a linked worktree whose root sits inside .git, .agents or .gemini opens nothing', () => {
+  const { base, main, wt } = repoWithWorktree();
+  const roots = [join(base, '.gemini', 'a'), join(base, '.agents', 'deep', 'b'), join(base, '.git', 'c'), join(base, '.GEMINI-x', '.Agents')];
+  roots.forEach((r, i) => gitIn(main, 'worktree', 'add', '-q', '-b', `denied${i}`, r));
+  for (const r of roots) {
+    assert.match(read({ TargetFile: join(r, 'a.ts') }, from(main)).reason ?? '', /reading outside the workspace/, r);
+    assert.match(edit({ TargetFile: join(r, 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/, r);
+  }
+  assert.deepEqual(edit({ TargetFile: join(wt, 'a.ts') }, from(main)), { decision: 'allow' }); // the others stay open
+});
+
+test('#4743: such a worktree nested in the workspace still keeps its own kit/guard denied', () => {
+  const { main } = repoWithWorktree();
+  const nested = join(main, '.git', 'nested-wt');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'in-git', nested);
+  assert.match(read({ TargetFile: join(nested, 'kit', 'guard', 'core.mjs') }, from(main)).reason ?? '', /kit\/guard is not allowed/);
+  assert.match(edit({ TargetFile: join(nested, 'a.ts') }, from(main)).reason ?? '', /not allowed/);
+});
+
+// The three spellings the PR 127 review probed by hand
+test('#4743 pin: a junction or link inside a worktree that leads out is denied; one that leads in is allowed', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const away = join(base, 'away');
+  mkdirSync(away);
+  try {
+    symlinkSync(away, join(wt, 'out'), 'junction');
+    symlinkSync(wt, join(base, 'shortcut'), 'junction');
+  } catch { t.skip('cannot create links here'); return; }
+  assert.match(edit({ TargetFile: join(wt, 'out', 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/);
+  assert.match(read({ TargetFile: join(wt, 'out', 'a.ts') }, from(main)).reason ?? '', /reading outside the workspace/);
+  assert.deepEqual(edit({ TargetFile: join(base, 'shortcut', 'a.ts') }, from(main)), { decision: 'allow' });
+});
+
+test('#4743 pin: a worktree registered with relative paths is found, from the main checkout and from a sibling', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const rel = join(base, 'rel');
+  gitIn(main, '-c', 'worktree.useRelativePaths=true', 'worktree', 'add', '-q', '-b', 'relative', rel);
+  if (!/^gitdir: \.\./.test(readFileSync(join(rel, '.git'), 'utf8'))) { t.skip('this git writes no relative worktree links'); return; }
+  for (const w of [main, wt]) assert.deepEqual(edit({ TargetFile: join(rel, 'a.ts') }, from(w)), { decision: 'allow' }, w);
+  assert.deepEqual(edit({ TargetFile: join(wt, 'a.ts') }, from(rel)), { decision: 'allow' });
+});
+
+test('#4743 pin: an 8.3 short name reads as the long one inside a worktree and for a denied root', (t) => {
+  const { base, main, wt } = repoWithWorktree();
+  const hidden = join(base, '.gemini', 'a');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'short', hidden);
+  mkdirSync(join(wt, '.gemini'));
+  const inWt = join(wt, 'GEMINI~1'), toHidden = join(base, 'GEMINI~1', 'a');
+  if (process.platform !== 'win32' || !existsSync(inWt) || !existsSync(toHidden)) { t.skip('no 8.3 names here'); return; }
+  assert.match(edit({ TargetFile: join(inWt, 'x.json') }, from(main)).reason ?? '', /not allowed/);
+  assert.match(edit({ TargetFile: join(toHidden, 'a.ts') }, from(main)).reason ?? '', /editing outside the workspace/);
+});

@@ -3,11 +3,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Settings as Gear } from 'lucide-react'
 import { rpc, useProjects } from '@/lib/api'
-import { go, type Route } from '@/lib/route'
+import { href, type Route } from '@/lib/route'
 import { Button } from '@/components/ui/button'
-import { ProjectDot } from '@/components/Chips'
+import { ProjectsList } from '@/components/projects/ProjectsList'
 import {
-  ROLES, checkSquad, diffSquads, isMulti, plural, saveError, seatCount, toDocument, type Squad, type SquadOptions, type SquadPage,
+  ROLES, checkSquad, diffSquads, isMulti, plural, saveError, seatCount, setSupervise, toDocument, type Squad, type SquadOptions, type SquadPage,
 } from '@/lib/squad'
 import { Notice, Section } from '@/components/settings/bits'
 import { RoleCard } from '@/components/settings/RoleCard'
@@ -18,34 +18,11 @@ import { ProjectRoleText } from '@/components/settings/ProjectRoleText'
 import { GitHub } from '@/components/settings/GitHub'
 
 /** Project settings (#4332): one project's squad, switches, reminders and GitHub watches, and the board-wide role texts.
+ *  With no project chosen: the Projects list (#4559), where Ahmed enables, disables and archives them.
  *  Owner only: App.tsx keeps other admins out, and the server refuses their writes. */
 export function Settings({ route }: { route: Route }) {
-  if (!route.project) return <ProjectChooser />
+  if (!route.project) return <ProjectsList />
   return <ProjectSettings key={route.project} project={route.project} />
-}
-
-function ProjectChooser() {
-  const { data: projects = [], isLoading } = useProjects()
-  return (
-    <div>
-      <h1 className="text-[28px] leading-tight font-semibold tracking-[-0.015em]">Project settings</h1>
-      <p className="mt-1 mb-5 max-w-[80ch] text-sm text-muted-foreground">Settings are per project. Pick one:</p>
-      {isLoading ? <p className="text-sm text-muted-foreground">Loading projects…</p> : (
-        <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {projects.map((p) => (
-            <li key={p.slug}>
-              <button onClick={() => go({ project: p.slug })}
-                className="flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2.5 text-left text-sm hover:bg-raised">
-                <ProjectDot slug={p.slug} />
-                <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
-                <span className="text-xs text-muted-foreground">{p.pipeline ? 'pipeline on' : 'pipeline off'}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
 }
 
 const useSquadPage = (project: string) =>
@@ -68,6 +45,7 @@ function ProjectSettings({ project }: { project: string }) {
   const data = page.data, opts = options.data
   const header = (
     <header className="mb-6">
+      <a href={href({ view: 'settings' })} className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">← Projects</a>
       <h1 className="flex items-center gap-2 text-[28px] leading-tight font-semibold tracking-[-0.015em]">
         <Gear className="size-6 text-muted-foreground" aria-hidden /> Project settings
       </h1>
@@ -167,7 +145,7 @@ function ProjectSettings({ project }: { project: string }) {
                 {problems.length > 0 && <p className="mb-2 text-[13px] text-destructive">Fix {plural(problems.length, 'thing')} marked above before saving.</p>}
                 {saveState && saveState.kind !== 'stale' && <p className="mb-2 text-[13px] text-destructive" role="alert">{saveState.text}</p>}
                 <p className="mb-2 text-[13px] text-muted-foreground">
-                  {supervised ? 'Seats start and close on the next supervisor round; idle seats on an old agent or model restart on the new one.'
+                  {supervised ? 'Seats start and close on the next supervisor round; idle seats on an old agent or model restart on the new one. A new effort applies when a seat next starts.'
                     : 'The supervisor is not acting on this project, so running seats keep their setting until they next start.'}
                 </p>
                 <div className="flex flex-wrap justify-end gap-2">
@@ -230,12 +208,12 @@ function Switches({ project, page, squad, edit }: { project: string; page: Squad
         </label>
         <label className="flex items-start gap-3 rounded-lg border bg-card p-3">
           <input type="checkbox" className="mt-0.5 size-4" checked={!!squad?.supervise} disabled={!squad}
-            onChange={(e) => edit((s) => ({ ...s, supervise: e.target.checked }))} />
+            onChange={(e) => { const on = e.target.checked; edit((s) => setSupervise(s, on, page.squad)) }} />
           <span className="text-sm">
             <span className="font-medium">Supervisor</span> <span className="rounded-full bg-lamp-soft px-2 py-0.5 text-xs text-lamp-ink">Only Ahmed changes this</span>
             <span className="block text-muted-foreground">
               Starts seats for waiting cards, closes idle ones and restarts idle seats on an old setting. It acts only while the pipeline is on.
-              {squad?.supervise !== page.supervise && ' Changed here: press Save the squad above to keep it.'}
+              {squad && !!squad.supervise !== page.supervise && ' Changed here: press Save the squad above to keep it.'}
               {!squad && ' This project has no squad yet.'}
             </span>
           </span>

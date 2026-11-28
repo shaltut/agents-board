@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { get, qs, rpc, useGoals, useMemStats, useQuestions, useUsers, type CbEvent, type Question } from '@/lib/api'
 import { ago, clock, day } from '@/lib/format'
 import { go, href, type Route } from '@/lib/route'
+import { seatsCodeLine, type SeatsCode } from '@/lib/seats-code'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -76,7 +77,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
   if (!initial.current && !isLoading) initial.current = new Set(allOpen.map((q) => q.id))
   const today = useQuery({
     queryKey: ['today', route.project, anchor], enabled: !!anchor,
-    queryFn: () => get<{ counts: { done: number; active: number; blocked: number }; events: CbEvent[] }>(
+    queryFn: () => get<{ counts: { done: number; active: number; blocked: number }; events: CbEvent[]; code?: SeatsCode | null }>(
       `/api/today${qs({ project: route.project, since: anchor ?? undefined })}`),
   })
 
@@ -88,6 +89,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
 
   const c = today.data?.counts
   const events = today.data?.events ?? []
+  const seatsLine = seatsCodeLine(today.data?.code)
   const blocking = open.filter((q) => q.blocking).length
 
   return (
@@ -178,6 +180,7 @@ function Briefing({ route, anchorState }: { route: Route; anchorState: ReturnTyp
             <Count n={c.blocked} label="blocked" tone="text-st-blocked" /> right now.
           </p>
         )}
+        {seatsLine && <p className="-mt-4 mb-6 text-sm text-muted-foreground">{seatsLine}</p>}
 
         {today.isLoading || !anchor ? (
           <p className="text-sm text-muted-foreground">Loading the shift log…</p>
@@ -237,7 +240,9 @@ function MemoryCard({ project }: { project?: string }) {
  *  The code is one-time and lasts 10 minutes; pairing writes cb.settings, whose NOTIFY flips this card live. */
 function TelegramCard() {
   const qc = useQueryClient()
-  const { data: t } = useQuery({ queryKey: ['telegram'], queryFn: () => get<{ configured: boolean; bot: string | null; paired: boolean; paired_at: string | null }>('/api/telegram') })
+  // refetched each minute: what did not reach Telegram changes with no board change to say so (#4629)
+  const { data: t } = useQuery({ queryKey: ['telegram'], refetchInterval: 60_000,
+    queryFn: () => get<{ configured: boolean; bot: string | null; paired: boolean; paired_at: string | null; refused?: number; unrecorded?: number }>('/api/telegram') })
   const [link, setLink] = useState<string | null>(null)
   const post = async (path: string) => {
     const r = await fetch(path, { method: 'POST' })
@@ -256,6 +261,8 @@ function TelegramCard() {
       {t.paired ? (
         <>
           <span className="text-muted-foreground">Questions go to your chat{t.paired_at ? `, since ${day(t.paired_at)}` : ''}.</span>
+          {!!t.refused && <span>{t.refused === 1 ? '1 question' : `${t.refused} questions`} could not be sent to Telegram: answer {t.refused === 1 ? 'it' : 'them'} here.</span>}
+          {!!t.unrecorded && <span>{t.unrecorded === 1 ? '1 question' : `${t.unrecorded} questions`} reached your chat, but answering there does not work yet: answer {t.unrecorded === 1 ? 'it' : 'them'} here.</span>}
           <Button variant="ghost" size="sm" className="ml-auto h-7" onClick={unpair}>Unpair</Button>
         </>
       ) : link ? (

@@ -6,7 +6,8 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { GUARD_FILES, installGuard, checkWiring } from '../kit/guard/install.mjs';
-import { compareManifest, headSha, readManifest, type Manifest } from './release.ts';
+import { buildManifest, compareManifest, headSha, readManifest, type Manifest } from './release.ts';
+import { agentFlagsReport, realProbe, type AgentProbe } from './agent-flags.ts';
 
 export type DoctorOptions = {
   root: string; // the checkout to check
@@ -14,6 +15,7 @@ export type DoctorOptions = {
   guardTarget: string; // the installed guard every hook runs
   settingsFile: string | null; // the Claude settings holding the hook, or null to skip the wiring check
   probes?: boolean; // run the 6 probes through the hook's command (default true, as install.mjs --check does)
+  agentProbe?: AgentProbe; // #4607: check each installed agent CLI's --help against its adapter's launch flags (cb doctor passes the real one)
 };
 
 const LIST = 20; // file names shown per kind; the rest are counted
@@ -49,7 +51,22 @@ export function doctor(o: DoctorOptions) {
 
   // 1. the files against the release
   const manifestFile = o.manifest ? resolve(o.manifest) : existsSync(join(root, 'release.json')) ? join(root, 'release.json') : null;
-  if (!manifestFile) {
+  if (!manifestFile && here) {
+    // a git checkout (the PC) with no release.json: git is its record. Its release files committed and nothing on disk
+    // that git does not have is a pass; the release it serves is its own commit
+    try {
+      const f = filesReport(root, buildManifest(root), here);
+      json.release = here;
+      json.files = f.files;
+      if (!f.ok) problems++;
+      lines.push(...(f.ok ? [`files: a git checkout at ${short(here)}, all ${f.files.total} release files committed`] : f.lines));
+    } catch (e: any) {
+      problems++;
+      json.files = null;
+      json.files_error = String(e?.message ?? e);
+      lines.push(`files: a git checkout at ${short(here)}: ${json.files_error}`);
+    }
+  } else if (!manifestFile) {
     problems++;
     json.files = null;
     lines.push(`files: not compared: no release.json in ${root}. Pass --manifest <file> (build one in an up-to-date clone with node cli/release.ts)`);
@@ -89,6 +106,14 @@ export function doctor(o: DoctorOptions) {
     else { problems++; lines.push(...w.problems.map((p: string) => `hook: ${p}`), `hook: ${AHMED}`); }
   } else json.wiring = null;
 
+  // 4. each installed agent CLI still lists the flags its adapter launches with (#4607): --help only, never a session
+  if (o.agentProbe) {
+    const a = agentFlagsReport({ root, probe: o.agentProbe });
+    json.agents = a.json;
+    problems += a.problems;
+    lines.push(...a.lines);
+  } else json.agents = null;
+
   json.ok = problems === 0;
   json.problems = problems;
   lines.push(problems ? `doctor: ${problems} ${problems === 1 ? 'check' : 'checks'} failed` : 'doctor: this machine matches the release');
@@ -102,6 +127,7 @@ export function doctorCmd(o: { root?: string; manifest?: string }) {
     manifest: o.manifest ?? null,
     guardTarget: join(homedir(), '.claude-board', 'guard'),
     settingsFile: join(homedir(), '.claude', 'settings.json'),
+    agentProbe: realProbe,
   });
   return { out: r.lines.join('\n'), json: r.json, code: r.ok ? 0 : 1 };
 }

@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
-import { freshDb, onProject, TEST_URL } from './helpers.ts';
+import { freshDb, onProject, stranger, TEST_URL } from './helpers.ts';
 import { bridgeFiles, seatKey } from '../cli/bridge.ts';
 import { claudeEndpointPath, readClaudeEndpoint, relaunchEnv, writeClaudeEndpoint } from '../cli/agents/claude.ts';
 
@@ -20,7 +20,7 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const M = 'testbox';
 const seatFiles = (pane: string) => {
   const k = seatKey(M, pane);
-  return { lock: join(tmpdir(), `cb-relay-${k}.pid`), log: join(tmpdir(), `cb-relay-${k}.log`), bridge: bridgeFiles(k).info, endpoint: claudeEndpointPath(M, pane) };
+  return { lock: join(tmpdir(), `cb-relay-${k}.pid`), log: join(tmpdir(), `cb-relay-${k}.log`), held: join(tmpdir(), `cb-relay-${k}.held`), bridge: bridgeFiles(k).info, endpoint: claudeEndpointPath(M, pane) };
 };
 const rmSeat = (pane: string) => { for (const f of Object.values(seatFiles(pane))) fs.rmSync(f, { force: true }); };
 
@@ -86,10 +86,12 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
            CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' },
   });
   const exited = new Promise((r) => relay.on('exit', r));
+  const other = await stranger('cb-relay/0000000'); // #3772: another run's relay, on its own database
+  after(() => other.end());
   try {
     await new Promise((r) => setTimeout(r, 1500)); // relay is listening
     // every session runs one: it names its connections, and holds no more than its LISTEN and one for queries
-    const names = (await sql`select application_name as n from pg_stat_activity where application_name like 'cb-relay%' and pid <> pg_backend_pid()`).map((r: any) => r.n);
+    const names = (await sql`select application_name as n from pg_stat_activity where datname = current_database() and application_name like 'cb-relay%' and pid <> pg_backend_pid()`).map((r: any) => r.n);
     assert.ok(names.length >= 1 && names.length <= 2, `cb-relay connections: ${names.length}`);
     // named with its code's version: a rollout is checked with one query (2026-11-18: a monitor guessed wrong)
     for (const n of names) assert.match(n, /^cb-relay\/[0-9a-f]{7}$/);
@@ -114,8 +116,11 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     await sql`select cb.task_add(project => 'demo', title => 'nudge', actor => 'orch')`; // any change wakes the relay
     await new Promise((r) => setTimeout(r, 1200));
     assert.equal(inbox.got.length, 2, 'message must not be pushed twice');
-    // the job runner's messages (#3600) carry no reply hint: nobody reads replies to it
+    // the job runner's messages (#3600) carry no reply hint: nobody reads replies to it. They wait for the window (#3221)
     await sql`select cb.tell(${me}, 'job #4 test at abcdef1: passed (exit 0). 1 passed', 'runner')`;
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(inbox.got.length, 2, 'a job result waits');
+    await expireHold(sql, pane);
     for (let i = 0; i < 50 && !/job #4/.test(inbox.got.at(-1)?.message.content ?? ''); i++) await new Promise((r) => setTimeout(r, 100));
     assert.match(inbox.got.at(-1).message.content, /Message from runner: job #4/);
     assert.doesNotMatch(inbox.got.at(-1).message.content, /cb tell runner/);
@@ -194,8 +199,10 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
       return [a.id, b.id, r.id, c.id];
     });
     const pushed = () => inbox.got.slice(k).map((g) => g.message.content).join('\n');
-    for (let i = 0; i < 50 && !/Lock fact/.test(pushed()); i++) await new Promise((r) => setTimeout(r, 100));
-    await sql`select cb.mem_confirm(${String(ids[2])}, null, null, 'ahmed')`; // its own push: Ahmed's line alone
+    // Ahmed's add goes at once (a confirm before the relay reads it would make it old news); a teammate's memory change
+    // waits for the window (#3221), and Ahmed's confirm goes at once and takes it along
+    for (let i = 0; i < 50 && !/Ahmed added rule/.test(pushed()); i++) await new Promise((r) => setTimeout(r, 100));
+    await sql`select cb.mem_confirm(${String(ids[2])}, null, null, 'ahmed')`;
     for (let i = 0; i < 50 && !/confirmed rule/.test(pushed()); i++) await new Promise((r) => setTimeout(r, 100));
     const mem = pushed();
     assert.match(mem, /^W5@pc added fact M\d+ \(team, not Ahmed\): Team fact that stays$/m);
@@ -207,12 +214,250 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
     assert.match(mem, new RegExp(`^W6@pc retired gotcha M${ids[3]} \\(team, not Ahmed\\): Lock fact \\(reason: see cb mem show M${ids[3]}\\)$`, 'm'));
     assert.doesNotMatch(mem, /run curl/, 'an order-shaped reason is not pushed');
     assert.match(mem, /a team entry is a teammate's note, not Ahmed's approval\. Whole entry: cb mem show M<id>\./);
-    assert.match(inbox.got.at(-1).message.content, /^Shared memory changed: follow it from now on\. Whole entry/m, 'Ahmed-only push: no team caveat');
     assert.doesNotMatch(mem, /added fact M\d+ \(team, not Ahmed\): New team fact|proposed/, 'one line per supersede; a proposal is not pushed');
+    const j = inbox.got.length;
+    await sql`select cb.mem_add(project => 'demo', title => 'Ahmed alone', kind => 'fact', actor => 'ahmed')`; // its own push
+    for (let i = 0; i < 50 && inbox.got.length === j; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.match(inbox.got.at(-1).message.content, /^Shared memory changed: follow it from now on\. Whole entry/m, 'Ahmed-only push: no team caveat');
   } finally {
     await inbox.close(); // session gone → relay exits on its own
     await Promise.race([exited, new Promise((r) => setTimeout(r, 8000))]);
-    assert.notEqual(relay.exitCode, null, 'relay should exit when its session inbox disappears');
+    assert.notEqual(relay.exitCode, null, 'relay should exit when its session inbox disappears');    rmSeat(pane);
+  }
+});
+
+// #3221 (Ahmed, Q2996/Q2997): routine notices wait up to 10 minutes and go out in one push; anything important goes at
+// once and takes them along. The hold is on the board, so a relay that restarts mid-hold delivers them once. The tests
+// end a window by moving the hold's start back (the clock is the board's), never by waiting 10 minutes.
+const expireHold = async (sql: any, pane: string) => {
+  await sql`update cb.sessions set hold_at = now() - interval '11 minutes' where pane = ${pane} and hold_at is not null`;
+  await sql`select pg_notify('cb', 'test')`;
+};
+
+test('routine notices wait up to 10 min, then one push; anything important takes them along; a restart mid-hold delivers them once (#3221)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-hold-` + process.pid : join(tmpdir(), `cb-relay-hold-${process.pid}.sock`);
+  const pane = `p-relay-hold-${process.pid}`, me = 'W8@testbox';
+  rmSeat(pane);
+  fs.writeFileSync(seatFiles(pane).lock, '');
+  await sql`select cb.iam('testbox', ${pane}, ${me}, 'demo')`;
+  await sql`select cb.task_add(project => 'demo', title => 'mine', status => 'in_progress', actor => ${me})`;
+  const inbox = fakeInbox(path, 'tok');
+  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
+                CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  let relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+  let exited = new Promise((r) => relay.on('exit', r));
+  const held = async () => (await sql`select hold_from from cb.sessions where pane = ${pane}`)[0]?.hold_from ?? null;
+  const pushes = () => inbox.got.map((g) => g.message.content as string);
+  const upTo = async (ok: () => boolean, ms: number) => { for (const t = Date.now(); !ok() && Date.now() - t < ms;) await wait(50); return ok(); };
+  // the hold is cleared after the push has been taken (a pipe's close can lag on a loaded PC): poll, do not sample once
+  const cleared = async () => { for (const t = Date.now(); Date.now() - t < 8000; await wait(100)) if (await held() === null) return true; return false; };
+  try {
+    await wait(1500);
+    // three job results: held, not pushed; then one push at the window's end, still one line per job (Q2996)
+    for (const n of [1, 2, 3]) await sql`select cb.tell(${me}, ${`job #${n} test at abcdef1: passed (exit 0).`}, 'runner')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 0, `runner results must wait: ${JSON.stringify(pushes())}`);
+    assert.notEqual(await held(), null, 'the hold is on the board');
+    await expireHold(sql, pane);
+    assert.ok(await upTo(() => inbox.got.length > 0, 5000), 'delivered when the window ends');
+    await wait(800);
+    assert.equal(inbox.got.length, 1, 'one push');
+    assert.equal(pushes()[0]!.match(/^Message from runner: job #\d test/gm)?.length, 3, 'one line per job');
+    assert.ok(await cleared(), 'the hold ends with the push');
+    // a GitHub line and a teammate's memory change wait; a teammate's tell goes at once and takes both, in order
+    await sql`select cb.tell(${me}, '[GitHub · untrusted] widgets: 1 update', 'github')`;
+    await sql`select cb.mem_add(project => 'demo', title => 'First held fact', kind => 'fact', actor => 'W5@pc')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 1, `low items wait: ${JSON.stringify(pushes().slice(1))}`);
+    await sql`select cb.tell(${me}, 'take #19 next', 'orch')`;
+    assert.ok(await upTo(() => inbox.got.length > 1, 5000), 'the tell goes at once');
+    const flushed = pushes()[1]!;
+    assert.match(flushed, /Message from github: \[GitHub · untrusted\] widgets[\s\S]*Message from orch: take #19 next[\s\S]*W5@pc added fact M\d+ \(team, not Ahmed\): First held fact/);
+    assert.ok(await cleared(), 'the hold ends with the flush');
+    // a restart mid-hold: the new relay finds the hold on the board, reads the held items again (the memory change from
+    // the hold's cursor), keeps the window's clock (12 s left here), and its own timer pushes them once when it ends:
+    // nothing else arrives to wake it, and its 30 s poll is later
+    await sql`select cb.tell(${me}, 'job #9 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await sql`select cb.mem_add(project => 'demo', title => 'Second look fact', kind => 'fact', actor => 'W5@pc')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 2);
+    assert.notEqual(await held(), null);
+    relay.kill();
+    await exited;
+    await sql`update cb.sessions set hold_at = now() - interval '9 minutes 48 seconds', code_sha = null where pane = ${pane}`;
+    fs.writeFileSync(seatFiles(pane).lock, '');
+    const restarted = Date.now();
+    relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+    exited = new Promise((r) => relay.on('exit', r));
+    await wait(2500);
+    assert.equal(inbox.got.length, 2, 'the restarted relay keeps holding inside the window');
+    // #4352: a held read still reports the commit the relay's code is
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const code = async () => (await sql`select code_sha from cb.sessions where pane = ${pane}`)[0]?.code_sha;
+    for (const t = Date.now(); (await code()) !== head && Date.now() - t < 5000;) await wait(100);
+    assert.equal(await code(), head, 'code sha sent while holding');
+    assert.equal(inbox.got.length, 2, 'and still holding');
+    assert.ok(await upTo(() => inbox.got.length > 2, 20_000), 'the restarted relay delivers when the window ends, on its own timer');
+    assert.ok(Date.now() - restarted < 25_000, 'before the 30 s poll');
+    await sql`select pg_notify('cb', 'test')`;
+    await wait(1200);
+    assert.equal(inbox.got.length, 3, 'once');
+    assert.match(pushes()[2]!, /Message from runner: job #9 lint[\s\S]*W5@pc added fact M\d+ \(team, not Ahmed\): Second look fact/);
+    assert.equal(pushes().join('\n').match(/job #9/g)?.length, 1);
+    assert.equal(pushes().join('\n').match(/Second look fact/g)?.length, 1);
+    // a board message the relay cannot place (no notice mark: a part sent back to me) goes at once; a nudge waits
+    await sql`insert into cb.events (actor, project, kind, summary, data) values ('board', 'demo', 'message', 'stall nudge', ${sql.json({ to: me, nudge: true })})`;
+    await wait(1200);
+    assert.equal(inbox.got.length, 3, 'a nudge waits');
+    await sql`insert into cb.events (actor, project, kind, summary, data) values ('board', 'demo', 'message', '#1 part api is back with you at build', ${sql.json({ to: me })})`;
+    assert.ok(await upTo(() => inbox.got.length > 3, 5000), 'an unmarked board message goes at once');
+    assert.match(pushes()[3]!, /stall nudge[\s\S]*back with you at build/);
+    // review I1: a teammate's note on my card goes at once (never held: the board returns it only while the card is
+    // mine), with a held job result; handing the card on after it loses nothing
+    await sql`select cb.tell(${me}, 'job #10 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1200);
+    assert.equal(inbox.got.length, 4, 'a job result waits');
+    await sql`select cb.log('demo', 'careful: the fixture is broken', '1', '{}', 'orch')`;
+    assert.ok(await upTo(() => inbox.got.length > 4, 5000), "a teammate's note on my card goes at once");
+    assert.match(pushes()[4]!, /Message from runner: job #10 lint[\s\S]*orch noted on #1 "mine" \(now in_progress\): careful: the fixture is broken/);
+    assert.ok(await cleared());
+    // review M1: the lead cancelling my card goes at once
+    await sql`select cb.tell(${me}, 'job #11 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1200);
+    assert.equal(inbox.got.length, 5, 'a job result waits');
+    await sql`select cb.task_move('1', 'cancelled', 'duplicate of #7', 'orch')`;
+    assert.ok(await upTo(() => inbox.got.length > 5, 5000), 'a cancel by the lead goes at once');
+    assert.match(pushes()[5]!, /Message from runner: job #11 lint[\s\S]*orch moved #1 "mine" \(now cancelled\): duplicate of #7/);
+    assert.ok(await cleared());
+    // review M3: a job result about a P0 card goes at once (the job's card rides in the message: cb._job_tell)
+    const [{ id: hot }] = await sql`select cb.task_add(project => 'demo', title => 'on fire', priority => 'P0', status => 'in_progress',
+                                                       assignee => 'W2@testbox', actor => 'orch') as id`;  // not mine: no Next offer
+    await wait(1200);
+    const n = inbox.got.length;
+    await sql`insert into cb.jobs (project, recipe, sha, requester, task_id, state, exit_code, summary)
+              values ('demo', 'test', 'abcdef1234', ${me}, ${hot}, 'passed', 0, 'P0 fix passes')`;
+    await sql`select cb._job_tell(j) from cb.jobs j where j.task_id = ${hot}`;
+    assert.ok(await upTo(() => inbox.got.length > n, 5000), "a P0 card's job result goes at once");
+    assert.match(pushes().at(-1)!, /Message from runner: job #\d+ test at abcdef1: passed \(exit 0\)\. P0 fix passes/);
+  } finally {
+    await inbox.close();
+    await Promise.race([exited, wait(8000)]);
+    if (relay.exitCode === null) relay.kill();
+    rmSeat(pane);
+  }
+});
+
+test('inbox: a digest with a new P0 or a supervisor problem is not marked as a notice; routine digests and nudges are (#3221)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('pc', 'w9:p1', 'orch', 'demo')`;
+  const [{ start }] = await sql`select coalesce(max(id), 0) as start from cb.events`;
+  for (const [summary, data] of [['digest', { digest: true }], ['urgent digest', { digest: true, urgent: true }], ['nudge', { nudge: true }], ['plain', {}]] as const)
+    await sql`insert into cb.events (actor, project, kind, summary, data) values ('board', 'demo', 'message', ${summary}, ${sql.json({ to: 'orch', ...data })})`;
+  const [{ id: hot }] = await sql`select cb.task_add(project => 'demo', title => 'hot', priority => 'P0', status => 'in_progress', assignee => 'orch', actor => 'W1') as id`;
+  const [{ id: cold }] = await sql`select cb.task_add(project => 'demo', title => 'cold', status => 'in_progress', assignee => 'orch', actor => 'W1') as id`;
+  // review M3: a nudge about a P0 card (its task_id) and a job result for one (cb._job_tell: data.task) are urgent;
+  // the same for a P2 card are not. Review M2/M4: a message marked urgent is too
+  for (const [summary, task] of [['P0 nudge', hot], ['P2 nudge', cold]] as const)
+    await sql`insert into cb.events (actor, project, task_id, kind, summary, data) values ('board', 'demo', ${task}, 'message', ${summary}, ${sql.json({ to: 'orch', nudge: true })})`;
+  for (const task of [hot, cold]) {
+    await sql`insert into cb.jobs (project, recipe, sha, requester, task_id, state, exit_code, summary) values ('demo', 'test', 'abcdef1234', 'orch', ${task}, 'passed', 0, ${`card ${task}`})`;
+    await sql`select cb._job_tell(j) from cb.jobs j where j.task_id = ${task}`;
+  }
+  const [{ i }] = await sql`select cb.inbox('pc', 'w9:p1', ${start}) as i`;
+  assert.deepEqual(i.messages.map((m: any) => [m.summary.split('\n')[0].replace(/^job #\d+ test at abcdef1: passed \(exit 0\)\. /, ''), m.notice, m.urgent]),
+    [['digest', 'digest', false], ['urgent digest', null, true], ['nudge', 'nudge', false], ['plain', null, false],
+     ['P0 nudge', 'nudge', true], ['P2 nudge', 'nudge', false], [`card ${hot}`, null, true], [`card ${cold}`, null, false]]);
+  assert.deepEqual((await sql`select (data ->> 'task')::bigint as t, task_id from cb.events where actor = 'runner' order by id`).map((r: any) => [Number(r.t), r.task_id]),
+    [[Number(hot), null], [Number(cold), null]], 'the card in data, never task_id (no card activity)');
+  assert.deepEqual(Object.keys(i.events[0]).sort(), ['actor', 'id', 'kind', 'status', 'summary', 'task_id', 'title'], 'events: as on main');
+  assert.equal(i.hold, null, 'nothing held: the key is there, empty');
+  // a hold keeps its first cursor and clock; null ends it; another session in the pane starts clean
+  await sql`select cb.relay_hold('pc', 'w9:p1', 5)`;
+  await sql`select cb.relay_hold('pc', 'w9:p1', 9)`;
+  const [{ i: h }] = await sql`select cb.inbox('pc', 'w9:p1', ${start}) as i`;
+  assert.equal(Number(h.hold.from), 5);
+  assert.ok(h.hold.age_ms >= 0 && h.hold.age_ms < 60_000);
+  await sql`select cb.relay_hold('pc', 'w9:p1', null)`;
+  assert.equal((await sql`select cb.inbox('pc', 'w9:p1', ${start}) as i`)[0].i.hold, null);
+  await sql`select cb.relay_hold('pc', 'w9:p1', 7)`;
+  await sql`select cb.inbox('pc', 'w9:p1', ${start}, 'S1')`; // the row takes S1 as its session
+  await sql`select cb.relay_hold('pc', 'w9:p1', 8)`;
+  assert.equal((await sql`select cb.inbox('pc', 'w9:p1', ${start}, 'S2') as i`)[0].i.hold, null, 'a new session drops the hold');
+  // review M5: a hold reads again from no further back than 24 h
+  const [{ old }] = await sql`insert into cb.events (actor, project, kind, summary) values ('W1', 'demo', 'note', 'a day ago') returning id as old`;
+  await sql`update cb.events set at = now() - interval '25 hours' where id = ${old}`;
+  await sql`select cb.relay_hold('pc', 'w9:p1', 0)`;
+  assert.equal(Number((await sql`select cb.inbox('pc', 'w9:p1', ${start}, 'S2') as i`)[0].i.hold.from), Number(old), 'capped at the newest event older than 24 h');
+});
+
+// #3221 review I2 and I1 (rename), end to end
+test('the hold ends right after the push, before the bookkeeping; a bind to another name mid-hold still delivers what was held (#3221)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-hold2-` + process.pid : join(tmpdir(), `cb-relay-hold2-${process.pid}.sock`);
+  const pane = `p-relay-hold2-${process.pid}`, me = 'W9@testbox';
+  rmSeat(pane);
+  fs.writeFileSync(seatFiles(pane).lock, '');
+  await sql`select cb.iam('testbox', ${pane}, ${me}, 'demo')`;
+  const inbox = fakeInbox(path, 'tok');
+  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
+                CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+  const exited = new Promise((r) => relay.on('exit', r));
+  const held = async () => (await sql`select hold_from from cb.sessions where pane = ${pane}`)[0]?.hold_from ?? null;
+  const pushes = () => inbox.got.map((g) => g.message.content as string);
+  const upTo = async (ok: () => boolean, ms: number) => { for (const t = Date.now(); !ok() && Date.now() - t < ms;) await wait(50); return ok(); };
+  try {
+    await wait(1500);
+    // I2: the answer's bookkeeping (cb.answer_delivered) is made slow; the hold must already be gone while it runs, so a
+    // relay that dies there leaves no hold for the next one to rewind to and push again
+    await sql`create or replace function public.slow_deliver() returns trigger language plpgsql as $$ begin perform pg_sleep(4); return new; end $$`;
+    await sql`create trigger slow_deliver before update on cb.questions for each row when (new.status = 'delivered') execute function public.slow_deliver()`;
+    const [{ q }] = await sql`select cb.ask(project => 'demo', body => 'which one?', reply_to => ${sql.json({ machine: 'testbox', pane })}, actor => ${me}) as q`;
+    await sql`select cb.tell(${me}, 'job #1 test at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 0, 'the job result waits');
+    assert.notEqual(await held(), null);
+    await sql`select cb.answer(${String(q)}, 'the second')`;
+    assert.ok(await upTo(() => inbox.got.length > 0, 5000), 'the answer goes at once');
+    assert.match(pushes()[0]!, /Message from runner: job #1[\s\S]*answered Q\d+: the second/);
+    await wait(500);
+    assert.equal((await sql`select status from cb.questions where id = ${q}`)[0].status, 'answered', 'its bookkeeping is still running');
+    assert.equal(await held(), null, 'the hold is already gone');
+    for (let t = Date.now(); Date.now() - t < 8000 && (await sql`select status from cb.questions where id = ${q}`)[0].status !== 'delivered';) await wait(200);
+    await sql`drop trigger slow_deliver on cb.questions`;
+    // I1, the rename case: a job result held for W9, then the pane is bound to another name (its mark starts again,
+    // the hold is cleared); the next read, as the new name, pushes what was held for the old one, once
+    await sql`select cb.tell(${me}, 'job #2 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 1, 'the job result waits');
+    await sql`select cb.iam('testbox', ${pane}, 'R9@testbox', 'demo')`;
+    await sql`select cb.tell('R9@testbox', 'review #4 next', 'orch')`; // wakes the relay as the new name
+    assert.ok(await upTo(() => pushes().join('\n').includes('job #2 lint'), 5000), 'what was held for the old name is pushed');
+    await wait(1200);
+    assert.equal(pushes().join('\n').match(/job #2 lint/g)?.length, 1, 'once');
+    assert.match(pushes().join('\n'), /Message from orch: review #4 next/);
+    // round 2 M1: a teammate's memory change held in demo, then the same name moves to another project (the board keeps
+    // the hold, but returns memory only for the bound project): the copy pushes it, once
+    await sql`select cb.ensure_project('other')`;
+    await wait(1200);
+    await sql`select cb.mem_add(project => 'demo', title => 'Fixture X is synthetic only', kind => 'fact', actor => 'W5@pc')`;
+    await wait(1500);
+    const k = inbox.got.length;
+    assert.notEqual(await held(), null, 'the memory change waits');
+    await sql`select cb.iam('testbox', ${pane}, 'R9@testbox', 'other')`;
+    await sql`select cb.tell('R9@testbox', 'review #5 next', 'orch')`;
+    assert.ok(await upTo(() => pushes().slice(k).join('\n').includes('Fixture X is synthetic only'), 5000), 'the held memory change is pushed');
+    await wait(1200);
+    assert.equal(pushes().join('\n').match(/Fixture X is synthetic only/g)?.length, 1, 'once');
+  } finally {
+    await sql`drop trigger if exists slow_deliver on cb.questions`;
+    await inbox.close();
+    await Promise.race([exited, wait(8000)]);
+    if (relay.exitCode === null) relay.kill();
     rmSeat(pane);
   }
 });
@@ -276,7 +521,7 @@ test('broadcasts reach every session once, filtered by project', async () => {
   await sql`select cb.task_add(project => 'board', title => 'y')`;
   await sql`select cb.iam('pc', 'p1', 'W1', 'iris')`;
   await sql`select cb.iam('pc', 'p2', 'B1', 'board')`;
-  await sql`select cb.broadcast('relay is live, run cb relay', null, 'ahmed')`;
+  await sql`select cb.broadcast('relay is live, run cb relay', null, 'ahmed', true)`;
   await sql`select cb.broadcast('iris only', 'iris', 'orch')`;
   const box = async (pane: string) => (await sql`select cb.inbox('pc', ${pane}, 0) as i`)[0].i;
   assert.deepEqual((await box('p1')).broadcasts.map((b: any) => b.summary), ['relay is live, run cb relay', 'iris only']);
@@ -735,6 +980,11 @@ test('external seat relay starts without CLAUDE_CODE_MESSAGING_SOCKET in its own
     await until(() => inbox.got.length > 0, 5000);
     assert.equal(inbox.got.length, 1);
     assert.match(inbox.got[0].message.content, /Q1.*Ship now/s);
+    // #4352: the relay notes the commit its code is (this checkout's HEAD) on the seat's row, for Today
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const code = async () => (await sql`select code_sha from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.code_sha;
+    for (const t = Date.now(); (await code()) !== head && Date.now() - t < 5000;) await wait(100);
+    assert.equal(await code(), head);
   } finally {
     await inbox.close();
     await stopSeat(pane, relay);
@@ -907,6 +1157,67 @@ test('same pane, new Claude session: the relay resets the pane\'s binding within
     assert.deepEqual(r, { actor: `${pane}@${M}`, project: null, session_id: 'S2' }, 'reset well before the 30 s poll');
   } finally {
     await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay);
+  }
+});
+
+// #3221 round 2 M2: a new agent process in the pane mid-hold (a new session id: the board starts the row again). The
+// held copy goes to it once it binds under the same name; under another name it is dropped, the log saying how many.
+test('a new agent session mid-hold gets the held notices once it binds under the same name; another name: dropped and logged (#3221)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-sidhold-${process.pid}`, first = sockPath('sidhold-a'), second = sockPath('sidhold-b'), third = sockPath('sidhold-c'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2'), boxC = fakeInbox(third, 'tok3');
+  await Promise.all([boxA.ready, boxB.ready, boxC.ready]);
+  const sidIs = async (s: string) => { for (const t = Date.now(); Date.now() - t < 8000; await wait(100))
+    if ((await sql`select session_id from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.session_id === s) return true; return false; };
+  const held = async () => (await sql`select hold_from from cb.sessions where machine = ${M} and pane = ${pane}`)[0]?.hold_from ?? null;
+  const text = (b: any) => b.got.map((g: any) => g.message.content as string).join('\n');
+  await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+  writeClaudeEndpoint(M, pane, { socket: first, token: 'tok', sessionId: 'S1' });
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    assert.ok(await sidIs('S1'));
+    await sql`select cb.tell('W1@test', 'job #5 test at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(boxA.got.length, 0, 'held');
+    assert.notEqual(await held(), null);
+    // a new Claude in the pane: the row starts again under the seat's own name, the hold cleared
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2', sessionId: 'S2' });
+    await boxA.close();
+    assert.ok(await sidIs('S2'));
+    await wait(1200);
+    assert.equal(boxB.got.length, 0, 'not bound yet: nothing pushed');
+    await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => text(boxB).includes('job #5 test'), 5000), 'bound under the same name: the held result is pushed');
+    await wait(1200);
+    assert.equal(text(boxB).match(/job #5 test/g)?.length, 1, 'once');
+    // again, but the next session binds under another name: dropped, and the log says how many, never what
+    await sql`select cb.tell('W1@test', 'job #6 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.ok(!text(boxB).includes('job #6'), 'held');
+    writeClaudeEndpoint(M, pane, { socket: third, token: 'tok3', sessionId: 'S3' });
+    await boxB.close();
+    assert.ok(await sidIs('S3'));
+    await sql`select cb.iam(${M}, ${pane}, 'R1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => /dropped 1 held notices: the new session bound under another name/.test(fs.readFileSync(f.log, 'utf8')), 5000), 'the drop is logged');
+    assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #6/, 'by count only');
+    assert.ok(!text(boxC).includes('job #6'), 'not pushed to another name');
+    // round 3 R1, #4630: the agent dies mid-hold: the relay leaves its copy in the seat's held file for the next relay in
+    // the pane, logging how many, never what
+    await sql`select cb.tell('R1@test', 'job #7 lint at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.ok(!text(boxC).includes('job #7'), 'held');
+    await boxC.close();
+    assert.ok(await until(() => /leaving: kept 1 held notices for the next relay in this pane/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'leaving logs the count');
+    assert.doesNotMatch(fs.readFileSync(f.log, 'utf8'), /job #7/, 'by count only');
+    assert.match(fs.readFileSync(f.held, 'utf8'), /job #7/, 'the copy is in the seat file');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close(), boxC.close()]);
     await stopSeat(pane, relay);
   }
 });
@@ -1169,3 +1480,59 @@ for (const [who, role, bound, leads] of LEADS) {
     if (leads) await say; else await assert.rejects(say, new RegExp(`${who} is not in huddle`));
   });
 }
+
+// #4630 (review 78 round 3 R1, probe D): the usual restart order. The old agent dies, its relay leaves about 4 s later, and
+// the new agent starts after that: a new relay, a new session id, the board's row and hold started again. The held
+// copy waits in the seat's held file; the new relay pushes it once the new session binds under the same name.
+test('held notices survive a relay restart: the old agent dies, its relay leaves, a new one binds under the same name and gets them once (#4630)', { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const pane = `p-heldfile-${process.pid}`, first = sockPath('heldfile-a'), second = sockPath('heldfile-b'), f = seatFiles(pane);
+  rmSeat(pane);
+  const boxA = fakeInbox(first, 'tok'), boxB = fakeInbox(second, 'tok2');
+  await Promise.all([boxA.ready, boxB.ready]);
+  const text = (b: any) => b.got.map((g: any) => g.message.content as string).join('\n');
+  await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+  writeClaudeEndpoint(M, pane, { socket: first, token: 'tok', sessionId: 'S1' });
+  const relay = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+  let relay2: ReturnType<typeof spawn> | undefined;
+  try {
+    assert.ok(await until(() => fs.existsSync(f.bridge), 10_000), 'relay up');
+    await wait(1500);
+    await sql`select cb.tell('W1@test', 'job #7 test at abcdef1: passed (exit 0).', 'runner')`;
+    await wait(1500);
+    assert.equal(boxA.got.length, 0, 'held');
+    await boxA.close(); // the old Claude dies; its endpoint still names its socket
+    assert.ok(await Promise.race([exitOf(relay).then(() => true), wait(10_000).then(() => false)]), 'the old relay left on its own');
+    writeClaudeEndpoint(M, pane, { socket: second, token: 'tok2', sessionId: 'S2' }); // the new Claude starts
+    relay2 = spawn('node', ['cli/relay.ts', '--child', '--pane', pane, '--agent', 'claude'], { stdio: 'ignore', env: seatEnv(null) });
+    assert.ok(await until(() => /found 1 held notices from the last relay in this pane/.test(fs.readFileSync(f.log, 'utf8')), 10_000), 'the new relay reads the copy');
+    assert.equal(fs.existsSync(f.held), false, 'read once');
+    await wait(1500);
+    assert.ok(!text(boxB).includes('job #7'), 'not bound yet: nothing pushed');
+    await sql`select cb.iam(${M}, ${pane}, 'W1@test', 'demo')`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await until(() => text(boxB).includes('job #7'), 8000), 'bound under the same name: the held result reaches the new session');
+    await wait(1500);
+    assert.equal(text(boxB).match(/job #7/g)?.length, 1, 'once');
+  } finally {
+    await Promise.all([boxA.close(), boxB.close()]);
+    await stopSeat(pane, relay2 ?? relay);
+  }
+});
+
+// #3779: cb.triagers judges each name by its latest session, as cb._is_lead does: a lead that has since bound another
+// project (in another pane: an older row stays) triages it no more, and cb bug's "no orchestrator there" note agrees
+test('triagers: a lead that moved to another project in another pane is not p\'s triager; p falls back to its own sessions', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('p'), cb.ensure_project('q')`;
+  await sql`select cb.iam('m', 'w1:p1', 'W1@m', 'p')`;
+  await sql`select cb.iam('m', 'w1:p9', 'QO@m', 'p', 'lead')`;
+  assert.deepEqual((await sql`select cb.triagers('p') as t`)[0].t, ['QO@m']);
+  await sql`select cb.iam('m', 'w1:p8', 'QO@m', 'q', 'lead')`;
+  await sql`update cb.sessions set last_seen = now() - interval '1 minute' where actor = 'QO@m' and pane = 'w1:p9'`;
+  const [{ t, lead }] = await sql`select cb.triagers('p') as t, cb._is_lead('QO@m', 'p') as lead`;
+  assert.equal(lead, false);
+  assert.deepEqual(t, ['W1@m'], 'the old p row no longer makes QO@m a triager of p');
+  assert.deepEqual((await sql`select cb.triagers('q') as t`)[0].t, ['QO@m']);
+});

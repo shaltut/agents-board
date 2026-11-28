@@ -6,7 +6,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { get, rpc } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { ROLE_TEXT_CAP, actorLabel, handEdited, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
+import { useLeads } from '@/views/Sessions'
+import { ROLE_TEXT_CAP, actorLabel, charCount, handEdited, plural, roleTextLabel, roleTextState, saveError, seedChanges, type RoleTextPage } from '@/lib/squad'
 import { Notice } from './bits'
 
 const useRoleTexts = () => useQuery({ queryKey: ['role-texts'], queryFn: () => rpc<RoleTextPage>('role_text_page', {}) })
@@ -75,6 +76,7 @@ export function RoleTexts() {
 
 function RoleText({ row }: { row: RoleTextPage['roles'][number] }) {
   const qc = useQueryClient()
+  const leads = useLeads()
   const [body, setBody] = useState<string | null>(null) // null: not editing
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
@@ -100,7 +102,7 @@ function RoleText({ row }: { row: RoleTextPage['roles'][number] }) {
       <div className="flex flex-wrap items-baseline gap-x-2">
         <h3 className="font-medium">{label}</h3>
         <span className="text-xs text-muted-foreground">
-          {row.updated_by ? `changed by ${actorLabel(row.updated_by)} ${ago(row.updated_at)}` : 'as first installed'}
+          {row.updated_by ? `changed by ${actorLabel(row.updated_by, leads)} ${ago(row.updated_at)}` : 'as first installed'}
         </span>
         {body === null && <Button variant="outline" size="sm" className="ml-auto" onClick={() => setBody(row.body)}>Edit</Button>}
       </div>
@@ -128,6 +130,7 @@ function RoleText({ row }: { row: RoleTextPage['roles'][number] }) {
 
 function Edits({ edits }: { edits: RoleTextPage['edits'] }) {
   const [open, setOpen] = useState<number | null>(null)
+  const leads = useLeads()
   if (edits.length === 0) return <p className="text-sm text-muted-foreground">No edits yet: every text is as first installed.</p>
   return (
     <ol className="divide-y rounded-lg border bg-card">
@@ -135,9 +138,9 @@ function Edits({ edits }: { edits: RoleTextPage['edits'] }) {
         <li key={e.id} className="px-3 py-2.5">
           <div className="flex flex-wrap items-baseline gap-x-2 text-sm">
             <span className="font-medium">{roleTextLabel(e.role)}</span>
-            <span className="text-muted-foreground" title={e.actor}>by {actorLabel(e.actor)}</span>
+            <span className="text-muted-foreground" title={e.actor}>by {actorLabel(e.actor, leads)}</span>
             <time dateTime={e.at} className="text-muted-foreground">{ago(e.at)}</time>
-            <span className="text-xs text-muted-foreground tabular-nums">{(e.before ?? '').length.toLocaleString()} → {e.after.length.toLocaleString()} characters</span>
+            <span className="text-xs text-muted-foreground tabular-nums">{charCount(e.before ?? '').toLocaleString()} → {charCount(e.after).toLocaleString()} characters</span>
             <Button variant="ghost" size="xs" className="ml-auto" aria-expanded={open === e.id} onClick={() => setOpen(open === e.id ? null : e.id)}>
               {open === e.id ? 'Hide' : 'Before and after'}
             </Button>

@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ArrowLeft } from 'lucide-react'
 import { get, qs, rpc, useDigest, useProjects, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
 import { ago, splitActor, STATUS } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
+import { liveRows } from '@/lib/projects'
 import { cn } from '@/lib/utils'
 import { ActorChip, Priority, ProjectChip, StatusDot, TaskId } from '@/components/Chips'
 import { Timeline } from '@/components/Timeline'
@@ -14,6 +15,7 @@ import { Textarea } from '@/components/ui/textarea'
 
 export interface SessionRow {
   actor: string; project: string | null; machine: string | null; pane: string | null; last_seen: string | null; live: boolean
+  lead?: boolean // leads its project (by role, #3746, #3771)
   doing: { id: number; title: string; priority: Task['priority']; status: Task['status'] }[]
   queued: number; done_24h: number; open_questions: number
   last: { at: string; kind: string; summary: string; task_id: number | null } | null
@@ -23,11 +25,19 @@ export interface SessionRow {
 export const useSessions = (project?: string) =>
   useQuery({ queryKey: ['sessions', project], queryFn: () => get<SessionRow[]>(`/api/sessions${qs({ project })}`), refetchInterval: 30_000 })
 
+/** The names that lead their project (sessions_overview's lead, by role: #3746, #3779), for actorLabel. undefined until read. */
+export function useLeads(): ReadonlySet<string> | undefined {
+  const { data } = useSessions()
+  return useMemo(() => data && new Set(data.filter((s) => s.lead).map((s) => s.actor)), [data])
+}
+
 export function Sessions({ route }: { route: Route }) {
-  const { data = [], isLoading } = useSessions(route.project)
-  const pipeline = !!useProjects().data?.find((p) => p.slug === route.project)?.pipeline
+  const { data: rows = [], isLoading } = useSessions(route.project)
+  const projects = useProjects().data
+  const pipeline = !!projects?.find((p) => p.slug === route.project)?.pipeline
   const { data: digest = [] } = useDigest(route.project, pipeline)
-  if (route.actor) return <SessionDetail route={route} row={data.find((s) => s.actor === route.actor)} />
+  if (route.actor) return <SessionDetail route={route} row={rows.find((s) => s.actor === route.actor)} />
+  const data = route.project ? rows : liveRows(rows, projects ?? [])
   const live = data.filter((s) => s.live).length
   const asking = data.filter((s) => s.open_questions > 0).length
 

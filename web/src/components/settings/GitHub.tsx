@@ -4,9 +4,10 @@ import { toast } from 'sonner'
 import { Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { rpc, useProjects } from '@/lib/api'
+import { liveOnly, rpc, useProjects } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { RX, actorLabel, saveError, type Watch } from '@/lib/squad'
+import { useLeads } from '@/views/Sessions'
 import { Notice } from './bits'
 
 /** GitHub watches (#4523, Q2971): the repos whose pull requests come to this project, and the muted logins (board-wide).
@@ -49,7 +50,7 @@ export function GitHub({ project }: { project: string }) {
             onRemove={() => act('github_watch_remove', { repo: w.repo }, `Stopped watching ${w.repo}`, 'The watch was not removed. Try again.')} />)}
         </ul>
       )}
-      <AddWatch busy={busy} others={projects.filter((p) => p.slug !== project).map((p) => ({ slug: p.slug, name: p.name }))}
+      <AddWatch busy={busy} others={liveOnly(projects).filter((p) => p.slug !== project).map((p) => ({ slug: p.slug, name: p.name }))}
         onAdd={(repo, tell, cardsIn) => act('github_watch_add', { repo, project, tell: tell || null, cards_in: cardsIn.length ? cardsIn : null },
           `Watching ${repo}`, 'The watch was not added. Check the repo name, or name the session it tells, and try again.')} />
       <Muted muted={data.muted} busy={busy}
@@ -63,6 +64,7 @@ function WatchRow({ w, project, pname, busy, onRemove }: {
   w: Watch; project: string; pname: (s: string | null) => string; busy: boolean; onRemove: () => void
 }) {
   const [sure, setSure] = useState(false)
+  const leads = useLeads()
   const also = (w.card_projects ?? []).filter((p) => p !== w.project)
   return (
     <li className="flex min-w-0 flex-col gap-1.5 rounded-lg border bg-card p-3 text-sm">
@@ -80,7 +82,7 @@ function WatchRow({ w, project, pname, busy, onRemove }: {
         {also.length > 0 && `, and may note cards in ${also.map(pname).join(', ')}`}.
       </div>
       {w.project !== project && <div className="text-[13px] text-muted-foreground">It logs on this project's cards, so it is listed here too.</div>}
-      <div className="text-muted-foreground">Tells <span className="text-foreground" title={w.to ?? undefined}>{w.to ? actorLabel(w.to) : 'nobody yet'}</span>
+      <div className="text-muted-foreground">Tells <span className="text-foreground" title={w.to ?? undefined}>{w.to ? actorLabel(w.to, leads) : 'nobody yet'}</span>
         {w.since && <> · watching since {new Date(w.since).toLocaleDateString([], { day: 'numeric', month: 'short' })}</>}
       </div>
       <div className="text-[13px]">
@@ -125,7 +127,7 @@ function AddWatch({ others, busy, onAdd }: {
           ))}
         </fieldset>
       )}
-      <p className="text-[13px] text-muted-foreground">A watch starts now: older pull requests are not brought in. Adding a repo that is already watched moves its cards to this project and changes only what you fill in.</p>
+      <p className="text-[13px] text-muted-foreground">A watch starts now: older pull requests are not brought in. Adding a repo that is already watched changes only what you fill in: its next pull requests come to this project, and the cards it already made stay where they are.</p>
     </div>
   )
 }

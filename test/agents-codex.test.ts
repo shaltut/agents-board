@@ -3,9 +3,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { codexAdapter, codexModelProblem, createCodexAdapter } from '../cli/agents/codex.ts';
 import { READ_ONLY_ROLES } from '../kit/guard/core.mjs';
-import { HANDLED_TOOLS, parseCodexInput } from '../kit/guard/shim-codex.mjs';
+import { HANDLED_TOOLS, parseCodexInput, runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { ADAPTERS, defaultModelFor, getAdapter } from '../cli/agents/index.ts';
 import type { LaunchInput, SeatHandle } from '../cli/agents/types.ts';
+import { NO_PROMPT_ENV } from '../cli/agents/env.ts';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type Call = [string | null, string[], number | undefined];
 const recorder = (res: { status: number | null; stderr?: string; error?: Error } = { status: 0 }) => {
@@ -18,22 +23,23 @@ const input = (extra: Partial<LaunchInput> = {}): LaunchInput =>
 
 test('registry: codex resolves to the codex adapter; its default model is null (cb._role_model gives none for non-Claude)', () => {
   assert.equal(ADAPTERS.codex, codexAdapter);
-  assert.throws(() => getAdapter('codex'), /agent "codex" is not installed yet/); // listed, not installed until wired
+  assert.throws(() => getAdapter('codex', { env: {} }), /agent "codex" cannot start a seat with MCP off/); // installed (#4585), behind its MCP gate
+  assert.equal(getAdapter('codex', { env: { CB_MCP_GATE_OK: 'codex' } }), ADAPTERS.codex);
   assert.equal(codexAdapter.kind, 'codex');
   assert.equal(codexAdapter.relayStart, 'pane-prestart');
   for (const r of ['builder', 'lead', 'reviewer']) assert.equal(defaultModelFor('codex', r), null);
 });
 
-test('buildLaunch: --no-daemon first, model, never ask, workspace-write for a builder, exact argv', () => {
+test('buildLaunch: --no-daemon first, model, never ask, no sandbox for a builder (Q3023), exact argv', () => {
   assert.deepEqual(codexAdapter.buildLaunch(input({ env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } })), {
     kind: 'codex',
-    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'workspace-write',
-      '-c', 'sandbox_workspace_write.network_access=true',
+    args: ['--no-daemon', '-m', 'gpt-5.1-codex', '-a', 'never', '--dangerously-bypass-hook-trust', '-s', 'danger-full-access',
+      '--disable', 'unified_exec_tty',
       '-c', "shell_environment_policy.exclude=['GITHUB_PERSONAL_ACCESS_TOKEN','CLAUDE_CODE_*','ANTHROPIC_*','CLAUDECODE']",
       '--disable', 'plugins', '--disable', 'apps', '--disable', 'skill_mcp_dependency_install',
       '-c', 'check_for_update_on_startup=false',
       '-c', "project_doc_fallback_filenames=['CLAUDE.md']"],
-    env: { CB_ROLE: 'builder', CB_AGENT: 'codex' },
+    env: { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_AGENT: 'codex' },
     prestart: { args: [] },
   });
 });
@@ -49,15 +55,22 @@ test('mcpOff (#4392): plugin, connector and skill-install MCP off per run; confi
   }
 });
 
-test('buildLaunch: reviewer, qa and investigator get a read-only sandbox and no network opening; other roles workspace-write', () => {
-  for (const role of ['reviewer', 'qa', 'investigator']) {
+test('buildLaunch (Q3023, #4611): every role runs with no CLI sandbox, read-only roles too, and no network flag', () => {
+  for (const role of ['reviewer', 'qa', 'investigator', 'lead', 'architect', 'owner', 'builder']) {
     const a = codexAdapter.buildLaunch(input({ role })).args;
-    assert.equal(a[a.indexOf('-s') + 1], 'read-only', role);
+    assert.equal(a[a.indexOf('-s') + 1], 'danger-full-access', role);
+    assert.ok(!a.includes('read-only'), role);
     assert.ok(!a.some((x) => x.startsWith('sandbox_workspace_write')), role);
   }
-  for (const role of ['lead', 'architect', 'owner', 'builder']) {
-    const a = codexAdapter.buildLaunch(input({ role })).args;
-    assert.equal(a[a.indexOf('-s') + 1], 'workspace-write', role);
+});
+
+test('#4611: a read-only seat is fenced by the guard, not a sandbox: its apply_patch, commit and push are blocked, cb runs', () => {
+  const hook = (role: string, tool: string, input: unknown) => runCodexShim(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, cwd: '/w/demo' }), { CB_ROLE: role, CB_AGENT: 'codex' });
+  for (const role of READ_ONLY_ROLES) {
+    assert.match(JSON.stringify(hook(role, 'apply_patch', { input: ['*** Begin Patch', '*** Update File: a.ts', '@@', '-x', '+y', '*** End Patch'].join('\n') })), /deny/, role);
+    assert.match(JSON.stringify(hook(role, 'Bash', { command: 'git commit -m x' })), /deny/, role);
+    assert.match(JSON.stringify(hook(role, 'Bash', { command: 'git push origin fix/x' })), /deny/, role);
+    assert.deepEqual(hook(role, 'Bash', { command: 'cb show 1' }), {}, role);
   }
 });
 
@@ -77,8 +90,8 @@ test('buildLaunch: GITHUB_PERSONAL_ACCESS_TOKEN, CLAUDE_CODE_*, ANTHROPIC_* and 
     GITHUB_PERSONAL_ACCESS_TOKEN: 'x', github_personal_access_token: 'x', CLAUDE_CODE_MESSAGING_SOCKET: 's', CLAUDE_CODE_MESSAGING_TOKEN: 't',
     ANTHROPIC_BASE_URL: 'u', anthropic_api_key: 'k', CLAUDECODE: '1',
     CLAUDE_CODE_ENTRYPOINT: 'e', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' } })).env;
-  assert.deepEqual(env, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
-  assert.deepEqual(codexAdapter.buildLaunch(input()).env, {});
+  assert.deepEqual(env, { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'main,develop', CLAUDE_BOARD_URL: 'keep' });
+  assert.deepEqual(codexAdapter.buildLaunch(input()).env, { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat', MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' });
 });
 
 test('buildLaunch: an empty model leaves -m out (Codex uses its own default); Claude names and bad names throw', () => {
@@ -147,29 +160,27 @@ test('guardInstallSpec: ~/.codex/hooks.json, shim-codex.mjs under the board, mat
   const g = codexAdapter.guardInstallSpec('C:/w/board//', 'win32');
   assert.equal(g.targetPath, '~/.codex/hooks.json');
   assert.equal(g.shimFile, 'C:/w/board/kit/guard/shim-codex.mjs');
-  assert.equal(g.matchers.win32, '^(Bash|PowerShell|apply_patch|Edit|Write|request_user_input)$');
-  assert.equal(g.matchers.darwin, '^(Bash|apply_patch|Edit|Write|request_user_input)$');
-  assert.equal(g.matchers.linux, g.matchers.darwin);
+  // #4609: a catch-all on every platform, so a tool Codex adds later still reaches the shim
+  for (const p of ['win32', 'darwin', 'linux']) assert.equal(g.matchers[p], '.*', p);
   assert.match(g.notes, /Hooks need review/);
   assert.match(g.notes, /never edit that one/);
   assert.match(g.notes, /never guarded/);
 });
 
-test('matcher and shim agree: every tool the shim judges matches (PowerShell only on win32); the matcher names nothing the shim calls unknown', () => {
+test('matcher and shim agree: the catch-all sends every tool to the shim, which judges its own and calls the rest unknown', () => {
   const g = codexAdapter.guardInstallSpec('C:/w/board', 'win32');
   for (const [platform, m] of Object.entries(g.matchers)) {
-    const re = new RegExp(m);
-    for (const t of HANDLED_TOOLS) assert.equal(re.test(t), platform === 'win32' || t !== 'PowerShell', `${platform} ${t}`);
-    for (const t of m.slice(2, -2).split('|')) {
-      assert.equal(parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls' } })).ok, true, `${platform} names ${t}, the shim must judge it`);
-    }
-    for (const t of ['mcp__x__y', 'BashX', 'bash', 'shell', 'local_shell', '']) assert.equal(re.test(t), false, `${platform} ${t}`);
+    const re = new RegExp(`^(?:${m})$`);
+    for (const t of [...HANDLED_TOOLS, 'mcp__x__y', 'spawn_agent', 'write_stdin']) assert.equal(re.test(t), true, `${platform} ${t}`);
+  }
+  for (const t of HANDLED_TOOLS) assert.equal(parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls', path: 'a.png' } })).ok, true, t);
+  for (const t of ['mcp__x__y', 'BashX', 'bash', 'shell', 'local_shell']) {
+    const p = parseCodexInput(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: t, tool_input: { command: 'ls' } }));
+    assert.equal(p.ok, false, t);
+    assert.equal(p.unknown, true, `${t}: unknown (denied in a seat, allowed outside one)`);
   }
 });
 
-test('READ_ONLY_ROLES: the sandbox choice follows the guard list', () => {
-  for (const role of READ_ONLY_ROLES) { const a = codexAdapter.buildLaunch(input({ role })).args; assert.equal(a[a.indexOf('-s') + 1], 'read-only', role); }
-});
 
 test('instructionMapping: AGENTS.md native, CLAUDE.md as the fallback filename, no env', () => {
   const m = codexAdapter.instructionMapping(input());
@@ -189,4 +200,52 @@ test('trustSpec: pre-empts Update available; names the folder trust dialog; hook
 
 test('disableAskSpec: request_user_input denied by the hook shim', () => {
   assert.deepEqual(codexAdapter.disableAskSpec(), { toolName: 'request_user_input', mechanism: 'hook', target: 'kit/guard/shim-codex.mjs' });
+});
+
+// PR 104 review B3: an editor or pager another program opens (git commit with no -m, git rebase -i, git log, gh pr
+// create, man) would wait in the terminal for write_stdin. Codex seats run their commands without a terminal, and every
+// non-Claude seat's pane gets an editor that fails at once and a pager that only prints.
+test('B3: Codex seats run exec without a terminal; codex, agy and opencode seats get the no-prompt editor and pager env', () => {
+  const base = { name: 'x@m', role: 'builder', repo: 'main', model: '', board: '/b', cwd: '/w/x' };
+  const NO_PROMPT = { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true', EDITOR: 'true', VISUAL: 'true', PAGER: 'cat', GIT_PAGER: 'cat', GH_PAGER: 'cat',
+    MANPAGER: 'cat', GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' };
+  const codex = ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex' } } as LaunchInput);
+  const at = codex.args.indexOf('unified_exec_tty');
+  assert.ok(at > 0 && codex.args[at - 1] === '--disable', codex.args.join(' '));
+  const agy = ADAPTERS.agy.buildLaunch({ ...base, agent: 'agy', env: { CB_ROLE: 'builder', CB_AGENT: 'agy' } } as LaunchInput);
+  const opencode = ADAPTERS.opencode.buildLaunch({ ...base, agent: 'opencode', model: 'anthropic/claude-opus-5-5', env: { CB_ROLE: 'builder', CB_AGENT: 'opencode', CB_OPENCODE_PORT: '41234' } } as LaunchInput);
+  for (const [kind, l] of [['codex', codex], ['agy', agy], ['opencode', opencode]] as const) {
+    for (const [k, v] of Object.entries(NO_PROMPT)) assert.equal(l.env[k], v, `${kind} ${k}`);
+    assert.equal(l.env.CB_AGENT, kind, `${kind} keeps the seat's own env`);
+  }
+  // a seat's own setting wins (a squad that sets EDITOR on purpose keeps it)
+  assert.equal(ADAPTERS.codex.buildLaunch({ ...base, agent: 'codex', model: 'gpt-6.1-sol', env: { CB_ROLE: 'builder', CB_AGENT: 'codex', PAGER: 'less -F' } } as LaunchInput).env.PAGER, 'less -F');
+});
+
+// PR 104 r2 R2-B1: the editor is true, not false. A conflicted git rebase --continue opens the editor for the message and
+// takes no -m, so false left a seat stuck mid-rebase; true keeps git's prepared message. A commit with no -m still fails
+// (an empty message), so nothing waits for input either way. Real git, in a temp repo with no user config.
+test('R2-B1: with the no-prompt env a conflicted git rebase --continue finishes, and git commit with no -m fails at once', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'noprompt-'));
+  const env = { ...process.env, ...NO_PROMPT_ENV, HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: dir, env, encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'f'), 'base\n'); git('add', 'f'); git('commit', '-qm', 'base');
+    git('checkout', '-qb', 'side'); writeFileSync(join(dir, 'f'), 'side\n'); git('commit', '-qam', 'side change');
+    git('checkout', '-q', 'main'); writeFileSync(join(dir, 'f'), 'main\n'); git('commit', '-qam', 'main change');
+    git('checkout', '-q', 'side');
+    assert.notEqual(git('rebase', 'main').status, 0, 'the rebase stops on the conflict');
+    writeFileSync(join(dir, 'f'), 'both\n'); git('add', 'f');
+    const cont = git('rebase', '--continue');
+    assert.equal(cont.status, 0, cont.stderr);
+    assert.equal(git('log', '-1', '--format=%s').stdout.trim(), 'side change');
+    writeFileSync(join(dir, 'g'), 'x\n'); git('add', 'g');
+    const bare = git('commit');
+    assert.notEqual(bare.status, 0, 'no -m: an empty message aborts the commit');
+    assert.match(bare.stderr, /empty commit message/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -13,7 +13,8 @@ import { freshDb, TEST_URL } from './helpers.ts';
 import { releaseApp, setRelease } from '../server/release.ts';
 import { releaseAt } from '../cli/release-archive.ts';
 import { startedAs } from '../cli/started-as.ts';
-import { layout, runningFrom } from '../cli/update-install.ts';
+import { layout, lsofCwd, rollback, runningFrom } from '../cli/update-install.ts';
+import { recordSchema, schemaSha } from '../db/schema-applied.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), `cb-upd-${process.pid}-`));
 const server = serve({ fetch: releaseApp.fetch, port: 0, hostname: '127.0.0.1' });
@@ -247,6 +248,9 @@ test('cb update: a release whose code fails its probe is never flipped to, and l
   git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
 });
 
+const plat = (s: string) => (process.platform === 'win32' ? s.replaceAll('/', '\\') : s);
+const elsewhere = plat(join(tmp, 'elsewhere', 'claude-board'));
+
 test('the runner or supervisor is found by its real command lines: through bin/cb, cb.ts, the spawned child, or a relative path', () => {
   const L = layout(live);
   const p = (cmd: string, pid = 9_000_001) => ({ pid, cmd });
@@ -255,10 +259,55 @@ test('the runner or supervisor is found by its real command lines: through bin/c
     p(`node ${home}/versions/${B}/cli/runner.ts`, 3), p('node cli/cb.ts runner', 4),
     p(`node ${live}/cli/relay.ts --pane w1:p1 --agent claude`, 5), p(`node ${live}/cli/cb.ts sessions`, 6),
     p('node /elsewhere/claude-board/cli/cb.ts runner', 7), p('node /elsewhere/claude-board/cli/relay.ts', 8)]
-    .map((x) => ({ ...x, cmd: process.platform === 'win32' ? x.cmd.replaceAll('/', '\\') : x.cmd })));
+    .map((x) => ({ ...x, cmd: plat(x.cmd) })), (pid) => (pid === 4 ? live : null));
   assert.deepEqual(run.daemons.map((x) => x.pid), [1, 2, 3, 4]);
   assert.deepEqual(run.relays.map((x) => x.pid), [5]);
   assert.deepEqual(run.others.map((x) => x.pid), [6]);
+  assert.deepEqual(run.unsure.map((x) => x.pid), []);
+});
+
+test('#4572: a relative runner counts only when its working folder is the copy; another checkout\'s does not; an unreadable folder is said so', () => {
+  const L = layout(live);
+  const folders: Record<number, string | null> = {
+    1: live, // started in the copy
+    2: plat(join(home, 'versions', '0'.repeat(40))), // started through the link before an earlier flip: the real folder
+    3: elsewhere, // another checkout's runner test on the same machine
+    4: null, // the folder cannot be read (Windows, or another user's process)
+    5: plat(`${live}-other`), // a sibling whose name starts like the copy's
+  };
+  const asked: number[] = [];
+  const run = runningFrom(L, [
+    { pid: 1, cmd: 'node cli/runner.ts' }, { pid: 2, cmd: 'node --conditions=x cli/supervise.ts' },
+    { pid: 3, cmd: 'node cli/runner.ts' }, { pid: 4, cmd: plat('/bin/sh ./bin/cb runner') },
+    { pid: 5, cmd: '"node" "cli/cb.ts" runner' }, { pid: 6, cmd: 'node cli/doctor.ts' }],
+  (pid) => { asked.push(pid); return folders[pid] ?? null; });
+  assert.deepEqual(run.daemons.map((x) => x.pid), [1, 2]);
+  assert.deepEqual(run.unsure.map((x) => x.pid), [4]);
+  assert.deepEqual([...run.relays, ...run.others].map((x) => x.pid), []);
+  assert.deepEqual(asked, [1, 2, 3, 4, 5], 'the folder is read only for a relative runner or supervisor');
+});
+
+test('#4572: a relative runner whose folder cannot be read refuses and says so, never that it runs from this copy; --force goes ahead', () => {
+  const where = realpathSync(live);
+  const procs = () => [{ pid: 999_999_991, cmd: 'node cli/runner.ts' }]; // no such pid: its folder cannot be read on any OS
+  assert.throws(() => rollback({ root: live, procs }), (e: any) => {
+    assert.match(e.message, /^pid 999999991 runs a runner or supervisor by a relative path and its working folder could not be read.*: it may be this copy's or another checkout's\. .*if it is not, pass --force$/);
+    assert.doesNotMatch(e.message, /runs from this copy/);
+    return true;
+  });
+  assert.equal(realpathSync(live), where);
+  const r = rollback({ root: live, procs, force: true });
+  assert.ok(r.lines.some((l) => /^runner\/supervisor: pid 999999991 runs a runner or supervisor by a relative path .*restart it by its pid \(never by name\)$/.test(l)), r.lines.join('\n'));
+  rollback({ root: live, procs: () => [] }); // and back
+  assert.equal(realpathSync(live), where);
+});
+
+test('#4572: the cwd line of lsof -Fn output is read; anything else is no folder', () => {
+  assert.equal(lsofCwd('p4242\nfcwd\nn/Users/x/Work/claude-board.home/versions/abc\n'), '/Users/x/Work/claude-board.home/versions/abc');
+  assert.equal(lsofCwd('p4242\nfcwd\nn/path with spaces/b\n'), '/path with spaces/b');
+  assert.equal(lsofCwd(''), null);
+  assert.equal(lsofCwd('p4242\n'), null);
+  assert.equal(lsofCwd('p4242\nfcwd\nnrelative/x\n'), null);
 });
 
 test('a relay or cb started through the copy path watches and relaunches through it, not the real version folder', () => {
@@ -267,4 +316,48 @@ test('a relay or cb started through the copy path watches and relaunches through
   assert.equal(startedAs('/t/test-runner.mjs', '/r/cli/relay.ts'), '/r/cli/relay.ts'); // imported, not run: its own path
   const src = readFileSync('cli/relay.ts', 'utf8');
   assert.doesNotMatch(src.replace(/startedAs\(process\.argv\[1\], import\.meta\.filename\)/, ''), /import\.meta\.(filename|dirname)/, 'relay.ts watches or relaunches by its real path');
+});
+
+// last: it serves releases whose schema the test board lacks, and moves the board's noted schema (put back at the end)
+test('schema gate: cb update refuses, writing nothing, a release whose schema the board\'s database does not have; it names what to deploy', { timeout: 300_000 }, async () => {
+  const sql = clients[0];
+  const ours = schemaSha('db/schema.sql'); // what the test board applied (this checkout's schema)
+  const where = realpathSync(live), st = readFileSync(join(home, 'versions', 'state.json'), 'utf8'), vs = readdirSync(join(home, 'versions')).sort();
+  const untouched = () => {
+    assert.equal(realpathSync(live), where, 'the link moved');
+    assert.equal(readFileSync(join(home, 'versions', 'state.json'), 'utf8'), st, 'state.json changed');
+    assert.deepEqual(readdirSync(join(home, 'versions')).sort(), vs, 'something was staged');
+    assert.ok(!existsSync(`${live}.update.lock`), 'a lock was left');
+  };
+  edit('db/schema.sql', '\n-- a schema the board has not applied\n');
+  const S = commit('S: new schema');
+  const need = sha(readFileSync(join(repo, 'db', 'schema.sql')));
+  try {
+    const r = await cb(['update', '--from', base, '--root', live]);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.err, new RegExp(`the board's database runs an older schema than release ${S.slice(0, 7)} needs \\(the release's db/schema\\.sql ${need.slice(0, 8)}, the board's ${ours.slice(0, 8)}\\): `
+      + `deploy release ${S.slice(0, 7)} to the board first \\(docs/ops/maintain\\.md, Upgrade: the board and its schema go first\\), then cb update again`));
+    untouched();
+
+    // the order: a schema first applied before the current one is covered (forward only); one first applied after it
+    // (the board rolled back since) or never applied is not
+    assert.equal((await sql`select cb.schema_covers(${ours}) as c`)[0].c, true);
+    await recordSchema(sql, need); // the board deployed S
+    assert.deepEqual((await sql`select cb.schema_covers(${need}) as n, cb.schema_covers(${ours}) as o, cb.schema_covers(${'f'.repeat(64)}) as x`)[0], { n: true, o: true, x: false });
+    await recordSchema(sql, ours); // and was rolled back
+    assert.deepEqual((await sql`select cb.schema_covers(${need}) as n, cb.schema_covers(${ours}) as o`)[0], { n: false, o: true });
+    assert.deepEqual((await sql`select cb.schema_applied() as a`)[0].a.seen.slice(-2), [ours, need], 'each schema once, in the order first applied');
+
+    // a board from before the gate (no cb.schema_applied): refused the same way
+    await sql`alter function cb.schema_applied() rename to schema_applied_gone`;
+    try {
+      const o = await cb(['update', '--from', base, '--root', live]);
+      assert.equal(o.code, 1, o.out);
+      assert.match(o.err, new RegExp(`the board's database does not say which schema it runs \\(it runs a board from before cb update's schema check\\): deploy release ${S.slice(0, 7)} to the board first`));
+      untouched();
+    } finally { await sql`alter function cb.schema_applied_gone() rename to schema_applied`; }
+  } finally {
+    await recordSchema(sql, ours);
+    git('reset', '-q', '--hard', 'HEAD~1'); setRelease(releaseAt(repo));
+  }
 });

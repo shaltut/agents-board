@@ -4,10 +4,12 @@
 // Message text is never logged or put in an error message.
 import { classifyAgentGet, realRun } from '../squad-up.ts';
 import type { Runner } from '../squad-up.ts';
-import { READ_ONLY_ROLES } from '../../kit/guard/core.mjs';
 import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
-import { stripClaudeOnly } from './env.ts';
+import { stripClaudeOnly, withNoPrompt } from './env.ts';
+import { codexPreseed } from './trust.ts';
+import { join } from 'node:path';
+import { checkedEffort } from './effort.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
 export const CLAUDE_MODEL_NAMES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -56,22 +58,28 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
-      const readOnly = (READ_ONLY_ROLES as string[]).includes(l.role);
-      const env = stripClaudeOnly(l.env);
+      const effort = checkedEffort('codex', l.name, l.effort);
+      const env = withNoPrompt(stripClaudeOnly(l.env));
       return {
         kind: 'codex',
         args: [
           '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
           ...(l.model ? ['-m', l.model] : []),
+          ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []),
           '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
           // #4002 install gate (Ahmed, Q3004): Codex runs hooks only once a person trusts them, and Esc on "Hooks need
           // review" goes on without them (the guard fails open). With this flag the installed hooks always run; the
           // prestart refuses a seat whose hooks.json has no cb guard entry, and the fence keeps every seat out of hooks.json
           // and config.toml. DANGEROUS in Codex's help: a trusted project's own .codex hooks run unreviewed too.
           '--dangerously-bypass-hook-trust',
-          '-s', readOnly ? 'read-only' : 'workspace-write',
-          // builders push branches: the workspace-write sandbox blocks the network unless told otherwise (owner's call)
-          ...(readOnly ? [] : ['-c', 'sandbox_workspace_write.network_access=true']),
+          // Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat, no CLI sandbox, the board guard is the fence. Every role,
+          // read-only ones too (#4611): Codex's read-only sandbox has no node and no network on the PC (#4573), so cb iam
+          // failed and the seat never bound. A reviewer, qa or investigator seat is fenced as a Claude one is: the guard's
+          // read-only role rules block its apply_patch, Edit and Write, commits and pushes
+          '-s', 'danger-full-access',
+          // PR 104 review B3: exec_command runs without a terminal, so an editor, pager or prompt that wants one fails
+          // instead of waiting for write_stdin, which no hook sees (#4626). An unknown feature name is a startup error
+          '--disable', 'unified_exec_tty',
           '-c', EXCLUDE,
           ...adapter.mcpOff(l.board).args,
           ...adapter.trustSpec([l.cwd], process.platform).extraArgs,
@@ -122,17 +130,22 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
       return r ? { kind: 'rate_limit', raw: r[0].trim() } : null;
     },
 
-    // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open), so it names
-    // exactly the tools the shim judges (HANDLED_TOOLS; PowerShell only on Windows, where a shell tool may carry that name).
+    // The matcher decides whether the hook runs at all: a tool it does not name is never guarded (fail open). #4609: a
+    // catch-all, so a tool Codex adds later still reaches the shim. In a board seat the shim denies every tool it does not
+    // judge (HANDLED_TOOLS); outside one the hook is machine-wide, so Codex gets exactly what Claude gets there: those tools
+    // pass and shell commands get the dangerous-command rules only (PR 96 review I3, r2 ruling). Codex 0.160's exec_command arrives as Bash, and write_stdin fires no hook (#4618, #4626).
+    // node kit/guard/install.mjs --agents codex writes this entry, pointing at the installed shim (AGENT_MATCHERS there).
     guardInstallSpec(boardDir) {
-      const re = (names: string[]) => `^(${names.join('|')})$`;
-      const base = HANDLED_TOOLS.filter((t: string) => t !== 'PowerShell');
       return {
         targetPath: '~/.codex/hooks.json',
         shimFile: `${boardDir.replace(/[\/\\]+$/, '')}/kit/guard/shim-codex.mjs`,
-        matchers: { win32: re([...HANDLED_TOOLS]), darwin: re(base), linux: re(base) },
-        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); [features] hooks = true is already set. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
+        matchers: { win32: '.*', darwin: '.*', linux: '.*' },
+        notes: "PreToolUse entry in ~/.codex/hooks.json beside herdr's SessionStart entry (never edit that one); the installer sets [features] hooks = true in config.toml. A tool the matcher does not name is never guarded. A changed hooks.json would make Codex show \"Hooks need review\"; board seats launch with --dangerously-bypass-hook-trust (Q3004), so the installed hooks run without it, and the seat prestart refuses a seat whose hooks.json lacks this entry.",
       };
+    },
+
+    userRulesFile(home: string, env: NodeJS.ProcessEnv) {
+      return join(env.CODEX_HOME || join(home, '.codex'), 'AGENTS.md');
     },
 
     // Codex reads AGENTS.md natively (the closest one to the cwd wins); CLAUDE.md is the fallback where a folder has no AGENTS.md.
@@ -147,11 +160,13 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
 
     // Startup dialogs on 0.160+: "Update available" is pre-empted by the -c flag; "Hooks need review" by the launch's
     // --dangerously-bypass-hook-trust (Q3004). A folder not under [projects] still shows the folder trust dialog: the seat
-    // parks as agent_not_ready until a person answers it; the board never does.
-    trustSpec() {
+    // parks as agent_not_ready until a person answers it; the board never does. cb squad trust (#4575), run once by Ahmed,
+    // writes that [projects] entry for the squad's folders (preseed), and squad up stops a seat whose folder lacks it.
+    trustSpec(_paths, platform) {
       return {
         dialogHint: '"Update available" (the launch already turns the update check off); the folder trust dialog for a folder not under [projects] in ~/.codex/config.toml (hook trust is bypassed: the launch runs the installed hooks)',
         preseedPath: '~/.codex/config.toml',
+        preseed: codexPreseed(platform),
         extraArgs: ['-c', 'check_for_update_on_startup=false'],
       };
     },

@@ -29,6 +29,13 @@ function recipeLines(list: any, project: string) {
   }
   return new Map([...by].map(([repo, seen]) => [repo, [...seen.values()].join(', ')]));
 }
+/** Why a project has no recipes (#4601): no runner has said hello, or the runners there offer none for it (their config
+ *  names other projects). The second is not fixed by waiting for a runner, so it says who adds them. */
+export function recipesNone(list: { runners: { name: string; last_seen?: string | null }[] }, project: string): string {
+  if (!list.runners.length) return 'none: no runner is connected';
+  const seen = list.runners.map((r) => `${r.name}, seen ${r.last_seen ? new Date(r.last_seen).toISOString().slice(0, 16).replace('T', ' ') + 'Z' : 'never'}`).join('; ');
+  return `none: no runner offers recipes for ${project} (runners: ${seen}); a project's recipes come from the runner's config on its machine (~/.claude-board/runner.json), which Ahmed edits: cb ask`;
+}
 // a one-repo project (main only) reads as before; with several repos each is named (#3703)
 const oneRepo = (m: Map<string, string>) => m.size === 1 && m.has('main');
 const repoTag = (j: any) => (j.repo && j.repo !== 'main' ? `/${j.repo}` : '');
@@ -46,15 +53,16 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
     const [{ l }] = await sql`select cb.jobs_list(${o.project}) as l`;
     const m = recipeLines(l, o.project!);
     if (o.repo) return m.get(o.repo) || `none for ${o.repo}`;
-    if (!m.size) return 'none: no runner is connected';
+    if (!m.size) return recipesNone(l, o.project!);
     return oneRepo(m) ? m.get('main')! : [...m].map(([repo, line]) => `${repo}: ${line}`).join('; ');
   };
   if (!o.recipe) throw new Error(`usage: cb run <recipe> --sha <sha> [--<param> <value>...] [--wait]. Recipes: ${await known()}`);
   if (!o.sha) throw new Error('give the commit: --sha <sha> (git rev-parse HEAD; push it first)');
-  if (o.card !== undefined && !/^\d+$/.test(o.card)) throw new Error('--card needs a card number');
+  const card = o.card?.replace(/^#/, ''); // #4724: cb prints ids as #42
+  if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number');
   let added: any;
   try {
-    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${o.card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
+    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
   } catch (e: any) {
     if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}${o.repo ? ` (${o.repo})` : ''}. Recipes: ${await known()}`);
     throw e;
@@ -73,6 +81,21 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
     if (Date.now() > until) return { out: `still running: cb job ${added.id}`, json: j, code: 1 };
     await sleep(o.pollMs ?? 3000);
   }
+}
+
+// #4732: no summary in the lines: it is the job's output, read one at a time with cb job <id>, where it is marked
+export async function endedCmd(sql: any, o: { project: string | null; requester?: string; card?: string }): Promise<Result> {
+  const card = o.card?.replace(/^#/, '');
+  if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number. Run: cb help jobs');
+  const [{ l }] = await sql`select cb.jobs_ended(${o.project}, ${o.requester ?? null}, ${card ?? null}::bigint) as l`;
+  const lines = l.jobs.map((j: any) => `#${j.id} ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}${j.task_id ? ` (card #${j.task_id})` : ''}, ended ${new Date(j.finished_at).toISOString().slice(0, 19)}Z`);
+  const asked = [o.project, o.requester && `by ${o.requester}`, card && `card #${card}`].filter(Boolean).join(', ');
+  if (!lines.length) lines.push(`no ended job${asked ? ` (${asked})` : ''}`);
+  else {
+    if (l.more) lines.push(`the newest ${l.jobs.length}; older ones are left out (narrow with --mine or --card <id>)`);
+    lines.push("one job's result: cb job <id>");
+  }
+  return { out: lines.join('\n'), json: { ...l, jobs: l.jobs.map(markedJson) }, code: 0 };
 }
 
 export async function jobsCmd(sql: any, project: string | null): Promise<Result> {
@@ -98,6 +121,7 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
     await sql`select cb.job_hold(${id}, ${sub === 'hold'}, ${actor})`;
     return { out: sub === 'hold' ? `${id}'s waiting jobs are held: running ones carry on (cb job release ${id})` : `${id}'s jobs start again`, json: { project: id, held: sub === 'hold' }, code: 0 };
   }
+  id = id?.replace(/^#/, ''); // after hold and release, whose id is a project
   if (!/^\d+$/.test(id ?? '') || !['show', 'cancel', 'log', 'retry', 'move'].includes(sub ?? '')) throw new Error(usage);
   if (sub === 'cancel') { await sql`select cb.job_cancel(${id!}::bigint, ${actor})`; return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
   if (sub === 'retry') {
@@ -110,7 +134,7 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
     return { out: r.moved ? `job #${id} moved ${place}` : `job #${id} is already ${place === 'up' || place === 'next' ? 'first' : 'last'}`, json: r, code: 0 };
   }
   const [{ j }] = await sql`select cb.job_get(${id!}::bigint) as j`;
-  if (!j) throw new Error(`no job #${id}`);
+  if (!j) throw new Error(`no job #${id}: cb jobs lists queued and running jobs, cb jobs --ended the ended ones`);
   if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: markedJson(j), code: 0 };
   return logCmd(sql, j, tail);
 }

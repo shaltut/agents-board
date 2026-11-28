@@ -62,7 +62,8 @@ Then the workers, right away, because their `cb` must match the schema:
   broke every `cb` on the Mac for 15 minutes.
 - **Check each worker** after its update (#4352): build the manifest in the updated checkout on the PC
   (`node cli/release.ts --out /tmp/release.json`; it refuses a tree with uncommitted release files), copy it next to
-  the archive, and run `cb doctor --manifest <file>` on the worker. It names every missing or changed file, checks the
+  the archive, and run `cb doctor --manifest <file>` on the worker (on the PC's own checkout plain `cb doctor` compares
+  with git: every release file committed and none untracked). It names every missing or changed file, checks the
   installed guard and its hook (as `node kit/guard/install.mjs --check`), writes nothing, never connects to the board,
   and exits 0 only when everything matches.
   Or, once the board serves the release (the `git archive` line above; its log says `release: serving <sha>`):
@@ -70,10 +71,17 @@ Then the workers, right away, because their `cb` must match the schema:
   `/release/current.json` and `/release/<sha>.tgz` (no sign-in: the public repo's tracked files only; the board refuses
   an archive holding an env file or node_modules), verifies the archive, and compares the worker's files the same way.
   It writes nothing. Without `release.tgz` the image still builds; `/release/current.json` then answers 404 with why.
+  The Today page says it too: each relay notes the commit its code is (`cb.sessions.code_sha`), and Today shows one
+  line, `N seats run other code than the board (<sha>): <machine> <count>, ...`, while any live seat differs (a relay
+  too old to say counts), and nothing when all match.
 - **Install the release on a copy** (#4352): `cb update --from <board https address>` on the worker (the Mac),
   instead of the tar lines above. A git checkout (the PC) is refused: it updates with `git pull --ff-only`.
   Once a copy has had one `cb update`, never use the tar lines on it again: they would extract into the version in
   use (through the link) instead of a new one. This change touches `cli/relay.ts`, so the Mac gate below applies.
+  - Schema first: before writing anything, `cb update` asks the board's database whether it has the schema the release
+    needs (the sha256 of the release's `db/schema.sql`; `db/setup.ts` notes each schema it applies in
+    `cb.schema_applied()`, and `cb.schema_covers` answers). A board whose schema is older, or one from before this check,
+    is refused with what to deploy first: deploy the board (above), then `cb update` again.
   - First run: the copy moves to `<copy>.home` and `<copy>` becomes a link to it (a symlink; a junction on Windows),
     the same code. Each release goes in `<copy>.home/versions/<sha>`: written from the verified archive, `bin/cb` made
     executable (git stores it 644), checked file by file against the manifest, then `cb help` and `cb sessions` run
@@ -88,6 +96,9 @@ Then the workers, right away, because their `cb` must match the schema:
     mid-flip. Relays notice their code path now points at new files and restart into it: each flip, update or
     rollback, restarts every relay running from the copy within ~3 s (no message is lost; at worst one duplicate push). A runner or supervisor running from the copy makes `cb update` refuse: stop it by its
     pid (never by name), update, start it again; `--force` goes ahead and leaves it on the old code until restarted.
+    One started by a relative path (`node cli/runner.ts`) counts only when its working folder is the copy (read from
+    `/proc` or `lsof`); another checkout's does not. When the folder cannot be read (always on Windows), `cb update`
+    refuses and says so: `--force` when it is not this copy's.
     Nothing is stopped by `cb update`.
   - `cb update --rollback` points `<copy>` back at the version before (the original copy after the first update);
     run it again to go forward. Back on the original copy, relays run its older relay.ts, which does not follow a flip:
@@ -181,6 +192,84 @@ The guard is `kit/guard/` (`core.mjs`, `shim-claude.mjs`, `install.mjs`). The ol
    command is refused.
 
 On the Mac, the same, from `~/Work/claude-board` after the tar step above.
+
+### Codex, agy and OpenCode seats (#4609)
+
+Also only with Ahmed's yes, on each machine that runs those seats. A seat whose guard is not wired is refused by
+the seat prestart, so until this runs those seats do not start.
+
+```
+node kit/guard/install.mjs --agents codex,opencode                         # per machine
+node kit/guard/install.mjs --agents agy --seat <seat folder> [--seat ...]   # per agy seat folder
+node kit/guard/install.mjs --check --agents codex,agy,opencode --seat <seat folder>
+```
+
+Each agent's shim is copied into the installed guard folder beside `core.mjs` and probed there (ls passes;
+`git reset --hard`, a tool the shim does not know, and malformed input block) before anything is swapped in. The hooks
+run that installed copy, never the checkout, so a `git pull` does not change a live guard unprobed.
+
+- **Codex**: one `PreToolUse` entry in `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`), matcher `.*`, command
+  `<absolute node> <guard>/shim-codex.mjs`. Every other entry stays as it was, herdr's `SessionStart` included; an older
+  guard entry (one pointing at a checkout) is replaced. `config.toml` gets `hooks = true` under `[features]`. A
+  `hooks = false` there, or an inline `features = { ... }`, is refused: change it by hand, as is a file this installer
+  cannot read the same way Codex does (a `[features]` header it could not place the key under). The matcher is a
+  catch-all, so a tool Codex adds later still reaches the shim. Codex 0.160's one shell tool, `exec_command`, arrives as
+  `Bash`; there is no `unified_exec`; `write_stdin` fires no hook at all (#4618), so a seat may not open an interactive
+  session for it to type into (#4626).
+- **agy**: group `cb-guard` in `<seat>/.agents/hooks.json`, matcher `.*`, command `node <guard>/shim-agy.mjs`
+  (forward slashes, no quotes: agy runs hooks through `cmd /c` on Windows, so a guard path with a space is refused;
+  install it elsewhere with `--target`). Other groups stay. `/.agents/` goes into that repo's `info/exclude` (a worktree's
+  shared one). agy loads a folder's hooks only once agy trusts the folder: trust each seat folder in agy.
+- **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
+  `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
+  call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+
+**These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
+OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
+seat: the dangerous-command rules only. A tool the shim does not judge (Codex `update_plan`, `spawn_agent`, MCP tools;
+OpenCode `webfetch`, `websearch`, `task`, `todowrite`, `skill`, `lsp`) passes, as Claude's tools that never reach the
+guard do; no role, fence or secret rule applies; and a question follows `CB_ALLOW_ASK`, as Claude's `AskUserQuestion`
+does. In a board seat every tool the shim does not judge is denied, and a seat may not change `CB_ROLE` or `CB_AGENT`
+(PR 96 review r2): the seat prestart also refuses to start an agent in a pane where either is missing or names
+another agent.
+
+Nor may a seat start a process with a fresh environment, which would run outside the seat with neither variable
+(#4669): another user (`sudo`, `su`, `doas`, `runas`), `ssh` or `mosh` to this machine, a scheduler (`at`, `crontab`,
+`systemd-run`, `launchctl submit`, `schtasks /create|/run`, `Register-ScheduledTask`), `wsl`, WMI's
+`Win32_Process Create`, or a tmux, screen or herdr command that starts a pane or types into one. Their read-only forms
+pass (`sudo --version`, `crontab -l`, `tmux ls`, `herdr pane read`, `wsl -l`, `schtasks /query`). Interpreter code
+that hands a child an environment of its own (`env: {}`, `env={}` without `process.env` or `os.environ`) counts too.
+A shell script the command runs (`bash x.sh`, `./x.sh`, `source x.sh`, `pwsh -File x.ps1`, `cmd /c x.cmd`) is read
+from the hook's working folder and judged for both rules; `node x.js` and `python x.py` are not read, since tests start
+children with their own env on purpose. A `cd` earlier in the same command is not followed. A lead seat keeps
+`herdr agent prompt`, `herdr pane send-keys` and `ssh` to a host named by a plain variable (`deploy/copy-to-vps.sh`'s
+`ssh "$VPS"`), since the lead drives other squads' seats and deploys; `$HOSTNAME`, loopback and this machine's name
+still block. Every other role is blocked from all three.
+
+`--agents` also installs the whole guard folder: Claude's shim and `core.mjs` there are replaced with this checkout's,
+exactly as a plain install does, so every agent on the machine runs the same rules.
+
+A second run changes nothing. A rewritten `config.toml`, `hooks.json` or `info/exclude` keeps its line endings and file
+mode. `--check` with `--agents` also checks each wiring and runs the probes through its own command (for OpenCode: the
+plugin is exactly what this checkout writes). Seats never write these files: the fence keeps them out, and the installer
+itself refuses anything but `--check` when `CB_ROLE` or `CB_AGENT` is set.
+
+## Rules files for the other agents
+
+Claude Code reads `CLAUDE.md`. Codex, agy and OpenCode read `AGENTS.md`. There is one source for each level (#4765).
+
+- **The repo.** `CLAUDE.md` is the file to edit. `node cli/agent-context.ts repo` makes `AGENTS.md` from it;
+  commit both. `test/agent-context.test.ts` fails when they differ.
+- **The user level, per machine.** From a checkout with `pnpm install` done, in the owner's own terminal:
+  `node cli/agent-context.ts user` copies `~/.claude/CLAUDE.md` into `~/.codex/AGENTS.md`,
+  `~/.config/opencode/AGENTS.md` and `~/.gemini/AGENTS.md` (`CODEX_HOME` and `XDG_CONFIG_HOME` are followed).
+  - **It sends that file to each agent's model provider** from the next session on: read it first.
+    `--agents codex,agy` limits which agents get it.
+  - The copy sits between two `cb:user-rules` marker lines. What the file already said stays, outside the block: read
+    it for lines that now contradict the copy. Taking the copy away again is deleting the block.
+  - An agent with no config folder on the machine is skipped. Run it again after editing the source;
+    `--check` writes nothing and exits 1 when a copy is out of date. A squad seat may only `--check`.
+  - These files are never in git.
 
 ## Usage ledger
 
@@ -299,7 +388,7 @@ dc exec -T db pg_restore -U cb -d claude_board --no-owner --exit-on-error < /var
 dc up -d board                                          # re-applies the schema, starts polling
 ```
 
-Then tell the sessions: `dc exec board cb broadcast "The board was restored to <time>: re-register anything you did since."`
+Then tell the sessions: `dc exec board cb broadcast "The board was restored to <time>: re-register anything you did since." --all`
 
 ## Users
 
@@ -316,6 +405,20 @@ dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       #
 
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
 lock at once. Removing someone, or a new link for a member, is on the Users page only.
+
+## GitHub watch: Ahmed's own login (#3221)
+
+The lead's relay holds routine notices up to 10 minutes; a PR, comment, review or commit by Ahmed on a watched repo goes
+through at once (with the rest of that poll's message). The watch knows which login is his only from the `github-owner` setting (a JSON string). None is
+set by default, and then nothing is marked urgent. It is never taken from gh's own login: the agents post under it.
+Ahmed sets it once (not a secret, but keep it out of cards, pages and this repo):
+
+```bash
+dc exec db psql -U cb -d claude_board -c "insert into cb.settings (key, value) values ('github-owner', to_jsonb('<your GitHub login>'::text)) on conflict (key) do update set value = excluded.value"
+dc exec db psql -U cb -d claude_board -c "delete from cb.settings where key = 'github-owner'"   # back to none
+```
+
+The next poll (within 3 minutes) uses it; case does not matter. Failed CI runs are never marked, whoever pushed.
 
 ## Secrets
 
@@ -395,11 +498,26 @@ Set up, once, on the PC:
    - With `dbLanes` above 1, `laneEnv` names those env values. Every DB recipe must set each of them with `{lane}`,
      and all DB recipes must write each one the same way, so lane n is one stack whichever recipe runs in it. The
      runner refuses to start otherwise.
+   - A DB recipe's first step brings its test stack up (#4710). The runner starts its stacks 30 s apart (the board's
+     `cb.runners.stack_gap_set`, 0-300 s, read at the runner's start; no page control yet), because Postgres containers
+     that initialise together miss compose's health deadline (27 Nov: 9 lanes claimed at once after a restart all died
+     `container ... is unhealthy`). The wait comes before the job's timeout starts. When that first step still fails on
+     `container <name> is unhealthy`, the runner runs the recipe's `finally` steps (the stack's `down`), waits its turn
+     and runs the step once more; the job's summary then starts with "The test stack was slow to start and was retried
+     once." Any other failure is never run again.
    - Switching on lanes: stop the runner, remove the stack left from before (`docker compose -p cb-runner-it down -v`),
      then start it. A stopped runner's `finally` steps do not run, so that stack stays up until removed.
    - A `guards` recipe can also run the repo's script tests on every job with the pre-push hook's own command
      (`pnpm exec lefthook run pre-push --commands <command> --no-tty`): the commit's own `lefthook.yml` decides which
      files run, so no file list is copied into runner.json.
+   - Placeholders in `steps`, `finally` and `cwd` are written `{name}` (declared in `params`; at most one per step
+     argument). Write `{{` and `}}` for literal braces (inline JS, JSON: `fs.rmSync('dist', {{force:true}})`), so
+     misspelled parameter names are still refused at start (#3773).
+   - A DB recipe whose tests start Postgres on the PC (this repo's own `test` recipe) gets a cluster per slot: every job
+     has `CB_RUNNER_JOB=1`, so `db/pg.ts` treats the slot like a worktree (own port, `.pgdata` in the slot), and a
+     `finally` step `node db/setup.ts --test --stop` stops it. A cluster left running anyway (a runner crash, a commit
+     older than #4756) is stopped before the slot's next `git clean`, which cannot delete its open log; only a postmaster
+     whose command line names that slot's `.pgdata` is stopped.
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
@@ -482,6 +600,13 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   a model its adapter refuses) is refused once per setting per supervisor run, logged, and the seat keeps running; a
   seat restarted once for a setting is not restarted again for it until it has been seen running it (no loop when a
   model name never reads as matching);
+- winds down a supervised squad whose project is disabled or archived (#4559, Q3018): it starts, restores and restarts
+  nothing there. Each seat of the squad (an earlier version's too) is closed once herdr shows it ready and it has been
+  quiet 10 minutes, counted from the disable at the earliest, with the cards it holds, which stay its own (Q3017); at
+  most 2 a tick, logged `close <seat> (project disabled)`. A running job of its own is waited for; a queued one waits
+  for Enable. Never the lead or a hand-started session, and a seat holding a card of an enabled project is kept. After
+  Enable, the seats that hold cards are restored as above, whatever was restored before the disable. A squad without
+  `"supervise": true` gets only the disable message;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
@@ -494,7 +619,9 @@ It never:
   session); it starts and restores only names the squad file generates now, and closes a leaving one only as above;
 - answers a startup dialog (folder trust, the bypass warning): it logs `blocked` and tells the lead (the project's
   live session in the lead role; none live: the digest's blocked line) once per block, with the pane and the command to send
-  the first prompt afterwards (the same when a session started but its first prompt was not sent);
+  the first prompt afterwards (the same when a session started but its first prompt was not sent, or may not have landed, which the lead checks in the pane before sending: #4687);
+  `cb squad trust <project>`, run once by the owner on each machine (#4575), marks the squad's seat folders trusted for
+  Claude, Codex and agy so that dialog never shows; `cb squad up` stops an untrusted seat before its pane (`cb help squad`);
 - frees a card held by a down session, or runs anything heavy itself.
 
 ## Squad file: herdr workspace
@@ -505,6 +632,57 @@ new session as a tab there (two per tab, as before), and make the workspace when
 pane takes the first session. Without `workspace` a session opens in whichever workspace is focused on that machine.
 Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
 Card #3719.
+
+## Squad file: Codex, OpenCode and agy seats (#4585)
+
+A role or a seat in any project may give `"agent": "codex"` (or `opencode`, `agy`) with that agent's model (Q3024).
+The save gate's list is `cb._agents_main()` in `db/schema.sql`, the launch gate's `INSTALLED` in `cli/agents/index.ts`
+(`test/settings.test.ts` compares them). Each of the three needs, on every machine that runs its seats and where
+`cb squad up`, the supervisor and the seat's relay run:
+
+- its MCP check done by Ahmed (no MCP server in that CLI's own config), then `CB_MCP_GATE_OK=codex,opencode,agy`
+  (the ones checked) in that environment; without it the launch fails before any pane (`cb squad up --dry-run` prints a
+  `would fail` line under the seat);
+- the guard installed for that CLI (`kit/guard/install.mjs`), which the seat prestart checks before the agent starts.
+
+An OpenCode seat's server port comes from its name (41000-48999, `CB_OPENCODE_PORT`).
+
+**No interactive sessions in a Codex seat (#4626).** Codex's `exec_command` can leave a process running, and
+`write_stdin` then types into it without any hook, so the guard never sees what a shell, REPL, database client, editor,
+pager or remote login opened that way runs next. In a Codex seat the guard therefore refuses a command that opens one
+(`bash`, `bash -s`, `sudo -s`, `python`, `node -i`, `psql`, `sqlite3 app.db`, `ssh host`, `ssh host bash`, `vim`,
+`less`, `tmux`, `docker exec -it c sh`, `kubectl exec -i pod -- sh`, `xargs`, `read`, `cat | sh`, `Read-Host`, ...),
+inside `bash -c "..."`, `$(...)` and the like too, whether or not Codex asked for a TTY. The one-shot forms stay
+allowed: `bash -c "..."`, `python x.py`, `python -c`, `psql -c`, `ssh -n host cmd`, `docker exec c ls`, or input from
+`< file`, a heredoc or a pipe. Codex sends no TTY or stdin field, so the rule reads the command text alone (PR 104
+review), and fails closed where it cannot read it:
+
+- A variable, `eval` or a substitution as the command word counts unless a literal assignment earlier in the same
+  command says what it runs (`X=python3; $X x.py` passes; `$SHELL`, `$(echo bash)` and `eval $cmd` do not).
+- `<&0`, `<&3` (any descriptor copy, since `exec 3<&0` makes one of the input) and `< /dev/stdin` read the seat's own
+  input, so they are no feed.
+- Editors, pagers and other full-screen programs count even when piped into (`ls | vim -`, `git log | less`, `fzf`), as
+  do git's interactive modes (`add -p`, `add -i`, `checkout -p`, `rebase -i`, `clean -i`, `commit --interactive`) and
+  `crontab -e`.
+- grep, sed, head, tail and cut given a file read that file, not the input (`grep foo file | awk` passes).
+- A package runner or `find -exec` is judged by the command it starts (`npx node`, `pnpm exec bash`, `npm exec -- python`,
+  `uv run python`, `find . -exec bash \;` are sessions; `npx tsc` and `find . -exec bash {} \;` pass) (#4658).
+- A one-shot whose code opens a session counts: `python -m code` or `-m pdb`, `pty.spawn`, `code.interact`,
+  `breakpoint()`, Node's `require('repl')`, `binding.irb`, and a call that starts a bare shell (`exec "/bin/sh"`,
+  `os.system('cmd')`, `spawnSync('bash', {stdio: 'inherit'})`; `os.system('sh build.sh')` passes). This reads only the
+  literal spellings. Code that builds the names gets past it; `--disable unified_exec_tty` is what stops a seat typing
+  into a process.
+
+Programs that open an editor or a pager themselves (`git commit` with no `-m`, `git log`, `gh pr create`, `man`) are
+handled at launch instead. A Codex seat starts with `--disable unified_exec_tty`, so its commands get no terminal. Every
+Codex, agy and OpenCode seat's pane also gets `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `EDITOR` and `VISUAL` set to
+`true`, `PAGER`, `GIT_PAGER`, `GH_PAGER` and `MANPAGER` set to `cat`, `GH_PROMPT_DISABLED=1` and
+`GIT_TERMINAL_PROMPT=0` (`NO_PROMPT_ENV` in `cli/agents/env.ts`). An editor returns at once with the text git prepared
+(a conflicted `git rebase --continue` finishes; `git commit` or `git tag -a` with no `-m` fails on the empty message),
+and a pager only prints.
+Claude's Bash has no stdin, so it does not get this rule. Codex's `update_plan` is
+allowed and `view_image` is a read with the secret-file rule; `spawn_agent` stays blocked until the live check (#4612)
+shows a sub-agent's own tools reach the hook.
 
 ## Squad file: protected branches
 

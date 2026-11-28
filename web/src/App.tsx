@@ -24,6 +24,7 @@ import { Goals } from '@/views/Goals'
 import { Settings } from '@/views/Settings'
 import { Runners } from '@/views/Runners'
 import { TagChip, TypeChip } from '@/components/Chips'
+import { StateBanner } from '@/components/projects/StateBanner'
 
 
 /** The full board for an admin (or on the PC board's own screen); a signed-in member gets the guest page; anyone
@@ -118,6 +119,7 @@ export default function App() {
             </button>
           </div>
         )}
+        {(route.view === 'board' || route.view === 'backlog' || route.view === 'sessions') && <StateBanner project={route.project} owner={owner} />}
         {ownersOnly ? <p className="text-sm text-muted-foreground">This page is for the board's owner.</p> : <View route={route} />}
       </main>
       <CommandMenu open={menu} onOpenChange={setMenu} onNewTask={() => setNewTask(true)} pages={pages} />

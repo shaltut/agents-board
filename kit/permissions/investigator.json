@@ -130,11 +130,8 @@
       "Read(//**/service-account*.json)",
       "Read(//**/.claude/.credentials.json)",
       "Edit(~/.claude/settings*.json)",
-      "Write(~/.claude/settings*.json)",
       "Edit(//**/.claude/settings*.json)",
-      "Write(//**/.claude/settings*.json)",
-      "Edit(~/.claude-board/**)",
-      "Write(~/.claude-board/**)"
+      "Edit(~/.claude-board/**)"
     ],
     "allow": [
       "Bash(cb *)"

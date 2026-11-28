@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import { CLAUDE_ONLY_ENV, isClaudeOnly } from '../cli/agents/env.ts';
 import { codexPromptText, createCodexAdapter } from '../cli/agents/codex.ts';
 import { opencodeEndpointPath, writeOpencodeEndpoint } from '../cli/agents/opencode.ts';
 import { seatRefusal } from '../cli/agents/seat-prestart.ts';
+import { BASH } from './bash.ts';
 
 const BOARD = fileURLToPath(new URL('..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '');
 // Plainly fake values: the names are what count, and no value is ever printed by a child.
@@ -22,7 +23,8 @@ const CANARY = { GITHUB_PERSONAL_ACCESS_TOKEN: 'not-a-token', CLAUDE_CODE_FAKE_S
 const ALL: ReadonlySet<AgentKind> = new Set(['claude', 'codex', 'opencode', 'agy']);
 const GATE = { installed: ALL, env: { CB_MCP_GATE_OK: 'codex,opencode,agy' } };
 const noPause = () => {};
-const shellOk = (sh: string) => { const r = spawnSync(sh, ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; };
+const exe = (sh: string) => (sh === 'bash' ? BASH : sh);
+const shellOk = (sh: string) => { const r = spawnSync(exe(sh), ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; };
 const bashOk = shellOk('bash'), zshOk = shellOk('zsh');
 const pwshOk = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
 
@@ -44,21 +46,44 @@ function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean;
   writeFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), JSON.stringify({ trustedWorkspaces: o.agyTrusted === false ? [root] : [join(root, 'elsewhere'), ws] }));
   if (o.plugin !== false) writeFileSync(join(home, '.config', 'opencode', 'plugins', 'cb-guard.js'), PLUGIN_GOOD);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp };
+  // a pane cb squad up started holds CB_ROLE (and CB_AGENT, set per agent where a check runs: seatEnv)
+  const env: Record<string, string | undefined> = { ...process.env, ...CANARY, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CB_ROLE: 'builder', CB_SEAT_RELAY: 'off' }; // #4610: a ready seat starts no relay here
   for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_SERVER_PASSWORD']) delete env[k];
   return { root, home, ws, env };
 }
+const seatEnv = (env: Record<string, string | undefined>, agent: string) => ({ ...env, CB_AGENT: agent }) as NodeJS.ProcessEnv;
+
+// PR 96 review r2 I3: the prestart is where a seat is known to be a seat, so a pane without both variables (CB_ROLE set,
+// CB_AGENT the agent being started) is refused there: outside a seat the guard keeps only its dangerous-command rules
+test('seatRefusal (PR 96 r2 I3): CB_ROLE must be set and CB_AGENT must name the agent being started', (t) => {
+  const w = world(t), env = { ...w.env };
+  for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
+  const r = (e: Record<string, string | undefined>) => seatRefusal('codex', 'm', 'w9:p1', e as NodeJS.ProcessEnv, w.ws, w.home);
+  assert.equal(r({ ...env, CB_AGENT: 'codex' }), null, 'a real seat passes');
+  for (const [what, e] of [
+    ['no CB_ROLE', { ...env, CB_ROLE: undefined, CB_AGENT: 'codex' }],
+    ['an empty CB_ROLE', { ...env, CB_ROLE: '  ', CB_AGENT: 'codex' }],
+    ['no CB_AGENT', { ...env, CB_AGENT: undefined }],
+    ['CB_AGENT names another agent', { ...env, CB_AGENT: 'opencode' }],
+    ['an empty CB_AGENT', { ...env, CB_AGENT: '' }],
+  ] as const) assert.match(r(e) ?? '', /CB_ROLE|CB_AGENT/, what);
+});
 
 const ok = (o: unknown) => ({ status: 0, stdout: JSON.stringify(o), stderr: '' });
 /** herdr, faked: one pane whose shell is a real bash; every typed line (pane run, then the agent) runs in that one shell. */
-function pane(env: Record<string, string | undefined>, cwd: string, shell = 'bash') {
+function pane(env0: Record<string, string | undefined>, cwd: string, shell = 'bash') {
   const calls: string[][] = [], typed: string[] = [];
+  const env = { ...env0 };
   let out = '', agent: { names: string[]; password: string | null; tmp: string } | null = null;
-  const sh = (script: string) => spawnSync('bash', ['-c', script], { env: env as NodeJS.ProcessEnv, cwd, encoding: 'utf8' });
+  const sh = (script: string) => spawnSync(BASH, ['-c', script],{ env: env as NodeJS.ProcessEnv, cwd, encoding: 'utf8' });
   const run: Runner = (_m, args) => {
     calls.push(args);
     const [a, b] = args;
-    if (a === 'tab' && b === 'create') return ok({ result: { pane: { pane_id: 'w9:p1' } } });
+    if (a === 'tab' && b === 'create') {
+      // as herdr does: each --env K=V is set in the new pane's shell (it only adds; the pane inherits the rest)
+      args.forEach((x, i) => { if (x === '--env') { const kv = args[i + 1]!; env[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1); } });
+      return ok({ result: { pane: { pane_id: 'w9:p1' } } });
+    }
     if (a === 'pane' && b === 'process-info') return ok({ result: { process_info: { foreground_processes: [{ argv0: `/usr/bin/${shell}`, name: shell }] } } });
     if (a === 'pane' && b === 'run') { typed.push(args[3]!); out = sh(typed.join('\n')).stdout; return ok({ result: { type: 'ok' } }); }
     if (a === 'pane' && b === 'wait-output') {
@@ -100,7 +125,7 @@ test('one Claude-only list: every adapter strips it from its launch env, and bot
 for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
   test(`prestart.sh in a real ${sh}: the Claude-only names leave the shell itself, a child sees none, the rest stays`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
-    const r = spawnSync(sh, ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(exe(sh), ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce1$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -110,7 +135,7 @@ for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
 
 test('prestart.ps1 in a real pwsh: the same', { skip: !pwshOk && 'no pwsh' }, (t) => {
   const w = world(t);
-  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce2'])}; node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce2'])}; node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
   assert.match(r.stdout, /^cb-seat-ready:n0nce2$/m, r.stdout + r.stderr);
   const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
   assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -125,7 +150,7 @@ for (const [sh, has, on] of [['bash', bashOk, 'shopt -s expand_aliases'], ['zsh'
   test(`prestart.sh in a ${sh} whose aliases and functions shadow grep, env, sed and node: still strips, still ready`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
     const script = `${on}\n${SHADOWS}${prestartLine('posix', BOARD, ['opencode', 'm', 'w9:p1', 'n0nce3', '41234'])}\ncommand node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(',') + ' PW ' + (process.env.OPENCODE_SERVER_PASSWORD || '').length)"`;
-    const r = spawnSync(sh, ['-c', script], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(exe(sh), ['-c', script], { env: seatEnv(w.env, 'opencode'),cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce3$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6, r.stdout.indexOf(' PW ')).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -137,7 +162,7 @@ for (const [sh, has, on] of [['bash', bashOk, 'shopt -s expand_aliases'], ['zsh'
 test('prestart.ps1 in a pwsh whose functions and aliases shadow node, Get-Command and Remove-Variable: still strips, still ready', { skip: !pwshOk && 'no pwsh' }, (t) => {
   const w = world(t);
   const shadows = "function node { 'junk' }; function Get-Command { $null }; function Remove-Item { throw 'shadowed' }; Set-Alias -Name Remove-Variable -Value Write-Error -Scope Global";
-  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${shadows}; ${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce4'])}; & (Microsoft.PowerShell.Core\\Get-Command node -CommandType Application)[0].Source -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: w.env as NodeJS.ProcessEnv, cwd: w.ws, encoding: 'utf8' });
+  const r = spawnSync('pwsh', ['-NoProfile', '-Command', `${shadows}; ${prestartLine('pwsh', BOARD, ['codex', 'm', 'w9:p1', 'n0nce4'])}; & (Microsoft.PowerShell.Core\\Get-Command node -CommandType Application)[0].Source -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
   assert.match(r.stdout, /^cb-seat-ready:n0nce4$/m, r.stdout + r.stderr);
   const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
   assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -150,7 +175,7 @@ test('seatRefusal reads the guard files, never a substring: crafted Codex, agy a
   const w = world(t), env = { ...w.env };
   for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
   const codexFile = join(w.home, '.codex', 'hooks.json'), cfg = join(w.home, '.codex', 'config.toml');
-  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', env as NodeJS.ProcessEnv, w.ws, w.home);
+  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', seatEnv(env, agent), w.ws, w.home);
   assert.equal(refusal('codex'), null, 'the real shape passes');
   const hook = (command: string) => [{ type: 'command', command }];
   const codexCases: [string, string][] = [
@@ -210,7 +235,7 @@ test('seatRefusal reads the guard files, never a substring: crafted Codex, agy a
     try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   };
   withTmp(() => writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: pw }));
-  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', { ...env, OPENCODE_SERVER_PASSWORD: pw } as NodeJS.ProcessEnv, w.ws, w.home));
+  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', seatEnv({ ...env, OPENCODE_SERVER_PASSWORD: pw }, 'opencode'), w.ws, w.home));
   assert.equal(ocRefusal(), null, 'the real plugin shape passes');
   for (const [what, src] of [
     ['an empty plugin', ''],
@@ -312,5 +337,269 @@ test('Codex input box (#4002): a trailing $word or @word gets a space so Enter s
 test('startOne sends the first prompt through the adapter\'s promptText', { skip: !bashOk && 'no bash' }, (t) => {
   const w = world(t), p = pane(w.env, w.ws);
   assert.ok(startOne(launch('codex', w.ws, { prompt: 'cb iam x, then use $skill' }), p.run, {}, noPause, GATE).ok);
-  assert.deepEqual(p.calls.find((c) => c[0] === 'agent' && c[1] === 'prompt')!.slice(3), ['cb iam x, then use $skill ']);
+  assert.deepEqual(p.calls.find((c) => c[0] === 'agent' && c[1] === 'prompt')!.slice(3, 4), ['cb iam x, then use $skill ']);
+});
+
+// #4551: the round-two follow-ups. 70-M2: the shim and the core.mjs it loads must be this board's kit/guard bytes (a
+// lookalike folder, a link to a fake, or a real shim beside a fake core passed on names). 70-M3: a hook file that repeats
+// a key in one object is refused (JSON.parse keeps the last; Codex may not). 70-M4: a selected profile turning hooks off
+// refuses, and a multi-line string's text is never read as keys.
+function seatWorld(t: { after: (fn: () => void) => void }) {
+  const w = world(t), env = { ...w.env };
+  for (const k of Object.keys(env)) if (isClaudeOnly(k)) delete env[k];
+  const refusal = (agent: string) => seatRefusal(agent, 'm', 'w9:p1', seatEnv(env, agent), w.ws, w.home);
+  return { ...w, env, refusal, codexFile: join(w.home, '.codex', 'hooks.json'), cfg: join(w.home, '.codex', 'config.toml'), agyFile: join(w.ws, '.agents', 'hooks.json') };
+}
+
+test('seatRefusal (70-M2): the shim and the core.mjs it loads must be this board\'s kit/guard bytes', (t) => {
+  const w = seatWorld(t), kit = join(BOARD, 'kit', 'guard');
+  const codexAt = (shim: string) => codexHooks([{ matcher: CODEX_MATCHER, hooks: [{ type: 'command', command: `${NODE} ${shim.replace(/\\/g, '/')}` }] }]);
+  /** a folder holding shim (fake unless real) and core.mjs (fake unless realCore) */
+  const folder = (name: string, shim: string, o: { real?: boolean; realCore?: boolean } = {}) => {
+    const d = join(w.root, name);
+    mkdirSync(d, { recursive: true });
+    if (o.real) copyFileSync(join(kit, shim), join(d, shim)); else writeFileSync(join(d, shim), 'process.stdout.write("{}")\n');
+    if (o.realCore) copyFileSync(join(kit, 'core.mjs'), join(d, 'core.mjs')); else writeFileSync(join(d, 'core.mjs'), 'export const evaluate = () => ({ allow: true });\n');
+    return d;
+  };
+  assert.equal(w.refusal('codex'), null, 'the real shape passes');
+  writeFileSync(w.codexFile, codexAt(join(folder('guаrd', 'shim-codex.mjs'), 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a lookalike folder with a fake shim and core');
+  writeFileSync(w.codexFile, codexAt(join(folder('fakecore', 'shim-codex.mjs', { real: true }), 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'the real shim beside a fake core');
+  writeFileSync(w.codexFile, codexAt(join(folder('copy', 'shim-codex.mjs', { real: true, realCore: true }), 'shim-codex.mjs')));
+  assert.equal(w.refusal('codex'), null, 'a byte-identical copy of the guard is the guard');
+  // links: a junction folder always works on Windows; a file symlink may need a privilege there
+  const fake = folder('fake', 'shim-codex.mjs');
+  symlinkSync(fake, join(w.root, 'jfake'), 'junction');
+  writeFileSync(w.codexFile, codexAt(join(w.root, 'jfake', 'shim-codex.mjs')));
+  assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a junction to a fake folder');
+  symlinkSync(kit, join(w.root, 'jreal'), 'junction');
+  writeFileSync(w.codexFile, codexAt(join(w.root, 'jreal', 'shim-codex.mjs')));
+  assert.equal(w.refusal('codex'), null, 'a junction to the real kit/guard');
+  let fileLink = true;
+  mkdirSync(join(w.root, 'flink'));
+  try { symlinkSync(join(fake, 'shim-codex.mjs'), join(w.root, 'flink', 'shim-codex.mjs'), 'file'); } catch { fileLink = false; }
+  if (fileLink) {
+    copyFileSync(join(kit, 'core.mjs'), join(w.root, 'flink', 'core.mjs'));
+    writeFileSync(w.codexFile, codexAt(join(w.root, 'flink', 'shim-codex.mjs')));
+    assert.match(w.refusal('codex') ?? 'READY', /no PreToolUse hook/, 'a symlinked shim pointing at a fake, a real core beside the link');
+  }
+  writeFileSync(w.agyFile, JSON.stringify({ 'cb-guard': { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `node ${join(folder('agyfake', 'shim-agy.mjs'), 'shim-agy.mjs').replace(/\\/g, '/')}` }] }] } }));
+  assert.match(w.refusal('agy') ?? 'READY', /no enabled PreToolUse hook/, 'a fake agy shim');
+
+  // OpenCode: the plugin names a fake shim
+  const plugin = join(w.home, '.config', 'opencode', 'plugins', 'cb-guard.js'), pw = 'synthetic-password-for-a-test', tmp = join(w.root, 'tmp');
+  const withTmp = <T>(fn: () => T): T => {
+    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+    Object.assign(process.env, { TMPDIR: tmp, TEMP: tmp, TMP: tmp });
+    try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  };
+  withTmp(() => writeOpencodeEndpoint('m', 'w9:p1', { port: 41234, password: pw }));
+  const ocRefusal = () => withTmp(() => seatRefusal('opencode', 'm', 'w9:p1', seatEnv({ ...w.env, OPENCODE_SERVER_PASSWORD: pw }, 'opencode'), w.ws, w.home));
+  assert.equal(ocRefusal(), null, 'the real plugin passes');
+  writeFileSync(plugin, PLUGIN_GOOD.replace(`${BOARD}/kit/guard`, folder('ocfake', 'shim-opencode.mjs').replace(/\\/g, '/')));
+  assert.match(ocRefusal() ?? 'READY', /does not register tool\.execute\.before/, 'a fake OpenCode shim');
+});
+
+test('seatRefusal (70-M3): a hook file that repeats a key in one object is refused, Codex and agy alike', (t) => {
+  const w = seatWorld(t);
+  // the good value last: JSON.parse keeps it, so the check passed while Codex may read the other or nothing
+  const bad = JSON.stringify({ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo off' }] }), good = JSON.stringify(CODEX_GOOD[0]);
+  for (const [what, text] of [
+    ['"hooks" twice', `{"hooks":{"PreToolUse":[${bad}]},"hooks":{"PreToolUse":[${good}]}}`],
+    ['"PreToolUse" twice', `{"hooks":{"PreToolUse":[${bad}],"PreToolUse":[${good}]}}`],
+    ['an escaped spelling of the same key', `{"hooks":{"PreToolUse":[${bad}],"PreTool\\u0055se":[${good}]}}`],
+  ] as const) {
+    writeFileSync(w.codexFile, text);
+    assert.match(w.refusal('codex') ?? 'READY', /repeats the key/, what);
+  }
+  writeFileSync(w.codexFile, codexHooks(CODEX_GOOD));
+  assert.equal(w.refusal('codex'), null, 'one hooks array per entry is no repeat');
+  writeFileSync(w.agyFile, `{"cb-guard":${JSON.stringify(AGY_GOOD['cb-guard'])},"cb-guard":${JSON.stringify(AGY_GOOD['cb-guard'])}}`);
+  assert.match(w.refusal('agy') ?? 'READY', /repeats the key/, 'agy: a group twice');
+});
+
+test('seatRefusal (70-M4): a Codex profile selected at the top that turns hooks off refuses; a multi-line string is text', (t) => {
+  const w = seatWorld(t), on = '[features]\nhooks = true\n';
+  for (const [what, toml] of [
+    ['a selected profile off', `profile = "x"\n${on}[profiles.x.features]\nhooks = false\n`],
+    ['a quoted profile name', `profile = 'x'\n${on}[profiles."x".features]\nhooks = false\n`],
+    ['a dotted key', `profile = "x"\n${on}[profiles.x]\nfeatures.hooks = false\n`],
+    ['an inline table', `profile = "x"\n${on}[profiles.x]\nfeatures = { hooks = false }\n`],
+  ] as const) {
+    writeFileSync(w.cfg, toml);
+    assert.match(w.refusal('codex') ?? 'READY', /profile/, what);
+  }
+  for (const [what, toml] of [
+    ['a profile off that nothing selects', `${on}[profiles.x.features]\nhooks = false\n`],
+    ['profile after a table is that table\'s key', `${on}[tui]\nprofile = "x"\n[profiles.x.features]\nhooks = false\n`],
+    ['hooks = false inside a multi-line string', `${on}[tui]\nnote = """\n[features]\nhooks = false\n"""\n`],
+    ['a one-line triple-quoted string', `[features]\nx = """a"""\nhooks = true\n`],
+    // PR 77 review M2: an array-of-tables header is a header; a triple quote inside a one-line string opens nothing
+    ['an array of tables after [features]', `${on}[[hooks.extra]]\nhooks = false\n`],
+    ['a triple quote inside a one-line string', `[tui]\nmsg = "it'''s"\nother = 'a """ b'\n${on}`],
+  ] as const) {
+    writeFileSync(w.cfg, toml);
+    assert.equal(w.refusal('codex'), null, what);
+  }
+  writeFileSync(w.cfg, `[[hooks.extra]]\nx = 1\n[features]\nhooks = true\n[[profiles.y]]\nhooks = true\n`);
+  assert.equal(w.refusal('codex'), null, 'keys after an array-of-tables header are that table\'s');
+  writeFileSync(w.cfg, `[features]\n[[hooks.extra]]\nhooks = true\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true under [[hooks.extra]] is not [features]');
+  // round 2 minor 3: a\""" is an escaped quote and "", so the string runs on and [features] below is its text
+  writeFileSync(w.cfg, `[tui]\nnote = """\na\\"""\n[features]\nhooks = true\n"""\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'an escaped quote before "" does not close the string');
+  writeFileSync(w.cfg, `[tui]\nnote = '''\n[features]\nhooks = true\n'''\n`);
+  assert.match(w.refusal('codex') ?? 'READY', /hooks = true/, 'hooks = true only inside a multi-line string');
+});
+
+// #4687: OpenCode's TUI dropped squad up's first prompt, sent the moment herdr agent start returned. The prompt now waits
+// for the agent to start working (herdr's --wait: agent_prompt_stalled when it does not within 5 s); stalled, the pane is
+// read, and a prompt that is not on the screen is sent once more. For every agent kind: the fake here is a Claude seat.
+const STALLED = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_prompt_stalled"}}' };
+const TIMED_OUT = { status: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' };
+const UNCONFIRMED = 'started demo-B1@m, its first prompt may not have landed (the agent did not start working): check herdr pane w9:p2, then send it if it is not there: herdr agent prompt demo-b1-m "cb iam demo-B1@m demo --role builder, then cb next"';
+function promptWorld(prompts: ('ok' | 'stall' | 'timeout')[], screen: (string | null)[] = []) {
+  const calls: string[][] = [];
+  let n = 0, reads = 0;
+  const run: Runner = (_m, args) => {
+    calls.push(args);
+    if (args[0] === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
+    if (args[0] === 'agent' && args[1] === 'prompt') { const k = prompts[n++]; return k === 'stall' ? STALLED : k === 'timeout' ? TIMED_OUT : ok({}); }
+    if (args[0] === 'agent' && args[1] === 'get') return ok({ result: { agent: { agent_status: 'idle' } } });
+    // null: the read fails (herdr exits non-zero)
+    if (args[0] === 'pane' && args[1] === 'read') { const s = screen[reads++]; return s === null ? { status: 1, stdout: '', stderr: 'pane_not_found' } : { status: 0, stdout: s ?? '', stderr: '' }; }
+    return ok({});
+  };
+  return { calls, run, prompts: () => calls.filter((c) => c[0] === 'agent' && c[1] === 'prompt') };
+}
+
+test('startOne (#4687): the first prompt waits for the agent to start working; landed at once, nothing more', () => {
+  const w = promptWorld(['ok']);
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 1);
+  const p = w.prompts()[0]!;
+  assert.equal(p[3], 'cb iam demo-B1@m demo --role builder, then cb next', 'the text stays the fourth argument');
+  assert.deepEqual(p.slice(4), ['--wait', '--until', 'working', '--until', 'blocked', '--timeout', '20000']);
+});
+
+test('startOne (#4687): a dropped first prompt (stalled, not on the screen) is sent once more', () => {
+  const w = promptWorld(['stall', 'ok'], ['opencode  > \n  ask anything...']);
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 2);
+  assert.deepEqual(w.prompts()[1], w.prompts()[0]);
+});
+
+test('startOne (#4687): a stalled prompt that is on the screen (it landed, the status lagged) is not sent twice', () => {
+  const w = promptWorld(['stall'], ['> cb iam demo-B1@m demo --role\n  builder, then cb next']);
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(w.prompts().length, 1);
+});
+
+test('startOne (#4687): dropped twice: the seat is up, the line says the prompt may not have landed and how to check and send it', () => {
+  const w = promptWorld(['stall', 'stall'], ['opencode  > \n  ask anything...']); // read, and the prompt is not there
+  const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  assert.equal(r.ok, false);
+  assert.equal(r.unconfirmed, true);
+  assert.equal(r.line, UNCONFIRMED);
+  assert.equal(w.prompts().length, 2);
+  assert.ok(!w.calls.some((c) => c[0] === 'pane' && c[1] === 'close'), 'the agent is up: its pane stays');
+});
+
+// PR 117 review B1: a resend only on herdr's own stall and a screen that was read and lacks the prompt. A pane read that
+// fails, or a herdr timeout (the submit may have landed: over a slow --machine relay it counts the submit time), is no
+// proof the text was lost, and a second prompt would have cb next take a second card. S1: the visible screen is read
+test('startOne (PR 117 B1, S1): a failed pane read or a herdr timeout never resends; the read is of the visible screen', () => {
+  for (const [what, prompts, screen] of [['the read fails', ['stall'], [null]], ['the read is empty', ['stall'], ['']], ['herdr timed out', ['timeout'], []]] as const) {
+    const w = promptWorld([...prompts], [...screen]);
+    const r = startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+    assert.equal(w.prompts().length, 1, what);
+    assert.equal(r.line, UNCONFIRMED, what);
+  }
+  const w = promptWorld(['stall', 'ok'], ['opencode  > \n  ask anything...']);
+  startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
+  const read = w.calls.find((c) => c[0] === 'pane' && c[1] === 'read')!;
+  assert.deepEqual(read.slice(3), ['--source', 'visible', '--format', 'text']);
+});
+
+// #4716: the first paste sat in a Codex input box, Enter not taken; the resend was appended to it and both went as one
+// message. A prompt that is on the screen gets Enter alone. The fake keeps an input box: a prompt is typed into it, its
+// first Enter is swallowed, send-keys enter submits whatever it holds.
+const TEXT_B1 = 'cb iam demo-B1@m demo --role builder, then cb next';
+function inputBoxWorld(o: { draw?: (box: string) => string; status?: string | null; sendKeys?: boolean; takes?: boolean } = {}) {
+  const calls: string[][] = [], submitted: string[] = [];
+  let box = '', prompted = 0;
+  const failed = { status: 1, stdout: '', stderr: '{"error":{"code":"herdr_failed"}}' };
+  const submit = () => { if (box) submitted.push(box); box = ''; };
+  const run: Runner = (_m, args) => {
+    calls.push(args);
+    const [a, b] = args;
+    if (a === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
+    if (a === 'agent' && b === 'prompt') { box += args[3]; if (prompted++ === 0) return STALLED; submit(); return ok({}); }
+    // null: herdr cannot say
+    if (a === 'agent' && b === 'get') return o.status === null ? failed : ok({ result: { agent: { agent_status: o.status ?? (submitted.length ? 'working' : 'idle') } } });
+    if (a === 'pane' && b === 'read') return { status: 0, stdout: (o.draw ?? ((s) => `› ${s}`))(box), stderr: '' };
+    if (a === 'agent' && b === 'send-keys') { if (o.sendKeys === false) return failed; if (o.takes !== false) submit(); return ok({}); }
+    if (a === 'agent' && b === 'wait') return submitted.length ? ok({}) : TIMED_OUT;
+    return ok({});
+  };
+  const of = (verb: string) => calls.filter((c) => c[0] === 'agent' && c[1] === verb);
+  return { calls, run, submitted, of };
+}
+
+test('startOne (#4716): a prompt left in the input box gets Enter alone: it is sent once, never twice joined', () => {
+  const w = inputBoxWorld();
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.deepEqual(w.submitted, [TEXT_B1]);
+  assert.equal(w.of('prompt').length, 1);
+  assert.deepEqual(w.of('send-keys'), [['agent', 'send-keys', 'demo-b1-m', 'enter']]);
+  assert.deepEqual(w.of('wait'), [['agent', 'wait', 'demo-b1-m', '--until', 'working', '--until', 'blocked', '--timeout', '20000']]);
+});
+
+test('startOne (#4716): the input box is found through borders, narrow wrapping, and when only its end shows', () => {
+  const draws: [string, (s: string) => string][] = [
+    ['a bordered box wrapped inside the first words', (s) => `╭──────────────╮\n${(s.match(/.{1,12}/g) ?? []).map((l, i) => `│ ${i ? ' ' : '>'} ${l.padEnd(12)} │`).join('\n')}\n╰──────────────╯`],
+    ['a bar gutter', (s) => (s.match(/.{1,16}/g) ?? []).map((l) => `  ┃  ${l}`).join('\n')],
+    ['only the end of the line', (s) => `› …${s.slice(-30)}`],
+  ];
+  for (const [what, draw] of draws) {
+    const w = inputBoxWorld({ draw });
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m', what);
+    assert.deepEqual(w.submitted, [TEXT_B1], what);
+    assert.equal(w.of('prompt').length, 1, what);
+  }
+});
+
+test('startOne (#4716): an agent already working gets nothing more, whatever the screen shows', () => {
+  const w = inputBoxWorld({ status: 'working', draw: () => 'thinking...' });
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(w.of('prompt').length, 1);
+  assert.equal(w.of('send-keys').length, 0);
+});
+
+// Enter answers a dialog (folder trust, permissions): it goes only to an agent herdr shows waiting at its prompt
+test('startOne (#4716): no Enter unless herdr says idle or done; blocked gets nothing at all', () => {
+  for (const status of ['blocked', 'unknown', null]) {
+    const w = inputBoxWorld({ status });
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, UNCONFIRMED, String(status));
+    assert.equal(w.of('send-keys').length, 0, String(status));
+    assert.equal(w.of('prompt').length, 1, String(status));
+  }
+  const blocked = inputBoxWorld({ status: 'blocked', draw: () => 'Do you trust this folder?' });
+  assert.equal(startOne(launch('claude', '/w/x'), blocked.run, {}, noPause, GATE).line, UNCONFIRMED);
+  assert.equal(blocked.of('prompt').length, 1);
+  const done = inputBoxWorld({ status: 'done' });
+  assert.equal(startOne(launch('claude', '/w/x'), done.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(done.of('send-keys').length, 1);
+});
+
+test('startOne (#4716): Enter that fails or starts nothing is unconfirmed, and the text is not sent again', () => {
+  for (const o of [{ sendKeys: false }, { takes: false }]) {
+    const w = inputBoxWorld(o);
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, UNCONFIRMED, JSON.stringify(o));
+    assert.equal(w.of('prompt').length, 1);
+  }
 });

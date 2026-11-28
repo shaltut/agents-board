@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { loadConfig } from './recipes.ts';
 import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand, realRun, runsOn, startOne, type Launch, type Runner } from './squad-up.ts';
-import { mayBeLeaving, pastSeatNames, planTick, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
+import { mayBeLeaving, pastSeatNames, planTick, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
 import type { AgentAdapter, SeatHandle } from './agents/types.ts';
@@ -33,6 +33,9 @@ export type Deps = {
   // #4261: aborted when the loop gives up on this tick (its deadline): checked before every step that acts
   signal?: AbortSignal;
 };
+// #4559: a project winding down closes at most this many seats a tick: each close waits up to a minute for herdr, and
+// the tick has a deadline
+const WIND_DOWN_CLOSES = 2;
 const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
 
 /** One tick. Returns the lines to print. Dry run: herdr is only read (agent list), the board is never written. */
@@ -46,7 +49,7 @@ export async function tick(d: Deps): Promise<string[]> {
   for (const { slug } of await sql`select slug from cb.projects where squad ->> 'supervise' = 'true' order by slug`) {
     try {
       const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
-      if (!s.supervised) continue;
+      if (!s.supervised && !s.winding_down) continue;
       // herdr null = the machine the supervisor runs on: a squad that puts it elsewhere is not this supervisor's
       const pc = Object.entries(s.squad.machines).find(([k, m]) => m.herdr === null && k.toLowerCase() !== machine())?.[0];
       if (pc === undefined) { states.push(s); continue; }
@@ -109,7 +112,7 @@ export async function tick(d: Deps): Promise<string[]> {
       out.push(`${state.project}: tick failed: ${msg(e)}`);
     }
   }
-  const leads = [...new Set(states.map(leadOf).filter((x) => x !== undefined))];
+  const leads = [...new Set(states.filter((s) => s.supervised).map(leadOf).filter((x) => x !== undefined))]; // a project that gets no work is not told
   d.signal?.throwIfAborted();
   try { await runnerCheck(d, out, log, leads); } catch (e) { out.push(`runner check failed: ${msg(e)}`); }
   return out;
@@ -152,7 +155,7 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
     if (r.ok || r.pane) memory.launched.add(l.name); // the agent exists (up, on a dialog, or its prompt not sent)
     // a startup dialog, or an agent up whose first prompt was not sent: a person finishes it; the lead is told once per block.
     // Event notes carry this short kind only: herdr's own error text stays in the PC log (r.line)
-    const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.pane ? 'prompt not sent' : 'start failed';
+    const kind = r.blocked ? 'startup dialog' : r.ok ? null : r.unconfirmed ? 'prompt not confirmed' : r.pane ? 'prompt not sent' : 'start failed';
     if (kind === 'start failed') {
       memory.failedAt.set(l.name, now);
       await log(project, 'failed', l.name, kind);
@@ -170,11 +173,15 @@ async function act(d: Deps, state: State, plan: TickPlan, out: string[], log: Lo
       else await launch(what, l);
     }
   }
+  let exits = 0;
   for (const name of plan.close) {
     d.signal?.throwIfAborted();
+    if (state.winding_down && exits >= WIND_DOWN_CLOSES) break;
     if (now - (memory.closeSkipAt.get(name) ?? -Infinity) < CLOSE_RETRY) continue;
-    if (dryRun) out.push(`would close ${name}`);
-    else out.push((await closeOne(d, state, name, log)).line);
+    if (dryRun) { out.push(`would close ${name}`); continue; }
+    const c = await closeOne(d, state, name, log);
+    out.push(c.line);
+    if (c.sent) exits++;
   }
   // #4332 (Q2970): a seat seen on its seat's setting again is forgotten; one on an old agent or model whose new one this
   // machine cannot start is kept, said once (restartTried)
@@ -231,7 +238,8 @@ async function tellLead(d: Deps, state: State, l: Launch, pane: string, why: 'di
   const local = l.prompt.includes('. Repos: ');
   const text = why === 'dialog'
     ? `supervisor: ${l.name} waits on a startup dialog in ${where}. Answer it there, then run${local ? ' the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`
-    : `supervisor: ${l.name} started in ${where} but its first prompt was not sent. Send it${local ? ' with the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`;
+    // PR 117 S2: a prompt herdr refused and one that may have landed read the same: the lead looks before sending
+    : `supervisor: ${l.name} started in ${where} but its first prompt may not have landed: check the pane, then send it if it is not there${local ? ' with the prompt command the supervisor printed in the PC log.' : `: ${promptCommand(l)}`}`;
   return tell(d, lead, text, out);
 }
 
@@ -241,18 +249,26 @@ async function tell(d: Deps, to: string, text: string, out: string[]) {
 
 // Mark closing, find its pane, re-check on a fresh statement, /exit (its agent adapter's close), wait for herdr to drop
 // the agent, close its pane. gone: the agent left herdr (#4332: only then does a restart start it again)
-async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<{ line: string; gone?: true }> {
+async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<{ line: string; gone?: true; sent?: true }> {
   const { sql, run } = d, sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))), clock = d.clock ?? Date.now;
   const unmark = () => sql`select cb.supervise_mark(${name}, false)`.catch(() => {});
-  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) return { line: `skip closing ${name}: it holds work or has no session` };
+  const windDown = !!state.winding_down;
+  if (!(await sql`select cb.supervise_mark(${name}, true) as ok`)[0].ok) {
+    if (windDown) d.memory.closeSkipAt.set(name, d.now); // it holds a live project's card: not asked again every tick
+    return { line: `skip closing ${name}: it holds work or has no session` };
+  }
   const m = state.squad.machines[name.split('@')[1]!]?.herdr ?? null, hn = herdrName(name);
   let pane: string | undefined, status: string | undefined, s: Session | undefined;
   try { // a throw before /exit is sent (the re-check, herdr) clears the mark too
     try { const got = herdrJson(run, m, ['agent', 'get', hn], 30_000); pane = find(got, 'pane_id'); status = find(got, 'agent_status'); } catch {}
     if (!pane) { await unmark(); d.memory.closeSkipAt.set(name, d.now); return { line: `could not close ${name}: herdr does not show it` }; }
     // the re-check sits right before /exit: the agent get above can take 30 s, long enough for a claim or an ask to land
-    s = ((await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State).sessions.find((x) => x.actor === name);
-    if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return { line: `skip closing ${name}: it took work` }; }
+    const fresh = (await sql`select cb.supervise_state(${state.project}) as s`)[0].s as State;
+    s = fresh.sessions.find((x) => x.actor === name);
+    if (windDown) { // #4559: it may keep cards, but only while the project still gets no work and it is still quiet
+      if (!fresh.winding_down) { await unmark(); return { line: `skip closing ${name}: ${state.project} is enabled again` }; }
+      if (!s || s.jobs_running || (s.bound && s.bound !== fresh.project) || !windDownQuiet(s, fresh.state_at, d.now)) { await unmark(); return { line: `skip closing ${name}: it is working again` }; }
+    } else if (!s || s.holds || s.questions || s.jobs || s.asks) { await unmark(); return { line: `skip closing ${name}: it took work` }; }
     // the agent running there now judges and closes it (#4002); one with no adapter yet is never closed
     let adapter: AgentAdapter;
     try { adapter = getAdapter(s.agent ?? 'claude'); } catch (e) { await unmark(); return { line: `skip closing ${name}: ${msg(e)}` }; }
@@ -266,11 +282,11 @@ async function closeOne(d: Deps, state: State, name: string, log: Log): Promise<
     d.signal?.throwIfAborted();
     if (classifyAgentGet(run(m, ['agent', 'get', hn], 30_000)) !== 'absent') continue;
     const closed = run(m, ['pane', 'close', pane], 30_000).status === 0;
-    await log(state.project, 'close', name, s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
-    return { line: closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`, gone: true };
+    await log(state.project, 'close', name, windDown ? 'project disabled' : s.role); // the mark stays until it lapses; cb.iam clears it if the name binds again
+    return { line: closed ? `closed ${name}` : `closed ${name}; its pane ${pane} did not close`, gone: true, sent: true };
   }
   // /exit was sent and it may still be exiting: the mark stays and lapses in 5 minutes, so no card lands on it meanwhile
-  return { line: `could not close ${name}` };
+  return { line: `could not close ${name}`, sent: true };
 }
 
 // The PC runner: no beat for 3 minutes → start it in a herdr tab, at most once per 10 minutes, unless its log port is

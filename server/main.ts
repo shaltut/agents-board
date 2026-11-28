@@ -12,7 +12,7 @@ import { callFn, RpcError } from './rpc.ts';
 import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
-import { releaseApp, loadRelease } from './release.ts';
+import { releaseApp, loadRelease, servedSha } from './release.ts';
 import { readRoleSeeds } from '../db/roles.ts';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -215,7 +215,9 @@ async function signInRule(admin: Who, fn: string, args: Record<string, unknown>)
 // admin sees the page read-only; the local dashboard (no admin) is Ahmed. The SQL guards stay as they are (squad_set
 // also lets the lead's cb squad set through; the rest are dashboard_only): this narrows only which signed-in admin may
 // call them. The pipeline switch and the reminders keep their guard (any admin, as on Board and Backlog).
-const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'role_text_import', 'project_role_set', 'github_watch_add', 'github_watch_remove', 'github_mute']);
+// #4559: a project's state (enabled, disabled, archived) is Ahmed's alone too
+const OWNER_ONLY = new Set(['squad_set', 'role_text_set', 'role_text_import', 'project_role_set', 'github_watch_add', 'github_watch_remove', 'github_mute',
+  'project_state']);
 // The Runners page (#4527) is for every admin to read (Q2978); managing the queue is Ahmed's and each project's lead's
 // (Q2982), and a lead is a session (cb job ...), never a signed-in admin. The SQL checks the same (cb._is_owner: exactly
 // ahmed on the dashboard; cb._is_lead); this refuses another admin before the database is asked.
@@ -255,7 +257,7 @@ app.post('/api/rpc/:fn', async (c) => {
 // Admins and the local dashboard only: guests never reach a path the sign-in rule above does not list.
 app.get('/api/role-text-seeds', (c) => c.json(readRoleSeeds(join(ROOT, 'prompts', 'roles'))));
 app.get('/api/projects', async (c) => c.json(await q.projects()));
-app.get('/api/tasks', async (c) => c.json(await q.tasks(opt(c.req.query('project')), opt(c.req.query('status')))));
+app.get('/api/tasks', async (c) => c.json(await q.tasks(opt(c.req.query('project')), opt(c.req.query('status')), c.req.query('live') === '1')));
 app.get('/api/tasks/:id', async (c) => {
   const r = await q.task(Number(c.req.param('id')));
   return r ? c.json(r) : c.json({ ok: false, error: 'not found' }, 404);
@@ -278,7 +280,7 @@ app.get('/api/events', async (c) => {
 });
 app.get('/api/today', async (c) => {
   const since = c.req.query('since') || new Date(Date.now() - 86_400_000).toISOString();
-  return c.json(await q.today(opt(c.req.query('project')), since));
+  return c.json(await q.today(opt(c.req.query('project')), since, servedSha()));
 });
 app.get('/api/last-seen', async (c) => c.json(await q.lastSeen()));
 // No tokens or hashes here: the For picker and the assignee list use it, to offer people on the item's project.
@@ -407,7 +409,8 @@ app.get('*', (c) =>
     ? c.html(readFileSync(join(DIST, 'index.html'), 'utf8'))
     : c.text('UI not built yet: run `pnpm build`', 503));
 
-/** The Telegram bot (#683) rides the same LISTEN as the pages: a question change reconciles the chat. */
+/** The Telegram bot (#683) rides the same LISTEN as the pages: a question change reconciles the chat (cb.project_state
+ *  sends one too: a project's questions leave or come back, #4559). */
 export async function startBot(token: string, api: string) {
   startTelegram({ token, api });
   clients.add((table) => { if (table === 'questions' || table === 'listen') reconcile(); });

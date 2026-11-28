@@ -4,7 +4,10 @@
 // Design note: docs/superpowers/specs/2026-11-26-agy-adapter-design.md (what is verified on agy 1.5.17 and what is not).
 import { classifyAgentGet, realRun, type Runner } from '../squad-up.ts';
 import type { AgentAdapter, AgentState, DisableAskSpec, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
-import { stripClaudeOnly } from './env.ts';
+import { stripClaudeOnly, withNoPrompt } from './env.ts';
+import { agyPreseed } from './trust.ts';
+import { join } from 'node:path';
+import { checkedEffort } from './effort.ts';
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 const CLAUDE_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable']);
@@ -37,15 +40,18 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
     // No session hook can hand a relay anything (agy has no inbox socket), so the relay is started with the pane.
     relayStart: 'pane-prestart',
 
-    // `herdr agent start <name> --kind agy --pane <pane> -- <args>`. --mode auto = OS sandbox plus a reviewer for what
-    // leaves it (never --dangerously-skip-permissions: the owner's classifier denied it). --settings is this session only.
+    // `herdr agent start <name> --kind agy --pane <pane> -- <args>`. Q3023 (Ahmed, 27 Nov): a seat runs like a Claude seat
+    // (Claude seats run bypassPermissions), no CLI sandbox, the board guard is the fence: --dangerously-skip-permissions
+    // approves every tool without asking, and --sandbox stays off. This replaces --mode auto (its OS sandbox blocked
+    // the board connection, #4583) and the earlier denial of this flag. --settings is this session only.
     buildLaunch(l: LaunchInput) {
       checkAgyModel(l.model);
-      const env = stripClaudeOnly(l.env);
+      const effort = checkedEffort('agy', l.name, l.effort);
+      const env = withNoPrompt(stripClaudeOnly(l.env)); // PR 104 review B3: no editor or pager waits for input
       env.AGY_CLI_DISABLE_AUTO_UPDATE = 'true'; // a pinned version: herdr's screen rules are tuned per version
       return {
         kind: 'agy',
-        args: ['--mode', 'auto', '--settings', `${trimSlash(l.board)}/kit/agy/settings.json`, ...(l.model ? ['--model', l.model] : [])],
+        args: ['--dangerously-skip-permissions', '--settings', `${trimSlash(l.board)}/kit/agy/settings.json`, ...(l.model ? ['--model', l.model] : []), ...(effort ? ['--effort', effort] : [])],
         env,
         // #4002: drops the Claude-only env from the pane's shell (agy has no exclude list: its shell saw them in the live
         // check) and refuses the seat unless the workspace hook is in place and agy trusts the folder (no trust, no hooks)
@@ -109,6 +115,10 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       };
     },
 
+    userRulesFile(home: string, env: NodeJS.ProcessEnv) {
+      return join(home, '.gemini', 'AGENTS.md');
+    },
+
     // agy never reads CLAUDE.md. AGENTS.md and GEMINI.md load from the launch folder up to the repo root; a repo's AGENTS.md
     // can be a bootstrap that points at CLAUDE.md.
     instructionMapping() {
@@ -116,13 +126,13 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
         nativeFiles: ['AGENTS.md', 'GEMINI.md', '.agents/rules/*.md', '~/.gemini/AGENTS.md', '~/.gemini/config/rules/*.md'],
         extraArgs: [],
         env: {},
-        note: 'agy does not read CLAUDE.md: a repo needs an AGENTS.md (or an always_on rule) that points at it',
+        note: 'agy does not read CLAUDE.md: a repo needs an AGENTS.md (cli/agent-context.ts repo makes this one from CLAUDE.md) or an always_on rule',
       };
     },
 
     // trustedWorkspaces holds native Windows paths (e.g. the user's home folder); never written here.
-    trustSpec() {
-      return { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', extraArgs: [] };
+    trustSpec(_paths, platform) {
+      return { dialogHint: 'Do you trust the contents of this project?', preseedPath: '~/.gemini/antigravity-cli/settings.json', preseed: agyPreseed(platform), extraArgs: [] };
     },
 
     disableAskSpec(): DisableAskSpec {

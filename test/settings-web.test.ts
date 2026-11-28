@@ -2,12 +2,13 @@
 // database: pure functions and file reads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ADDITION_CAP, SESSION_NAME, additionState, askFirstLabel, askFirstOf, askFirstOk, askFirstUnknown, askFirstValue, handEdited, seedChanges,
   CLAUDE_MODELS, OWNER_ONLY_MESSAGE, ROLES, ROLE_TEXT_CAP, RX, STALE_PREFIX, agentLabel, checkSquad, diffSquads, historyLines,
-  modelLabel, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
+  joinedModels, modelLabel, modelProblem, pathOk, roleLabel, roleTextLabel, roleTextState, saveError, seatNote, setCount, setRoleOn, summarizeSquad, toDocument,
+  actorLabel, charCount, restoredHerdr, seatName, setSupervise,
   type Seat, type Squad, type SquadPage,
 } from '../web/src/lib/squad.ts';
 import { PAGES, visiblePages } from '../web/src/lib/route.ts';
@@ -31,16 +32,58 @@ const squad = (): Squad => ({
   areas: [], supervise: true,
 });
 
-test('rpc() adds no actor to the settings reads: each takes none in db/schema.sql (Postgres would find no function)', () => {
-  for (const fn of ['squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page']) {
-    const m = schema.match(new RegExp(`create function cb\\.${fn}\\(([^)]*)\\)`));
-    assert.ok(m, `cb.${fn} is in the schema`);
-    assert.ok(!/\bactor\b/.test(m![1]!), `cb.${fn} takes no actor`);
-    assert.ok(NO_ACTOR.has(fn), `${fn} is in NO_ACTOR`);
+/** Each cb.<fn>'s parameter names per definition, from the schema text: parentheses balanced (a default like now() has
+ *  its own), commas split at the top level only, nothing inside a quoted default or a -- comment counted. */
+function schemaParams(sqlText: string): Map<string, string[][]> {
+  const out = new Map<string, string[][]>();
+  for (const m of sqlText.matchAll(/create (?:or replace )?function cb\.([a-z_0-9]+)\(/g)) {
+    const parts: string[] = [];
+    let depth = 1, quoted = false, cur = '';
+    for (let i = m.index! + m[0].length; i < sqlText.length; i++) {
+      const c = sqlText[i]!;
+      if (!quoted && c === '-' && sqlText[i + 1] === '-') { const nl = sqlText.indexOf('\n', i); i = nl < 0 ? sqlText.length : nl - 1; continue; } // a -- comment, its apostrophes too
+      if (c === "'") quoted = !quoted;
+      else if (!quoted && c === '(') depth++;
+      else if (!quoted && c === ')' && --depth === 0) break;
+      if (!quoted && depth === 1 && c === ',') { parts.push(cur); cur = ''; } else cur += c;
+    }
+    if (cur.trim()) parts.push(cur);
+    const names = parts.map((p) => p.trim().replace(/^(in|out|inout|variadic)\s+/i, '').split(/\s+/)[0]!.toLowerCase());
+    out.set(m[1]!, [...(out.get(m[1]!) ?? []), names]);
   }
-  for (const fn of ['squad_set', 'role_text_set', 'github_watch_add', 'github_watch_remove', 'github_mute', 'project_pipeline', 'task_ping_bulk', 'project_role_set', 'role_text_import']) {
-    assert.ok(!NO_ACTOR.has(fn), `${fn} takes an actor`);
+  return out;
+}
+/** Every cb function the web calls: rpc('name', ...) anywhere, and in a file that calls rpc(fn, ...) with a name it
+ *  passes along, each quoted name the server allows (server/rpc.ts RPC_FUNCTIONS). */
+function webCalls(): { direct: Set<string>; called: Set<string> } {
+  const allowed = new Set([...readFileSync(join(root, 'server', 'rpc.ts'), 'utf8').match(/RPC_FUNCTIONS = \[([\s\S]*?)\];/)![1]!.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!));
+  const files: string[] = [];
+  const walk = (d: string) => { for (const f of readdirSync(d, { withFileTypes: true })) f.isDirectory() ? walk(join(d, f.name)) : /\.tsx?$/.test(f.name) && files.push(join(d, f.name)); };
+  walk(join(root, 'web', 'src'));
+  const direct = new Set<string>(), called = new Set<string>();
+  for (const f of files) {
+    const text = readFileSync(f, 'utf8').replace(/export const NO_ACTOR = new Set\(\[[^\]]*\]\)/, '');
+    for (const m of text.matchAll(/\brpc(?:<[^(]*?>)?\(\s*['"]([a-z_]+)['"]/g)) { direct.add(m[1]!); called.add(m[1]!); }
+    if (/(?<!function )\brpc(?:<[^(]*?>)?\(\s*[A-Za-z_]/.test(text)) for (const m of text.matchAll(/['"]([a-z_]+)['"]/g)) if (allowed.has(m[1]!)) called.add(m[1]!);
   }
+  return { direct, called: new Set([...called].filter((f) => allowed.has(f) || direct.has(f))) };
+}
+
+test('NO_ACTOR is exactly the functions the web calls that take no actor in db/schema.sql (review M-1: derived, not a hand list)', () => {
+  // the parser reads a default with its own parentheses (digest's now()) and a signature over two lines
+  assert.deepEqual(schemaParams("create function cb.f(at timestamptz default now(), note text default 'a, (b)', -- it's (a note)\n  actor text default null) returns int"),
+    new Map([['f', [['at', 'note', 'actor']]]]));
+  const params = schemaParams(schema);
+  const { direct, called } = webCalls();
+  assert.ok(called.size >= 40, `found ${called.size} functions the web calls`);
+  const allowed = readFileSync(join(root, 'server', 'rpc.ts'), 'utf8');
+  for (const fn of direct) assert.ok(allowed.includes(`'${fn}'`), `${fn} is in RPC_FUNCTIONS (else the server answers unknown function)`);
+  for (const fn of called) assert.ok(params.has(fn), `cb.${fn} is in the schema`);
+  // as the server decides (server/main.ts takesActor): any definition with a parameter named actor
+  const actorless = [...called].filter((fn) => !params.get(fn)!.some((names) => names.includes('actor'))).sort();
+  assert.deepEqual([...NO_ACTOR].sort(), actorless, 'rpc() would add an actor where Postgres has none, or leave out one it needs');
+  for (const fn of ['squad_page', 'squad_options', 'role_text_page', 'github_watches', 'project_role_page', 'digest', 'seen']) assert.ok(called.has(fn) && NO_ACTOR.has(fn), fn);
+  for (const fn of ['squad_set', 'role_text_set', 'github_watch_add', 'project_pipeline', 'task_ping_bulk', 'project_role_set', 'role_text_import']) assert.ok(called.has(fn) && !NO_ACTOR.has(fn), fn);
 });
 
 // #4525: the project's addition and who its seats ask first, as the page checks them before cb.project_role_set does
@@ -190,10 +233,103 @@ test('the JS patterns match squad_set\'s POSIX ones on paths, slugs and model na
   assert.ok(RX.repo.test('acme/widgets') && !RX.repo.test('acme'));
 });
 
+test('a model field that appended a second pick is caught and refused, never saved as two names (#4717)', () => {
+  const known = ['gemini-4-neon-high', 'gemini-4-neon-xhigh'];
+  const joined = 'gemini-4-neon-highgemini-4-neon-xhigh';
+  // the picker slip: the second choice was appended to the first, with no separator
+  assert.deepEqual(joinedModels(joined, known), ['gemini-4-neon-high', 'gemini-4-neon-xhigh']);
+  // the same name picked twice is a join too, as the server judges it (PR 123 review)
+  assert.deepEqual(joinedModels('gemini-4-neon-highgemini-4-neon-high', known), ['gemini-4-neon-high', 'gemini-4-neon-high']);
+  assert.match(modelProblem('agy', 'gemini-4-neon-highgemini-4-neon-high', known) ?? '', /two model names joined/);
+  // not a join: a known name itself, a new name, or nothing
+  assert.equal(joinedModels('gemini-4-neon-xhigh', known), null);
+  assert.equal(joinedModels('gemini-4-neon-low', known), null);
+  assert.equal(joinedModels('', known), null);
+  // the agy shape (letters, digits, . _ -) lets a doubled name through; the known names catch it and name both halves
+  assert.equal(modelProblem('agy', joined), null, 'the shape alone passes a doubled name');
+  assert.match(modelProblem('agy', joined, known) ?? '', /two model names joined/);
+  assert.equal(modelProblem('agy', 'gemini-4-neon-xhigh', known), null, 'a real name is still fine');
+  // the form blocks the save (the Save button is disabled while checkSquad reports a problem)
+  const bad = squad(); bad.roles.qa = { ...bad.roles.qa!, agent: 'agy', model: joined };
+  const withUsed = { ...opts, models_used: { agy: known } };
+  assert.match(checkSquad(bad, 'demo', withUsed).map((p) => p.text).join(' | '), /two model names joined/);
+  // the field no longer offers a native datalist, which is where the second pick was appended
+  const card = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleCard.tsx'), 'utf8');
+  assert.doesNotMatch(card, /<datalist/, 'the model field must not use a native datalist (#4717)');
+  assert.doesNotMatch(card, /list=\{`models-/, 'nothing links a model input to a datalist (#4717)');
+});
+
+// the PR 71 review's minors
+test('the Supervisor ticked on then off leaves nothing to save on a squad that has no supervise key', () => {
+  const saved = squad(); delete saved.supervise;
+  const back = setSupervise(setSupervise(saved, true, saved), false, saved);
+  assert.equal(JSON.stringify(toDocument(back)), JSON.stringify(saved), 'the page compares the documents as text: not dirty');
+  assert.equal(setSupervise(saved, true, saved).supervise, true);
+  assert.equal(setSupervise(squad(), false, squad()).supervise, false, 'a saved key is kept, as false');
+  const page = readFileSync(join(root, 'web', 'src', 'views', 'Settings.tsx'), 'utf8');
+  assert.match(page, /edit\(\(s\) => setSupervise\(s, on, page\.squad\)\)/);
+  assert.match(page, /!!squad\.supervise !== page\.supervise && ' Changed here/, 'no key and false read the same: no "changed here"');
+});
+
+test('a machine switched to This PC and back gets its herdr name back, not the MacBook', () => {
+  const used = [{ key: 'far', herdr: 'box-2', board: '/b' }, { key: 'pc', herdr: null, board: 'C:/b' }];
+  assert.equal(restoredHerdr('mac', { mac: 'box-7' }, used), 'box-7', 'the name it had before the switch');
+  assert.equal(restoredHerdr('far', {}, used), 'box-2', 'else the name another squad gives that key');
+  assert.equal(restoredHerdr('pc', {}, used), 'macbook', 'else the MacBook, as before');
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'settings', 'Machines.tsx'), 'utf8'), /restoredHerdr\(k, herdrBefore, options\.machines_used\)/);
+});
+
+test('a live seat whose machine key is not in the squad: the squad machine by its herdr name, never the raw name', () => {
+  const seat: Seat = { actor: 'demo-B1@gone', machine: 'macbook', role: 'builder', area: null, repo: 'api', agent: 'claude', model: 'sonnet', in_squad: true,
+    want_agent: 'claude', want_model: 'sonnet', same: true, holds: 0, last_seen: '' };
+  assert.equal(seatName(seat, squad()), 'Builder 1 on MacBook');
+  const other = squad(); other.machines.far = { herdr: 'box-2', board: '/b' };
+  assert.equal(seatName({ ...seat, machine: 'box-2' }, other), 'Builder 1 on box-2', 'a squad machine with that herdr name');
+  assert.equal(seatName({ ...seat, machine: 'host-123' }, squad()), 'Builder 1 on another machine');
+  assert.equal(seatName({ ...seat, machine: null }, squad()), 'Builder 1 on another machine');
+});
+
+test('Last edits count characters as the counter does (code points, not UTF-16 units)', () => {
+  assert.equal(charCount('😀😀a'), 3);
+  const page = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'RoleTexts.tsx'), 'utf8');
+  assert.match(page, /charCount\(e\.before \?\? ''\)\.toLocaleString\(\)\} → \{charCount\(e\.after\)/);
+  assert.doesNotMatch(page, /e\.after\.length/);
+});
+
+test('the watch help says what re-adding a watched repo does: later pull requests only (github_watch_add patches project)', () => {
+  const page = readFileSync(join(root, 'web', 'src', 'components', 'settings', 'GitHub.tsx'), 'utf8');
+  assert.doesNotMatch(page, /moves its cards/);
+  assert.match(page, /its next pull requests come to this project, and the cards it already made stay where they are/);
+});
+
+test('a gear beside the project switcher opens Project settings, owner only, not on a phone; the Board header stays clear', () => {
+  const sw = readFileSync(join(root, 'web', 'src', 'components', 'ProjectSwitcher.tsx'), 'utf8');
+  assert.match(sw, /href\(\{ view: 'settings', project \}\)/);
+  assert.match(sw, /\{settings && \(/, 'the gear only for a viewer who gets the page');
+  assert.match(sw, /className="-ml-2 hidden size-8 shrink-0 sm:grid /, 'hidden below sm: the nav\'s Settings menu has the page on a phone');
+  assert.match(readFileSync(join(root, 'web', 'src', 'components', 'TopBar.tsx'), 'utf8'), /<ProjectSwitcher project=\{route\.project\} settings=\{pages\.some\(\(p\) => p\.view === 'settings'\)\} \/>/);
+  const board = readFileSync(join(root, 'web', 'src', 'views', 'Board.tsx'), 'utf8');
+  assert.doesNotMatch(board, /pipeline/i, 'PR 73: no pipeline switch or line on the Board');
+  assert.match(schema, /perform cb\.dashboard_only\('Project settings'\);\s+a := cb\.set_actor\(coalesce\(actor, 'ahmed'\)\);\s+update cb\.projects pr set pipeline/,
+    'project_pipeline\'s refusal names the page the switch is on');
+});
+
 test('the saved document: lowering a count drops seats that no longer exist; version and changed never go back', () => {
   const s = setCount(squad(), 'builder', 1, 'api');
   assert.equal(s.roles.builder!.seats, undefined, 'seat api:2 went with the count');
   const back = toDocument({ ...squad(), version: 4, changed: true } as Squad);
   assert.ok(!('version' in back) && !('changed' in back));
   assert.deepEqual(Object.keys(back).sort(), ['areas', 'machines', 'repos', 'roles', 'supervise'], 'every other key is carried');
+});
+
+// #3779 (PR 113 follow-up): "The lead" is the project's lead by role (sessions_overview's lead), whatever its name; with no
+// sessions to go by, the old orch@ name still reads as the lead
+test('actorLabel: the lead by the sessions\' lead flag, not the orch@ name', () => {
+  const leads = new Set(['SQUAD@pc']);
+  assert.equal(actorLabel('SQUAD@pc', leads), 'The lead');
+  assert.equal(actorLabel('orch@pc', leads), 'A session', 'an orch@ name that does not lead is a session');
+  assert.equal(actorLabel('W1@pc', leads), 'A session');
+  assert.equal(actorLabel('ahmed', leads), 'Ahmed');
+  assert.equal(actorLabel('orch@pc'), 'The lead', 'no sessions read yet: the old name rule');
+  assert.equal(actorLabel('board', leads), 'board');
 });

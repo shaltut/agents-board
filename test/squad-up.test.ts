@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, launchSpec, opencodePort, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
 import { squadShow } from '../cli/squad-show.ts';
 import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
 import { help } from '../cli/help.ts';
@@ -272,6 +272,8 @@ test('squad up: a quiet lead: no lead started, one line names it and how to fix 
   const prot = await squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? { ...squad, protected: ['development', 'releases/*'] } : [quietRow(10)]), fake(() => GONE).run);
   assert.match(prot, /^skip lead: QO@shaltoot leads demo but is not live \(last seen 10 min ago\): restart it by hand in a tab made with herdr tab create --env 'CB_ROLE=lead' --env 'CB_AGENT=claude' --env 'CB_PROTECTED_BRANCHES=development,releases\/\*', or cb iam <name> demo --role lead$/m);
   assert.match(await squadUp('demo', true, callFn([quietRow(125)]), fake(() => GONE).run), /\(last seen 2h 5m ago\)/);
+  // #3779: the board's clock ahead of this one: never "last seen -3 min ago"
+  assert.match(await squadUp('demo', true, callFn([quietRow(-3)]), fake(() => GONE).run), /\(last seen 0 min ago\)/);
   const old = await squadUp('demo', true, callFn([...rows([['orch@shaltoot', 'other', true, 'lead']]), quietRow(2 * 24 * 60)]), fake(() => GONE).run);
   assert.match(old, /^start demo-orch@shaltoot \(lead, opus\) on shaltoot$/m);
   assert.doesNotMatch(old, /skip lead/);
@@ -554,6 +556,174 @@ test('startOne: any other start error is not retried', () => {
   assert.match(r.line, /model_missing/);
 });
 
+// #4576: a seat CLI that exits at start (codex 0.160 dropped --full-auto: 'unexpected argument', then exit) left herdr
+// waiting out its whole timeout, and squad up said only "timed out waiting for agent startup". The pane is read before
+// it is closed, and the CLI's own last lines go in the failure, with values cut.
+const TIMEOUT = { status: 1, stderr: '{"error":{"code":"agent_start_timeout","message":"timed out waiting for agent startup"}}' };
+const paneText = (text: string) => ({ status: 0, stdout: text, stderr: '' });
+const CODEX_EXIT = "PS C:\\w\\sq-board> codex --no-daemon --full-auto\nerror: unexpected argument '--full-auto' found\n\n  tip: to pass '--full-auto' as a value, use '-- --full-auto'\n\nUsage: codex [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.\nPS C:\\w\\sq-board> \n";
+
+test('startOne: a CLI that exits at start: the failure carries its error lines, read before the pane closes (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[0] === 'pane' && c.args[1] === 'read') return paneText(CODEX_EXIT);
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /timed out waiting for agent startup/);
+  assert.match(r.line, /the CLI said: error: unexpected argument '--full-auto' found/);
+  assert.match(r.line, /Usage: codex \[OPTIONS\] \[PROMPT\]/);
+  // only lines that look like a CLI error: the prompt line with the folder, the tip and the blank lines are dropped
+  assert.doesNotMatch(r.line, /sq-board|PS C:|tip:/);
+  const i = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'read');
+  const j = f.calls.findIndex((c) => c.args[0] === 'pane' && c.args[1] === 'close');
+  assert.ok(i >= 0 && j > i, 'read, then close');
+  assert.deepEqual(f.calls[i].args.slice(0, 3), ['pane', 'read', 'w5:p1']);
+  assert.deepEqual(f.calls[j].args, ['pane', 'close', 'w5:p1']);
+});
+
+// PR 93 review M2: the flag name is the point, however long
+test('startOne: a flag name in an error line is kept whole, a flag\'s value is not (#4576)', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: invalid value for --config=sandbox_workspace_write.network_access=true\n");
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  assert.match(r.line, /'--dangerously-bypass-hook-trust'/);
+  assert.match(r.line, /invalid value for --config=…/);
+  assert.doesNotMatch(r.line, /sandbox_workspace_write|network_access/);
+});
+
+// PR 93 review M1: the line goes to squad up's output and the supervisor log, so nothing that may be a value survives
+test('startOne: no value survives in the pane lines: env sets, tokens, passwords, user:pass@host, keys, e-mails, paths (#4576)', () => {
+  const SECRETS = [
+    "error: $env:OPENAI_API_KEY = 'sk-live-abc'", 'error: OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789',
+    'error: auth failed: Authorization: Bearer abc123', 'error: unauthorized, Bearer qwertyuiop',
+    'error: bad config {"password": "hunter2"}', 'error: invalid --token hunter2', 'error: invalid --api-key=hunter3',
+    'error: cannot reach https://alice:s3cret@git.example.com/repo', 'error: bad key dGhpcyBpcyBh/c2VjcmV0+dG9rZW4=',
+    'error: AWS key AKIAIOSFODNN7EXAMPLE rejected', 'error: account someone@example.com is not allowed',
+    'error: no such file C:\\Users\\jdoe\\ClientCo\\notes.txt', 'error: no such file /Users/jdoe/ClientCo/notes.txt',
+    'error: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef012345', 'error: password hunter4 is wrong', 'error: secret: hunter5',
+  ];
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(0, 8).join('\n') + '\n\u001b[31merror: exit 1\u001b[0m\n');
+  });
+  const g = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(SECRETS.slice(8).join('\n'));
+  });
+  const line = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line + ' ' + startOne(wsLaunch('orch@shaltoot'), g.run, {}, () => {}).line;
+  for (const v of ['sk-live', 'sk-proj', 'abc123', 'qwertyuiop', 'hunter2', 'hunter3', 'hunter4', 'hunter5', 'alice', 's3cret', 'git.example.com', 'dGhpcyBp', 'c2VjcmV0',
+    'AKIAIOSFODNN7EXAMPLE', 'someone', 'example.com', 'jdoe', 'ClientCo', 'notes.txt', 'ghp_', '\u001b']) {
+    assert.ok(!line.includes(v), `"${v}" leaked: ${line}`);
+  }
+  // the words that say what went wrong stay
+  assert.match(line, /error: auth failed/);
+  assert.match(line, /--token …/);
+  assert.match(line, /error: no such file …/);
+});
+
+// #4617 (PR 93 re-review): a flag is a flag's shape, not anything after a dash; a secret-sounding word cuts the next one
+// whatever its form; tabs and curly quotes neither glue nor hide words
+test('startOne: only flag-shaped flags survive; secret-ish words cut the next word; tabs split, curly quotes trim (#4617)', () => {
+  const lineFor = (text: string) => {
+    const f = fake((c) => {
+      if (c.args[0] === 'tab') return paneOut('w5:p1');
+      if (c.args[1] === 'start') return TIMEOUT;
+      if (c.args[1] === 'read') return paneText(text);
+    });
+    return startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line;
+  };
+  // S1: random tokens after a dash, a password stuck to a short flag, upper-case or over-long "flags"
+  const s1 = lineFor('error: bad option -aB3dEf9xQ\nerror: invalid -pHunter6pw\nerror: unknown --Hunter7Secret\n'
+    + `error: unknown --${'a'.repeat(70)}\nerror: invalid --x_y_hunter8\n`);
+  for (const v of ['aB3dEf9xQ', 'Hunter6pw', 'Hunter7Secret', 'a'.repeat(70), 'hunter8']) assert.ok(!s1.includes(v), `"${v}" leaked: ${s1}`);
+  // real flags stay whole
+  const ok = lineFor("error: unexpected argument '--dangerously-bypass-hook-trust' found\nerror: unknown option -m\nerror: invalid --model=gpt\n");
+  assert.match(ok, /'--dangerously-bypass-hook-trust' found/);
+  assert.match(ok, /unknown option -m/);
+  assert.match(ok, /invalid --model=…/);
+  // L1: plain-word secrets and names
+  const l1 = lineFor(['error: API_KEY: hunter9', 'error: bad access_token hunterA', 'error: wrong passphrase hunterB', 'error: unknown profile clientco',
+    'error: no such user jdoe', 'error: account acmecorp denied', 'error: org globex not found', 'error: login mallory failed', 'error: mysql -p hunterC refused',
+    'error: invalid credentials hunterD', 'error: authorization hunterE denied'].join('\n'));
+  for (const v of ['hunter9', 'hunterA', 'hunterB', 'clientco', 'jdoe', 'acmecorp', 'globex', 'mallory', 'hunterC', 'hunterD', 'hunterE']) assert.ok(!l1.includes(v), `"${v}" leaked: ${l1}`);
+  // L2: a tab splits words (it no longer glues a value onto a kept word); L3: curly quotes are trimmed like straight ones
+  const l2 = lineFor('error: invalid token\thunterF\nerror: unexpected argument \u201c--full-auto\u201d found\nerror: unknown \u2018--no-daemon\u2019\n');
+  assert.ok(!l2.includes('hunterF'), l2);
+  assert.match(l2, /\u201c--full-auto\u201d found/);
+  assert.match(l2, /unknown \u2018--no-daemon\u2019/);
+  // cosmetic: after bypass or oauth the next word is kept
+  assert.match(lineFor('error: --dangerously-bypass-hook-trust conflicts with sandbox\nerror: oauth provider rejected\n'), /bypass-hook-trust conflicts with sandbox.*oauth provider rejected/);
+});
+
+// PR 105 review: punctuation and linking words between a secret word and its value, other control characters, dashed
+// account flags, secret words matched inside ordinary words, and a very long line
+test('startOne: PR 105 review B1-B7: no value after "password :", "token is", a vertical tab or --user; ordinary words stay; long lines stay fast (#4617)', () => {
+  const lineFor = (text: string) => {
+    const f = fake((c) => {
+      if (c.args[0] === 'tab') return paneOut('w5:p1');
+      if (c.args[1] === 'start') return TIMEOUT;
+      if (c.args[1] === 'read') return paneText(text);
+    });
+    return startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {}).line;
+  };
+  const leaks = (line: string, values: string[]) => values.filter((v) => line.includes(v));
+  // B1: a punctuation-only token between the word and the value
+  assert.deepEqual(leaks(lineFor(['error: password : hunterG', 'error: token = hunterH', 'error: secret - hunterI', 'error: api_key := hunterJ'].join('\n')),
+    ['hunterG', 'hunterH', 'hunterI', 'hunterJ']), []);
+  // B2: vertical tab, form feed and a bare CR are spaces, never glue
+  assert.deepEqual(leaks(lineFor('error: invalid token\u000bhunterK\nerror: invalid token\u000chunterL\nerror: bad token\rhunterM\n'), ['hunterK', 'hunterL', 'hunterM']), []);
+  // B3: an account name given as a long flag
+  const b3 = lineFor(['--user', '--username', '--profile', '--org', '--tenant', '--account'].map((f, i) => `error: unknown ${f} name${'ABCDEF'[i]}x`).join('\n'));
+  assert.deepEqual(leaks(b3, ['nameAx', 'nameBx', 'nameCx', 'nameDx', 'nameEx', 'nameFx']), []);
+  assert.match(b3, /--username/);
+  // B5: a linking word between the word and the value; an outcome after it is kept
+  assert.deepEqual(leaks(lineFor(['error: password is hunterN', 'error: token was hunterO', 'error: the key is set to hunterP', 'error: API_KEY = is hunterQ'].join('\n')),
+    ['hunterN', 'hunterO', 'hunterP', 'hunterQ']), []);
+  assert.match(lineFor('error: password is missing\n'), /password is missing/);
+  // B4: a secret word inside an ordinary word is not one, and the messages that matter stay readable
+  const b4 = lineFor(['error: tests passed then failed', 'error: keyboard layout invalid', 'error: author field missing', 'error: credit balance unknown',
+    'error: API key not found', 'error: authentication failed', 'error: codex login required', 'error: invalid --dangerously-bypass-hook-trust value'].join('\n'));
+  for (const kept of ['tests passed then failed', 'keyboard layout invalid', 'author field missing', 'credit balance unknown', 'API key not found',
+    'authentication failed', 'codex login required']) assert.ok(b4.includes(kept), `"${kept}" in ${b4}`);
+  // and compounds still are: camelCase, snake_case, one word
+  assert.deepEqual(leaks(lineFor(['error: bad accessToken hunterR', 'error: bad AUTH_TOKEN hunterS', 'error: bad apikey hunterT', 'error: bad client-secret hunterU',
+    'error: invalid credentials hunterV', 'error: authorization hunterW denied'].join('\n')), ['hunterR', 'hunterS', 'hunterT', 'hunterU', 'hunterV', 'hunterW']), []);
+  // B7: a 100k-character line is cut before it is cleaned, so it stays fast
+  const t0 = Date.now();
+  lineFor(`error: x${'!'.repeat(100_000)}\nerror: ${'a.'.repeat(100_000)}\nerror: ${'('.repeat(100_000)}\n`);
+  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+});
+
+test('startOne: an unreadable pane still fails with herdr\'s reason; long output is cut to its last lines (#4576)', () => {
+  const unreadable = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return { status: 1, stderr: 'pane gone' };
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), unreadable.run, {}, () => {});
+  assert.ok(!r.ok);
+  assert.match(r.line, /^failed orch@shaltoot: .*timed out waiting for agent startup/);
+  assert.doesNotMatch(r.line, /the CLI said/);
+  assert.ok(has(unreadable.calls, 'pane', 'close', 'w5:p1'));
+
+  const long = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText(Array.from({ length: 40 }, (_, k) => `error: line ${k} ${'word '.repeat(60)}`).join('\n'));
+  });
+  const l = startOne(wsLaunch('orch@shaltoot'), long.run, {}, () => {}).line;
+  assert.match(l, /error: line …/);
+  assert.equal(l.split(' | ').length, 8, 'the last 8 error lines');
+  assert.ok(l.length < 1200, `short enough to read: ${l.length}`);
+});
+
 test('startOne: busy, then a startup dialog: the split is kept as blocked and counts toward its tab', () => {
   let starts = 0;
   const f = fake((c) => {
@@ -636,7 +806,7 @@ test('launchFor sets CB_ROLE and CB_AGENT and defaults missing agent to claude',
   }
 });
 
-// synthetic: cb.squad_set refuses a non-Claude primary seat in phase 1, so this squad never comes from the board
+// synthetic: cb.squad_set refuses a non-Claude primary seat outside cb._agents_projects() (#4585), so a demo squad never holds one
 const MIXED: any = { ...squad, roles: { ...squad.roles,
   builder: { count: 3, model: 'sonnet', machine: 'macbook', fallback: [{ agent: 'codex', model: 'gpt-6.1-sol' }],
     seats: { '2': { model: 'opus' }, '3': { agent: 'codex', model: 'gpt-6.1-sol', fallback: [{ agent: 'opencode', model: 'anthropic/claude-opus-5-5' }] } } },
@@ -738,14 +908,49 @@ test('squad up --dry-run names a non-Claude seat agent/model; a Claude seat as b
   assert.match(out, /^start demo-B1@macbook \(builder, sonnet\) on macbook$/m);
 });
 
-test('startOne refuses an unimplemented agent before creating a pane', () => {
+// #4585: one builder each of claude, codex, agy and opencode on the PC (synthetic paths)
+const FOUR: any = {
+  machines: { pc: { herdr: null, repo: 'C:/work/demo', board: 'C:/work/board' } },
+  roles: { lead: { count: 1, model: 'opus', machine: 'pc' }, builder: { count: 4, model: 'sonnet', machine: 'pc', seats: {
+    '2': { agent: 'codex', model: 'gpt-6.1-sol' }, '3': { agent: 'agy', model: 'gemini-4-neon-xhigh' }, '4': { agent: 'opencode', model: 'anthropic/claude-opus-5-5' } } } },
+  areas: [],
+};
+const CODEX_BUILDER_SANDBOX = 'danger-full-access'; // Q3023
+const AGY_ARGS = ['--dangerously-skip-permissions', '--settings', 'C:/work/board/kit/agy/settings.json', '--model', 'gemini-4-neon-xhigh'];
+test('squad up --dry-run (#4585): four builders, one per agent, plan four launches; without CB_MCP_GATE_OK the three others say would fail', async () => {
+  const up = () => squadUp('demo', true, async (fn: string) => (fn === 'squad_get' ? FOUR : []), fake((c) => (c.args[1] === 'get' ? GONE : undefined)).run);
+  const starts = ['start demo-B1@pc (builder, sonnet) on pc', 'start demo-B2@pc (builder, codex/gpt-6.1-sol) on pc',
+    'start demo-B3@pc (builder, agy/gemini-4-neon-xhigh) on pc', 'start demo-B4@pc (builder, opencode/anthropic/claude-opus-5-5) on pc'];
+  const shut = (await up()).split('\n');
+  for (const s of starts) assert.ok(shut.includes(s), s);
+  for (const k of ['codex', 'agy', 'opencode']) assert.ok(shut.some((l) => l.startsWith(`  would fail: agent "${k}" cannot start a seat with MCP off for one run`)), k);
+  assert.equal(shut.filter((l) => l.startsWith('  would fail')).length, 3);
+  process.env.CB_MCP_GATE_OK = 'codex,opencode,agy';
+  try {
+    assert.deepEqual((await up()).split('\n'), ['start orch@pc (lead, opus) on pc', ...starts]);
+    const spec = (n: string) => launchSpec(launchFor('demo', FOUR, wantList('demo', FOUR).find((w) => w.name === n)!)).spec;
+    const b1 = spec('demo-B1@pc'), b2 = spec('demo-B2@pc'), b3 = spec('demo-B3@pc'), b4 = spec('demo-B4@pc'), port = String(opencodePort('demo-B4@pc'));
+    assert.deepEqual([b1.kind, b1.args, Object.keys(b1.env), b1.prestart], ['claude', ['--model', 'sonnet', '--permission-mode', 'bypassPermissions',
+      '--settings', 'C:/work/board/kit/permissions/builder.json', '--strict-mcp-config', '--mcp-config', 'C:/work/board/kit/mcp/none.json'], ['CB_ROLE', 'CB_AGENT'], undefined]);
+    assert.deepEqual([b2.kind, b2.args.slice(0, 8), Object.keys(b2.env), b2.prestart], ['codex', ['--no-daemon', '-m', 'gpt-6.1-sol', '-a', 'never',
+      '--dangerously-bypass-hook-trust', '-s', CODEX_BUILDER_SANDBOX], ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK'], { args: [] }]);
+    assert.ok(b2.args.includes('--disable') && b2.args.includes('plugins'), 'MCP off: plugins and apps disabled');
+    assert.deepEqual([b3.kind, b3.args, Object.keys(b3.env), b3.prestart], ['agy', AGY_ARGS, ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'AGY_CLI_DISABLE_AUTO_UPDATE'], { args: [] }]);
+    assert.deepEqual([b4.kind, b4.args, Object.keys(b4.env), b4.prestart], ['opencode', ['C:/work/demo', '--hostname', '127.0.0.1', '--port', port, '-m', 'anthropic/claude-opus-5-5', '--auto'],
+      ['GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR', 'VISUAL', 'PAGER', 'GIT_PAGER', 'GH_PAGER', 'MANPAGER', 'GH_PROMPT_DISABLED', 'GIT_TERMINAL_PROMPT', 'CB_ROLE', 'CB_AGENT', 'CB_MCP_GATE_OK', 'CB_OPENCODE_PORT', 'OPENCODE_DISABLE_CLAUDE_CODE_PROMPT', 'OPENCODE_DISABLE_AUTOUPDATE'], { args: [port] }]);
+    // the port is the seat's own, stable across restarts, in range
+    assert.ok(Number(port) >= 41000 && Number(port) <= 48999, port);
+  } finally { delete process.env.CB_MCP_GATE_OK; }
+});
+
+test('startOne refuses an agent whose MCP check is not confirmed here (or an unknown one) before creating a pane', () => {
   const b3 = launchFor('demo', MIXED, mixedWant('demo-B3@macbook'));
   const each: Record<string, { pane: string; panes: number }>[] = [{}, { macbook: { pane: 'w4:p1', panes: 1 } }];
   for (const tabs of each) { // a new tab, or a split of this run's tab
     const f = fake((c) => (c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
     const r = startOne(b3, f.run, tabs);
     assert.equal(r.ok, false);
-    assert.equal(r.line, 'failed demo-B3@macbook: agent "codex" is not installed yet (phase 1 supports claude only)');
+    assert.match(r.line, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off for one run: .*set CB_MCP_GATE_OK=codex /);
     assert.equal(r.pane, undefined);
     assert.deepEqual(f.calls, [], 'no herdr call: no pane, never a Claude start in its place');
   }
@@ -754,10 +959,10 @@ test('startOne refuses an unimplemented agent before creating a pane', () => {
   assert.equal(f.calls.length, 0);
 });
 
-test('squad up starts the Claude seats and refuses the codex one without touching a pane for it', async () => {
+test('squad up starts the Claude seats and refuses the codex one (its MCP check not confirmed here) without touching a pane for it', async () => {
   const f = fake((c) => (c.args[1] === 'get' ? GONE : c.args[0] === 'tab' || c.args[1] === 'split' ? paneOut('p1') : undefined));
   const out = await squadUp('demo', false, async (fn: string) => (fn === 'squad_get' ? MIXED : []), f.run);
-  assert.match(out, /^failed demo-B3@macbook: agent "codex" is not installed yet/m);
+  assert.match(out, /^failed demo-B3@macbook: agent "codex" cannot start a seat with MCP off/m);
   assert.match(out, /^started demo-B2@macbook$/m);
   assert.ok(f.calls.filter((c) => c.args.includes('demo-b3-macbook')).every((c) => c.args[1] === 'get'), 'only herdr agent get for the codex seat');
   assert.ok(!f.calls.some((c) => c.args.includes('demo-B3@macbook')), 'no tab labelled for it');
@@ -779,4 +984,27 @@ test('squadShow: Claude roles exactly as before; another agent in brackets, a fa
     'reviewer  1 × opus on macbook',
     '  seat 1: opus; fallback gemini-4-neon-xhigh (agy)',
     'areas: claims'].join('\n'));
+  // #3779: the protected branches print too, not only with --json
+  assert.equal(squadShow({ ...plain, protected: ['development', 'releases/*'] }), 'lead  1 × opus on shaltoot\nbuilder  2 × sonnet on macbook\nareas: none\nprotected: development, releases/*');
+});
+
+test('squad up: a disabled project starts nothing and says so (#4559)', async () => {
+  const f = fake(() => OK);
+  const off = async (fn: string) => fn === 'squad_get' ? squad
+    : fn === 'project_state_preview' ? { state: 'disabled', words: 'Demo is disabled by Ahmed: no work is handed out there' } : [];
+  await assert.rejects(squadUp('demo', false, off, f.run), /Demo is disabled by Ahmed: no work is handed out there; Ahmed enables it on Projects first, then cb squad up demo$/);
+  assert.deepEqual(f.calls, [], 'herdr is never asked');
+});
+
+// #4679 (PR 105 R2-1): "Authorization: Bearer <token>" cut the word Bearer and showed an all-letter token
+test('startOne: the token after Authorization: Bearer is cut, whatever it is made of', () => {
+  const f = fake((c) => {
+    if (c.args[0] === 'tab') return paneOut('w5:p1');
+    if (c.args[1] === 'start') return TIMEOUT;
+    if (c.args[1] === 'read') return paneText('error: unauthorized, Authorization: Bearer qwertyzzz\nerror: bad Authorization: Basic asdfghjkl rejected\nerror: auth failed: token: secret plmoknijb\n');
+  });
+  const r = startOne(wsLaunch('orch@shaltoot'), f.run, {}, () => {});
+  for (const v of ['qwertyzzz', 'asdfghjkl', 'plmoknijb']) assert.ok(!r.line.includes(v), `"${v}" leaked: ${r.line}`);
+  assert.match(r.line, /unauthorized/);
+  assert.match(r.line, /rejected/);
 });

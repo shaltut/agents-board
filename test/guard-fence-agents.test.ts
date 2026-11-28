@@ -193,3 +193,225 @@ test('editTargets reads indented patch headers', () => {
   assert.deepEqual(editTargets({ command: p }), ['src/a.ts', '/Users/me/.codex/hooks.json']);
   assert.match(String(codex('apply_patch', { command: p }, CODEX)), /fence/);
 });
+
+// #4551 (review 68-m1): git is judged in command position, so a read whose search text is "git" passes (these blocked
+// after PR 68), while git as the command, under any launcher or spelling, keeps every write form fenced.
+const shell = (command: string, role: string) => evaluate({ tool: 'shell', command, role }).allow;
+test('the fence judges git as a command: a search for the word git is a read; git behind a launcher or spelled as a path still writes', () => {
+  const reads = ['rg -n git opencode.json', 'grep git .codex/config.toml', 'node cli/cb.ts help git -- .codex', 'cb help git -- .codex',
+    'rg "git" opencode.json', 'grep -rn git status opencode.json', 'nice git log -- opencode.json', 'git "diff" opencode.json'];
+  const writes = ['/usr/bin/git add opencode.json', 'git.exe add opencode.json', '"C:/Program Files/Git/cmd/git.exe" add opencode.json',
+    'bash -c "git add opencode.json"', 'bash -c "cd x; git add opencode.json"', "sh -c 'git add .codex/config.toml'", 'xargs git add < l opencode.json',
+    String.raw`find . -name opencode.json -exec git add {} \;`, 'timeout 5 git add opencode.json', 'cmd /c git add opencode.json',
+    'pwsh -Command git add opencode.json', 'pnpm exec git checkout -- opencode.json', 'sudo -u root git add opencode.json',
+    'env -u X git add opencode.json', 'GIT_DIR=.git git add opencode.json', 'echo $(git add opencode.json)', '(git add opencode.json)',
+    '{ git add opencode.json; }', 'if true; then git add opencode.json; fi', 'time git add opencode.json', '! git add opencode.json',
+    'command git add opencode.json', 'nohup git add opencode.json', 'ssh h git add opencode.json', 'npx git add opencode.json',
+    'sudo git $SUB opencode.json', 'rg -n "git add" opencode.json',
+    // the review's fail-closed git forms
+    'git -c alias.x=checkout x opencode.json', 'git -C . apply opencode.json', 'git stash push opencode.json', 'git restore opencode.json',
+    'git config -f .codex/config.toml a.b c', 'git update-index opencode.json', 'git diff --output=/home/u/.codex/hooks.json',
+    'git log --output x opencode.json', 'git -c core.pager="tee ~/.codex/hooks.json" log', 'git show HEAD:x > ~/.codex/hooks.json',
+    'cd ~/.claude && git apply p.diff'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+  }
+  // and through a shim
+  assert.equal(codex('Bash', { command: 'rg -n git opencode.json' }, CODEX), true);
+  assert.match(String(codex('Bash', { command: 'xargs git add < l opencode.json' }, CODEX)), /fence/);
+});
+
+// Review 68-m2: git forms that run a program are writers, however they read.
+test('the fence reads git -c program keys, grep -O and program-running git variables as writes; harmless forms stay reads', () => {
+  const writes = ['git -c diff.external=./x.sh diff -- opencode.json', 'git -c DIFF.EXTERNAL=./x.sh diff -- opencode.json',
+    'git -c "diff.external=./x.sh" diff -- opencode.json', 'git --config-env=diff.external=X diff -- opencode.json',
+    'git --config-env core.pager=P log -- opencode.json', 'git -c core.pager=./x.sh log -- opencode.json',
+    'git -c core.fsmonitor=./x.sh status opencode.json', 'git -c core.hooksPath=./h status opencode.json',
+    'git -c core.sshCommand=./x status opencode.json', 'git -c diff.x.textconv=./x.sh log -p -- opencode.json',
+    'git -c include.path=/tmp/c log -- opencode.json', 'git --exec-path=./bin diff -- opencode.json',
+    'git grep -O./x.sh foo -- .codex/hooks.json', 'git grep --open-files-in-pager=./x.sh foo -- .codex/hooks.json',
+    'git grep -nO foo -- .codex/hooks.json', 'GIT_EXTERNAL_DIFF=./x.sh git diff -- opencode.json', 'GIT_PAGER=./x.sh git log -- opencode.json',
+    'env GIT_EXTERNAL_DIFF=./x.sh git diff -- opencode.json', 'GIT_CONFIG_PARAMETERS=x git log -- opencode.json'];
+  const reads = ['git -c core.quotepath=off status opencode.json', 'git diff -O.order -- opencode.json', 'GIT_PAGER=cat git log -- opencode.json',
+    'git -c core.pager=cat log -- opencode.json', 'git -c core.pager="less -R" log -- opencode.json', 'git grep -n foo -- .codex/hooks.json'];
+  for (const c of writes) assert.equal(shell(c, 'builder'), false, c);
+  for (const c of reads) assert.equal(shell(c, 'builder'), true, c);
+});
+
+// Review 68-m3: a ... segment, bash's $USERPROFILE and an NTFS stream suffix name the fenced file too.
+test('the fence folds a ... segment, reads bash $USERPROFILE as home, and drops an NTFS stream suffix', () => {
+  const paths = ['~/.codex/.../hooks.json', String.raw`C:\Users\me\.codex\...\hooks.json`, 'C:/Users/me/.codex/hooks.json::$DATA',
+    String.raw`C:\Users\me\.codex\hooks.json::$data`, '/home/u/.codex::$INDEX_ALLOCATION/hooks.json', '/home/u/.codex:$I30:$INDEX_ALLOCATION/config.toml'];
+  for (const p of paths) {
+    assert.ok(editFence(p), `editFence ${p}`);
+    assert.match(String(codex('Write', { file_path: p, content: 'x' }, CODEX)), /fence/, `codex ${p}`);
+  }
+  for (const c of ['echo x > ~/.codex/.../hooks.json', 'echo x > $USERPROFILE/.gemini/settings.json', 'echo x > ${USERPROFILE}/.gemini/settings.json',
+    'echo x > ${env:USERPROFILE}/.gemini/settings.json', "echo x > '~/.codex/hooks.json::$DATA'", 'echo x > ~/.codex/hooks.json::',
+    'echo x > ~/.codex::$INDEX_ALLOCATION/hooks.json', 'cd ~/.codex::$INDEX_ALLOCATION && echo x > hooks.json']) {
+    assert.equal(shell(c, 'builder'), false, c);
+  }
+  for (const p of ['notes/.../x.md', 'src/a::b.ts']) assert.equal(editFence(p), null, p);
+  assert.equal(shell('echo ... > notes.txt', 'builder'), true);
+});
+
+// PR 77 review: I1, a command word the shell fills in is an unknown program, judged as git (main blocked these by its
+// word match); I2, a backtick around a command hid the fence path (main and head); M1, a function or alias defined on
+// the same line moved the writer into another segment.
+test('the fence judges a shell-filled command word as git, sees paths inside backticks, and treats a same-line function or alias as a writer', () => {
+  const writes = ['$GIT checkout -- opencode.json', '"$GIT" checkout -- opencode.json', '${GIT:-git} checkout -- opencode.json',
+    'sudo $GIT checkout -- opencode.json', 'xargs $GIT add < l opencode.json', '$(which git) checkout -- opencode.json',
+    '`which git` checkout -- opencode.json',
+    'echo `cp x opencode.json`', 'echo `cp x ~/.codex/hooks.json`', 'echo `echo x > .claude/settings.json`', 'v=`cp x ~/.claude/settings.json`',
+    'x=`git checkout -- opencode.json`',
+    'f() { cp x "$1"; }; f .claude/settings.json', 'alias c=cp; c x .claude/settings.json', 'g() { git checkout -- "$@"; }; g opencode.json',
+    'function f { cp x $args }; f opencode.json', 'Set-Alias c Copy-Item; c x opencode.json'];
+  const reads = ['$GIT log -- opencode.json', 'echo $HOME opencode.json', '$x = Get-Content ~/.codex/config.toml',
+    "$env:X = 'y'; cat opencode.json", 'x=$(cat opencode.json)', 'echo `date` opencode.json', 'rg -n "function opencode" src opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
+
+// PR 77 re-review: a shell-filled word before a writing git subcommand is git in any position (no wrapper list to fall
+// behind: main blocked these by its word match); a definition inside quoted text is not a definition; alias -- and hash -p
+// define too.
+test('the fence judges a shell-filled word before a writing git subcommand as git anywhere; quoted text defines nothing', () => {
+  const writes = ['caffeinate $GIT checkout -- opencode.json', 'caffeinate -i $GIT checkout -- .claude/settings.json',
+    'arch -arm64 $GIT checkout -- opencode.json', 'taskset 1 $GIT checkout -- opencode.json', 'chrt 1 $GIT checkout -- opencode.json',
+    'firejail $GIT checkout -- opencode.json', 'proxychains $GIT checkout -- opencode.json', 'time -p $GIT checkout -- opencode.json',
+    '. $GIT checkout -- opencode.json', 'caffeinate `which git` checkout -- opencode.json', 'alias -- c=cp; c x opencode.json',
+    'hash -p /bin/cp c; c x opencode.json'];
+  const reads = ['caffeinate $GIT log -- opencode.json', 'arch -arm64 $GIT diff opencode.json', 'echo $HOME opencode.json', '$PAGER opencode.json',
+    '$x = Get-Content opencode.json', 'grep -E "a|function b" opencode.json', 'node -e "(function f(){})()" opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
+
+// PR 77 round 3: after a shell-filled word, the next word that is not an option decides: any git command (or a filled
+// one) is judged with the command-position rule, so merge-file, stage, a read's --output and $SUB write.
+test('the fence judges a filled word followed by any git command with the command-position rule', () => {
+  const writes = ['caffeinate $GIT merge-file opencode.json a b', 'caffeinate $GIT diff --output=opencode.json',
+    'caffeinate $GIT log --output=opencode.json', 'caffeinate $GIT show --output=opencode.json HEAD', 'caffeinate $GIT $SUB -- opencode.json',
+    'caffeinate $GIT stage opencode.json', 'caffeinate $GIT -C . checkout -- opencode.json', 'caffeinate ${GIT:-git} checkout -- opencode.json',
+    'caffeinate $(which git) checkout -- opencode.json'];
+  const reads = ['caffeinate $GIT log -- opencode.json', 'caffeinate $GIT show HEAD:opencode.json', 'arch -arm64 $GIT diff opencode.json',
+    '$PAGER opencode.json', 'echo $HOME opencode.json', 'echo $HOME is opencode.json', 'cat $HOME/.codex/config.toml', 'echo `date` opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
+
+// PR 77 round 4: after a filled word, only a git command, a bare $VAR / ${VAR} / %VAR% or a ${...} / $(...) / backtick group
+// fills the subcommand slot ($HOME/.codex/... is a path, not git); a quoted string that starts with $ is not a command line;
+// git's options after a filled word are judged, not skipped; the git 2.53 command list; cmd's %VAR% is a filled word. echo
+// of a filled word still counts: what echo prints may be run ($(echo $GIT checkout ...), | sh).
+test('the fence reads two filled paths and quoted $( ) paths as reads; judges options after a filled word', () => {
+  const writes = ['caffeinate $GIT -c alias.x=checkout x -- opencode.json', 'caffeinate $GIT --config-env=alias.x=V x -- opencode.json',
+    'caffeinate $GIT --attr-source HEAD checkout -- opencode.json', 'arch -arm64 $GIT -c alias.x=checkout x -- .claude/settings.json',
+    'time -p $GIT --attr-source HEAD restore .codex/config.toml', 'caffeinate $GIT --exec-path=/tmp/x foo opencode.json',
+    'caffeinate $GIT credential-store --file=opencode.json store', 'caffeinate $GIT credential-store --file ~/.codex/config.toml store',
+    'caffeinate $GIT subtree add --prefix=.opencode/plugins ../p main', 'caffeinate $GIT init-db --template=/tmp/t .codex',
+    'caffeinate $G merge-recursive HEAD -- a b opencode.json', '%GIT% checkout -- opencode.json', 'caffeinate %GIT% checkout -- opencode.json',
+    'cmd /c "%GIT% checkout -- opencode.json"', 'caffeinate $GIT $SUB -- opencode.json', 'bash -c "$G checkout -- opencode.json"',
+    'bash -c "$(which git) checkout -- opencode.json"', 'echo $(caffeinate $GIT checkout -- opencode.json)',
+    'echo $GIT checkout -- opencode.json | sh', '$(echo $GIT checkout -- opencode.json)', 'bash <(echo $GIT checkout -- opencode.json)',
+    'sh -c "$(echo $GIT checkout -- opencode.json)"', 'caffeinate $(echo --name) cat $GIT checkout -- opencode.json'];
+  const reads = [
+    'ls $HOME/.codex $HOME/.gemini',
+    'diff $HOME/.codex/config.toml $HOME/.codex/config.toml.bak',
+    'cat $HOME/.codex/hooks.json $HOME/.agents/hooks.json',
+    'head -3 $HOME/.claude/settings.json $PWD/.claude/settings.json',
+    'grep -n $PATTERN $HOME/.codex/config.toml',
+    'rg $PAT $ROOT/opencode.json',
+    'Get-Content $HOME/.codex/config.toml, $HOME/.gemini/settings.json',
+    'Compare-Object (Get-Content $env:USERPROFILE/.codex/config.toml) (Get-Content $env:TEMP/c.toml)',
+    'jq -s . $HOME/.claude/settings.json $HOME/.claude/settings.local.json',
+    'for f in $HOME/.codex/config.toml $HOME/.gemini/settings.json; do wc -l $f; done',
+    'sha256sum $REPO/opencode.json $BACKUP/opencode.json',
+    'cat "$(git rev-parse --show-toplevel)/.claude/settings.json"',
+    'cat "$(git rev-parse --show-toplevel)/opencode.json"',
+    'cat "$(pwd)/opencode.json"',
+    'cat "$(pwd)"/opencode.json',
+    'head -5 "$(dirname $0)/opencode.json"',
+    'jq . "$(git rev-parse --show-toplevel)/.agents/hooks.json"',
+    'diff opencode.json "$(git rev-parse --show-toplevel)/opencode.json"',
+    'ls "$(git rev-parse --show-toplevel)/.codex"',
+    'cat "$HOME/.codex/config.toml"',
+    'cat "${HOME}/.claude/settings.json"',
+    'cat "$(echo ~)/.codex/config.toml"',
+    '$(git rev-parse --show-toplevel)/scripts/lint.sh opencode.json',
+    'cat `git rev-parse --show-toplevel`/opencode.json',
+    'cat "`git rev-parse --show-toplevel`/opencode.json"',
+    'wc -c "$(git rev-parse --show-toplevel)"/opencode.json',
+    'echo "$(date) checking opencode.json"',
+    'echo "$(git log -1 --format=%h) opencode.json"',
+    'echo "$USER reading .claude/settings.json"',
+    'echo "files: $(ls .codex)"',
+    'Get-Content "$(git rev-parse --show-toplevel)/opencode.json"',
+    'Get-Content "$env:USERPROFILE\\.codex\\config.toml"',
+    'Get-Content (Join-Path $HOME \'.codex/config.toml\')',
+    'node -e "console.log(process.env.HOME)" opencode.json',
+    'caffeinate $GIT -C . diff -- opencode.json', 'caffeinate $GIT ./opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});
+
+// PR 77 round 5: a partly filled subcommand after a filled word ($S$X, ch$X, ch${X}, check%X%) is filled (I2); an option
+// outside git's global options ends the test, a program that never runs or prints its arguments (cat, grep, rg, diff,
+// git itself in command position ...) runs no filled word when it is a real command word, and the test stops at a closing
+// ) or backtick (I3).
+test('the fence judges a partly filled subcommand as git; two variables or a variable after an option in a read pass', () => {
+  const writes = [
+    'caffeinate $GIT $S$X -- opencode.json',
+    'caffeinate $GIT ch$X -- opencode.json',
+    'caffeinate $G $S$X -- opencode.json',
+    'bash -c "$G ch$X -- opencode.json"',
+    'bash -c "$G $S$X -- opencode.json"',
+    'caffeinate $G ch$X -- opencode.json',
+    'caffeinate $G ch${X} -- opencode.json',
+    'caffeinate $G che$(echo ck)out -- opencode.json',
+    'caffeinate $G check%X% -- opencode.json',
+    'caffeinate $(echo --name) cat $GIT checkout -- opencode.json',
+    'cat $(caffeinate $GIT checkout -- opencode.json)',
+    'echo $A $B checkout -- opencode.json | sh'];
+  const reads = [
+    'git diff $BASE $HEAD -- opencode.json',
+    'git diff "$BASE" "$HEAD" -- .claude/settings.json',
+    'git diff $BASE $HEAD --stat -- .codex/config.toml',
+    'git log --oneline $FROM $TO -- opencode.json',
+    'git diff ${BASE} ${HEAD} -- opencode.json',
+    'git show $SHA $SHA2 -- opencode.json',
+    'git -C $REPO diff $A $B -- opencode.json',
+    'git log -n $N $REV -- opencode.json',
+    'git blame -L $A,$B $REV -- opencode.json',
+    'git log --format=%h $A $B -- opencode.json',
+    'rg -n $PAT $DIR opencode.json',
+    'rg -n -e $A -e $B opencode.json',
+    'grep -n -e $A -e $B .claude/settings.json',
+    'grep -n $A $FILE opencode.json',
+    'cat $A $B opencode.json',
+    'wc -l $F $G opencode.json',
+    'Select-String -Path $HOME/.codex/config.toml -Pattern $P',
+    'Get-Content $A, $B .claude/settings.json',
+    'git diff $(git rev-parse $A) $(git rev-parse $B) -- opencode.json',
+    'cat `echo $A` opencode.json',
+    'cat "`echo $A`" opencode.json',
+    'diff $(dirname $A) $(dirname $B)/opencode.json',
+    'Get-Content -Path $HOME/.codex/config.toml -TotalCount $N',
+    'Get-Content $env:USERPROFILE/.codex/config.toml -Tail $N',
+    'grep -A $N -B $M hooks opencode.json',
+    'cmp $A $B opencode.json',
+    'stat -c %y $HOME/.claude/settings.json ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of writes) assert.equal(shell(c, role), false, `${role}: ${c}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${c}`);
+  }
+});

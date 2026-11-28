@@ -97,12 +97,10 @@ flowchart LR
 
 ## Current state and limits
 
-- **Claude Code is the only adapter.** `cli/agents/index.ts` knows the kinds `claude`, `codex`, `opencode` and `agy`,
-  but only `claude` has an adapter; asking for another throws ("not installed yet") rather than silently starting
-  Claude. Agent-neutral today: the seat relay and its keying, the supervisor's close and status logic, the `agent`
-  field in squad files and sessions, and the guard core. Claude-only today: the launch flags and permission files
-  (`kit/permissions/`), message delivery (Claude Code's messaging socket), the SessionStart and PreToolUse hooks
-  (`hooks/`, `kit/guard/shim-claude.mjs`) and the `AskUserQuestion` block.
+- **Four adapters.** `cli/agents/` has adapters for `claude`, `codex`, `opencode` and `agy`, all installed: any
+  project's seat may run any of them. Codex, OpenCode and agy seats also need `CB_MCP_GATE_OK` naming them where they
+  start, and their guard installed (`docs/ops/maintain.md`). An unknown agent
+  throws rather than silently starting Claude.
 - **Squads need herdr.** `cb squad up` and the supervisor start panes through the `herdr` CLI.
 - **The guard is a fence for agent mistakes, not a security boundary.** It matches command text and fails closed on
   what it cannot read, but a determined agent or person can get around it.
@@ -175,9 +173,9 @@ CB_TEST_DB=claude_board_test pnpm -s test                                       
 Tests expect Postgres on `127.0.0.1:5434` as user `cb` and **only ever touch databases named `claude_board_test*`**:
 `test/helpers.ts` refuses any other `CB_TEST_DB`, because each test run truncates every table. Use a distinct
 `CB_TEST_DB=claude_board_test_<name>` per parallel worktree. On Windows the test setup starts the private cluster for
-you; elsewhere have Postgres running first. A Windows git worktree gets its own cluster on its own port instead of
-5434 (stop it with `node db/setup.ts --test --stop` before removing the worktree). Never point the tests at a board you
-care about. A few files
+you; elsewhere have Postgres running first. A Windows git worktree, and a PC runner job's checkout, gets its own cluster
+on its own port instead of 5434 (stop it with `node db/setup.ts --test --stop` before removing the worktree). Never
+point the tests at a board you care about. A few files
 (`test/agents.test.ts`, `test/guard.test.ts`) are pure and need no database.
 
 ### Deploy with Docker Compose

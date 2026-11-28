@@ -7,10 +7,10 @@ export type Role = (typeof ROLES)[number]
 export const REPO_BOUND: readonly Role[] = ['builder', 'reviewer']
 export const CLAUDE_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const
 
-export interface Fallback { agent: string; model: string }
-export interface SeatSpec { agent?: string; model?: string; fallback?: Fallback[] }
+export interface Fallback { agent: string; model: string; effort?: string }
+export interface SeatSpec { agent?: string; model?: string; effort?: string; fallback?: Fallback[] }
 export interface RoleSpec {
-  count?: number | Record<string, number>; model?: string; machine: string; agent?: string; fallback?: Fallback[]
+  count?: number | Record<string, number>; model?: string; machine: string; agent?: string; effort?: string; fallback?: Fallback[]
   seats?: Record<string, SeatSpec>
 }
 export interface MachineSpec { herdr: string | null; repo?: string; board: string; workspace?: string }
@@ -30,9 +30,14 @@ export interface SquadPage {
   history: { id: number; at: string; actor: string; version: number | null; via: 'page' | 'cli' | null; squad: Squad }[]
   reminders: { open: number; on: number }
 }
+export interface ModelList { models: { id: string; efforts?: string[] }[]; at: string }
 export interface SquadOptions {
   roles: Role[]; agents: { agent: string; main: boolean }[]; claude_models: string[]; default_models: Record<string, string>
   limits: { count_min: number; count_max: number; macbook_seats: number; fallbacks: number; session_name: number }
+  /** per agent, the effort levels a seat can be started with; an empty list: that agent takes none */
+  efforts: Record<string, string[]>
+  /** per machine name, per agent: the models its CLI listed when it last sent them (cb models report) */
+  machine_models?: Record<string, Record<string, ModelList>>
   models_used: Record<string, string[]>; machines_used: ({ key: string } & MachineSpec)[]
 }
 export interface RoleTextPage {
@@ -67,16 +72,24 @@ export const agentLabel = (a?: string | null) => AGENT[a ?? 'claude'] ?? 'Anothe
 /** Claude's four names get a capital; other agents' model names are what Ahmed typed, shown as typed. */
 export const modelLabel = (m?: string | null) =>
   !m ? 'its usual model' : (CLAUDE_MODELS as readonly string[]).includes(m) ? m[0]!.toUpperCase() + m.slice(1) : m
-export const setupLabel = (agent?: string | null, model?: string | null) => `${agentLabel(agent)}, ${modelLabel(model)}`
+export const setupLabel = (agent?: string | null, model?: string | null, effort?: string | null) =>
+  `${agentLabel(agent)}, ${modelLabel(model)}${effort ? `, ${effort} effort` : ''}`
 /** A machine as a person knows it: herdr null is the PC the board runs on. */
 export function machineLabel(m?: Pick<MachineSpec, 'herdr'> | null, key?: string) {
   if (!m) return key ? `machine ${key}` : 'an unknown machine'
   if (m.herdr == null) return 'This PC'
   return m.herdr === 'macbook' ? 'MacBook' : m.herdr
 }
+/** The herdr name a machine gets back when it is switched from This PC to Another machine: the one it had before the
+ *  switch on this page, else the one another project's squad gives that key, else the MacBook. */
+export function restoredHerdr(key: string, before: Record<string, string>, used: readonly ({ key: string } & Pick<MachineSpec, 'herdr'>)[]) {
+  return before[key] || used.find((m) => m.key === key && m.herdr)?.herdr || 'macbook'
+}
 /** Who did something, in words: Ahmed, the lead or another session (the session name goes in a tooltip), or a signed-in
  *  admin by name. */
-export const actorLabel = (a: string) => (a === 'ahmed' ? 'Ahmed' : /(^|-)orch@/.test(a) ? 'The lead' : a.includes('@') ? 'A session' : a)
+// #3779: leads (useLeads: sessions_overview's lead, by role) says who leads, whatever the name; not read yet, the old orch@ name
+export const actorLabel = (a: string, leads?: ReadonlySet<string>) =>
+  (a === 'ahmed' ? 'Ahmed' : (leads ? leads.has(a) : /(^|-)orch@/.test(a)) ? 'The lead' : a.includes('@') ? 'A session' : a)
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
 // ---------------------------------------------------------------- shape helpers
@@ -134,6 +147,14 @@ export function pruneSeats(sq: Squad): string[] {
   return gone
 }
 
+/** The Supervisor switch. Off on a saved squad that has no supervise key drops the key again (squad_set stores it only
+ *  when given), so ticking it on and off leaves nothing to save. */
+export function setSupervise(sq: Squad, on: boolean, saved: Squad | null): Squad {
+  const next = clone(sq)
+  if (on || (saved && 'supervise' in saved)) next.supervise = on; else delete next.supervise
+  return next
+}
+
 export function setRoleOn(sq: Squad, role: Role, on: boolean, defaults: Record<string, string>): Squad {
   const next = clone(sq)
   if (!on) { delete next.roles[role]; if (role === 'owner') next.areas = []; return next }
@@ -163,12 +184,53 @@ export function patchRole(sq: Squad, role: Role, patch: Partial<RoleSpec>, defau
   const spec = next.roles[role]
   if (!spec) return next
   Object.assign(spec, patch)
+  if ('effort' in patch && !patch.effort) delete spec.effort // squad_set refuses a null: no key is the agent's default
   if ('agent' in patch) {
+    // levels differ by agent: the role starts at the new one's default, and so does each seat that would inherit it
+    delete spec.effort
+    for (const [k, s] of Object.entries(spec.seats ?? {})) {
+      if (!s.agent) delete s.effort
+      if (Object.keys(s).length === 0) delete spec.seats![k]
+    }
+    if (spec.seats && Object.keys(spec.seats).length === 0) delete spec.seats
     const claude = (CLAUDE_MODELS as readonly string[]).includes(spec.model ?? '')
     if ((patch.agent ?? 'claude') === 'claude') { delete spec.agent; if (!claude) spec.model = defaults[role] ?? 'sonnet' }
     else if (claude) spec.model = '' // a Claude name never fits another agent: the field asks for one
   }
   return next
+}
+
+/** The squad with one seat set differently (#4763). A model or effort given empty goes: the seat takes the role's. A new
+ *  agent drops the effort; back on the role's agent the model goes too, and on another agent the seat names its own ('' until
+ *  one is picked, which checkSquad flags). A seat with nothing of its own is not kept: squad_set refuses an empty one. */
+export function patchSeat(sq: Squad, role: Role, key: string, patch: SeatSpec, defaults: Record<string, string>): Squad {
+  const next = clone(sq)
+  const spec = next.roles[role]
+  if (!spec) return next
+  const roleAgent = spec.agent ?? 'claude'
+  const seat: SeatSpec = { ...spec.seats?.[key] }
+  if (seat.agent === roleAgent) delete seat.agent // the role moved to the seat's agent since: it is the role's now (as squad_set stores it)
+  if ('agent' in patch) {
+    delete seat.effort
+    const agent = patch.agent || roleAgent
+    if (agent === roleAgent) { delete seat.agent; delete seat.model }
+    else { seat.agent = agent; seat.model = agent === 'claude' ? defaults[role] ?? 'sonnet' : '' }
+  }
+  if ('model' in patch) { if (patch.model || seat.agent) seat.model = patch.model ?? ''; else delete seat.model }
+  if ('effort' in patch) { if (patch.effort) seat.effort = patch.effort; else delete seat.effort }
+  const all = { ...spec.seats }
+  if (Object.keys(seat).length) all[key] = seat; else delete all[key]
+  if (Object.keys(all).length) spec.seats = all; else delete spec.seats
+  return next
+}
+
+/** What a seat's empty choices say. model undefined: the seat is on another agent, so it must pick a model. */
+export function seatBlank(role: RoleSpec, seat: SeatSpec): { model: string | undefined; effort: string } {
+  const same = (seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude')
+  return {
+    model: same ? `Same as the role: ${modelLabel(role.model)}` : undefined,
+    effort: same && role.effort ? `Same as the role: ${role.effort} effort` : 'Default effort',
+  }
 }
 
 /** The squad with one area added or removed (with repos an area names its repo); removing the last turns owners off. */
@@ -195,9 +257,27 @@ export const RX = {
 }
 export const pathOk = (p?: string) => !!p && RX.absolute.test(p) && !RX.forbidden.test(p)
 
-/** Why a model does not fit its agent, or null. */
-export function modelProblem(agent: string | undefined, model: string | undefined): string | null {
+/** The two model names a value is, when it is two known names joined with no separator: the settings field's picker
+ *  slip, where the second click appended to the first instead of replacing it (#4717). null when it is not such a
+ *  pair (a single name, a new name, or a value that does not split into two known ones). */
+export function joinedModels(model: string, known: readonly string[]): [string, string] | null {
+  const v = model ?? ''
+  if (!v) return null
+  for (const a of known) {
+    if (a && v.length > a.length && v.startsWith(a)) {
+      const b = v.slice(a.length)
+      if (known.includes(b)) return [a, b]
+    }
+  }
+  return null
+}
+
+/** Why a model does not fit its agent, or null. known (the names already used for that agent) catches two names joined
+ *  with no separator, which still fit the agent's shape alone (#4717). */
+export function modelProblem(agent: string | undefined, model: string | undefined, known: readonly string[] = []): string | null {
   const m = model ?? ''
+  const joined = joinedModels(m, known)
+  if (joined) return `That is two model names joined (${joined[0]} and ${joined[1]}): pick one.`
   const claudeName = (CLAUDE_MODELS as readonly string[]).includes(m)
   switch (agent ?? 'claude') {
     case 'claude': return claudeName ? null : 'Pick Opus, Sonnet, Haiku or Fable.'
@@ -212,7 +292,7 @@ export interface Problem { where: string; text: string }
 
 /** Everything cb.squad_set would refuse, said plainly and placed by section ('role:<role>', 'machines', 'repos',
  *  'areas', 'squad'). An empty list means the save should pass the server's checks. */
-export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'>): Problem[] {
+export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 'agents'> & { models_used?: SquadOptions['models_used'] }): Problem[] {
   const out: Problem[] = []
   const add = (where: string, text: string) => out.push({ where, text })
   const mains = new Set(opts.agents.filter((a) => a.main).map((a) => a.agent))
@@ -261,7 +341,7 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
     const agent = spec.agent ?? 'claude'
     if (!sq.machines[spec.machine]) add(where, `${name}: pick a machine.`)
     if (!mains.has(agent)) add(where, `${agentLabel(agent)} is not ready to run a seat yet. You can list it as a backup.`)
-    const mp = modelProblem(agent, spec.model)
+    const mp = modelProblem(agent, spec.model, opts.models_used?.[agent])
     if (mp) add(where, `${name}: ${mp}`)
     let need: string[] = []
     if (role === 'owner') need = multi ? [...new Set(areas.flatMap((a) => (typeof a === 'string' ? [] : [a.repo])))] : []
@@ -280,12 +360,12 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
       need = home ? [home] : []
     }
     if (multi) for (const r of need) if (sq.repos?.[r] && !sq.repos[r]!.paths[spec.machine]) add(where, `${name}: repo ${r} has no folder on ${machineLabel(sq.machines[spec.machine], spec.machine)}.`)
-    fallbackProblems(spec.fallback, agent, spec.model, name).forEach((t) => add(where, t))
+    fallbackProblems(spec.fallback, agent, spec.model, name, opts.models_used).forEach((t) => add(where, t))
     for (const [k, s] of Object.entries(spec.seats ?? {})) {
       const label = seatKeyLabel(sq, role, k), sa = s.agent ?? agent, sm = s.model ?? spec.model
       if (s.agent && !mains.has(s.agent)) add(where, `${label}: ${agentLabel(s.agent)} is not ready to run a seat yet.`)
-      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm); if (p) add(where, `${label}: ${p}`) }
-      fallbackProblems(s.fallback, sa, sm, label).forEach((t) => add(where, t))
+      if ('model' in s || 'agent' in s) { const p = modelProblem(sa, sm, opts.models_used?.[sa]); if (p) add(where, `${label}: ${p}`) }
+      fallbackProblems(s.fallback, sa, sm, label, opts.models_used).forEach((t) => add(where, t))
     }
     if (sq.machines[spec.machine]?.herdr === 'macbook') mac += seatCount(sq, role)
   }
@@ -301,13 +381,13 @@ export function checkSquad(sq: Squad, project: string, opts: Pick<SquadOptions, 
   return out
 }
 
-function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string): string[] {
+function fallbackProblems(fb: Fallback[] | undefined, agent: string, model: string | undefined, label: string, used?: SquadOptions['models_used']): string[] {
   if (!fb) return []
   const out: string[] = []
   if (fb.length > 5) out.push(`${label}: at most 5 backups.`)
   const seen = new Set<string>()
   fb.forEach((f, i) => {
-    const p = modelProblem(f.agent, f.model)
+    const p = modelProblem(f.agent, f.model, used?.[f.agent])
     if (p) out.push(`${label}, backup ${i + 1}: ${p}`)
     const pair = `${f.agent} ${f.model}`
     if (f.agent === agent && f.model === model) out.push(`${label}, backup ${i + 1} is the same as the seat itself.`)
@@ -343,7 +423,21 @@ function countWords(sq: Squad, role: Role): string {
   if (typeof spec.count === 'object') return Object.entries(spec.count).map(([r, n]) => `${n} in ${r}`).join(', ')
   return plural(spec.count ?? 0, 'seat')
 }
-const fbWords = (fb?: Fallback[]) => (fb?.length ? fb.map((f) => setupLabel(f.agent, f.model)).join('; ') : 'none')
+const fbWords = (fb?: Fallback[]) => (fb?.length ? fb.map((f) => setupLabel(f.agent, f.model, f.effort)).join('; ') : 'none')
+/** The list the chosen machine sent for an agent: under its name in the squad, else under its herdr label; null: none. */
+export function machineModels(opts: Pick<SquadOptions, 'machine_models'>, key: string, machine: MachineSpec | undefined, agent: string): ModelList | null {
+  const all = opts.machine_models ?? {}
+  return all[key]?.[agent] ?? (machine?.herdr ? all[machine.herdr.toLowerCase()]?.[agent] : undefined) ?? null
+}
+/** The efforts to offer: the listed model's own when its CLI names them, else the agent's. The saved one stays shown. */
+export function effortChoices(opts: Pick<SquadOptions, 'efforts'>, agent: string, list: ModelList | null, model: string, current?: string): string[] {
+  const all = opts.efforts[agent] ?? []
+  const own = list?.models.find((m) => m.id === model)?.efforts
+  return all.filter((e) => !own?.length || own.includes(e) || e === current)
+}
+/** A seat's effort: its own, else its role's when it runs the role's agent (as seatSpec, cli/squad-up.ts). */
+export const seatEffort = (role: { agent?: string; effort?: string }, seat: { agent?: string; effort?: string }) =>
+  seat.effort ?? ((seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude') ? role.effort : undefined)
 
 /** A saved squad as lines a person reads (the history's "view"). */
 export function summarizeSquad(sq: Squad | null): string[] {
@@ -352,11 +446,11 @@ export function summarizeSquad(sq: Squad | null): string[] {
   for (const role of ROLES) {
     const spec = sq.roles[role]
     if (!spec) continue
-    let line = `${ROLE_MANY[role]}: ${countWords(sq, role)} on ${machineLabel(sq.machines[spec.machine], spec.machine)}, ${setupLabel(spec.agent, spec.model)}`
+    let line = `${ROLE_MANY[role]}: ${countWords(sq, role)} on ${machineLabel(sq.machines[spec.machine], spec.machine)}, ${setupLabel(spec.agent, spec.model, spec.effort)}`
     if (spec.fallback?.length) line += `; backup if it stops: ${fbWords(spec.fallback)}`
     lines.push(line + '.')
     for (const [k, s] of Object.entries(spec.seats ?? {})) {
-      lines.push(`${seatKeyLabel(sq, role, k)} runs ${setupLabel(s.agent ?? spec.agent, s.model ?? spec.model)}${s.fallback?.length ? `; backup: ${fbWords(s.fallback)}` : ''}.`)
+      lines.push(`${seatKeyLabel(sq, role, k)} runs ${setupLabel(s.agent ?? spec.agent, s.model ?? spec.model, seatEffort(spec, s))}${s.fallback?.length ? `; backup: ${fbWords(s.fallback)}` : ''}.`)
     }
   }
   const off = ROLES.filter((r) => !sq.roles[r]).map((r) => ROLE_MANY[r])
@@ -379,7 +473,7 @@ export function diffSquads(a: Squad | null, b: Squad | null): string[] {
   for (const role of ROLES) {
     const x = a.roles[role], y = b.roles[role], name = ROLE_MANY[role]
     if (!x && !y) continue
-    if (!x) { out.push(`${name} turned on: ${countWords(b, role)}, ${setupLabel(y!.agent, y!.model)}.`); continue }
+    if (!x) { out.push(`${name} turned on: ${countWords(b, role)}, ${setupLabel(y!.agent, y!.model, y!.effort)}.`); continue }
     if (!y) { out.push(`${name} turned off.`); continue }
     if (role !== 'owner' && !same(x.count, y.count)) {
       if (typeof x.count === 'object' || typeof y.count === 'object') {
@@ -390,7 +484,9 @@ export function diffSquads(a: Squad | null, b: Squad | null): string[] {
       } else out.push(`${name}: ${x.count ?? 0} → ${y.count ?? 0} seats.`)
     }
     if (x.machine !== y.machine) out.push(`${name} moved from ${machineLabel(a.machines[x.machine], x.machine)} to ${machineLabel(b.machines[y.machine], y.machine)}.`)
-    if ((x.agent ?? 'claude') !== (y.agent ?? 'claude') || x.model !== y.model) out.push(`${name}: ${setupLabel(x.agent, x.model)} → ${setupLabel(y.agent, y.model)}.`)
+    if ((x.agent ?? 'claude') !== (y.agent ?? 'claude') || x.model !== y.model || x.effort !== y.effort) {
+      out.push(`${name}: ${setupLabel(x.agent, x.model, x.effort)} → ${setupLabel(y.agent, y.model, y.effort)}.`)
+    }
     if (!same(x.fallback, y.fallback)) out.push(`${name} backups: ${fbWords(x.fallback)} → ${fbWords(y.fallback)}.`)
     if (!same(x.seats, y.seats)) out.push(`${name}: single-seat settings changed.`)
   }
@@ -426,7 +522,9 @@ export function historyLines(history: SquadPage['history'], i: number): string[]
 /** A live session in words: "Builder 3 on MacBook", "The lead on This PC". The session name stays in a tooltip. */
 export function seatName(s: Seat, sq: Squad | null): string {
   const key = s.actor.split('@')[1]
-  const m = key && sq?.machines[key] ? machineLabel(sq.machines[key], key) : s.machine ?? 'another machine'
+  // a session name whose machine key is not in the squad: the squad machine with that herdr name, never the raw name
+  const byHerdr = s.machine ? Object.values(sq?.machines ?? {}).find((x) => x.herdr === s.machine) ?? (s.machine === 'macbook' ? { herdr: s.machine } : null) : null
+  const m = key && sq?.machines[key] ? machineLabel(sq.machines[key], key) : byHerdr ? machineLabel(byHerdr) : 'another machine'
   const n = (s.actor.match(/[ABRQI]([0-9]+)@/) ?? [])[1]
   if (s.role === 'lead') return `The lead on ${m}`
   if (s.role === 'owner') return `Area owner${s.area ? ` of ${s.area}` : ''} on ${m}`
@@ -449,11 +547,13 @@ export function seatNote(s: Seat, sq: Squad | null, supervised: boolean): string
 
 // ---------------------------------------------------------------- role text and server messages
 export const ROLE_TEXT_CAP = 8000
+/** Characters as the server counts them (code points): the counter and the Last edits lengths agree. */
+export const charCount = (s: string) => [...s].length
 /** The role text as cb.role_text_set will store it (spaces, tabs and line breaks trimmed at both ends) and its length in
  *  characters (Postgres length counts code points, so does [...s]). */
 export function roleTextState(body: string, saved: string) {
   const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
-  const count = [...t].length
+  const count = charCount(t)
   const over = count > ROLE_TEXT_CAP, empty = count === 0, changed = t !== saved
   return { count, over, empty, changed, canSave: changed && !over && !empty }
 }
@@ -463,7 +563,7 @@ export function roleTextState(body: string, saved: string) {
 export const ADDITION_CAP = 1000
 export function additionState(body: string, saved: string) {
   const t = body.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '')
-  const count = [...t].length
+  const count = charCount(t)
   const over = count > ADDITION_CAP, changed = t !== saved
   return { count, over, changed, canSave: changed && !over }
 }

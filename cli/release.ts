@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { wordsDrift } from '../kit/fault-line.mjs';
 
@@ -33,6 +33,15 @@ const same = (a: string, b: string) => {
 export function headSha(root: string): string | null {
   const [top, sha] = (git(root, ['rev-parse', '--show-toplevel', 'HEAD']) ?? '').trim().split(/\r?\n/);
   return top && sha && same(top, root) ? sha : null;
+}
+
+/** The commit the code at root is (#4352): an installed release's (cb update writes each to <home>/versions/<sha>),
+ *  else a checkout's HEAD, else null (a copy that is neither, such as a copy's original folder). Reads only. */
+export function codeSha(root: string): string | null {
+  let r: string;
+  try { r = realpathSync(root); } catch { return null; }
+  if (basename(dirname(r)) === 'versions' && /^[0-9a-f]{40}$/.test(basename(r))) return basename(r);
+  return headSha(root);
 }
 
 /** The manifest of the commit checked out at root. Refuses a tree whose release files differ from that commit: the

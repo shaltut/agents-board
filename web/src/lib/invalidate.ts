@@ -15,8 +15,10 @@ export const TABLE_KEYS: Record<string, string[]> = {
   goal_tasks: ['goals', 'goal', 'goal-preview', 'tasks'],
   questions: ['questions', 'task', 'goal', 'me', 'projects', 'people', 'sessions', 'memories'],
   // every write's history line: what shows activity, never the board's lists
-  // (a squad or role text save writes one too: the settings page re-reads)
-  events: ['events', 'today', 'task', 'page', 'me', 'people', 'sessions', 'asks', 'huddles', 'huddle', 'memories', 'squad-page', 'role-texts'],
+  // (a squad save writes one too: the settings page re-reads)
+  events: ['events', 'today', 'task', 'page', 'me', 'people', 'sessions', 'asks', 'huddles', 'huddle', 'memories', 'squad-page'],
+  // the role texts (up to 8 of 8000 characters, with their edits): only when one changes, not on every history line
+  role_texts: ['role-texts'],
   asks: ['asks'],
   projects: ['projects', 'squad-page'],
   huddles: ['huddles', 'huddle'],

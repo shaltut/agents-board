@@ -115,6 +115,36 @@ test('expand repeats an element per value and drops empty params', () => {
   assert.deepEqual(expand(['node', '{files}'], { files: [] }), ['node']);
 });
 
+// #3773: {{ and }} escape literal braces in steps, finally and cwd; unescaped or unmatched braces are still refused
+test('escaped braces ({{ and }}) pass through as literal braces in steps, finally and cwd', () => {
+  const cfg = loadConfig(cfgWith({
+    params: { ws: { pattern: '.' }, files: { pattern: '.', max: 4 } },
+    cwd: 'apps/{{lit}}/{ws}',
+    steps: [
+      ['node', '-e', "fs.rmSync('dist', {{force:true}})"],
+      ['node', '-e', 'const f = () => {{ return {{a: 1}}; }}; console.log({{}});'],
+      ['tool', '--json={{"ws":"{{ws}}","file":"{files}"}}'],
+      ['tool', '{{{ws}}}'],
+    ],
+    finally: [['node', '-e', "fs.rmSync('tmp', {{recursive:true, force:true}})"]],
+  }));
+  const r = cfg.projects.p!.repos.main!.recipes.r!;
+  assert.deepEqual(expand(r.steps[0]!, {}), ['node', '-e', "fs.rmSync('dist', {force:true})"]);
+  assert.deepEqual(expand(r.steps[1]!, {}), ['node', '-e', 'const f = () => { return {a: 1}; }; console.log({});']);
+  assert.deepEqual(expand(r.steps[2]!, { files: ['a.ts', 'b.ts'] }), ['tool', '--json={"ws":"{ws}","file":"a.ts"}', '--json={"ws":"{ws}","file":"b.ts"}']);
+  assert.deepEqual(expand(r.steps[3]!, { ws: ['@iris/a'] }), ['tool', '{@iris/a}']);
+  assert.deepEqual(expand(r.finally[0]!, {}), ['node', '-e', "fs.rmSync('tmp', {recursive:true, force:true})"]);
+  const slot = resolve('C:/runs/p-1');
+  assert.equal(jobCwd(slot, r, { ws: ['web'] }), resolve(slot, 'apps/{lit}/web'));
+  assert.deepEqual(relPaths(r, { ws: ['web'], files: ['apps/{lit}/web/a.ts'] }), { ws: ['web'], files: ['a.ts'] });
+  // unescaped and unmatched braces stay refused, with a hint to double them
+  assert.throws(() => loadConfig(cfgWith({ steps: [['node', '-e', "fs.rmSync('dist', {force:true})"]] })), /unknown parameter \{force:true\}.*\{\{.*\}\}/);
+  assert.throws(() => loadConfig(cfgWith({ steps: [['node', '-e', 'console.log({})']] })), /unknown parameter \{\}.*\{\{.*\}\}/);
+  assert.throws(() => loadConfig(cfgWith({ steps: [['node', '-e', 'fs.rmSync("dist", {{force:true})']] })), /unmatched "\}".*\{\{.*\}\}/);
+  assert.throws(() => loadConfig(cfgWith({ steps: [['pnpm', '--filter={ws']], params: { ws: { pattern: '.' } } })), /unmatched "\{".*\{\{.*\}\}/);
+  assert.throws(() => loadConfig(cfgWith({ steps: [['a']], cwd: 'apps/{app' })), /cwd.*unmatched "\{"/);
+});
+
 test('jobCwd stays inside the slot', () => {
   const r = example().projects.iris!.repos.main!.recipes.test!;
   const slot = resolve('C:/runs/iris-1');
@@ -130,7 +160,7 @@ test('jobEnv starts empty', () => {
   const recipe = { ...cfg.projects.iris!.repos.main!.recipes.guards!, env: { A: '1' } };
   const from = { PATH: 'p', CB_DATABASE_URL: 'x', DATABASE_URL: 'y', SECRET: 's', TEMP: 't' };
   // NoDefaultCurrentDirectoryInExePath: Windows must not run a program from the cwd (a committed git.exe) before PATH
-  assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', A: '1' });
+  assert.deepEqual(jobEnv(from, cfg, recipe), { PATH: 'p', TEMP: 't', NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', CB_RUNNER_JOB: '1', NoDefaultCurrentDirectoryInExePath: '1', A: '1' });
   assert.equal(jobEnv({ ...from, SECRET: 's' }, { ...cfg, passEnv: ['SECRET', 'ABSENT'] }, recipe).SECRET, 's');
 });
 

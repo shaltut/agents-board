@@ -8,6 +8,8 @@ import { statSync } from 'node:fs';
 import { ensurePg, ensureTestPg, ownsPg, stopTestPg, testDbUrl } from './pg.ts';
 import { databaseUrl } from '../server/db.ts';
 import { loadRoleTexts } from './roles.ts';
+import { applySchema } from './apply.ts';
+import { recordSchema, schemaSha } from './schema-applied.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const isTest = process.argv.includes('--test');
@@ -30,8 +32,10 @@ const [exists] = await admin`select 1 from pg_database where datname = ${dbName}
 if (!exists) await admin.unsafe(`create database "${dbName}"`);
 await admin.end();
 
-const sql = postgres(url.toString(), { onnotice: () => {} });
-await sql.file(join(ROOT, 'db', 'schema.sql'));
+// one connection, so the lock timeout holds for the whole apply: a wait that long is given up and retried (#4726)
+const sql = postgres(url.toString(), { max: 1, connection: { lock_timeout: 5000 }, onnotice: () => {} });
+await applySchema(sql, join(ROOT, 'db', 'schema.sql'));
+await recordSchema(sql, schemaSha(join(ROOT, 'db', 'schema.sql'))); // after the whole file applied (#4352)
 await loadRoleTexts(sql, join(ROOT, 'prompts', 'roles'));
 await sql.end();
 
