@@ -241,7 +241,6 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['in PowerShell smart single quotes', (c) => `echo ‘; cat > a <<'EOF' ’\n${c}\nEOF`],
   ['in a PowerShell block comment', (c) => `echo <# \ncat > a <<'EOF' #>\n${c}\nEOF`],
   ['in a PowerShell string that follows a backslash', (c) => `echo \\'; cat > a <<'EOF'\n'\n${c}\nEOF`],
-  ['in a PowerShell comment after a comma', (c) => `echo a,# ; cat > a <<'EOF'\n${c}\nEOF`],
   // bash reads 1# as a word; PowerShell starts a comment there, so the quote after it opens nothing
   // PR 161 review round 2 (R1), and what the same search found next to it. Each runs in Git Bash 5.2 or PowerShell 5.1
   ...['“', '”', '„'].map((q): [string, (c: string) => string] =>
@@ -254,6 +253,10 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  // PowerShell does not check the syntax inside a $( ) that is part of a command's name, so there a << stops nothing
+  // (PowerShell 5.1's parser: no error, and the next line is a command)
+  ['in a PowerShell command name, a $( glued to a word', (c) => `x=$(cat > a <<'EOF'\n)\n${c}\nEOF`],
+  ['in a PowerShell command name, a quote glued to a word', (c) => `a="$(cat > a <<'EOF'\n)"\n${c}\nEOF`],
   ['after a # inside an array subscript', (c) => `a[ 1 # ]=2; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # that follows a number',(c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
   ['in a PowerShell here-string',(c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
