@@ -1340,32 +1340,33 @@ function filledEnd(raw, k) {
 // a word the shell fills in: $X, ${...}, $(...), cmd's %X% (round 4, I2), or a quoted word that starts with a backtick
 // (#4795: a bare backtick is its own token, judged as an opener)
 const isFilled = (u) => u.startsWith('$') || (u.length > 1 && u.startsWith('`')) || /^%[A-Za-z_]\w*%/.test(u);
-// #4798: a slash makes a filled word a path only when it is outside every $( ), ${ } and backtick pair (a redirect or a
-// ${v/a/b} inside one says nothing about what comes out). One pass; quotes and \ are skipped only inside those, where a
-// quoted ) closes nothing (outside, \ is Windows' separator). Left open, the rest counts as inside: judged, fail closed
-function slashOutside(v) {
-  const open = [];
-  let quote = '';
-  for (let i = 0; i < v.length; i++) {
-    const c = v[i];
-    if (!open.length) {
-      if (c === '/' || c === '\\') return true;
-    } else if (quote) {
-      if (c === quote) quote = '';
-      continue;
-    } else if (c === '\\') {
-      i++;
-      continue;
-    } else if (c === '"' || c === "'") {
-      quote = c;
-      continue;
-    }
-    if (c === open[open.length - 1]) open.pop();
-    else if (c === '`') open.push('`');
-    else if (c === '$' && (v[i + 1] === '(' || v[i + 1] === '{')) open.push(v[++i] === '(' ? ')' : '}');
-    else if (open.length && (c === '(' || c === '{')) open.push(c === '(' ? ')' : '}');
-  }
-  return false;
+// #4798/#4802 (PR 181 review): where a substitution ends is not worked out (a ) in ${ }, a heredoc, a comment or a case
+// label fakes it). Only a CLEAN one is taken as ended: nothing in it can fake its closer (no quote, bracket, #, <, \,
+// no $( or ${ inside, not the word case). What is left of a word once those are out is DIRTY when anything is still open
+const CLEAN_PIECE = /\$\((?:[^()"'`#<\\{}$]|\$(?![({]))*\)|`(?:[^()"'`#<\\{}$]|\$(?![({]))*`|\$\{[A-Za-z_]\w*(?::?[-=?+](?:[^()"'`#<\\{}$]|\$(?![({]))*)?\}/g;
+const withoutClean = (v) => v.replace(CLEAN_PIECE, (m) => (/\bcase\b/.test(m) ? m : ' '));
+const DIRTY = /\$[({]|`/;
+// a slash makes a filled word a path only when it is outside every substitution, which is known only for a word with
+// nothing left open
+const isPathWord = (v) => { const left = withoutClean(v); return !DIRTY.test(left) && /[\\/]/.test(left); };
+// is the word at raw[j] a substitution, or does it hold one, that is not clean? A bare one is read for at most
+// CLEAN_REACH tokens and counts as open past that (linear)
+const CLEAN_REACH = 64;
+// a bare $( or ${, alone or glued after other text (""$( check$( --git-dir=$(): the tokens split it from what follows
+const bareDollar = (raw, j) => (raw[j] ?? '').endsWith('$') && /^[({]$/.test(raw[j + 1] ?? '');
+// the tokens do not say whether a word touches the backtick after it, so an opening one is read as if it did
+const gluedTick = (raw, j) => raw[j] !== '`' && raw[j + 1] === '`' && !shape(raw).closingTick[j + 1];
+// the index just past a bare substitution that starts in raw[j], else just past raw[j]
+const pastBare = (raw, j) => (bareDollar(raw, j) ? shape(raw).ends[j + 1] : raw[j] === '`' ? filledEnd(raw, j) : j + 1);
+function opensUnknown(raw, j) {
+  if (gluedTick(raw, j)) return opensUnknown(raw, j + 1);
+  const x = raw[j] ?? '', dollar = bareDollar(raw, j);
+  if (x !== '`' && !dollar) return DIRTY.test(withoutClean(x));
+  const end = pastBare(raw, j);
+  if (end - j > CLEAN_REACH) return true;
+  const inner = raw.slice(j + (dollar ? 2 : 1), end - 1).join(' ');
+  const closer = !dollar ? '`' : raw[j + 1] === '(' ? ')' : '}';
+  return raw[end - 1] !== closer || DIRTY.test(withoutClean(`${dollar ? x + raw[j + 1] : x}${inner}${closer}`));
 }
 // git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
 const MAX_FILLED_OPTS = 32;
@@ -1381,8 +1382,8 @@ const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', '
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
 // (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
-function filledWrites(raw, k, judge) {
-  const after = filledEnd(raw, k);
+function filledWrites(raw, k, judge, cut) {
+  const after = filledEnd(raw, k), head = ['git'];
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
     if (x === ')' || (x === '`' && shape(raw).closingTick[j])) return false; // the filled word's command ended
@@ -1393,12 +1394,20 @@ function filledWrites(raw, k, judge) {
       if (!GIT_GLOBAL_OPTS.has(v.split('=')[0]) && !/^-C./.test(v)) return false;
       const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
       if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
+      // the option's value, the next word or attached to this one; a bare substitution there is skipped whole, and
+      // stands in the judged words as one filled word
+      head.push(v);
       if (GIT_OPT_ARG.has(v)) j++;
+      if (cut && opensUnknown(raw, j)) cut();
+      const bare = bareDollar(raw, j) || (raw[j] === '`' && !shape(raw).closingTick[j]);
+      if (GIT_OPT_ARG.has(v)) head.push(bare ? '$' : unquote(raw[j] ?? ''));
+      if (bare) j = pastBare(raw, j) - 1;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !slashOutside(v));
+    const filledSub = x === '`' || gluedTick(raw, j) ||(x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !isPathWord(x)); // x as written: a quoted ) must be seen
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
-    return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
+    if (cut && filledSub && opensUnknown(raw, j)) cut();
+    return judge(() => [...head, ...raw.slice(j).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
   return false;
 }
@@ -1456,7 +1465,31 @@ const gitWrites = (seg, inQuote = false) => {
   }
   return false;
 };
-const FORMAT_WRITE = /(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
+// #4802: SEGMENTS cuts at ; & | and newline even inside a substitution. When the subcommand place (or a git option's
+// value) after a filled word opens one that is not clean, nothing tells where that git call ends: the rest of the
+// command, with the path it writes, may be part of it. A quoted command line is read as one too (bash -c '...'), each
+// time with a layer of quotes off, so it always shrinks
+function cutsGitCall(seg) {
+  const raw = seg.match(GIT_TOKEN) ?? [];
+  let hit = false, ticks = 0;
+  const cut = () => { hit = true; };
+  const unread = () => false;
+  for (let k = 0; k < raw.length && !hit; k++) {
+    const t = raw[k];
+    if (t === '`') {
+      if (ticks++ % 2 === 0) filledWrites(raw, k, unread, cut);
+      continue;
+    }
+    const u = unquote(t);
+    if (/["']/.test(t) && /[\s;&|]/.test(u)) {
+      const inner = u === t ? t.replace(/["']/g, '') : u;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(cutsGitCall)) return true;
+    }
+    if (isFilled(u)) filledWrites(raw, k, unread, cut);
+  }
+  return hit;
+}
+const FORMAT_WRITE =/(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
 const writes = (seg) => FENCE_WRITER.test(seg) || gitWrites(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
@@ -2255,53 +2288,6 @@ const NOCLOBBER = /(&?>>?&?)[|!]/g;
 // #4631: >&word sends both streams to the file word, unless word is an fd number or - (>&1, >&-: a duplication). Read
 // as > before the split, or its & cut the target off into a segment of its own
 const BOTH_TO = />&(?![ \t]*[\d-])/g;
-// #4802: SEGMENTS cuts at ; & | and newline even inside a $( ) or backtick pair, so $GIT "$(true; echo checkout)x" f cut
-// the filled git word off from the path it writes. This is the text with those read as spaces inside every pair that
-// closes (one left open runs nothing). quotes: whether quoted text closes nothing; cases: whether a ) between case and
-// esac is a pattern's. Each reading miscounts something the others get right (a stray quote in a comment, a quoted ), the
-// word case as an argument), so the caller judges all of JOIN_READINGS. One pass, plus one to rewrite.
-const CASE_WORD = /(?<![\w-])(?:case|esac)(?![\w-])/y;
-const JOIN_READINGS = [{ quotes: true }, { quotes: false }, { quotes: true, cases: true }];
-function joinSubstitutions(text, { quotes, cases = false }) {
-  const open = [], marks = new Int32Array(text.length + 1);
-  const close = (i) => { const { at } = open.pop(); if (at >= 0) { marks[at]++; marks[i + 1]--; } };
-  let ansiDead = false; // a $' with no end was read to the end once: later ones are not read again (linear)
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i], frame = open[open.length - 1], top = frame?.end;
-    if (cases && top === ')' && (c === 'c' || c === 'e')) {
-      CASE_WORD.lastIndex = i;
-      if (CASE_WORD.test(text)) {
-        frame.cases = Math.max(0, (frame.cases ?? 0) + (c === 'c' ? 1 : -1));
-        i += 3;
-        continue;
-      }
-    }
-    if (c === '\\') i++;
-    else if (quotes && c === '#' && top !== '"' && (i === 0 || /[\s;&|(]/.test(text[i - 1]))) {
-      const j = text.indexOf('\n', i); // a comment: nothing in it opens or closes
-      i = j < 0 ? text.length : j - 1;
-    } else if (quotes && !ansiDead && c === '$' && text[i + 1] === "'" && top !== '"') {
-      let j = i + 2;
-      while (j < text.length && text[j] !== "'") j += text[j] === '\\' ? 2 : 1;
-      if (j < text.length) i = j;
-      else ansiDead = true;
-    } else if (quotes && c === "'" && top !== '"') {
-      const j = text.indexOf("'", i + 1);
-      if (j > 0) i = j; // with no later ' there is none to look for again
-    } else if (quotes && c === '"') {
-      if (top === '"') open.pop();
-      else open.push({ end: '"', at: -1 });
-    } else if (c === '`') {
-      if (top === '`') close(i);
-      else open.push({ end: '`', at: i });
-    } else if (c === '$' && text[i + 1] === '(') open.push({ end: ')', at: i++ });
-    else if (c === '(' && top === ')') open.push({ end: ')', at: -1 });
-    else if (c === ')' && top === ')' && !frame.cases) close(i);
-  }
-  const inside = new Uint8Array(text.length);
-  for (let i = 0, depth = 0; i < text.length; i++) inside[i] = (depth += marks[i]) > 0 ? 1 : 0;
-  return text.replace(/[;&|\r\n]/g, (c, i) => (inside[i] ? ' ' : c));
-}
 const fenceWrite = rawAndJoined(fenceWriteOne);
 const seatVarChange = rawAndJoined(seatVarChangeOne);
 function fenceWriteOne(command) {
@@ -2312,29 +2298,21 @@ function fenceWriteOne(command) {
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
   if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
-  if (fencedSegments(text, writes)) return FENCE;
-  // #4802: the second reading adds blocks and takes none away. Only the git rule reads it: joining would otherwise put
-  // a writer inside a substitution on one line with a path another command in it only reads
-  const joined = new Set(JOIN_READINGS.map((reading) => joinSubstitutions(text, reading)));
-  joined.delete(text);
-  return [...joined].some((t) => fencedSegments(t, gitWrites)) ? FENCE : null;
-}
-// true when a segment that names a fence path, or runs inside one, redirects or is judged a write
-function fencedSegments(text, judge) {
+  if ((text.match(SEGMENTS) ?? []).some(cutsGitCall)) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
     if (CD.test(seg)) {
-      if (redirects(seg, false)) return true;
+      if (redirects(seg, false)) return FENCE;
       inFence = fenceDir(seg);
       continue;
     }
     const names = fencePath(seg);
     if (!names && !inFence) continue;
-    if (redirects(seg, inFence && !names)) return true;
-    if (judge(seg)) return true;
+    if (redirects(seg, inFence && !names)) return FENCE;
+    if (writes(seg)) return FENCE;
   }
-  return false;
+  return null;
 }
 
 // An edit tool's target paths (#4002 install gate): for an adapter whose agent edits files natively (Codex apply_patch,

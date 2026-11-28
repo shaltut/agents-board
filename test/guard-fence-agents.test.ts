@@ -332,13 +332,42 @@ test('the fence keeps a substitution whole across the separators inside it', () 
   }
 });
 
+// PR 181 review: anything that fakes the closing paren (a ) in ${ }, in a heredoc body, a comment or a case label) must
+// not end the substitution early, whether the command splitter cuts it or the path rule reads a slash in it
+test('the fence is not told where a substitution ends by a ) that closes nothing', () => {
+  const words = [
+    '"$(echo ${X:-)}; echo checkou)t"', '"$(echo ${X#)}; echo checkout)x"', '$(echo ${X:-)}; echo checkout)', '"$(cat <<E\n)\nE\necho checkout)x"',
+    '$(cat <<E\n)\nE\necho checkout)', '"$(echo checkout # )\n)x"', '$(echo a # )\necho checkout)', '$(echo \')\'; echo checkout)',
+    '"$(echo checkout # )\n </dev/null)x"', '"$(case a in a) echo checkout </dev/null;; esac)x"', '"$(case a in a) echo checkout;; esac)x"',
+    '"$(echo checkout </dev/null # ) /\n)x"', '"$(echo \')/\' >/dev/null; echo checkout)x"',
+  ];
+  // the same cut in the value of a git option, before the subcommand
+  const lines = [...words.map((w) => `caffeinate $GIT ${w} -- opencode.json`), 'caffeinate $GIT -C "$(true; pwd)" checkout -- opencode.json',
+    'caffeinate $GIT -C $(true; pwd) checkout -- opencode.json', 'caffeinate $GIT --git-dir "$(cd x && pwd)" checkout -- .claude/settings.json',
+    // text glued before a bare substitution, an option with its value attached, and the whole line handed to a shell
+    'caffeinate $GIT ""$(true; echo checkout) -- opencode.json', 'caffeinate $GIT check$(true; echo out) -- opencode.json',
+    'caffeinate $GIT check`true; echo out` -- opencode.json', 'caffeinate $GIT ""`true; echo checkout` -- opencode.json',
+    'caffeinate $GIT --git-dir=$(true; pwd)/.git checkout -- opencode.json', 'caffeinate $GIT --work-tree="$(true; pwd)" checkout -- opencode.json',
+    'bash -c \'caffeinate $GIT "$(true; echo checkout)x" -- opencode.json\'', '$GIT "$(true; echo checkout)x" -- opencode.json',
+    // a bare substitution as an option's value is skipped whole, so the subcommand after it is still read
+    'caffeinate $GIT -C $(pwd) checkout -- opencode.json', 'caffeinate $GIT -C `pwd` checkout -- opencode.json', 'caffeinate $GIT --git-dir=$(pwd) checkout -- opencode.json'];
+  const reads = ['echo $HOME "$(date)"; cat opencode.json', 'ls $HOME "$(dirname $0)"; cat opencode.json', 'cd "$(git rev-parse --show-toplevel)" && cat opencode.json',
+    'git fetch -q && x=$(git fetch -q; git rev-parse HEAD) && cat opencode.json', 'x="$(git log -1; date)"; cat opencode.json',
+    'caffeinate $GIT -C "$(pwd)" log -- opencode.json', 'diff $A "$(pwd)/$(date)" opencode.json', 'caffeinate $GIT -C $(pwd) log -- opencode.json',
+    'caffeinate $GIT --git-dir=$(pwd)/.git diff opencode.json', 'caffeinate $GIT log `date` -- opencode.json'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const c of lines) assert.equal(shell(c, role), false, `${role}: ${JSON.stringify(c)}`);
+    for (const c of reads) assert.equal(shell(c, role), true, `${role}: ${JSON.stringify(c)}`);
+  }
+});
+
 // #4798: only a slash OUTSIDE every substitution and ${...} makes a filled word a path. One inside (a redirect, a
 // ${v/a/b} replacement) says nothing about what the word comes out as
 test('the fence does not read a slash inside a substitution as a path', () => {
   const hidden = ['"$(echo checkout </dev/null)x"', '"`echo checkout </dev/null`x"', '"$(echo checkou 2>/dev/null)t"', 'x"$(echo checkout </dev/null)"',
     '"$(echo $(echo checkout </dev/null))x"', '"${S/q/checkout}"', '"$(echo checkout \')\' </dev/null)x"', '"$( (echo checkout) </dev/null)x"',
     '"$(echo checkout </dev/null"'];
-  const paths = ['"${A}/${B}"', '"$(pwd)/$(date)"', '"`pwd`/`date`"', '"$(echo \')\')/x"', '"$(pwd)\\opencode.json"', '"$(cat /tmp/dir)/x"',
+  const paths = ['"${A}/${B}"', '"$(pwd)/$(date)"', '"`pwd`/`date`"', '"$(pwd)\\opencode.json"', '"$(cat /tmp/dir)/x"',
     '"${HOME:-/root}/.codex"', '"$ROOT/$NAME"'];
   for (const role of ['builder', 'reviewer', 'lead']) {
     for (const w of hidden) {
