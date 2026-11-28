@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, launchSpec, opencodePort, seatSpec, startOne, type Runner } from '../cli/squad-up.ts';
+import { planSquad, classifyAgentGet, squadUp, herdrName, wantList, launchFor, launchSpec, opencodePort, seatSpec, startOne, START_MAX_MS, type Runner } from '../cli/squad-up.ts';
+import { SILENT_MS, TICK_MS } from '../cli/supervise.ts';
 import { squadShow } from '../cli/squad-show.ts';
 import { ADAPTERS, AGENT_KINDS } from '../cli/agents/index.ts';
 import { help } from '../cli/help.ts';
@@ -1017,4 +1018,28 @@ test('startOne: the token after Authorization: Bearer is cut, whatever it is mad
   for (const v of ['qwertyzzz', 'asdfghjkl', 'plmoknijb']) assert.ok(!r.line.includes(v), `"${v}" leaked: ${r.line}`);
   assert.match(r.line, /unauthorized/);
   assert.match(r.line, /rejected/);
+});
+
+// #4895: the supervisor's lease is renewed only while its main thread speaks, and one seat's start is the longest it is
+// rightly held. Every herdr call here takes the whole time it is given: a raised timeout or a new call fails this test
+test('START_MAX_MS covers a start whose herdr calls each take their whole timeout; the lease waits longer still', () => {
+  const codex = { ...wsLaunch('demo-B1@macbook'), agent: 'codex' as const, model: 'gpt-5.1-codex' };
+  let spent = 30_000, nonce = '', starts = 0; // 30 s: the supervisor's check that the seat is not running
+  const f = fake((c) => {
+    const [a, b] = c.args;
+    if (a === 'agent' && b === 'start' && ++starts <= 5) return { status: 1, stdout: '', stderr: 'agent_pane_busy' }; // quick refusals
+    spent += c.timeout ?? 180_000; // realRun's default
+    if (a === 'workspace' && b === 'list') return wsList(['w1', 'Workers']);
+    if (a === 'workspace' && b === 'create') return { status: 0, stdout: JSON.stringify({ result: { workspace: { workspace_id: 'w7' }, root_pane: { pane_id: 'w7:p1' } } }), stderr: '' };
+    if (b === 'process-info') return { status: 0, stdout: JSON.stringify({ result: { foreground_processes: [{ name: 'pwsh' }] } }), stderr: '' };
+    if (a === 'pane' && b === 'run') nonce = /-Nonce (\w+)/.exec(c.args.join(' '))![1]!;
+    if (b === 'wait-output') return { status: 0, stdout: JSON.stringify({ result: { matched_line: `cb-seat-ready:${nonce}` } }), stderr: '' };
+    if (a === 'agent' && b === 'start') return { status: 1, stdout: '', stderr: 'agent_start_failed' }; // the longer end: its pane read, then closed
+  });
+  const r = startOne(codex, f.run, {}, (ms) => { spent += ms; }, { installed: new Set(['claude', 'codex'] as const), env: { CB_MCP_GATE_OK: 'codex' } });
+  assert.equal(r.ok, false, r.line);
+  assert.ok(nonce && has(f.calls, 'pane', 'close'), `the whole path ran: ${r.line}`);
+  assert.ok(spent <= START_MAX_MS, `a start can take ${spent} ms, over ${START_MAX_MS}`);
+  assert.ok(SILENT_MS >= START_MAX_MS + 60_000, 'with room to spare');
+  assert.ok(SILENT_MS > TICK_MS, 'a long tick that is given up on does not stop the renewal first');
 });

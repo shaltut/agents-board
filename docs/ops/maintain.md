@@ -569,9 +569,18 @@ when it stops. Card #3601; design: `docs/superpowers/specs/2026-11-23-supervisor
 Start it by hand on the PC, in a herdr tab named `supervisor`, and leave it: `cb supervise`. After any change to
 `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise` (it validates runner.json with the code
 it loaded at start). Only one runs at a time,
-on any machine (a Postgres advisory lock); a second says `another supervisor is running` and exits. Check the plan
-first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing); `cb supervise
---once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
+on any machine: it holds the supervisor lease on the board (`cb.leases`, #3222 S5), taken for 180 s and renewed every
+30 s. A second says `another supervisor is running`, who holds the lease and for how long, and exits. Stopping it
+(Ctrl-C, closing its pane) gives the lease back; one killed outright leaves it to run out, at most 180 s. The board
+saying the lease is another's ends the process. A board that does not answer does not: it keeps trying, and after
+150 s without a renewal the running tick stops. The renewal runs on its own thread, so a long seat start does not
+stop it. A supervisor that is hung (no tick and no `herdr` call for about 25 minutes) is not renewed: its lease runs
+out, at most 180 s later, and another can start. Once the lease is another's, or has not been renewed for 150 s, it
+makes no further `herdr` call, also in the middle of a seat start (a call already running is not cut off); a
+half-started seat's pane can be left open. **At the upgrade that brings the lease, stop the old supervisor before
+you start the new one:** an older one holds a database lock the new one does not look at, so both would run.
+Check the plan first with `cb supervise --dry-run` (prints `would start ...`, `would close ...`, acts on nothing, takes
+no lease); `cb supervise --once` acts once and exits. Its log is `~/.claude-board/supervisor/<date>.log` (override the folder with
 `CB_SUPERVISOR_HOME`), one file a day, kept 7 days. Every start, close, restore and runner start is also a board event by actor
 `supervisor` (session names, roles and counts only).
 
