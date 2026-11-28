@@ -74,6 +74,9 @@ const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}
   return { sql: sup, run, dryRun: false, now: Date.now(), memory: memory(), runnerConfig: null, probe: async () => false,
     sleep: async (ms: number) => { t += ms; }, clock: () => t, ...o };
 };
+/** The supervisor's connection with each of its board calls going through f (text: select cb.<name>(...)). */
+const gate = (sup: any, f: (text: string, send: () => Promise<any>) => PromiseLike<any>) =>
+  ({ unsafe: (text: string, values: any[]) => f(text, () => sup.unsafe(text, values)) });
 const tells = (sql: any, to = 'orch@macbook') => sql`select summary from cb.events where kind = 'message' and data ->> 'to' = ${to}` as Promise<any[]>;
 
 test('a waiting build card starts a builder', async () => {
@@ -714,12 +717,11 @@ test('a project enabled again between the plan and the close keeps its holder', 
   h.live.set('sv-b1-macbook', 'w1:p9');
   // Ahmed enables it right after the supervisor has marked the seat closing, before it sends /exit
   let marked = false;
-  const gated = (text: TemplateStringsArray, ...values: any[]) => {
-    const query = sup(text, ...values);
-    if (marked || !text.join('?').includes('supervise_mark')) return query;
+  const gated = gate(sup, (text, send) => {
+    if (marked || !text.includes('supervise_mark')) return send();
     marked = true;
-    return query.then(async (rows: any) => { await sql`select cb.project_state('sv', 'enabled', 'ahmed')`; return rows; });
-  };
+    return send().then(async (rows: any) => { await sql`select cb.project_state('sv', 'enabled', 'ahmed')`; return rows; });
+  });
   const out = await tick(deps(gated, h.run));
   assert.ok(marked, out.join('\n'));
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
@@ -997,13 +999,13 @@ for (const [name, at, closed] of [['before /exit', 'supervise_mark', 0], ['after
     const { sql, sup, h, d } = await switchSetup();
     await tick(d);
     let saved = false;
-    const gated = (text: TemplateStringsArray, ...values: any[]) => {
-      if (saved || !text.join('?').includes(at)) return sup(text, ...values);
+    const gated = gate(sup, (text, send) => {
+      if (saved || !text.includes(at)) return send();
       saved = true;
       const save = () => sql`select cb.squad_set('sv', ${sql.json(OTHER)}, 'ahmed')`;
       // the mark: saved right after it, before the re-check. The record: saved right before it
-      return at === 'supervise_mark' ? sup(text, ...values).then(async (rows: any) => { await save(); return rows; }) : save().then(() => sup(text, ...values));
-    };
+      return at === 'supervise_mark' ? send().then(async (rows: any) => { await save(); return rows; }) : save().then(() => send());
+    });
     const out = await tick(deps(gated, h.run, { memory: d.memory }));
     assert.ok(saved, out.join('\n'));
     assert.equal(exits(h.calls).length, closed, out.join('\n'));
@@ -1016,12 +1018,11 @@ test('#4787: a seat that acts after the mark, right before /exit, is not closed'
   const { sql, sup, h, d } = await switchSetup();
   await tick(d);
   let marked = false;
-  const gated = (text: TemplateStringsArray, ...values: any[]) => {
-    const query = sup(text, ...values);
-    if (marked || !text.join('?').includes('supervise_mark')) return query;
+  const gated = gate(sup, (text, send) => {
+    if (marked || !text.includes('supervise_mark')) return send();
     marked = true;
-    return query.then(async (rows: any) => { await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`; return rows; });
-  };
+    return send().then(async (rows: any) => { await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`; return rows; });
+  });
   const out = await tick(deps(gated, h.run, { memory: d.memory }));
   assert.ok(marked, out.join('\n'));
   assert.deepEqual(exits(h.calls), [], out.join('\n'));
