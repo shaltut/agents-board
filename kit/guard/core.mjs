@@ -1746,6 +1746,10 @@ function rgEnds(before) {
 }
 // find's actions that run the words after them as a command
 const FIND_EXEC = /^-(?:exec|execdir|ok|okdir)$/;
+// a segment naming find is walked even with no launcher in it: the next one may go on from it. find goes on over braces,
+// where a segment also ends, and over its own end mark, \; or a quoted ; (the flat reading cuts at that ; too)
+const FIND_WORD = /\bfind\b/i;
+const FIND_END = /^(?:\\;|';'|";")/;
 // cut: the second reading split this command inside a quote, so a shell's command string may be every word that is left
 function codeStrings(name, args, cut) {
   const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
@@ -1865,11 +1869,18 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
   // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
   const writes = varWrites(blankComments(stripped));
-  let written = 0;
+  let written = 0, finds = false, after = 0; // finds: inside a find command; after: where the segment before ended
   for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
-    const seg = segment[0];
+    let seg = segment[0];
+    if (finds) {
+      const mark = FIND_END.exec(raw.slice(after - 1, after + 2))?.[0];
+      if (/[;&|\n]/.test(raw.slice(after + (mark ? 1 : 0), segment.index))) finds = false;
+      // the flat reading cuts a quoted ; in two: left in, its closing quote would pair with the next one
+      else if (flat && mark && mark !== '\\;') seg = ` ${seg.slice(1)}`;
+    }
+    after = segment.index + seg.length;
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
-    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
+    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg) && !FIND_WORD.test(seg)) {
       // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
       const plain = unhide(seg.replace(/["']/g, ''));
       if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
@@ -1885,7 +1896,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       walked.add(key);
       return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
     };
-    let cmd = true, finds = false;
+    let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
       if (finds && FIND_EXEC.test(u[i])) { cmd = true; continue; } // #4789: what follows is a command of its own
