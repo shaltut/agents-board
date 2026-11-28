@@ -21,7 +21,7 @@ export function keyFile(kind: Kind, env: Env = process.env) {
 }
 
 /** The board's address, without a trailing slash. The key travels with every call: https, or this machine itself. */
-function boardUrl(text: string): string {
+export function boardUrl(text: string): string {
   const u = URL.canParse(text) ? new URL(text) : null;
   const safe = !!u && (u.protocol === 'https:' || (u.protocol === 'http:' && OWN_HOST.has(u.hostname)));
   if (!u || !safe || u.username || u.password || u.search || u.hash) {

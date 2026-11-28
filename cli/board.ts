@@ -5,7 +5,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { OPS } from '../server/ops.ts';
 import { RpcError, selectFn } from '../server/rpc.ts';
-import { readKey } from './transport.ts';
+import { boardUrl, readKey } from './transport.ts';
 
 let board: any;
 /** The connection calls run on: cb's own, or its session relay's bridge. */
@@ -59,13 +59,14 @@ const parsed = (text: string): any => { try { return JSON.parse(text); } catch {
 /** The worker API as a board call() can run on. The key is read for every request, so a new one takes effect at once.
  *  Redirects are never followed: the key goes to url only. */
 export function apiBoard(o: ApiOpts) {
-  const secure = o.url.startsWith('https:');
+  const base = boardUrl(o.url); // here too, whoever calls: the key goes only where it may travel
+  const secure = base.startsWith('https:');
   const lib = secure ? https : http;
   // one connection for a command's calls; an idle one is dropped before the server drops it under us (5 s)
   const agent = new lib.Agent({ keepAlive: true, timeout: 4000 });
 
   function send(method: string, path: string, via: http.Agent | false, body?: string): http.ClientRequest {
-    const req = lib.request(o.url + path, {
+    const req = lib.request(base + path, {
       method, agent: via,
       headers: {
         authorization: `Bearer ${readKey(o.keyFile)}`, 'x-cb-proto': '1', 'x-cb-code': o.code,
@@ -75,7 +76,7 @@ export function apiBoard(o: ApiOpts) {
     // a connection that never finished carried nothing, so this one error is safe to send again
     req.once('socket', (socket) => {
       if (req.reusedSocket) return;
-      const t = setTimeout(() => req.destroy(error('CONNECT_TIMEOUT', 'the connection to the board timed out')), o.connectTimeoutMs ?? 5000);
+      const t = setTimeout(() => req.destroy(error('CONNECT_TIMEOUT', 'the connection to the board timed out: check CB_BOARD_URL and that the board is up (cb key check)')), o.connectTimeoutMs ?? 5000);
       const done = () => clearTimeout(t);
       socket.once(secure ? 'secureConnect' : 'connect', done);
       req.once('close', done);
@@ -93,7 +94,7 @@ export function apiBoard(o: ApiOpts) {
 
   async function exchange(method: string, path: string, body?: string): Promise<any> {
     const req = send(method, path, agent, body);
-    const timer = setTimeout(() => req.destroy(error('CB_NO_ANSWER', 'the board did not answer in time')), o.replyTimeoutMs ?? 60_000);
+    const timer = setTimeout(() => req.destroy(error('CB_NO_ANSWER', 'the board did not answer in time: if this repeats, check CB_BOARD_URL and ask it with cb key check')), o.replyTimeoutMs ?? 60_000);
     try {
       const res = await new Promise<http.IncomingMessage>((ok, fail) => {
         req.on('response', ok);
@@ -142,7 +143,8 @@ export function apiBoard(o: ApiOpts) {
           const mine = !!res.headers['x-cb-proto'];
           if (res.statusCode !== 200 || !mine) {
             read(res).then((text) => {
-              if (over || (res.statusCode !== 401 && res.statusCode !== 403)) return again();
+              // only the board's own refusal ends the stream: something on the way may refuse for a while
+              if (over || !mine || (res.statusCode !== 401 && res.statusCode !== 403)) return again();
               over = closed = true;
               clearTimeout(quiet);
               so.refused?.(refusal(res.statusCode!, mine, parsed(text)));

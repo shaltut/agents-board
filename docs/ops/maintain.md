@@ -441,6 +441,15 @@ All in `deploy/.env` (mode 600). After changing one: `dc up -d` (recreates what 
   login stopped working.
 - **Nginx Proxy Manager:** its admin account and Let's Encrypt certificates are NPM's (it renews them itself).
 
+## Worker keys (#3222)
+
+A worker's key to the board's API is one file per kind, `~/.claude-board/keys/<kind>.key` (`CB_KEY_DIR` moves the
+folder). `cb key install <kind>` writes it from stdin, and `cb key check` asks the board who it is.
+
+On Linux and macOS the file is readable by its user only. On Windows that file mode does nothing: the file takes its
+folder's permissions. Under your own profile that is you, the administrators and the system; a `CB_KEY_DIR` outside
+the profile may let other accounts on the machine read it, so leave the folder where it is.
+
 ## Disk and housekeeping
 
 ```bash

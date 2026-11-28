@@ -135,6 +135,13 @@ test('any other lost or odd answer may have run: a network error, never sent aga
     const e = await failure(call('task_add', {}, client(s.url, { replyTimeoutMs: 200 })));
     assert.ok(!neverSent(e) && isNetworkError(e), `${what}: ${e.code} ${e.message}`);
     assert.equal(s.seen.length, 1, what);
+    if (reply === 'hang') assert.match(e.message, /CB_BOARD_URL.*cb key check/, what); // it says what to do next
+  }
+});
+
+test('apiBoard itself takes only an address the key may travel to, whoever calls it', () => {
+  for (const url of ['http://board.example', 'https://user:pw@board.example', 'board.example']) {
+    assert.throws(() => apiBoard({ url, keyFile, code: 'x' }), /CB_BOARD_URL/, url);
   }
 });
 
@@ -178,6 +185,7 @@ test('a board that refuses the connection, or never finishes it, was never sent 
   servers.push({ close: () => { open.forEach((s) => s.destroy()); mute.close(); } });
   const slow = await failure(call('task_add', {}, client(`https://127.0.0.1:${(mute.address() as net.AddressInfo).port}`, { connectTimeoutMs: 200 })));
   assert.equal(slow.code, 'CONNECT_TIMEOUT', slow.message);
+  assert.match(slow.message, /CB_BOARD_URL.*cb key check/);
   assert.ok(neverSent(slow));
 });
 
@@ -236,6 +244,20 @@ test('a stream hands over each event, ignores pings, and comes back after an end
   const n = s.seen.length;
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(s.seen.length, n, 'a closed stream comes back no more');
+});
+
+test('a 401 or 403 from something on the way, not the board, does not end the stream', async () => {
+  let n = 0;
+  const s = await stub((_r, res) => {
+    if (++n < 3) return { status: n === 1 ? 401 : 403, bare: true, raw: '<html>sign in to this network</html>' };
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'x-cb-proto': '1' });
+    res.write('event: listen\ndata: \n\n');
+    return null;
+  });
+  const got: string[] = [], refused: string[] = [];
+  const stream = client(s.url).events(['cb'], (channel) => got.push(channel), { retryMs: 10, refused: (e: Error) => refused.push(e.message) });
+  try { await until(() => got.length === 1); } finally { stream.close(); }
+  assert.deepEqual([s.seen.length, refused], [3, []]);
 });
 
 test('a stream refused for its key ends for good and says so once', async () => {
