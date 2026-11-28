@@ -6,7 +6,64 @@ import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import postgres from 'postgres';
-import { ensurePg, ensureTestPg, spawnWithin, testPgPort, testPortStart } from '../db/pg.ts';
+import { databaseLost, ensurePg, ensureTestPg, spawnWithin, stopTestPg, testPgPort, testPortStart } from '../db/pg.ts';
+
+// #4922: a test cluster that crashes and recovers mid-run fails dozens of unrelated tests ("the database system is in
+// recovery mode"). The log lines below have the shape of real ones, with made-up times and process numbers.
+const at = (s: string, pid: number, rest: string) => `2026-01-01 10:00:${s} UTC [${pid}] ${rest}`;
+const KILLED = [
+  at('01.000', 900, 'ERROR:  task #77 not found'),
+  at('02.000', 100, 'LOG:  WAL writer process (PID 555) exited with exit code 1'),
+  at('02.001', 100, 'LOG:  terminating any other active server processes'),
+  at('02.002', 100, 'LOG:  all server processes terminated; reinitializing'),
+];
+
+test('databaseLost names the process that went, and says when it logged no error of its own', () => {
+  const [line, ...more] = databaseLost(KILLED.join('\r\n'));
+  assert.equal(more.length, 0);
+  assert.match(line!, /^database lost: the test Postgres crashed and restarted during this run/);
+  assert.match(line!, /10:00:02\.000 UTC \[100\] LOG: {2}WAL writer process \(PID 555\) exited with exit code 1/);
+  assert.match(line!, /it logged no error of its own/);
+});
+
+test('databaseLost gives the failed process\'s own last error, past the DETAIL line', () => {
+  const [line] = databaseLost([
+    at('03.000', 556, 'PANIC:  could not write to file "pg_wal/x": No space left on device'),
+    at('03.001', 100, 'LOG:  server process (PID 556) was terminated by exception 0xC0000409'),
+    at('03.001', 100, 'DETAIL:  Failed process was running: select 1'),
+    at('03.002', 100, 'LOG:  terminating any other active server processes'),
+  ].join('\n'));
+  assert.match(line!, /server process \(PID 556\) was terminated by exception 0xC0000409/);
+  assert.match(line!, /No space left on device/);
+  assert.doesNotMatch(line!, /Failed process was running|no error of its own/);
+});
+
+test('databaseLost is silent for a normal stop, an ordinary error and an empty log', () => {
+  assert.deepEqual(databaseLost([
+    at('04.000', 100, 'LOG:  received fast shutdown request'),
+    at('04.001', 100, 'LOG:  background worker "logical replication launcher" (PID 557) exited with exit code 1'),
+    at('04.002', 900, 'ERROR:  terminating connection due to administrator command'),
+    // a statement a test sent that quotes the words is not the server's own line
+    at('04.003', 901, 'STATEMENT:  select \'terminating any other active server processes\''),
+  ].join('\n')), []);
+  assert.deepEqual(databaseLost(''), []);
+});
+
+test('databaseLost keeps the first three crashes', () => {
+  assert.equal(databaseLost([...KILLED, ...KILLED, ...KILLED, ...KILLED].join('\n')).length, 3);
+});
+
+test('stopping a worktree\'s test cluster reports what its log says was lost', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'cb-pg-lost-'));
+  try {
+    writeFileSync(join(root, '.git'), 'gitdir: elsewhere\n'); // a worktree's .git is a file
+    mkdirSync(join(root, '.pgdata'));
+    writeFileSync(join(root, '.pgdata', 'server.log'), KILLED.join('\n'));
+    const r = stopTestPg(root);
+    assert.match(r.message, /^database lost: .*WAL writer process \(PID 555\)/m);
+    assert.match(r.message, /no test cluster running/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 // the private cluster is Windows-only (initdb.exe, pg_ctl.exe; db/pg.ts): elsewhere Postgres is started by hand (#4401)
 test('ensurePg creates the cluster when .pgdata is missing', { timeout: 120_000, skip: process.platform !== 'win32' && 'Windows only' }, async () => {
