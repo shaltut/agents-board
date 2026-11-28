@@ -56,8 +56,11 @@ test('role blocks: a builder cannot push to main or merge; a reviewer cannot com
   assert.match(run(bash('gh pr merge 12'), { CB_ROLE: 'builder' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(builder\): /);
   // #4638: an alias, commit plumbing and a gh api merge are judged in the Codex seat the same way
   assert.match(run(bash('gh api -X PUT repos/o/r/pulls/5/merge'), { CB_ROLE: 'builder' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(builder\): /);
+  assert.match(run(bash('S=push; git $S origin main'), { CB_ROLE: 'lead' }).out.hookSpecificOutput.permissionDecisionReason, /^Blocked by role \(lead\): /);
   for (const cmd of ['git commit -m x', 'git push origin feat/x', 'git -c alias.c=commit c -m x', 'git commit-tree HEAD^{tree} -m x',
-    'git update-ref refs/heads/x HEAD', 'gh api -X PUT repos/o/r/pulls/5/merge']) {
+    'git update-ref refs/heads/x HEAD', 'gh api -X PUT repos/o/r/pulls/5/merge',
+    // #4661
+    'git subtree push -P x origin feat/x', 'GIT_EXEC_PATH=/tmp/evil git status', 'gh merge 5']) {
     for (const role of ['reviewer', 'qa', 'investigator']) {
       assert.match(run(bash(cmd), { CB_ROLE: role }).out.hookSpecificOutput.permissionDecisionReason, new RegExp(`^Blocked by role \\(${role}\\): `), `${role} ${cmd}`);
     }
@@ -214,7 +217,7 @@ const SESSIONS = [
   'kubectl exec -it pod -- sh', 'kubectl exec --stdin pod -- sh', 'kubectl attach pod -i',
   'vim notes.md', 'less log.txt', 'man git', 'nano x', 'ed x',
   'grep foo | sh', 'grep -e x | sh', 'grep foo - | sh', 'tr a b | sh', 'head -n 5 | sh', 'sed s/a/b/ | bash', 'cut -f1 | sh',
-  'cat | sh', 'cat | python', 'tee x | bash', 'head -c 9 | node', 'xargs git', "awk '{system($0)}'", 'read x; eval $x', 'select x in a b; do echo $x; done', 'echo $(python)', 'echo "$(bash)"', 'read -r cmd && git $cmd',
+  'cat | sh', 'cat | python', 'tee x | bash', 'head -c 9 | node', 'xargs git', "awk '{system($0)}'", 'read x; eval $x', 'select x in a b; do echo $x; done', 'echo $(python)', 'echo "$(bash)"',
   'Read-Host "cmd"', '$c = [Console]::ReadLine(); iex $c', 'foreach ($l in $input) { iex $l }', '$host.UI.ReadLine()',
   'env FOO=1 python', 'sudo bash', 'sudo -u web bash', 'nohup bash -i', 'FOO=1 node', 'timeout 60 python', 'cd /tmp && python', 'ls; bash', 'bash -c "python"', 'cat x.txt > /dev/tty',
   '/usr/bin/python3', 'C:\\Python311\\python.exe', '"C:\\Program Files\\PowerShell\\7\\pwsh.exe"', 'if true; then bash; fi',
@@ -255,6 +258,10 @@ test('a board seat may not open an interactive session (shell, REPL, client, rem
     // #4669 (merged after #4626): sudo, su, tmux and screen in a seat are refused first as a fresh-environment launch
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /write_stdin|fresh environment/, c);
   }
+  // #4661 S1 runs first here (checkRole before the session rule): a git subcommand the shell fills in blocks on its own
+  const read = seat('read -r cmd && git $cmd').hookSpecificOutput;
+  assert.equal(read?.permissionDecision, 'deny');
+  assert.match(read.permissionDecisionReason, /write_stdin|a subcommand the shell fills in/);
 });
 
 test('one-shot commands, input redirects and plain text naming a shell stay allowed (#4626)', () => {

@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import { Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { rpc, useProjects } from '@/lib/api'
+import { liveOnly, rpc, useProjects } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { RX, actorLabel, saveError, type Watch } from '@/lib/squad'
 import { useLeads } from '@/views/Sessions'
@@ -50,7 +50,7 @@ export function GitHub({ project }: { project: string }) {
             onRemove={() => act('github_watch_remove', { repo: w.repo }, `Stopped watching ${w.repo}`, 'The watch was not removed. Try again.')} />)}
         </ul>
       )}
-      <AddWatch busy={busy} others={projects.filter((p) => p.slug !== project).map((p) => ({ slug: p.slug, name: p.name }))}
+      <AddWatch busy={busy} others={liveOnly(projects).filter((p) => p.slug !== project).map((p) => ({ slug: p.slug, name: p.name }))}
         onAdd={(repo, tell, cardsIn) => act('github_watch_add', { repo, project, tell: tell || null, cards_in: cardsIn.length ? cardsIn : null },
           `Watching ${repo}`, 'The watch was not added. Check the repo name, or name the session it tells, and try again.')} />
       <Muted muted={data.muted} busy={busy}

@@ -96,7 +96,7 @@ function PingAll({ tasks }: { tasks: ListTask[] }) {
 
 export function Board({ route }: { route: Route }) {
   const qc = useQueryClient()
-  const { data = [], isLoading } = useTasks(route.project)
+  const { data = [], isLoading } = useTasks(route.project, undefined, true)
   const [optimistic, setOptimistic] = useState<{ id: number; status: Status; rank: number } | null>(null)
   const [active, setActive] = useState<ListTask | null>(null)
   const sensors = useSensors(

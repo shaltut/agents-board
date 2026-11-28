@@ -695,6 +695,145 @@ test('role rules: aliases, write plumbing and gh api writes do not get past the 
   assert.match(shell('gh api -X PUT repos/o/r/pulls/5/merge', { CB_ROLE: 'builder' }).reason!, /gh pr comment/);
 });
 
+// #4661 (PR 107 review S1, L1, L2): the push, commit and merge rules past a filled or unknown subcommand, git subtree,
+// an alias written to a config file, a config key or variable that runs a command, and gh extensions, repo sync, workflows
+test('role rules: hidden pushes, command-running git settings and gh extensions do not get past the rules (#4661)', () => {
+  // S1, every role (the lead too): main is pushed by no spelling
+  const mainPushes = ['S=push; git $S origin main', 'git $S origin main', 'git ${S} origin master', 'git p origin main',
+    'git p origin HEAD:main', 'git p origin +main', 'sudo git p origin refs/heads/main', 'x=$(git p origin main)',
+    'git subtree push --prefix x origin main', 'git subtree push -P x origin master', 'git subtree push --prefix=x origin refs/heads/main',
+    'git -C wt subtree push -P x origin HEAD:main',
+    // an alias written to a config file renames a subcommand for every later call
+    "printf '[alias]\\n p = push\\n' >> .git/config", 'echo "[alias] p = push" > .git/config', 'tee -a .git/config < a.cfg',
+    'cp evil.cfg .git/config', 'Add-Content .git/config "[alias]"', "sed -i 's/x/y/' .git/config", 'echo x >> ~/.gitconfig',
+    'echo x >> .git/worktrees/w/config.worktree', 'echo x >> ~/.config/git/config', String.raw`Add-Content $HOME\.gitconfig x`,
+    'echo x >>.git/config', 'git config --local alias.p push', 'git config --file .git/config alias.p push',
+    'git config -f .git/config include.path /tmp/a.cfg',
+    // a command-running setting whose command pushes
+    "git -c core.pager='git push origin HEAD:main' log", "GIT_PAGER='git push origin HEAD:main' git log"];
+  for (const role of ROLES) blocksByRole(role, mainPushes);
+  // a protected branch from CB_PROTECTED_BRANCHES, the same way
+  for (const c of ['git p origin develop', 'git $S origin develop', 'git subtree push -P x origin develop']) {
+    assert.equal(shell(c, { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'develop' }).decision, 'block', c);
+  }
+
+  // L1 and S1, read-only roles: no subtree write, and no git setting or variable that runs a command
+  const readOnlyRuns = ['git subtree push -P x origin feat/x', 'git subtree add -P x origin feat/x', 'git subtree pull -P x origin feat/x',
+    'git subtree merge -P x feat/x', "git -c core.pager='git commit -am x' log", 'git -c core.sshCommand="sh -c x" fetch',
+    'git -c diff.external=/tmp/x diff', "git -c credential.helper='!sh -c x' fetch", 'git -c gpg.program=/tmp/x log --show-signature',
+    'git -c core.editor=/tmp/x tag -a v1', 'git -c filter.x.clean=/tmp/x status', 'git -c diff.x.textconv=/tmp/x diff',
+    'git -c core.fsmonitor=/tmp/x status', 'git -c core.hooksPath=/tmp/h status', 'git -c sequence.editor=/tmp/x status',
+    'git -c pager.log=/tmp/x log', 'git -c merge.x.driver=/tmp/x status', 'git --config-env=core.pager=P log',
+    "GIT_PAGER='git commit -am x' git log", 'GIT_EXEC_PATH=/tmp/evil git status', 'GIT_SSH_COMMAND=/tmp/x git fetch',
+    'GIT_EXTERNAL_DIFF=/tmp/x git diff', 'GIT_EDITOR=/tmp/x git tag -a v1', 'git --exec-path=/tmp/evil status'];
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, readOnlyRuns);
+    passes(role, ['git -c core.pager=cat log', 'git -c core.pager="less -R" log', 'GIT_PAGER=cat git log', 'PAGER= git log',
+      'git -c pager.branch=false branch', 'git -c color.ui=always log', 'git -c core.autocrlf=false status', 'git subtree split -P x',
+      'git --exec-path', 'git -c core.pager=cat log main', 'git config -f .git/config --get remote.origin.url', 'git --no-pager log']);
+  }
+  // everyday git: no false blocks, any role
+  for (const role of ROLES) {
+    passes(role, ['git checkout main', 'git log main', 'git diff main...HEAD', 'git rebase origin/main', 'git merge-base main HEAD',
+      'git fetch origin main', 'git pull origin main', 'grep -rn git docs main', 'echo git p main', 'cat .git/config',
+      'grep alias .git/config', 'cb log 1 "echo x >> .git/config"', 'git config --get-regexp alias', 'git config --get alias.c',
+      'git subtree split -P x', 'git status', 'git show main:README.md']);
+  }
+  for (const role of ['builder', 'architect', 'owner', 'lead']) {
+    passes(role, ['git subtree push -P x origin feat/x', 'git subtree split -P x -b split-x', 'git -c core.pager=less log',
+      'git p origin feat/x', 'git config user.email b@example.com']);
+  }
+
+  // L2, every role but the lead: gh extensions (an installed one runs as any gh word), unknown gh commands, a fork sync
+  // that moves a remote branch, a workflow run
+  const ghRuns = ['gh extension install o/gh-merge', 'gh ext install o/gh-merge', 'gh extensions upgrade --all',
+    'gh extension exec merge 5', 'gh merge 5', 'gh -R o/r merge 5', 'gh repo sync o/fork -b main --source u/r --force', 'gh repo sync o/fork',
+    'gh workflow run merge.yml', 'gh workflow run merge.yml -f pr=5', 'bash -c "gh merge 5"'];
+  for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ghRuns);
+  passes('lead', ['gh extension install o/x', 'gh workflow run merge.yml', 'gh repo sync o/fork', 'gh merge 5']);
+  for (const role of ROLES) {
+    passes(role, ['gh extension list', 'gh co 5', 'gh pr checkout 5', 'gh run rerun 5', 'gh run view 5', 'gh workflow list',
+      'gh workflow view merge.yml', 'gh repo sync', 'gh repo view o/r', 'gh copilot suggest x', 'gh status', 'gh issue list',
+      'gh search prs x', 'echo gh merge 5', 'which gh', 'gh --version', 'gh help', 'gh auth status', 'rg "gh merge" docs']);
+  }
+
+  // review before the PR: a launcher with an argument, a filled subcommand with no literal branch, command-running keys
+  // through GIT_CONFIG_*, hidden config path spellings
+  for (const role of ROLES) {
+    blocksByRole(role, ['timeout 30 git $S origin main', 'env -i git p origin main', 'S=push; B=main; git $S origin $B',
+      'git $S origin HEAD', 'git $S --all', 'echo x >> .git/con""fig', 'echo x >> .git/./config',
+      `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='git push origin HEAD:main' git log`]);
+    passes(role, ['echo "git is on main"', 'grep -rn "git lg main" docs', 'cat .git/worktrees/x/config.worktree']);
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) blocksByRole(role, ['sudo -u x gh merge 5']);
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, [`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='git commit -am x' git log`,
+      `GIT_CONFIG_PARAMETERS="'core.pager=git commit -am x'" git log`]);
+    passes(role, ['git -c core.fsmonitor=false status', 'git -c credential.helper= fetch']);
+  }
+  passes('builder', ['git subtree push -P x origin feat/x 2>$null']);
+
+  // PR 111 review. R1: a brace group bash and zsh expand ({a,b}, {1..3}) is a word the shell fills in, never unbraced.
+  // B1: a command-running setting's value is judged as the command git runs (git runs it through a shell; # ends git's
+  // own arguments), set with -c, a variable or git config. B2: cmd /c runs git. B3: XDG_CONFIG_HOME points git at another
+  // config. B4: an alias naming a branch the shell fills in
+  for (const role of ROLES) {
+    blocksByRole(role, ['git push origin {main,}', 'git push origin {feat/x,main}', 'git push {-f,} origin feat/x',
+      'git p origin {main,}', 'git push origin HEAD:{main,}', 'git push origin ma{i,}n', 'git push origin {1..2}',
+      `git -c core.fsmonitor='git pu""sh -q origin HEAD:main #' status`, `git -c diff.external='git pu""sh -q origin HEAD:main #' diff`,
+      `git -c core.fsmonitor='S=pu; git \${S}sh origin HEAD:main #' status`, `git -c core.fsmonitor='git p origin main #' status`,
+      `git -c core.fsmonitor='git $S origin main #' status`, `GIT_EXTERNAL_DIFF='git pu""sh -q origin HEAD:main #' git diff`,
+      `git config core.fsmonitor 'git p origin main'`, `git config --global diff.external 'git pu""sh origin HEAD:main #'`,
+      'cmd /c git p origin main', 'cmd.exe /c git p origin main', 'cmd /k git p origin main', 'cmd /s /c git p origin main',
+      'XDG_CONFIG_HOME=/tmp/x git st', 'B=main; git p origin $B', 'git p origin ${B}']);
+    passes(role, ['git log --format=%H -- src/{a,b}.ts', 'git -C ${WT} log', 'gh api repos/{owner}/{repo}/pulls/111']);
+  }
+  for (const role of ['builder', 'lead']) {
+    passes(role, [`git -c core.fsmonitor='git pu""sh -q origin HEAD:feat/x #' status`, 'git config core.fsmonitor false',
+      'git push origin feat/x', 'git co feat/x', 'git lg', 'git lg --all', 'git lg HEAD']);
+  }
+  for (const role of READ_ONLY_ROLES) {
+    blocksByRole(role, ['git config core.fsmonitor /tmp/x.sh', 'git config diff.external /tmp/x', 'git config set core.hooksPath /tmp/h',
+      'git config --global core.sshCommand /tmp/x']);
+    passes(role, ['git config core.fsmonitor', 'git config --get core.hooksPath', 'git config core.fsmonitor false']);
+  }
+  // an alias naming main says what it is, not "git push"
+  assert.match(shell('git co main', { CB_ROLE: 'builder' }).reason!, /git co is not a git command.*git checkout main/);
+  // PR 111 r2 N1: a command-running value the shell fills in or decodes cannot be read, so it blocks
+  for (const role of ROLES) {
+    blocksByRole(role, [String.raw`git -c core.fsmonitor=$'git push origin HEAD:ma\x69n #' status`,
+      String.raw`git -c core.fsmonitor=$'git pu\x73h origin HEAD:main #' status`, 'git -c core.fsmonitor="`cat x.txt` #" status',
+      `X='git push origin main #'; git -c core.fsmonitor="$X" status`, String.raw`GIT_EXTERNAL_DIFF=$'git pu\x73h origin HEAD:main #' git diff`]);
+  }
+  assert.equal(shell(String.raw`git -c core.fsmonitor=$'git pu\x73h origin HEAD:develop #' status`,
+    { CB_ROLE: 'builder', CB_PROTECTED_BRANCHES: 'develop' }).decision, 'block');
+  // a $HOME/ path start is the home folder, unless the command sets HOME
+  for (const role of ['lead', 'builder']) {
+    passes(role, ['GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519" git fetch origin', 'GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/k" git pull']);
+    blocksByRole(role, [`HOME='x; git push origin main #'; GIT_SSH_COMMAND="ssh -i $HOME/k" git fetch`,
+      'GIT_SSH_COMMAND="ssh -i $HOMEDIR/k" git fetch']);
+  }
+  // PR 111 r3 (straight against core, to keep the file fast): R3-1 git spelled with quotes is git to the alias rule;
+  // R3-3 any other mention of HOME or USERPROFILE drops the $HOME/ exemption, and $home/ is none
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const quotedGit = ['g""it p origin main', '"g"it p origin main', `'gi't p origin HEAD:main`, `gi''t p origin main`, 'G""IT p origin main',
+    'B=main; g""it p origin $B', `g""it -c core.fsmonitor='g""it p origin main #' status`, 'sudo g""it p origin main',
+    `& 'gi''t' p origin main`, 'g""it subtree push --prefix x origin main'];
+  const homeNamed = [String.raw`HOME+=$';git push -q origin ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`read -r HOME <<< $'/x;git push -q origin ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`printf -v HOME '%s' $';git push origin HEAD:ma\x69n #'; git -c core.fsmonitor="$HOME/k" status`,
+    String.raw`for HOME in $';git push origin HEAD:ma\x69n #'; do git -c core.fsmonitor="$HOME/k" status; done`,
+    `typeset -x HOME+=';x'; git -c core.fsmonitor="$HOME/k" status`, `Set-Variable -Name HOME -Value 'x' -Force; git -c core.fsmonitor="$HOME/k" status`,
+    `[Environment]::SetEnvironmentVariable('HOME', 'x'); git -c core.fsmonitor="$HOME/k" status`,
+    `$Global:HOME = 'x'; git -c core.fsmonitor="$HOME/k" status`, 'git -c core.fsmonitor="$home/k" status'];
+  const homeKept = ['cd /home/ubuntu/w && GIT_SSH_COMMAND="ssh -i $HOME/.ssh/k" git fetch',
+    'echo "home page"; GIT_SSH_COMMAND="ssh -i $HOME/k" git fetch', 'GIT_SSH_COMMAND="ssh -i $USERPROFILE\\.ssh\\k" git fetch'];
+  for (const role of ['lead', 'builder']) {
+    for (const c of [...quotedGit, ...homeNamed]) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    for (const c of homeKept) assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+  }
+});
+
 test('role rules: main/master read every quoted string; a pipe into a shell, iex, bare pwsh/powershell and su -c are runners', () => {
   // main and master are protected like the protected-branch scan protects its list: every quoted string counts, so a
   // mention of pushing main blocks too (accepted cost); other quoted git text is still text
@@ -787,6 +926,8 @@ test('long commands stay fast', () => {
     ['seat vars, 200 KB of env -a words', asBuilder(kb200('env -a -b '))],
     ['seat vars, 200 KB of unset words then a name', asBuilder(kb200('unset x ') + 'CB_ROLE')],
     ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
+    // PR 111 r3-2: nested $HOME/ setting values read the command for HOME once per text, not once per value
+    ['git settings, 200 KB of nested $HOME/ values', asBuilder('git ' + kb200(`-c core.fsmonitor='git -c core.sshCommand="$HOME/k" status' `) + 'status')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

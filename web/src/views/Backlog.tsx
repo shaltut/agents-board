@@ -7,7 +7,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Plus } from 'lucide-react'
 import { toast } from 'sonner'
-import { rpc, useProjects, useTasks, type Status, type ListTask } from '@/lib/api'
+import { rpc, useLiveProjects, useTasks, type Status, type ListTask } from '@/lib/api'
 import { ago } from '@/lib/format'
 import { bandRank, dropIndex } from '@/lib/rank'
 import { go, type Route } from '@/lib/route'
@@ -60,12 +60,12 @@ function List({ status, tasks, children, empty }: { status: Status; tasks: ListT
 
 export function Backlog({ route }: { route: Route }) {
   const qc = useQueryClient()
-  const { data: nextAll = [] } = useTasks(route.project, 'next')
-  const { data: backlogAll = [] } = useTasks(route.project, 'backlog')
+  const { data: nextAll = [] } = useTasks(route.project, 'next', true)
+  const { data: backlogAll = [] } = useTasks(route.project, 'backlog', true)
   const tagged = (ts: ListTask[]) => ts.filter((t) => (!route.tag || t.labels.includes(route.tag)) && (!route.type || t.type === route.type))
   const next = useMemo(() => tagged(nextAll), [nextAll, route.tag, route.type])
   const backlog = useMemo(() => tagged(backlogAll), [backlogAll, route.tag, route.type])
-  const { data: projects = [] } = useProjects()
+  const projects = useLiveProjects() // pickers list enabled projects only (#4559)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [title, setTitle] = useState('')
   const [proj, setProj] = useState('')
