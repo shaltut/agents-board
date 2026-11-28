@@ -139,4 +139,18 @@ test('since: when the oldest line that is on a clock was first seen (a copy of t
   c.now = 5_000; assert.equal(holdStep(box({ events: [closed] }), [], c).since, 5_000, 'only closed notices: now');
   c.now = 9_000; assert.equal(holdStep(box({ events: [closed], messages: [tell(9)] }), [], c).since, 9_000);
   c.now = 12_000; assert.equal(holdStep(box({ events: [closed], messages: [tell(9), runner(1)] }), [], c).since, 9_000);
+  // PR 165 review LOW 2: with only closed notices left, a later poll does not make them newer
+  const only = clock();
+  only.now = 5_000; holdStep(box({ events: [closed] }), [], only);
+  only.now = 40_000; assert.equal(holdStep(box({ events: [closed] }), [], only).since, 5_000);
+});
+
+// PR 165 review LOW 1: the inbox marks any person's line urgent, not the owner's alone; every list honours the mark
+test("another person's broadcast, memory change and bug go at once", () => {
+  const marked: Record<string, any> = {
+    broadcast: { broadcasts: [{ id: 9, actor: 'cai', urgent: true }] },
+    memory: { memory: [{ id: 9, actor: 'cai', urgent: true }] },
+    bug: { bugs: [{ event_id: 9, id: 1, priority: 'P2', actor: 'cai', urgent: true }] },
+  };
+  for (const [what, o] of Object.entries(marked)) assert.equal(holdStep(box(o), [], clock()).action, 'deliver', what);
 });

@@ -503,6 +503,68 @@ test('session lines wait the settle window and go in one push; a closed notice w
   }
 });
 
+// PR 165 review LOW 1, the board's side
+test("inbox: a signed-in person's broadcast, memory change and bug are marked urgent; a session's are not", async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`insert into cb.users (name, display) values ('cai', 'Cai')`;
+  await sql`select cb.iam('pc', 'w9:p3', 'orch', 'demo')`;
+  const [{ start }] = await sql`select coalesce(max(id), 0) as start from cb.events`;
+  for (const actor of ['cai', 'W5']) {
+    await sql`select cb.broadcast(${`from ${actor}`}, 'demo', ${actor})`;
+    await sql`select cb.mem_add(project => 'demo', title => ${`fact by ${actor}`}, kind => 'fact', actor => ${actor})`;
+    await sql`select cb.task_add(project => 'demo', title => ${`bug by ${actor}`}, status => 'next', type => 'bug', actor => ${actor})`;
+  }
+  const [{ i }] = await sql`select cb.inbox('pc', 'w9:p3', ${start}) as i`;
+  for (const list of [i.broadcasts, i.memory, i.bugs]) assert.deepEqual(list.map((x: any) => [x.actor, x.urgent]), [['cai', true], ['W5', false]]);
+});
+
+// PR 165 review HIGH 1: a held card line outlives a relay that is killed (cb relay --restart on Windows gives it no
+// time to leave), in the same session, with a session id or with none
+for (const sid of ['S-restart', '']) test(`a held card line survives the relay being killed after its card moved on (${sid ? 'a session id' : 'no session id'}) (#3221)`, { timeout: 60_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const tag = sid ? 'sid' : 'nosid';
+  const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-kill-` + tag + process.pid : join(tmpdir(), `cb-relay-kill-${tag}${process.pid}.sock`);
+  const pane = `p-relay-kill-${tag}-${process.pid}`, me = 'W6@testbox';
+  rmSeat(pane);
+  fs.writeFileSync(seatFiles(pane).lock, '');
+  await sql`select cb.iam('testbox', ${pane}, ${me}, 'demo')`;
+  const [{ id }] = await sql`select cb.task_add(project => 'demo', title => 'moving', status => 'in_progress', assignee => ${me}, actor => 'orch') as id`;
+  const inbox = fakeInbox(path, 'tok');
+  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', CB_RELAY_SETTLE_MS: '60000',
+                CLAUDE_CODE_SESSION_ID: sid, CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  let relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+  let exited = new Promise((r) => relay.on('exit', r));
+  const text = () => inbox.got.map((g) => g.message.content as string).join(' | ');
+  try {
+    await wait(1500);
+    await sql`select cb.log('demo', 'held through a kill', ${String(id)}, '{}', 'orch')`;
+    for (const t = Date.now(); Date.now() - t < 8000; await wait(100))
+      if ((await sql`select hold_from from cb.sessions where pane = ${pane}`)[0]?.hold_from != null) break;
+    await wait(800);
+    assert.equal(inbox.got.length, 0, `held: ${text()}`);
+    relay.kill('SIGKILL');
+    await exited;
+    await sql`update cb.tasks set assignee = 'W2@testbox' where id = ${id}`;
+    fs.writeFileSync(seatFiles(pane).lock, '');
+    relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+    exited = new Promise((r) => relay.on('exit', r));
+    await wait(2500);
+    await sql`select cb.tell(${me}, 'still there?', 'orch')`;
+    for (const t = Date.now(); !/still there/.test(text()) && Date.now() - t < 10_000;) await wait(100);
+    await wait(800);
+    assert.equal(inbox.got.length, 1, text());
+    assert.equal(text().match(/held through a kill/g)?.length, 1, text());
+    assert.equal(fs.existsSync(seatFiles(pane).held), false, 'pushed: no copy is left behind');
+  } finally {
+    await inbox.close();
+    await Promise.race([exited, wait(8000)]);
+    if (relay.exitCode === null) relay.kill();
+    rmSeat(pane);
+  }
+});
+
 // #3221 review I2 and I1 (rename), end to end
 test('the hold ends right after the push, before the bookkeeping; a bind to another name mid-hold still delivers what was held (#3221)', { timeout: 60_000 }, async () => {
   const sql = await db();
