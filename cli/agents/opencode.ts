@@ -242,12 +242,16 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
       };
     },
 
+    userRulesFile(home: string, env: NodeJS.ProcessEnv) {
+      return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'AGENTS.md');
+    },
+
     instructionMapping() {
       return {
         nativeFiles: ['AGENTS.md', 'CLAUDE.md (project, fallback only)', '~/.config/opencode/AGENTS.md'],
         extraArgs: [],
         env: { OPENCODE_DISABLE_CLAUDE_CODE_PROMPT: '1' },
-        note: '~/.config/opencode/AGENTS.md exists on purpose so OpenCode never falls back to ~/.claude/CLAUDE.md; the env flag is what the freellm wrapper sets',
+        note: '~/.config/opencode/AGENTS.md exists on purpose so OpenCode never falls back to ~/.claude/CLAUDE.md (cli/agent-context.ts user copies the owner rules into it); the env flag is what the freellm wrapper sets',
       };
     },
 
