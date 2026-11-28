@@ -5,6 +5,7 @@
 export type JobState = 'queued' | 'running' | 'passed' | 'failed' | 'error' | 'cancelled'
 export type Why =
   | { reason: 'next' } | { reason: 'no_runner' }
+  | { reason: 'project'; state: 'disabled' | 'archived'; words: string } // the board's own sentence (cb._state_words)
   | { reason: 'slot' | 'lane'; busy: number; of: number }
   | { reason: 'held'; by: string; at: string }
   | { reason: 'paused' | 'draining'; runner: string; by: string | null; at: string | null }
@@ -51,6 +52,7 @@ export const who = (actor: string | null | undefined) =>
 // in the reader's words. Anything else is the job's own output, shown apart and never as the board's words.
 const KNOWN: [RegExp, (m: RegExpExecArray) => string][] = [
   [/^cancelled by (.+)$/, (m) => `Stopped by ${who(m[1])}.`],
+  [/^cancelled: the project was archived$/, () => 'Stopped because the project was archived.'],
   [/^error: push it first$|^error: not on a branch of origin$/, () => 'The commit is not on GitHub yet. Push it, then run again.'],
   [/^error: could not fetch from origin$/, () => 'Could not download the code.'],
   [/^error: runner restarted$/, () => 'Stopped because the runner restarted. Run it again.'],
@@ -79,6 +81,7 @@ export function waitWords(why: Why | undefined, at: (iso: string) => string = cl
   if (!why) return 'Waiting'
   switch (why.reason) {
     case 'next': return 'Starts next'
+    case 'project': return why.words || 'Waiting'
     case 'no_runner': return 'No runner offers this check now'
     case 'held': return `This project's jobs are held by ${who(why.by)}`
     case 'down': return 'The runner is not answering'
