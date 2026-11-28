@@ -410,83 +410,9 @@ const freshEnvFine = [
   `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
   'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
 ];
-// #4734: "at" is an English word and a common variable name, and a script a heredoc writes, or the | of a search pattern,
-// puts it where a command would be. It is blocked unless the words after it are a shape that cannot schedule
-const atFine = [
-  `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
-  String.raw`grep -n "fresh environment\|schtasks\|'at'\|cron" kit/guard/core.mjs`, 'grep -E "before|at|after" notes.md', 'grep -E "(at|on) the end" notes.md',
-  'rg "x;at;y" src', "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"", "node -e \"\n  if (at < 0) { return; }\n\"",
-  'at -l', 'at -c 5', 'at -r 3', 'at -V', 'at --version', 'echo x | at',
-];
-// PR 139 review (R2) H1-H3: -b is batch and needs no time; <= and >= are redirects to a file named =; and an operand the
-// shell turns into nothing, or expands, can leave a time behind it
-const atReview = ['echo x | at -b', 'at -bf job.sh', 'echo x | at -mb', 'at >= now', 'at <= now', 'at {,now}', 'at {n..n}ow', 'at -f {job.sh,now}', 'at {,}now',
-  'at "" now', "at '' now", 'at " " now', String.raw`at "\ " now`, 'at no?', 'at n[o]w', 'at *', "node -e \"\n  if (at >= 0) break;\n\"",
-  // not in the review: some at builds take a bare increment, and sept is a month
-  'at +5min', 'at + 1 hour', 'at sept 4'];
-const atRuns = ['at now', 'at now+1min', 'at "now + 1 hour"', "at 'midnight'", 'at noon tomorrow', 'at teatime', 'at 4pm', 'at 16:00', 'at 0400 -f job.sh', 'at -m -q b now', 'at -f job.sh 10:00',
-  'at -mf job.sh now', 'at -t 202601011200', 'at -mt202601011200', 'at < job.sh now', 'at <job.sh now', "at now <<'EOF'\nls\nEOF", 'at "$WHEN"', 'at $(date +%H:%M)', 'at `cat t`',
-  'at 2>&1 now', 'echo now | xargs at', String.raw`at \\host 10:00 cmd`, 'echo x | /usr/bin/at now', 'if true; then at now; fi', 'bash -c "echo x | at now"', 'at \\\n now',
-  'at n""ow', "at 'mid'night", String.raw`at \now`, 'at tomorrow', 'at friday', 'at jul 4', 'at next week'];
-// PR 139 review round 3 (R1): quoted and escaped flags, and a brace list holding a quoted blank, got past the reading of
-// at's operands. The rule is now the other way round: at is blocked unless the words after it are one of a few shapes
-// that cannot schedule. These are the review's spellings, and others of the same kind found while rewriting
-const atShapes = ['at "-b"', "at '-b'", 'at -""b', String.raw`at -`, String.raw`at \-b`, 'at -m""b', 'at "-t" 202601011200', "at '-t' 202601011200",
-  'at "-m" now', String.raw`at \-m now`, 'at "-f" job.sh now', 'at -""f job.sh now', 'at {" ",now}',
-  // the segment split cuts at &, so what follows is not seen
-  'at &>/dev/null now', 'at &> f now', 'at = x &> f -t 202601011200', 'at -l &>f -t 202601011200', 'at = ";" -t 202601011200', 'at = x "-t" 202601011200',
-  // -V prints the version and carries on; only alone is it harmless
-  'at -V now',
-  // a number after > is an operand, and a ) the shell does not read closes nothing
-  'at < 0 now', 'at <= 0)', '(at >= 0)', String.raw`at < 0\) now`,
-  // a ) closes a subshell, and bash takes do or then straight after it: what follows must start no command
-  'until (at < 0) do at now; done', 'until (at =) do at now; done', 'until (at -l) do at now; done', 'if (at < 0) { at now }',
-  'until (at)do at now; done',
-  // PR 139 round 4 (R1): a case arm is also a word and a ), and bash drops the \ in front of a command name
-  ...[String.raw`\batch`, String.raw`\sudo codex`, String.raw`\wsl`, String.raw`\schtasks /run /tn x`, String.raw`\b$(echo atch)`, String.raw`\b"atch"`, String.raw`\s"u"do codex`]
-    .map((arm) => 'case $x in y) : ;; at)' + arm + ' ;; esac'),
-  // as main: a word that is no known shape
-  'at the end now'];
-test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {
-  for (const c of atFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of [...atRuns, ...atReview, ...atShapes]) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
-});
-
-// #4736 (folded into #4734): the | of a quoted search pattern is not a pipe, so the word between two of them is not a
-// command. Only a search command's own quoted strings are read as data; a quoted string a shell or a program runs is not
-const searchFine = [
-  'grep -E "a|batch|b" f', "grep -nE 'relay|batch|queue' cli/relay.ts", 'rg -n "x|sudo|y" src', "git grep -E 'tmux new|crontab' -- docs", 'git -C ../x grep "a|batch|b"',
-  'cd cli && LC_ALL=C grep -E "a|batch|b" relay.ts | head -5', 'cb bug "guard: blocked" -b "the search was grep -E \\"a|batch|b\\" cli/relay.ts" -l guard',
-  `python3 - <<'EOF'\nimport re\nat = 1\nx = re.compile('foo|at|bar')\nEOF`,
-];
-// A lone quoted command after bash -c, sh -c, eval or rg --pre is not pinned: this rule never walked it (main allows it too)
-const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$(echo x | batch)" f', 'grep `true; batch -f j` f',
-  "bash <<'EOF'\nat now\nEOF", "bash -c 'true | batch'", 'echo "see grep " ; sudo codex exec x "y"', "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
-  "git grep -O'x;batch' y", "alias grep=eval; grep 'true;batch'", "grep() { eval \"$1\"; }; grep 'true;batch'",
-  // PowerShell: a backslash does not escape, so "C:\src\" ends there and what follows runs
-  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`,
-  // PR 139 review (R2) H4, H5: PowerShell also closes a string at a smart quote, and at a quote after any backslash
-  'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
-  String.raw`rg "a\"x ; schtasks /run /tn y ; echo "b\"c`,
-  // nested quotes: inside "$( )" or "${ }" bash starts a new string, so the pass loses count
-  'grep x "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
-  // PowerShell here-strings, block comments and --% quote differently
-  'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "',
-  // git takes any unique prefix of --open-files-in-pager, and a backslash in a flag is dropped
-  "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`,
-  // the same spellings with only pipes inside, so each bail is pinned by itself
-  'rg "a”|schtasks /run /tn y|rg “b" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`, 'grep x "$(echo "|sudo codex|echo ")"',
-  'grep x "${y:-"|sudo codex|echo "}"', 'rg x {# "\n|sudo codex|\n{# "', String.raw`rg x \; . "x|sudo|y"`,
-  // a quoted string holding ; & a newline or a spaced pipe is not blanked: a search pattern needs none of them
-  'rg "a; sudo codex" f', 'rg "a | batch" f'];
-test('#4736: a quoted search pattern or bug body naming a launcher passes; the same word where something runs it is blocked', () => {
-  for (const c of searchFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of searchStillRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
-});
-
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
 const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
-  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
+  'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'DEPLOY_HOST=vps2; ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
 test('#4669: the R3 spellings and fresh-environment launches are blocked in a seat; the non-bypasses and everyday commands pass', () => {
   for (const role of ROLES) for (const c of [...seatVarR3, ...freshEnv]) {
     if (role === 'lead' && leadKeeps.includes(c)) continue;
@@ -530,12 +456,13 @@ test('#4669 I2: herdr --machine <m> / -m <m> before a pane run or send-keys is s
   }
 });
 
-// N1 (the lead's ruling on #4669): a lead seat keeps herdr agent prompt, herdr pane send-keys and ssh to the deploy VPS
+// N1 / #4707 R2-1: a lead seat keeps herdr agent prompt, herdr pane send-keys and a resolved variable naming the deploy VPS
 // (deploy/copy-to-vps.sh); every other role is blocked from them, and the lead is not exempt from the rest
 test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the deploy ssh; other roles are blocked', () => {
   const deploy = readFileSync(fileURLToPath(new URL('../deploy/copy-to-vps.sh', import.meta.url)), 'utf8');
+  assert.match(deploy, /^VPS=\$\{VPS:-vps2\}$/m, 'the guard exception must track the deploy script default');
   const readScript = (p: string) => (p.replace(/^.*[\\/]/, '') === 'copy-to-vps.sh' ? deploy : null);
-  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript });
+  const ev = (command: string, role: string) => evaluate({ tool: 'shell', command, role, readScript, deployHost: 'vps2' });
   for (const c of [...leadKeeps, 'bash deploy/copy-to-vps.sh', 'VPS=vps2 deploy/copy-to-vps.sh']) {
     assert.deepEqual(ev(c, 'lead'), { allow: true }, `lead: ${c}`);
     for (const role of ROLES.filter((r) => r !== 'lead')) assert.equal(ev(c, role).kind, 'role', `${role}: ${c}`);
@@ -947,6 +874,110 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
   blocksByRole('builder', [`printf '${merge}' | grep bash`]);
 });
 
+// #4729 (PR 111 r4). R4-1: a quoted, escaped, lower-case or brace spelling of HOME is still a mention of HOME, so it
+// drops the $HOME/ exemption. Each hidden push is spelled so no other rule reads it (\x69, 'ma'+'in'): only this one blocks.
+test('guard: quoted, escaped, lower-case and brace spellings of HOME drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // quoted and escaped names (bash), and PowerShell's backtick
+    `read -r HO""ME <<< ${sh}`, String.raw`read -r \HOME <<< ` + sh, `read -r "H"OME <<< ${sh}`, `read -r H'O'ME <<< ${sh}`,
+    `printf -v HO''ME '%s' ${sh}`, `export HO""ME=${sh}`, `declare -n r=HO""ME; r=${sh}`, String.raw`for HO\ME in ` + `${sh}; do :; done`,
+    'unset HO""ME; : ${HOME:=' + sh + '}', ': ${HOME:=' + sh + '}', 'Set-Variable -Name HO`ME -Value ' + ps + ' -Force',
+    // a name split over a continued line
+    'read -r HO\\\nME <<< ' + sh,
+    // brace spellings
+    `export {HOME,x}=${sh}`, `declare {HOME,x}=${sh}`, `read -r {HOME,x} <<< ${sh}`,
+    // PowerShell reads a variable's name in any case
+    `Set-Variable -Name home -Value ${ps} -Force`, `Set-Variable -Name Home -Value ${ps} -Force`, `sv home ${ps} -Force`,
+    `set home ${ps} -Force`, `New-Variable -Name home -Value ${ps} -Force`, 'Remove-Variable home -Force',
+    `Set-Variable -Value 'a;b' -Name home -Force`, String.raw`Set-Item Variable:\HOME -Value ` + `${ps} -Force`,
+    `Set-Item Variable:/HOME -Value ${ps} -Force`, `si variable:home ${ps} -Force`, `$global:home = ${ps}`,
+    `$env:home = ${ps}`, '${env:home} = ' + ps, `[Environment]::SetEnvironmentVariable('home', ${ps})`,
+  ].map((set) => `${set}; ${run}`);
+  const kept = ['echo "${HOME}"; ' + run, 'cd ${HOME} && ' + run, 'git -c core.sshCommand="ssh -i ${HOME}/.ssh/k" fetch',
+    `echo "$HOME"; ${run}`, `echo "home page"; ${run}`, `cd /home/ubuntu/w && ${run}`, `set -e; cd /home/ubuntu; ${run}`,
+    `git remote set-url origin /srv/home && ${run}`, `Set-Location home; ${run}`, `export HOMEBREW_PREFIX=/opt/homebrew; ${run}`,
+    String.raw`git -c core.sshCommand="ssh -i $USERPROFILE\.ssh\key" fetch`];
+  for (const role of ['lead', 'builder']) {
+    for (const c of blocked) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    for (const c of kept) assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+  }
+});
+
+// #4729, the PR 132 review: a brace expansion inside a word can spell the name; a lower-case or wildcard name can reach a
+// PowerShell setter from another segment; and reading HOME with a default or trimmed is a read, like ${HOME}
+test('guard: the PR 132 review spellings drop the $HOME/ exemption; default-value reads keep it (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // brace expansion inside the name
+    `declare H{O,}ME=${sh}`, `export H{O,}ME=${sh}`, `declare {H,}OME=${sh}`, `declare HOM{E,}=${sh}`, `read -r H{O,}ME <<< ${sh}`,
+    `declare H{O..O}ME=${sh}`, `declare H{{O,},}ME=${sh}`, `bash -c "declare H{O,}ME=x"`,
+    // the name and the setter in different segments
+    `$n='home'; Set-Variable $n ${ps} -Force`, `$p=@{Name='home';Value=${ps};Force=$true}; Set-Variable @p`,
+    `'home' | % { Set-Variable $_ ${ps} -Force }`, `Get-Variable home | Set-Variable -Value ${ps} -Force`,
+    // wildcard names, which PowerShell matches against HOME
+    `Set-Variable -Name hom? -Value ${ps} -Force`, `Set-Variable -Name ho*e -Value ${ps} -Force`,
+    `Set-Variable -Name HOM[E] -Value ${ps} -Force`, `Set-Item variable:hom* ${ps} -Force`,
+    `Get-Variable hom* | Set-Variable -Value ${ps} -Force`, `$n='hom*'; Set-Variable $n ${ps} -Force`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`cd "\${HOME:-/tmp}" && ${fetch}`, `test -n "\${HOME+x}" && ${fetch}`, `cd \${HOME-/tmp} && ${fetch}`,
+    `echo \${HOME:+yes} && ${fetch}`, `echo \${HOME#/} \${HOME%/} && ${fetch}`, `cb log 1 "set up home"; ${fetch}`,
+    `git commit -m "Set Home"; ${fetch}`, `set -e; ls src/*.ts; ${fetch}`, `git log HEAD@{1}..HEAD; ${fetch}`,
+    `cat src/{a,b}.ts; ${fetch}`, `curl -d '{"a":1,"b":2}' x; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729, the PR 132 re-read: brace groups side by side spell the name with no letter beside a brace, and an ANSI-C or
+// locale quote ($'...', $"...") leaves no dollar sign in the word bash builds, its escapes decoded
+test('guard: side-by-side brace groups and ANSI-C or locale quotes drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const blocked = [
+    'declare {HO,X}{ME,Y}=x', 'export {H,}{O,}{M,}{E,}=x', 'read -r {HO,X}{ME,Y} <<< x', 'cat src/{a,b}{1,2}.ts', // the accepted cost
+    String.raw`declare HOM$'E'=x`, 'declare HOM$"E"=x', String.raw`export $'\x48'OME=x`, String.raw`export $'\x48OME=x'`,
+    String.raw`export $'\110OME'=x`, String.raw`declare $'HOME'=x`, String.raw`declare $'\U00000048OME'=x`,
+    // an earlier $' that opens no quote must not pair with the real one
+    String.raw`echo 'a$' ; declare HOM$'E'=x`, String.raw`echo 'a$' ; export $'\x48'OME=x`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`grep -n 'end$' src/a.ts; ${fetch}`, String.raw`printf $'a\tb\n'; ${fetch}`, `echo "cost: $" ; ${fetch}`,
+    `echo \${A}\${B}; ${fetch}`, `echo '[{"a":1},{"b":2}]'; ${fetch}`, String.raw`printf '\UFFFFFFFF'; ${fetch}`, String.raw`echo $'\UFFFFFFFF'; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729: bash drops a backslash before an ordinary letter, so g\it is git (and g\h is gh, a\z is az) to every rule that
+// reads those commands; a Windows path to git.exe stays git, and a quoted 'g\it' keeps its backslash
+test('guard: a backslash inside the git, gh or az name does not hide the command (#4729)', () => {
+  const judged = (command: string, role: string, protectedBranches: string[] = []) =>
+    evaluate({ tool: 'shell', command, role, protectedBranches }).allow;
+  for (const role of ROLES) {
+    for (const c of [String.raw`g\it push origin main`, String.raw`g\i\t push origin HEAD:main`, String.raw`gi\t push -f origin feat/x`,
+      String.raw`/usr/bin/g\it push origin main`, String.raw`sudo g\it push origin main`, String.raw`g\it p origin main`,
+      String.raw`bash -c 'g\it push origin main'`, String.raw`g\it -c alias.p=push p origin feat/x`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+    assert.equal(judged(String.raw`g\it push origin develop`, role, ['develop']), false, `${role} protected branch`);
+    for (const c of [String.raw`"C:\Program Files\Git\cmd\git.exe" status`, String.raw`ls C:\repos\g\it`, String.raw`g\it status`]) {
+      assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+    }
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) {
+    for (const c of [String.raw`g\h pr merge 5`, String.raw`a\z repos pr update --id 1 --status completed`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+  }
+  for (const role of READ_ONLY_ROLES) assert.equal(judged(String.raw`g\it commit -m x`, role), false, `${role} commit`);
+});
+
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
@@ -1002,6 +1033,14 @@ test('long commands stay fast', () => {
     ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
     // PR 111 r3-2: nested $HOME/ setting values read the command for HOME once per text, not once per value
     ['git settings, 200 KB of nested $HOME/ values', asBuilder('git ' + kb200(`-c core.fsmonitor='git -c core.sshCommand="$HOME/k" status' `) + 'status')],
+    // #4729: the PowerShell setter test reads each segment once; the quote-stripped copy is made once per text
+    ['git settings, 200 KB of setter words beside a $HOME/ value', asBuilder(kb200('sv ni set ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // PR 132 review: the brace and wildcard tests read each word and statement once
+    ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
@@ -1010,25 +1049,6 @@ test('long commands stay fast', () => {
     ['kill scan, 200 KB of kill words', () => check(kb200('kill '))],
     ['kill scan, 200 KB of taskkill /pid', () => check(kb200('taskkill /pid 1 '))],
     ['kill scan, 200 KB of quoted words', () => check('echo ' + kb200('"a b" '))],
-    // #4736: the search-pattern pass reads the command once; #4734: at reads its own 40 words
-    ['search blanking, 200 KB of quoted patterns, as a builder', asBuilder('grep ' + kb200('"a|batch" '))],
-    ['search blanking, 200 KB of open parentheses and blanks, as a builder', asBuilder('grep x ' + kb200('(          '))],
-    ['search blanking, 200 KB after one unclosed quote, as a builder', asBuilder('grep "' + kb200('a '))],
-    ['search blanking, a 200 KB option word, as a builder', asBuilder('grep -' + 'a'.repeat(200000) + ' x')],
-    ['at, 200 KB of at segments, as a builder', asBuilder(kb200('at -m x$; at < 0; '))],
-    ['at, a 200 KB time word, as a builder', asBuilder('at ' + 'a'.repeat(200000))],
-    // PR 139 review (R2) H6: a newline is a separator and was also \s, so each one re-read every later one
-    ['search blanking, 200 KB of newlines, as a builder', asBuilder('grep x' + '\n'.repeat(200000))],
-    ['search blanking, 200 KB of blank lines, as a builder', asBuilder('grep x' + kb200(' \r\n'))],
-    ['search blanking, 200 KB of open parentheses and newlines, as a builder', asBuilder('grep x ' + kb200('(\n'))],
-    ['search blanking, 200 KB of separators, as a builder', asBuilder('grep x ' + kb200(';'))],
-    ['at, 200 KB of unclosed braces, as a builder', asBuilder('at ' + kb200('{,') )],
-    ['at, 200 KB of brace words, as a builder', asBuilder(kb200('at {a}; '))],
-    // PR 139 review round 3: operands of escaped quotes took 13 to 33 s
-    ['at, 200 KB of escaped quotes, as a builder', asBuilder('at ' + escaped)],
-    ['at -f, 200 KB of escaped quotes, as a builder', asBuilder('at -f ' + escaped + ' now')],
-    ['at, 200 KB of assignments in one segment, as a builder', asBuilder(kb200('at = '))],
-    ['at, 200 KB of at words in one segment, as a builder', asBuilder(kb200('then at '))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
@@ -1070,6 +1090,9 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of exec words in node -e, as a builder', asBuilder('node -e "' + kb200('exec ') + '"')],
     ['#4669 I1, 200 KB of local x; echo "$k=$v"; as a builder', asBuilder(kb200('local x; echo "$k=$v"; '))],
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
+    ['#4707, 200 KB of quoted assignment values, as a builder', asBuilder(kb200('local args="--set $k=$v"; '))],
+    ['#4707, 200 KB of wrapper option values, as a builder', asBuilder(kb200('xargs -a f ') + 'echo hi')],
+    ['#4707, 200 KB of host assignments before SSH, as a lead', () => evaluate({ tool: 'shell', command: kb200('VPS=vps2; ') + 'ssh "$VPS" uptime', role: 'lead' })],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
     // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
@@ -1233,7 +1256,7 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     const bad = join(tmp, 'bad');
     mkdirSync(bad);
     copyFileSync(SHIM, join(bad, 'shim-claude.mjs'));
-    writeFileSync(join(bad, 'core.mjs'), 'export function evaluate() { return { allow: true }; }\n');
+    writeFileSync(join(bad, 'core.mjs'), 'export const localHosts = () => [];\nexport function evaluate() { return { allow: true }; }\n');
     const refused = installGuard(bad, target);
     assert.equal(refused.ok, false);
     assert.equal(refused.failures.length, 4, refused.failures.join('\n'));
@@ -1261,4 +1284,231 @@ test('installGuard stages, runs 6 probes with cleared CB_* env, swaps atomically
     }
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// #4707, the review of PR 124 at e588da1. Its HIGH 3 (a one-word bash -c or eval launcher) is #4741's
+const mustBlock = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.equal(evaluate({ tool: 'shell', command, role, ...extra }).allow, false, `must block (${role}): ${command}`);
+};
+const mustAllow = (commands: string[], role = 'builder', extra = {}) => {
+  for (const command of commands) assert.deepEqual(evaluate({ tool: 'shell', command, role, ...extra }), { allow: true }, `must allow (${role}): ${command}`);
+};
+
+test('#4707 review H1: ssh to this machine in a URI, with two @, as any zero or IPv6 loopback, or through -o', () => {
+  mustBlock(['ssh a@b@localhost codex', 'ssh ssh://localhost', 'ssh ssh://me@localhost:22', 'ssh ssh://[::1]:22', 'ssh 0x0 codex', 'ssh 0.0 codex',
+    'ssh 00 codex', 'ssh ::ffff:127.0.0.1 codex', 'ssh 0:0:0:0:0:0:0:1 codex', 'ssh me@::1%lo codex', 'ssh 0:0:0:0:0:0:0:0 codex',
+    'ssh -o Hostname=localhost foo codex', 'ssh -oHostname=127.0.0.1 foo codex', 'ssh -o "HostName localhost" foo codex',
+    'ssh -o hostname=$H foo codex', 'ssh -o ProxyCommand="nc localhost 22" foo codex', 'ssh -oProxyCommand="nc 127.1 22" foo codex']);
+  mustBlock(['ssh -o HostName=localhost "$VPS" codex'], 'lead', { deployHost: 'vps2' });
+  mustAllow(['ssh ssh://git@github.com:22', 'ssh -o HostName=remote.example box uptime', 'ssh -o BatchMode=yes remote.example uptime',
+    'ssh -o ProxyCommand="ssh -W %h:%p jump.example" box uptime', 'ssh 2001:db8::7 uptime']);
+});
+
+test('#4707 review H2: only a text script over the read limit is refused; a large binary run by path is not', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-guard-big-'));
+  try {
+    const binary = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(300 * 1024, 1)]);
+    const pad = '# padding\n'.repeat(35000);
+    writeFileSync(join(dir, 'app'), binary);
+    writeFileSync(join(dir, 'configure'), '#!/bin/sh\n' + pad);
+    writeFileSync(join(dir, 'plain'), pad);
+    writeFileSync(join(dir, 'named.sh'), binary);
+    writeFileSync(join(dir, 'late-nul'), pad + '\0');
+    const run = (command: string) => runClaudeShim(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: dir }), { CB_ROLE: 'builder' });
+    assert.deepEqual(run('./app --version'), {});
+    for (const c of ['./configure', 'bash plain', 'bash named.sh', 'bash late-nul']) assert.equal(run(c).decision, 'block', c);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#4707 review M1: a lead ssh variable is known only from a plain assignment that the shell keeps', () => {
+  mustBlock([': VPS=vps2; ssh "$VPS" codex', 'VPS=vps2 ssh "$VPS" codex', 'VPS=vps2 true; ssh "$VPS" codex',
+    'VPS=vps2; read VPS <<< localhost; ssh "$VPS" codex', 'VPS=vps2; printf -v VPS %s localhost; ssh "$VPS" codex',
+    'VPS=vps2; VPS+=.localhost; ssh "$VPS" codex', 'VPS=vps2; mapfile -t VPS < f; ssh "$VPS" codex',
+    'declare -n r=VPS; VPS=vps2; r=localhost; ssh "$VPS" codex', 'false && VPS=vps2; ssh "$VPS" codex',
+    'if x; then VPS=vps2; fi; ssh "$VPS" codex', '(VPS=vps2); ssh "$VPS" codex', 'VPS=vps2; eval "$s"; ssh "$VPS" codex',
+    'VPS=vps2; . ./env.sh; ssh "$VPS" codex', 'if x; then :; VPS=vps2; fi; ssh "$VPS" codex',
+    'f() { :; VPS=vps2; }; ssh "$VPS" codex', 'while false; do :; VPS=vps2; done; ssh "$VPS" codex', '(true; VPS=vps2; true); ssh "$VPS" codex',
+    'case $x in a) :; VPS=vps2;; esac; ssh "$VPS" codex', 'VPS=vps2; unset VPS; ssh "$VPS" codex', 'VPS=vps2; for VPS in localhost; do ssh "$VPS" codex; done'], 'lead');
+  mustAllow(['VPS=vps2; ssh "$VPS" uptime', 'export VPS=vps2 && ssh "$VPS" uptime', 'A=1 VPS=vps2; ssh "${VPS}" uptime'], 'lead');
+  mustAllow(['VPS=vps2 ssh "$VPS" uptime'], 'lead', { deployHost: 'vps2' });
+  const readScript = (p: string) => (p === 'd.sh' ? 'VPS=${VPS:-vps2}\nssh "$VPS" uptime\n' : null);
+  mustBlock(['VPS=vps2 true; bash d.sh', 'read VPS <<< localhost; bash d.sh'], 'lead', { readScript, deployHost: 'localhost' });
+  mustAllow(['VPS=vps2 bash d.sh', 'bash d.sh'], 'lead', { readScript });
+  // the deploy script itself, which the lead runs
+  const deploy = readFileSync(join(import.meta.dirname, '..', 'deploy', 'copy-to-vps.sh'), 'utf8');
+  mustAllow(['bash deploy/copy-to-vps.sh', 'VPS=vps2 bash deploy/copy-to-vps.sh --final'], 'lead', { readScript: () => deploy });
+});
+
+test('#4707 review: the new reads stay fast on long commands', () => {
+  const budget = machineBudget();
+  const long = {
+    prints: 'printf '.repeat(30000),
+    evals: Array.from({ length: 20000 }, (_, i) => `v${i}=1`).join(';') + ';eval'.repeat(40000),
+    namerefs: '(declare -n '.repeat(16000) + 'declare -n r=' + 'a'.repeat(50000),
+    envs: 'node -e "spawn(' + ' env'.repeat(50000) + ' '.repeat(50000) + 'env}"',
+    options: 'ssh ' + '-o A=b '.repeat(28000) + 'box uptime',
+    splits: 'env -S '.repeat(25000),
+    joinedSplits: 'env -vS '.repeat(22000),
+    refs: 'declare -n a=b '.repeat(13000),
+    spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
+  };
+  for (const [name, command] of Object.entries(long)) {
+    const from = process.hrtime.bigint();
+    evaluate({ tool: 'shell', command, role: 'lead' });
+    const ms = Number(process.hrtime.bigint() - from) / 1e6;
+    assert.ok(ms < budget, `${name}: ${Math.round(ms)} ms, budget ${Math.round(budget)} ms`);
+  }
+});
+
+test('#4707 review M2: an env shorthand anywhere in a child option object is blocked; a copy of process.env is not', () => {
+  mustBlock(['node -e "const env={}; spawn(c,[],{stdio:\'inherit\',env})"', 'node -e "const env={}; spawn(c,[],{cwd, env})"',
+    'node -e "let env={...process.env}; env={}; spawn(c,[],{env})"']);
+  mustAllow(['node -e "const env={...process.env}; spawn(c,[],{env})"', 'node -e "const env = { ...process.env, A: 1 }; spawn(c,[],{cwd, env})"']);
+});
+
+test('#4707 review M3: wrapper options that take a value, and env -S, keep the launcher in command position', () => {
+  mustBlock(["xargs -d '\\n' sudo", 'xargs --delimiter x sudo', 'xargs --process-slot-var S sudo', 'timeout -s 9 5 sudo codex',
+    'timeout -k 1 --signal KILL 5 sudo codex', "env -S 'sudo codex'", "env --split-string='sudo codex'", 'env -S sudo codex', 'env -u FOO sudo codex']);
+  mustAllow(["xargs -d '\\n' echo", 'timeout -s 9 5 echo sudo', "env -S 'echo sudo'", 'env -u FOO echo sudo']);
+});
+
+test('#4707 review M4: scripts reached through -c, env, a leading or numbered redirect, or head are read', () => {
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`bash -c 'bash ${f}'`, `sh -c "cat ${f} | bash"`, `env bash ${f}`, `env A=1 bash ${f}`, `< ${f} bash`,
+    `bash 0< ${f}`, `head ${f} | bash`, `tail -n 5 ${f} | sh`, `timeout -s 9 5 bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
+});
+
+test('#4707 review M5: a nameref to a target the guard cannot read is blocked', () => {
+  mustBlock(['x=CB_ROLE; declare -n r=$x; r=; codex', 'typeset -n r="$x"; r=', 'f() { local -n r=$1; r=; }; f CB_ROLE']);
+  mustAllow(['declare -n r=PATH', 'declare -i n=$x', 'grep -rn "declare -n r=$x" kit']);
+});
+
+// the review of ed4b13a
+test('#4707 review 2 H1: ssh -o HostName with inner quotes or space around this machine\'s name, as OpenSSH reads it', () => {
+  mustBlock(['ssh -o \'HostName="localhost"\' foo codex', 'ssh -o \'HostName localhost \' foo codex', 'ssh -o "HostName=\'127.0.0.1\'" foo codex',
+    'ssh -o \'HostName=local""host\' foo codex', 'ssh -o \'"HostName" localhost\' foo codex', 'ssh -o "HostName=localhost # box" foo codex',
+    'ssh -o \'HostName=\t::1\t\' foo codex']);
+  mustAllow(['ssh -o \'HostName="remote.example"\' box uptime', 'ssh -o "HostName remote.example " box uptime']);
+});
+
+test('#4707 review 2 H2: a nameref command is judged on every operand, not only the first', () => {
+  mustBlock(['x=CB_ROLE; declare -n a=foo r=$x; r=; codex', 'local -n a=PATH b="$1"', 'typeset -g -n a=foo "r=$x"',
+    'declare -n a=\'$lit\' r="a\'$x\'"', 'declare -n $spec', 'declare -n r; r=$x; r=', 'command declare -n a=foo r=`id`', 'declare -gn a=foo r=${x}']);
+  mustAllow(['declare -n a=foo r=PATH', 'declare -n r=\'$literal\'', 'declare -n a=foo; b=$x', 'declare -n', 'declare -p -x',
+    'declare a=foo r=$x', 'declare +n r', 'grep -rn "declare -n a=foo r=$x" kit']);
+});
+
+test('#4707 review 2 H3: a combined short option still takes its value: env -vS, -vu, timeout -vs, xargs -0n', () => {
+  mustBlock(['env -vS \'sudo codex\'', 'env -iS \'codex\'', 'env -vS\'sudo codex\'', 'env -0vS "sudo codex"', 'env -vu FOO sudo codex',
+    'env -vC /tmp sudo codex', 'timeout -vs 9 5 sudo codex', 'timeout -fk 1 5 sudo codex', 'xargs -0n 1 sudo codex', 'xargs -rI {} sudo codex',
+    'stdbuf -oL sudo codex']);
+  mustAllow(['env -vS \'echo sudo\'', 'env -vu SHELL echo sudo', 'env -uSHELL echo sudo', 'timeout -vs 9 5 echo sudo', 'xargs -0n 1 echo sudo']);
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`env -S 'bash ${f}'`, `env -vS "bash ${f}"`, `env --split-string='bash ${f}'`, `timeout -vs 9 5 bash ${f}`, `env -vu FOO bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
+});
+
+// #4734 and #4736: a script line or a search pattern holding the two-letter scheduler word was refused. #4707's
+// quote-aware walk (PR 124) fixed the reported commands; these pin them, and the spellings four reviews of PR 139 used to
+// get a real launch past a narrower rule, so a later one cannot reopen either side
+const card4734Fine = [
+  "python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE \"\\b(const|let) (argv|at)\\b\" a.js",
+  "grep -n \"fresh environment\\|schtasks\\|'at'\\|cron\" kit/guard/core.mjs",
+  "grep -E \"before|at|after\" notes.md",
+  "grep -E \"(at|on) the end\" notes.md",
+  "rg \"x;at;y\" src",
+  "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"",
+  "node -e \"\n  if (at < 0) { return; }\n\"",
+  "at -l",
+  "at -c 5",
+  "at -r 3",
+  "grep -E \"a|batch|b\" f",
+  "grep -nE 'relay|batch|queue' cli/relay.ts",
+  "rg -n \"x|sudo|y\" src",
+  "git grep -E 'tmux new|crontab' -- docs",
+  "git -C ../x grep \"a|batch|b\"",
+  "cd cli && LC_ALL=C grep -E \"a|batch|b\" relay.ts | head -5",
+  "cb bug \"guard: blocked\" -b \"the search was grep -E \\\"a|batch|b\\\" cli/relay.ts\" -l guard",
+];
+const card4734Runs = [
+  "at now",
+  "at now+1min",
+  "at \"now + 1 hour\"",
+  "at 'midnight'",
+  "at noon tomorrow",
+  "at teatime",
+  "at 4pm",
+  "at 16:00",
+  "at 0400 -f job.sh",
+  "at -m -q b now",
+  "at -f job.sh 10:00",
+  "at -mf job.sh now",
+  "at -t 202601011200",
+  "at -mt202601011200",
+  "at < job.sh now",
+  "at <job.sh now",
+  "at now <<'EOF'\nls\nEOF",
+  "at \"$WHEN\"",
+  "at $(date +%H:%M)",
+  "at `cat t`",
+  "at 2>&1 now",
+  "echo now | xargs at",
+  "at \\\\host 10:00 cmd",
+  "echo x | /usr/bin/at now",
+  "if true; then at now; fi",
+  "bash -c \"echo x | at now\"",
+  "at \\\n now",
+  "at n\"\"ow",
+  "at 'mid'night",
+  "at \\now",
+  "at tomorrow",
+  "at friday",
+  "at jul 4",
+  "at next week",
+  "echo x | at -b",
+  "at -bf job.sh",
+  "echo x | at -mb",
+  "at >= now",
+  "at <= now",
+  "at {,now}",
+  "at {n..n}ow",
+  "at -f {job.sh,now}",
+  "at {,}now",
+  "at \"\" now",
+  "at '' now",
+  "at \" \" now",
+  "at \"\\ \" now",
+  "at no?",
+  "at n[o]w",
+  "at *",
+  "at +5min",
+  "at + 1 hour",
+  "at sept 4",
+  "at \"-b\"",
+  "at '-b'",
+  "at -\"\"b",
+  "at -\b",
+  "at \\-b",
+  "at -m\"\"b",
+  "at \"-t\" 202601011200",
+  "at '-t' 202601011200",
+  "at \"-m\" now",
+  "at \\-m now",
+  "at \"-f\" job.sh now",
+  "at -\"\"f job.sh now",
+  "at {\" \",now}",
+  "case $x in y) : ;; at)\\batch ;; esac",
+  "case $x in y) : ;; at)\\sudo codex ;; esac",
+  "case $x in y) : ;; at)\\wsl ;; esac",
+  "case $x in y) : ;; at)\\schtasks /run /tn x ;; esac",
+  "case $x in y) : ;; at)\\b$(echo atch) ;; esac",
+  "case $x in y) : ;; at)\\b\"atch\" ;; esac",
+  "case $x in y) : ;; at)\\s\"u\"do codex ;; esac",
+];
+test('#4734: the reported script and search commands pass; a real launch by that word, however spelled, stays blocked', () => {
+  for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
 });
