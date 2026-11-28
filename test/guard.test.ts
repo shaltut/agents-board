@@ -1834,6 +1834,9 @@ test('#4803: a redirect before a command word hides nothing', () => {
     }
   }
   for (const command of ['sudo>log codex', 'nohup >/dev/null 2>&1 sudo codex', '>a 2>b <c sudo codex', '2>&1 \\\n sudo codex']) assert.equal(judged4803(command), 'role', command);
+  // the one redirect left as written (cat >file <<WORD, which hides nothing) keeps no other one in
+  for (const command of ["cat > f <<'EOF'\ntext\nEOF\n2>&1 sudo codex", 'cat >f <<EOF; 2>&1 sudo codex\ntext\nEOF', 'cat > f <<EOF 2>&1 | >log sudo codex\ntext\nEOF',
+    '>log cat > f <<EOF\ntext\nEOF\n>log sudo codex']) assert.equal(judged4803(command), 'role', command);
 });
 
 test('#4803: a redirect inside a command hides nothing from any rule', () => {

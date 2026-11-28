@@ -3051,7 +3051,11 @@ function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\
 // ends the word. << (a heredoc) stays. A substitution as the target is bounded, so the scan stays linear. Messages and
 // heredoc data are dropped first: which text is data depends on the redirect (cat > notes <<EOF writes its text away)
 const REDIRECT = /(?:\d{1,3}|\*|&|\{[A-Za-z_]\w{0,40}\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*(?:\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|`[^`\n]{0,200}`|"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|\\.|[^\s"'`\\;&|<>(){}])+/g;
-function unredirected(text, left = () => ' ') {
+// cat >file <<WORD at a line's start, with nothing after the header, hides nothing: left as written, so the usual huge
+// command, a file written from a heredoc, is judged once. Each test reads a bounded piece
+const catToFile = (redirect, at, text) => /^>>?[ \t]*[A-Za-z0-9_./-]+$/.test(redirect) && /(?:^|\n)[ \t]*cat[ \t]+$/.test(text.slice(Math.max(0, at - 40), at))
+  && /^[ \t]*<<-?[ \t]*(["']?)\w{1,40}\1[ \t]*(?:\n|$)/.test(text.slice(at + redirect.length, at + redirect.length + 80));
+function unredirected(text, left = (redirect, at, all) => (catToFile(redirect, at, all) ? redirect : ' ')) {
   if (!/[<>]/.test(text)) return [text];
   const kept = stripMessages(text), bare = kept.replace(REDIRECT, left);
   return bare === kept ? [text] : [text, bare];
