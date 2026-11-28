@@ -145,7 +145,7 @@ function ProjectSettings({ project }: { project: string }) {
                 {problems.length > 0 && <p className="mb-2 text-[13px] text-destructive">Fix {plural(problems.length, 'thing')} marked above before saving.</p>}
                 {saveState && saveState.kind !== 'stale' && <p className="mb-2 text-[13px] text-destructive" role="alert">{saveState.text}</p>}
                 <p className="mb-2 text-[13px] text-muted-foreground">
-                  {supervised ? `${data.pipeline ? 'Seats start and close' : 'With no pipeline, seats the squad no longer names close'} on the next supervisor round; idle seats on an old agent or model restart on the new one. A new effort applies when a seat next starts.`
+                  {supervised ? `${data.pipeline ? 'Seats start and close' : 'With no pipeline, seats the squad no longer names close'} on the next supervisor round; idle seats on an old agent, model or effort restart on the new one.`
                     : 'The supervisor is not acting on this project, so running seats keep their setting until they next start.'}
                 </p>
                 <div className="flex flex-wrap justify-end gap-2">

@@ -223,6 +223,11 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
 - **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
   `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
   call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+  **OpenCode 2.x (`opencode2`) never runs that file**, so the same step also writes `opencode-plugin-v2.js` beside it as
+  `cb-guard-v2.js` (#4817), which does the same through 2.x's `execute.before`; 1.x loads it too and gets no hook from
+  it. `--check` wants both. A shell call's `workdir` is judged as a `cd` to it before the command. The board cannot yet
+  start a 2.x seat. 2.x's default background service does not carry a pane's `CB_ROLE`, so only a server started with
+  that env applies a seat's rules.
 
 **These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
 OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
@@ -595,8 +600,12 @@ new setting and wind-down work the same. The squad `count` per role is the most 
   (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
   the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
   under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
-- restarts a squad seat running another agent or model than the squad file now names for it (#4332, Q2970: the
-  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them) once it is
+- restarts a squad seat running another agent, model or effort than the squad file now names for it (#4332, Q2970: the
+  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them; the effort
+  is the `cb iam --effort` of its first prompt, `default` for none, #4766. The effort is not read from the running
+  agent, so one changed inside a session is not seen; a seat that said none is not judged, so a seat started before
+  this keeps running. Every machine's board checkout must know `--effort` before a squad starts seats there: an older
+  `cb` refuses the flag and the seat does not bind) once it is
   idle as above and quiet 5 minutes: it closes it as above, then starts it under the same name on the new setting, at
   most 2 a tick, each taking one of the 3 starts (waiting work starts first). Busy, it waits until idle. Never the lead,
   a hand-started name or a leaving seat; one idle 20 minutes with no waiting work is simply closed. Each restart is a
@@ -713,6 +722,12 @@ denied by the role permission files. Card #3746.
 - The block says what to do instead: push your own branch and open a PR; the lead merges it.
 - While the list is set, a push whose remote or branch the shell fills in (`$B`, `$(git branch --show-current)`,
   backticks) is blocked too, since the hook cannot see the branch: name it literally.
+- A command word the shell fills in (`$G`, `"$GIT"`, `%GIT%`, `& $git`) is read as `git` when what follows can push
+  (`push`, `send-pack`, `http-push`, `subtree`, an alias set for the call or in git config, a subcommand that is filled
+  in too), by this list and by every role's rules against a push (#4815): write `git` by its name. A variable that holds
+  another tool with a `push` command (`$DOCKER push <image>`) is refused the same way: write that tool's name.
+- In a seat, a command and its first argument both filled in (`$G $SUB`, also `$CC $CFLAGS`) are refused whatever they
+  hold: write the command's name (#4815).
 - While the list is set, a wildcard destination (`refs/heads/*:refs/heads/*`, `develop*`) is blocked too: it can write
   a protected branch. Push one branch by name.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
