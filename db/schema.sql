@@ -289,6 +289,7 @@ drop function if exists cb.norm_type cascade;
 drop function if exists cb.triagers cascade;
 drop function if exists cb.norm_id cascade;
 drop function if exists cb.ensure_project cascade;
+drop function if exists cb._freed_status cascade;
 drop function if exists cb.slug cascade;
 drop function if exists cb.read_project cascade;
 drop function if exists cb._live cascade;
@@ -511,6 +512,8 @@ begin
   if a = t then raise exception 'a project cannot be an alias of itself'; end if;
   -- #4559: merged work would land where nothing picks it up
   if not cb._live(t) then raise exception '%: nothing is merged into it until Ahmed enables it on Projects', cb._state_words(t); end if;
+  -- #4621: nor is such a project merged away: its cards would be handed out again under the other name
+  if not cb._live(a) then raise exception '%: it is not merged into another project until Ahmed enables it', cb._state_words(a); end if;
   perform cb.ensure_project(t);
   if exists (select 1 from cb.projects p where p.slug = a) then
     perform set_config('cb.quiet', 'on', true);
@@ -581,6 +584,12 @@ create function cb._wait_words(project text) returns text language sql stable as
   select cb._state_words($1) || case when cb._live($1) then '' when (select p.state from cb.projects p where p.slug = $1) = 'archived'
     then '. File new work elsewhere, or ask Ahmed to unarchive it'
     else '. Write where you stopped (cb log <card> "...") and wait: you will be told when it is enabled' end
+$$;
+
+-- #4621: where a card goes when its question stops holding it: its holder takes it up again, or it waits in Next. A
+-- project that gets no work starts nothing: the holder keeps the card and finds it in Next.
+create function cb._freed_status(assignee text, project text) returns text language sql stable as $$
+  select case when $1 is null or not cb._live($2) then 'next' else 'in_progress' end
 $$;
 
 create function cb.ensure_project(project text) returns text language plpgsql as $$
@@ -1385,9 +1394,10 @@ begin
     perform set_config('cb.note', 'Q' || c.id || ' waits again: back as before it asked', true);
     update cb.tasks x set blocked_on = live,
            status = case when live is not null then 'blocked'
-                         when h ->> 'blocked_on' is null then h ->> 'status'
+                         when h ->> 'blocked_on' is null then
+                           case when h ->> 'status' = 'in_progress' and not cb._live(x.project) then 'next' else h ->> 'status' end
                          when cardinality(cb._waits_on(x.id)) > 0 then 'blocked'
-                         when x.assignee is null then 'next' else 'in_progress' end
+                         else cb._freed_status(x.assignee, x.project) end
      where x.id = (h ->> 'task')::bigint and x.blocked_on = c.id and x.status = 'blocked';
   end loop;
   perform set_config('cb.note', '', true);
@@ -1435,7 +1445,7 @@ begin
   perform set_config('cb.note', 'Q' || qid || ' withdrawn; still waits on its blocking tasks', true);
   update cb.tasks t set blocked_on = null where t.blocked_on = qid and t.status = 'blocked' and cardinality(cb._waits_on(t.id)) > 0;
   perform set_config('cb.note', '', true);
-  update cb.tasks t set status = case when t.assignee is null then 'next' else 'in_progress' end
+  update cb.tasks t set status = cb._freed_status(t.assignee, t.project)
    where t.blocked_on = qid and t.status = 'blocked';
 end $$;
 
@@ -1497,6 +1507,10 @@ begin
   end if;
   if q.status not in ('open', 'sent_back') then
     raise exception 'Q% is %: only an open or sent-back question can be rewritten', qid, q.status;
+  end if;
+  -- #4621: as cb.ask: nothing is asked in a project that gets no work, and a rewrite asks again
+  if not cb._live(q.project) then
+    raise exception '%: nothing is asked there until Ahmed enables it. Write where you stopped with cb log <card> "..."', cb._state_words(q.project);
   end if;
   if q.sent_back ->> 'reason' = 'visual' and not pictures and not cb._is_dashboard() then
     raise exception 'Q% was sent back with "Show me": rewrite it with pictures (cb reask Q% -i "Now=<screenshot>" -i "After=<mockup>"). No way to make one? cb withdraw Q% and ask again saying why', qid, qid, qid;
@@ -1580,7 +1594,7 @@ begin
   perform set_config('cb.note', 'Q' || qid || ' answered; still waits on its blocking tasks', true);
   update cb.tasks t set blocked_on = null where t.blocked_on = qid and t.status = 'blocked' and cardinality(cb._waits_on(t.id)) > 0;
   perform set_config('cb.note', 'unblocked: Q' || qid || ' answered', true);
-  update cb.tasks t set status = case when t.assignee is null then 'next' else 'in_progress' end
+  update cb.tasks t set status = cb._freed_status(t.assignee, t.project)
    where t.blocked_on = qid and t.status = 'blocked';
   perform set_config('cb.note', '', true);
 end $$;
@@ -1668,7 +1682,7 @@ declare p text := cb.read_project(project);  -- unknown project raises; null kee
         mo text := nullif(trim(model), '');
         rp text := nullif(trim(repo), '');
         ag text := nullif(trim(agent), '');  -- the CLI the session runs (#4002); null: claude, or what it said before
-        pp text;
+        pp text; held record; eff text;
 begin
   if ag is not null and ag not in ('claude', 'codex', 'opencode', 'agy') then
     raise exception 'agent must be one of claude, codex, opencode, agy (got %)', ag;
@@ -1684,11 +1698,13 @@ begin
   end if;
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
-  -- #4559: no new seat binds to a project that gets no work; a pane already bound to it keeps its binding (a re-bind
-  -- after a compaction included), and a call that names no project keeps the pane's
-  if p is not null and not cb._live(p)
-     and (select s.project from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane)) is distinct from p then
-    raise exception '%: no new seat binds to it until Ahmed enables it', cb._state_words(p);
+  -- #4559: no new seat binds to a project that gets no work; the same name on a pane already bound to it keeps its
+  -- binding (a re-bind after a compaction included), and a call that names no project keeps the pane's. Another name
+  -- there is a new seat (#4621)
+  select s.project, s.actor into held from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane);
+  eff := coalesce(p, held.project);
+  if not cb._live(eff) and (held.project is distinct from eff or held.actor is distinct from trim(actor)) then
+    raise exception '%: no new seat binds to it until Ahmed enables it', cb._state_words(eff);
   end if;
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
   insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo, agent)
