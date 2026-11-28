@@ -16,7 +16,7 @@ const shown = async () => { const r = await row(); return [r.model, r.running_mo
 async function setup() {
   await sql?.end();
   sql = await freshDb();
-  await sql`select cb.add_project('zed', 'Zed', 'zed-orch@pc')`;
+  await sql`select cb.ensure_project('zed')`;
 }
 
 test('a screen reading is kept beside the launch model and flagged only when it differs', async () => {
