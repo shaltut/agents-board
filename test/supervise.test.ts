@@ -46,7 +46,7 @@ type Call = { m: string | null; args: string[] };
 const OK = { status: 0, stdout: '{}', stderr: '' };
 const GONE = { status: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' };
 const json = (o: unknown) => ({ status: 0, stdout: JSON.stringify(o), stderr: '' });
-function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => any; prompt?: (c: Call) => any } = {}) {
+function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => any; prompt?: (c: Call) => any; read?: (pane: string) => any } = {}) {
   const calls: Call[] = [], live = new Map<string, string>(); // herdr name → pane
   let panes = 0;
   const run: Runner = (m, args) => {
@@ -59,13 +59,15 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
     if (a === 'agent' && b === 'start') { const r = o.start?.(c); live.set(x!, args[args.indexOf('--pane') + 1]!); return r ?? OK; }
     if (a === 'agent' && b === 'prompt' && args[3] === '/exit') live.delete(x!);
     if (a === 'agent' && b === 'prompt') return o.prompt?.(c) ?? OK;
+    if (a === 'pane' && b === 'read') return o.read?.(x!) ?? { status: 0, stdout: '', stderr: '' }; // plain text lines, no JSON
     return OK;
   };
   return { calls, run, live };
 }
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
-  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>() });
+  closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>(),
+  unreadTold: new Set<string>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -768,4 +770,118 @@ test('a disabled project: two closes a tick, and a seat the board will not close
   const second = await tick(d);
   assert.deepEqual(closed(second), [`closed ${seats[3]}`], second.join('\n'));
   assert.ok(!second.some((l) => l.includes(seats[0]!)), 'the refusal is not repeated every tick');
+});
+
+// ---------------- #4787: a seat stopped by its model's quota
+const BANNER = 'Claude usage limit reached. Your limit will reset at 5pm.\n> \n? for shortcuts';
+const paneReads = (calls: Call[]) => calls.filter((c) => c.args[0] === 'pane' && c.args[1] === 'read');
+const screen = (text: string) => () => ({ status: 0, stdout: text, stderr: '' });
+// the pane with this id shows the banner, every other one an empty prompt
+const onPane = (id: string, text = BANNER) => (pane: string) => ({ status: 0, stdout: pane === id ? text : '> ', stderr: '' });
+// a lead and one builder holding a card (so the planner closes nothing), both running in herdr
+async function stopSetup() {
+  const { sql, sup } = await setup();
+  await session(sql, 'orch@macbook', 'lead');
+  await session(sql, 'sv-B1@macbook', 'builder');
+  await card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' });
+  return { sql, sup };
+}
+const running = (h: ReturnType<typeof fakeHerdr>) => { h.live.set('orch-macbook', 'w1:p1'); h.live.set('sv-b1-macbook', 'w1:p9'); };
+
+test("#4787: an idle seat showing its CLI's limit message tells the lead once per stop", async () => {
+  const { sql, sup } = await stopSetup();
+  const h = fakeHerdr({ read: onPane('w1:p9') });
+  running(h);
+  const d = deps(sup, h.run);
+  const out = await tick(d);
+  const read = paneReads(h.calls).find((c) => c.args[2] === 'w1:p9');
+  assert.ok(read, out.join('\n'));
+  assert.deepEqual([read.m, read.args.slice(3)], ['macbook', ['--source', 'recent-unwrapped', '--lines', '40', '--format', 'text']]);
+  const told = await tells(sql);
+  assert.equal(told.length, 1, out.join('\n'));
+  assert.match(told[0].summary, /sv-B1@macbook looks stopped by its model's quota/);
+  assert.match(told[0].summary, /herdr pane w1:p9 on macbook/);
+  assert.match(told[0].summary, /holds 1 card/);
+  assert.ok(!told[0].summary.includes('reset at 5pm'), 'no pane text on the board');
+  assert.deepEqual((await events(sql, 'quota')).map((e: any) => [e.data.session, e.data.note, e.project]), [['sv-B1@macbook', 'herdr pane w1:p9', 'sv']]);
+  assert.ok(out.some((l) => l.startsWith('sv-B1@macbook looks stopped by its quota')), out.join('\n'));
+  assert.ok(!h.calls.some((c) => c.args[0] === 'pane' && c.args[1] === 'close') && !has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), 'nothing is closed');
+
+  await tick(d);
+  await tick(deps(sup, h.run)); // a restarted supervisor: the board remembers it
+  assert.equal((await tells(sql)).length, 1, 'said once');
+  assert.equal((await events(sql, 'quota')).length, 1);
+
+  // the seat did something on the board, then stopped again: a new stop
+  await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`;
+  await tick(d);
+  assert.equal((await tells(sql)).length, 2);
+  assert.equal((await events(sql, 'quota')).length, 2);
+});
+
+test('#4787: a working seat is not read; a rate limit, ordinary output and text far above the last lines are no stop', async () => {
+  const { sql, sup } = await stopSetup();
+  const working = fakeHerdr({ status: 'working', read: screen(BANNER) });
+  running(working);
+  await tick(deps(sup, working.run));
+  assert.deepEqual(paneReads(working.calls), []);
+  const far = `${BANNER.split('\n')[0]}\n\n${Array.from({ length: 30 }, (_, i) => `later line ${i}`).join('\n')}`;
+  for (const text of ['API Error: 429 rate limit exceeded\n> ', 'all fine here\n> ', far, '']) {
+    const h = fakeHerdr({ read: screen(text) });
+    running(h);
+    await tick(deps(sup, h.run));
+    assert.ok(paneReads(h.calls).length > 0, 'an idle seat is read');
+  }
+  assert.equal((await tells(sql)).length, 0);
+  assert.equal((await events(sql, 'quota')).length, 0);
+});
+
+test('#4787: a stopped lead is logged for the digest, not told', async () => {
+  const { sql, sup } = await stopSetup();
+  const h = fakeHerdr({ read: onPane('w1:p1') });
+  running(h);
+  await tick(deps(sup, h.run));
+  assert.deepEqual((await events(sql, 'quota')).map((e: any) => e.data.session), ['orch@macbook']);
+  assert.equal((await tells(sql)).length, 0);
+});
+
+test("#4787: another agent's seat is judged by its own adapter; the retry time and the seat's backups are named", async () => {
+  const { sql, sup } = await stopSetup();
+  const fallback = [{ agent: 'claude', model: 'haiku' }];
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, fallback } } })}, 'ahmed')`;
+  await sql`update cb.sessions set agent = 'codex' where actor = 'sv-B1@macbook'`;
+  process.env.CB_MCP_GATE_OK = 'codex';
+  try {
+    const h = fakeHerdr({ read: onPane('w1:p9', 'You’ve hit your usage limit. Try again in 2 hours 5 minutes.\n> ') });
+    running(h);
+    await tick(deps(sup, h.run));
+  } finally { delete process.env.CB_MCP_GATE_OK; }
+  const [told] = await tells(sql);
+  assert.match(told!.summary, /retry in about 125 min/);
+  assert.match(told!.summary, /Backups named for the seat: haiku/);
+});
+
+test('#4787: a dry run reads panes, says what it would say and writes nothing', async () => {
+  const { sql, sup } = await stopSetup();
+  const h = fakeHerdr({ read: onPane('w1:p9') });
+  running(h);
+  const out = await tick(deps(sup, h.run, { dryRun: true }));
+  assert.ok(out.includes('would say sv-B1@macbook looks stopped by its quota'), out.join('\n'));
+  assert.equal((await tells(sql)).length, 0);
+  assert.equal((await events(sql, 'quota')).length, 0);
+});
+
+test('#4787: a pane that cannot be read is said once, until it reads again', async () => {
+  const { sql, sup } = await stopSetup();
+  let broken = true;
+  const h = fakeHerdr({ read: () => (broken ? { status: 1, stdout: '', stderr: 'no such pane' } : { status: 0, stdout: '> ', stderr: '' }) });
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  const d = deps(sup, h.run);
+  const said = (out: string[]) => out.filter((l) => l.startsWith('cannot check sv-B1@macbook for a quota stop')).length;
+  assert.equal(said(await tick(d)), 1);
+  assert.equal(said(await tick(d)), 0);
+  broken = false;
+  await tick(d);
+  broken = true;
+  assert.equal(said(await tick(d)), 1);
 });

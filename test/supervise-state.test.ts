@@ -320,6 +320,29 @@ test('a squad with one repo: a card with no repos named counts under it', async 
   assert.ok(s.sessions.every((x: any) => x.repo === 'api'));
 });
 
+test("#4787: quota_told stands from a quota log until the seat's next board event or a new bind", async () => {
+  const { sql, sup } = await setup();
+  const b1 = async () => (await state(sup)).sessions.find((x: any) => x.actor === 'sv-B1@macbook').quota_told;
+  assert.equal(await b1(), false);
+  await sup`select cb.supervise_log('sv', 'quota', 'sv-B1@macbook', 'herdr pane w1:p9')`;
+  assert.equal(await b1(), true);
+  await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B2@macbook', 'sv', 'note', 'another seat')`;
+  assert.equal(await b1(), true);
+  await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`;
+  assert.equal(await b1(), false);
+  await sup`select cb.supervise_log('sv', 'quota', 'sv-B1@macbook')`;
+  assert.equal(await b1(), true);
+  await sql`update cb.sessions set started_at = clock_timestamp() where actor = 'sv-B1@macbook'`; // a restart: a new session
+  assert.equal(await b1(), false);
+});
+
+test('#4787: a quota stop has its own digest line', async () => {
+  const { sql, sup } = await setup();
+  await sup`select cb.supervise_log('sv', 'quota', 'sv-B1@macbook', 'herdr pane w1:p9')`;
+  const d = (await sql`select cb.digest('sv', now() - interval '1 hour') as r`)[0].r;
+  assert.ok(d.includes('sv-B1@macbook stopped by its quota: herdr pane w1:p9'), JSON.stringify(d));
+});
+
 test('#4559 slice 3: a supervised project that is not live winds down; running jobs are counted apart', async () => {
   const { sql, sup } = await setup();
   assert.equal((await state(sup)).winding_down, false);
