@@ -102,6 +102,8 @@ export function reap(stateDir: string, say: (m: string) => void = () => {}): num
   return n;
 }
 
+export const servesFolder = (_cmd: string, _dir: string): boolean => false; // stub: the tests come first
+
 // A `$ argv` line, always on a line of its own (the last command may have ended without a newline).
 function header(io: Io, text: string) {
   const size = fstatSync(io.fd).size;
