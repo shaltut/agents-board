@@ -48,7 +48,8 @@ test('a call through the bridge: arguments, jsonb, dates, and Postgres errors wi
     assert.ok(db, 'bridge opened');
     const id = await call('task_add', { project: 'demo', title: 'first', actor: 'W1' }, db);
     await call('task_tag', { id, add: ['a', 'b'], remove: [], actor: 'W1' }, db); // lists travel as jsonb
-    const over = await call('task_row', { id }, db), direct = await call('task_row', { id }, sql);
+    const own = connect(TEST_URL, { app: 'cb', max: 1 }); clients.push(own); // a cb with no relay
+    const over = await call('task_row', { id }, db), direct = await call('task_row', { id }, own);
     assert.deepStrictEqual(over.map((r: any) => ({ ...r })), direct.map((r: any) => ({ ...r })));
     assert.ok(over[0].created_at instanceof Date);
     await assert.rejects(call('task_move', { id: '999', status: 'done', note: 'x', actor: 'W1' }, db),
