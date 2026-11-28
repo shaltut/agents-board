@@ -286,6 +286,30 @@ test('#4768, #4770: a command bash runs is never dropped as heredoc text; real h
   for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
 });
 
+// #4824: a commit message fed to git commit -F - is text wherever the output redirect stands on its line. The & of a
+// redirect (2>&1, >&2, &>) is no command separator
+test('#4824: a heredoc message to git commit stays text beside a redirect; what a shell runs does not', () => {
+  const message = 'fix: keep the row\n\nThe loader now does not read `tripKind` from the row, and unset values stay.\n\nCo-Authored-By: A Seat <seat@example.invalid>';
+  const heredoc = (head: string, body = message, tail = '') => `cd /tmp/w && git add -A && ${head}\n${body}\nEOF\n${tail}`;
+  const refused = (command: string) => {
+    const v = evaluate({ tool: 'shell', command, role: 'builder' });
+    return v.allow ? null : `${JSON.stringify(command.split('\n')[0])}: ${v.reason?.slice(0, 60)}`;
+  };
+  assert.deepEqual([
+    "git commit -q -F - <<'EOF' > /tmp/c.log 2>&1", "git commit -q -F - > /tmp/c.log 2>&1 <<'EOF'", "git commit -q -F - 2>&1 <<'EOF'",
+    "git commit -q -F - >&2 <<'EOF'", "git commit -q -F - 2>&- <<'EOF'", "cb log 1 - 2>&1 <<'EOF'",
+  ].map((head) => refused(heredoc(head, message, 'echo $?; git rev-parse HEAD'))).filter(Boolean), []);
+  // a real separator, or a shell that reads the body, keeps the body judged
+  for (const head of [
+    "git commit -q -F - 2>&1 | bash <<'EOF'", "git commit -q -F - &bash <<'EOF'", "git commit -q -F - >&2 & bash <<'EOF'",
+    "git commit -q -F - 2>&1 && bash <<'EOF'", "git commit -q -F - 2>&1; sh <<'EOF'", "cat >&1 <<'EOF' | bash",
+    "cat 2>&1 <<'EOF' | bash", "bash 2>&1 <<'EOF'", "git commit -q -F - 2>&1 <<EOF", "cat > notes >&2 <<'EOF' |& bash",
+    "git commit -q -F - 2>&1&bash <<'EOF'", "git commit -q -F - &> bash <<'EOF'",
+  ]) {
+    assert.equal(evaluate({ tool: 'shell', command: heredoc(head, head.endsWith('<<EOF') ? '$(unset CB_ROLE)' : 'unset CB_ROLE'), role: 'builder' }).allow, false, `must block: ${head}`);
+  }
+});
+
 // #4774: message text is dropped only where a shell runs the message command. In each of these the command, or the
 // quote that seems to open its message, stands in a comment or a quoted word, and the shell runs the line between
 const hiddenByMessage: [string, (c: string) => string][] = [
