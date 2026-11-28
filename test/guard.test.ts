@@ -1099,11 +1099,21 @@ const miscounts = [
   // the search itself runs its text: a program flag, or the search word made into something else
   "git grep -O'x;batch' y", "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`, "alias grep=eval; grep 'true;batch'",
   "grep() { eval \"$1\"; }; grep 'true;batch'",
+  // PR 159 review (R1) 1: a delimiter that is not a plain word, so the guard cannot place the body
+  "cat <<'E-O-F'\ndon't\nE-O-F\nsudo codex\ncat <<'E-O-F'\nwon't\nE-O-F", "cat <<\\EOF\ndon't\nEOF\nsudo codex\ncat <<\\EOF\nwon't\nEOF",
+  "cat <<EOF.1\ndon't\nEOF.1\nsudo codex\ncat <<EOF.1\nwon't\nEOF.1",
+  // 2: a line bash does not take as the end: blanks after or before the word, or a tab under << without the -
+  "cat <<'EOF'\nEOF \ndon't\nEOF\nsudo codex\ncat <<'EOF'\nEOF \nwon't\nEOF", "cat <<'EOF'\n  EOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n  EOF\nwon't\nEOF",
+  "cat <<'EOF'\n\tEOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n\tEOF\nwon't\nEOF",
+  // 3: other function bodies, and PowerShell's alias setters
+  "grep() ( eval \"$1\" ); grep 'true;batch'", "grep()\n{\n eval \"$1\"\n}\ngrep 'true;batch'", "grep () if true; then eval \"$1\"; fi; grep 'true;batch'",
+  "Set-Alias grep Invoke-Expression; grep 'true;batch'", "New-Alias rg iex; rg 'true;batch'", "sal grep iex; grep 'true;batch'", "nal rg iex; rg 'true;batch'",
 ];
 const miscountFine = [
   `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', \'\'\'\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n\'\'\')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
   'grep -E "before|at|after" notes.md', 'rg "x;at;y" src', 'grep "a|batch|b" f', 'grep -E "(at|on) the end" notes.md',
   "cat <<'EOF' > n.md\nit isn't, and it won't\nEOF\ngrep \"a|batch|b\" f",
+  'grep "a|batch|b" <<< "$x"'.replace('$x', 'x'), "cat <<-EOF > n.md\n\tbody\n\tEOF\ngrep \"a|batch|b\" f", "cat <<EOF > n.md\nbody\nEOF\nrg \"x;at;y\" src",
 ];
 test('#4767: a launch that a quote miscount would hide is blocked; plain quoted searches stay allowed', () => {
   for (const c of miscounts) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
@@ -1182,6 +1192,9 @@ test('long commands stay fast', () => {
     ['miscount check, 200 KB of heredoc marks on one line, as a builder', asBuilder(kb200('<<a '))],
     ['miscount check, 200 KB quote left open, as a builder', asBuilder('echo "' + kb200('a '))],
     ['miscount check, 200 KB of parentheses, as a builder', asBuilder('grep x ' + kb200('( '))],
+    ['miscount check, 200 KB of newlines after empty parentheses, as a builder', asBuilder('grep x ()' + '\n'.repeat(200000))],
+    ['miscount check, 200 KB of empty parentheses, as a builder', asBuilder('grep x ' + kb200('() \n'))],
+    ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],

@@ -1717,7 +1717,9 @@ function applyWrite(vars, { key, value }) {
 // or function, git grep -O, rg --pre), that reading can take a real command for quoted data. Such a command is read a
 // second time, flat: cut at every ; & | and newline, as before PR 124. The second reading can only add a block
 const MISCOUNTS = /#|--%|`|\$[({[']|@["']|\\["']|[\u2018-\u201E]/;
-const REDEFINES = /(?:^|[;&|\n(])[ \t\r]*(?:alias|function)\s|\([ \t]{0,4}\)[ \t\r]{0,4}\{/;
+// a word that makes another word run something else, anywhere in the text; or name() and any body bash takes, on the
+// same line or a later one. [ \t\r\n]* follows a ) of its own each time, so it stays linear
+const REDEFINES = /(?<![\w-])(?:alias|function|set-alias|new-alias|sal|nal)(?![\w-])|\([ \t]*\)[ \t\r\n]*(?:[({]|\[\[|(?:if|while|until|for|case|select)(?![\w-]))/i;
 const SEARCH_PROGRAM = /(?:^|[ \t])(?:--pre(?![\w-])|--op|-[A-Za-z]{0,8}O)/;
 const CLOSED_TEXT = /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^"'\\]+)*/y;
 const leftOpen = (text) => {
@@ -1725,16 +1727,26 @@ const leftOpen = (text) => {
   CLOSED_TEXT.exec(text);
   return text[CLOSED_TEXT.lastIndex] === '"' || text[CLOSED_TEXT.lastIndex] === "'";
 };
-const HEREDOC_WORD = /<<-?[ \t]*(["']?)(\w+)\1/;
-// a heredoc body is not shell text, so a quote it leaves open pairs with a later one. Each line is read once
+// a heredoc's << (not <<< or <<=), and the one header form the guard can place: a plain word, quoted or not, then a
+// blank, a redirect, an operator or the line's end
+const HEREDOC_MARK = /(?<!<)<<(?![<=])/;
+const HEREDOC_HEADER = /<<(-?)[ \t]*(["']?)(\w+)\2(?=[ \t;&|<>()]|$)/y;
+// a heredoc body is not shell text, so a quote it leaves open pairs with a later one. Anything about a heredoc that the
+// guard cannot place counts as lost. The end line is bash's: the word exactly (<<- drops leading tabs), with no other
+// blank: a looser match would end the body early and leave the rest unchecked. Each line is read once
 function bodyLeavesQuote(text) {
+  // Git Bash drops a carriage return, so there EOF plus one ends a heredoc, which on Linux it does not: lost either way
+  if (text.includes('\r')) return true;
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const header = HEREDOC_WORD.exec(lines[i]);
-    if (!header) continue;
-    if (leftOpen(lines[i].slice(0, header.index)) || lines[i].indexOf('<<', header.index + 2) >= 0) return true;
+    const at = lines[i].search(HEREDOC_MARK);
+    if (at < 0) continue;
+    HEREDOC_HEADER.lastIndex = at;
+    const header = HEREDOC_HEADER.exec(lines[i]);
+    if (!header || HEREDOC_MARK.test(lines[i].slice(HEREDOC_HEADER.lastIndex)) || leftOpen(lines[i].slice(0, at))) return true;
+    const [, tabs, , word] = header;
     let end = i + 1;
-    while (end < lines.length && lines[end].trim() !== header[2]) end++;
+    while (end < lines.length && (tabs ? lines[end].replace(/^\t+/, '') : lines[end]) !== word) end++;
     if (end === lines.length || leftOpen(lines.slice(i + 1, end).join('\n'))) return true;
     i = end;
   }
