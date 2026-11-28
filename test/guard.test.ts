@@ -807,8 +807,22 @@ const secretReads = [
   // bash comment's trailing \)
   'Get-ChildItem C:\\work\\\ncat .env', 'echo a\\\ncat .env', 'ls # x\\\ncat .env',
   'Set-Location C:\\tmp\\\nGet-Content .env', 'Get-ChildItem C:\\work\\\r\ncat .env',
+  // #4882: the relay's bridge file holds the token its local socket runs any SQL for: by full path, by the temp
+  // variable, and by every glob that reaches it; the seat's token file by a glob too
+  'cat /tmp/cb-relay-ab12cd34ef56.bridge', `cat "$TMPDIR/cb-relay-ab12cd34ef56.bridge"`, String.raw`type %TEMP%\cb-relay-ab12cd34ef56.bridge`,
+  String.raw`Get-Content $env:TEMP\cb-relay-ab12cd34ef56.bridge`, String.raw`type C:\Temp\cb-relay-ab12cd34ef56.bridge`, 'cp /tmp/cb-relay-ab12cd34ef56.bridge /tmp/x',
+  String.raw`Copy-Item "$env:TEMP\cb-relay-*.bridge" .`, 'cat /tmp/cb-relay-*.bridge', 'cat /tmp/cb-relay-????????????.bridge',
+  'cat /tmp/cb-relay-[0-9a-f]*.bridge', 'cat /tmp/cb-relay-*', String.raw`gc $env:TEMP\cb-relay-ab12*`, 'head /tmp/cb-relay-ab12cd34ef56.*',
+  'grep token $TEMP/*.bridge', 'base64 < /tmp/cb-relay-ab12cd34ef56.bridge', 'cat /tmp/cb-relay-*.bridge*', `cat "$TMPDIR"/cb-seat-*.claude.json`,
+  String.raw`Get-Content $env:TEMP\cb-seat-*.opencode.json`,
 ];
 const secretUses = [
+  // #4882: the relay's other files stay readable, and so does the code that names the bridge file
+  'tail -n 50 /tmp/cb-relay-ab12cd34ef56.log', 'tail -f /tmp/cb-relay-*.log', String.raw`Get-Content $env:TEMP\cb-relay-*.log -Tail 20`,
+  'cat /tmp/cb-relay-ab12cd34ef56.pid', 'cat /tmp/cb-relay-*.log*', 'ls /tmp/cb-relay-*', 'rm /tmp/cb-relay-ab12cd34ef56.bridge',
+  'cat cli/bridge.ts', 'grep -n "files.bridge" cli/bridge.ts', 'grep -rn "cb-relay-" cli', 'grep -n "cb-relay-bridge-" cli/bridge.ts',
+  // an escaped star in a search for the rule itself is no glob
+  String.raw`grep -c "cb-relay-\*.bridge" kit/permissions/builder.json`,
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
   'docker compose --env-file .env up -d', 'cat ~/.ssh/id_ed25519.pub', 'cat src/env.ts', 'grep -rn process.env src',
   'cat environment.md', `cb log 1 "the key lives in deploy/.env: cat it yourself"`, 'ls -la', 'cat key.txt', 'cat monkey.ts',

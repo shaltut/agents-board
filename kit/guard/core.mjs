@@ -1363,7 +1363,11 @@ function ghRuns(w, i, j) {
 const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{;|&>$` + '`' + String.raw`])`;
 const SECRET_END = String.raw`(?=[\s"';&|)<>*?[{},:` + '`' + String.raw`]|$)`;
 const SOURCE_EXT = String.raw`(?:md|mdx|ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|txt|html|css)`;
-const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.-]*\.(?:claude|opencode)\.json)` + SECRET_END, 'i');
+// #4882: the relay's bridge file (cli/bridge.ts) holds the token its local socket runs any SQL for. Named in full, by a
+// glob in the name, by a glob that ends the word and so reaches it (cb-relay-*, not cb-relay-*.log), or as *.bridge. The
+// name's characters hold none that can start another name, so each is read once
+const BRIDGE_NAME = String.raw`cb-relay-[\w.*?[\]-]*\.bridge|cb-relay-[\w.*?[\]-]*(?<!\.(?:log|pid|held|refused))\*(?![\w.*?[\]-])|(?<!cb-relay-\\)\*\.bridge`;
+const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.*?[\]-]*\.(?:claude|opencode)\.json|` + BRIDGE_NAME + ')' + SECRET_END, 'i');
 const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
   'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
   'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',
@@ -1374,7 +1378,7 @@ const SECRET_READER = new RegExp(String.raw`(?<![\w.$\\/-])(?:${SECRET_READERS.j
 const TEMPLATE_COPY = /^\s*(?:cp|copy|copy-item|cpi)\s+(?:-\S+\s+)*["']?[^\s"']+\.(?:example|sample|template|dist)["']?\s+["']?[^\s"']+["']?\s*$/i;
 const EXCLUDE = /--exclude(?:-dir)?=\S*/gi;
 const dequote = (t) => t.replace(/""|''/g, '');
-const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials or a seat token file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials, a seat token file or the relay\'s bridge file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
   return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
