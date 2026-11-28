@@ -223,6 +223,11 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
 - **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
   `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
   call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+  **OpenCode 2.x (`opencode2`) never runs that file**, so the same step also writes `opencode-plugin-v2.js` beside it as
+  `cb-guard-v2.js` (#4817), which does the same through 2.x's `execute.before`; 1.x loads it too and gets no hook from
+  it. `--check` wants both. A shell call's `workdir` is judged as a `cd` to it before the command. The board cannot yet
+  start a 2.x seat. 2.x's default background service does not carry a pane's `CB_ROLE`, so only a server started with
+  that env applies a seat's rules.
 
 **These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
 OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
