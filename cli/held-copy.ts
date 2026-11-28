@@ -59,13 +59,14 @@ export function readCopies(file: string, now: number): HeldCopy[] {
   return Array.isArray(raw) ? raw.filter(isCopy).filter((c) => now - c.at <= SAME_SESSION_MS) : [];
 }
 
-/** Review 106 L2: removes the held files in dir older than the hold window. herdr never reuses a pane id, so a seat
- *  restarted in a new pane leaves its file unread; nothing in one that old would be pushed anyway. */
+/** Review 106 L2: removes the held files in dir last written over a day ago. herdr never reuses a pane id, so a seat
+ *  restarted in a new pane leaves its file unread; nothing in one that old would be pushed anyway. A younger one may
+ *  still be its own relay's, down for a while (SAME_SESSION_MS). */
 export function sweepHeld(dir: string, now: number) {
   let names: string[] = [];
   try { names = readdirSync(dir); } catch { return; }
   for (const n of names) {
     if (!/^cb-relay-.+\.held$/.test(n)) continue;
-    try { if (now - statSync(join(dir, n)).mtimeMs > HOLD_MS) rmSync(join(dir, n), { force: true }); } catch {}
+    try { if (now - statSync(join(dir, n)).mtimeMs > SAME_SESSION_MS) rmSync(join(dir, n), { force: true }); } catch {}
   }
 }
