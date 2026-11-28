@@ -257,19 +257,26 @@ test('files: the cap stops the day, an old day file is deleted on a new day, par
   assert.equal(readFaults(Date.now() - 3600_000, { CB_FAULTS_HOME: dir3 } as any).length, 1001);
 });
 
-test('speed: 200 writes, p95 under 20 ms', () => {
+test('speed: 200 writes, median under 5 ms and at most 3 over 20 ms', (t) => {
   const dir = temp(), env = { CB_FAULTS_HOME: dir } as any;
   const times: number[] = [];
-  // the first fault of a process also makes the folder and reads the vocabulary once
+  // the first fault of a process also makes the folder and reads the vocabulary once. One sample cannot be judged
+  // tightly (it reached 688 ms on a busy PC), so this bound only catches a first write that takes seconds
   const t0 = performance.now();
   writeFault({ src: 'cb', kind: 'refused', cmd: 'show', msg: mask('task #0 not found'), exit: 1 }, env);
-  assert.ok(performance.now() - t0 < 200, `first write ${(performance.now() - t0).toFixed(1)} ms`);
+  const first = performance.now() - t0;
+  assert.ok(first < 2000, `first write ${first.toFixed(1)} ms`);
   for (let i = 0; i < 200; i++) {
     const t = performance.now();
     writeFault({ src: 'cb', kind: 'refused', cmd: 'show', msg: mask(`task #${i} not found`), exit: 1 }, env);
     times.push(performance.now() - t);
   }
-  // Ignore occasional scheduling or filesystem stalls, but catch sustained slow writes.
-  const p95 = times.sort((a, b) => a - b)[189]!;
-  assert.ok(p95 < 20, `p95 write ${p95.toFixed(1)} ms`);
+  // A few scheduling or filesystem stalls pass. The median catches writes that all got slower, the count catches slow
+  // ones that come too often to be stalls.
+  times.sort((a, b) => a - b);
+  const median = times[99]!, slow = times.filter((ms) => ms > 20).length;
+  const seen = `first ${first.toFixed(1)} ms, median ${median.toFixed(2)} ms, ${slow} over 20 ms, slowest ${times[199]!.toFixed(1)} ms`;
+  t.diagnostic(seen);
+  assert.ok(median < 5, seen);
+  assert.ok(slow <= 3, seen);
 });
