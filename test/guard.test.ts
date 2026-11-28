@@ -1513,6 +1513,16 @@ test('long commands stay fast', () => {
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
+    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced: unspaced nesting is
+    // slow in fencePath's .. fold, on its own card (#4813)
+    ['#4802, 200 KB of closed $(a;) words, then a fence path', asBuilder(kb200('$(a;) ') + 'opencode.json')],
+    ['#4802, 200 KB of $(a; left open, then a fence path', asBuilder(kb200('$(a;') + ' opencode.json')],
+    ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
+    ['#4802, 200 KB of a filled word and an option whose bare value never closes', asBuilder(kb200('$A -C $( ') + 'opencode.json')],
+    ['#4802, 200 KB of a filled word and a bare backtick value', asBuilder(kb200('$A -C ` ') + 'opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$( ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of ${a:- starts', asBuilder('caffeinate $GIT "' + kb200('${a:- ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of one open $( and plain $x words', asBuilder('caffeinate $GIT "$(' + kb200('$x y ') + '" opencode.json')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
