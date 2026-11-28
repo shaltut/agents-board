@@ -46,9 +46,26 @@ test('a Windows worktree tests on its own port; the main checkout and other plat
     assert.notEqual(port, 5434);
     assert.ok(port >= 15435 && port < 16454, `port ${port} in the worktree range`);
     assert.equal(testPgPort(tree, 'win32'), port, 'the same worktree gets the same port');
-    assert.equal(testPgPort(main, 'win32'), 5434, 'the main checkout');
+    assert.equal(testPgPort(main, 'win32', {}), 5434, 'the main checkout');
     assert.equal(testPgPort(tree, 'darwin'), 5434, 'the Mac: Postgres started by hand on 5434');
     assert.equal(testPgPort(tree, 'linux'), 5434);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// #4756: a PC runner slot is a clone (.git is a folder), so it was given the shared 5434: --test started a cluster in the
+// slot's .pgdata there, --test --stop (the recipe's finally step) did nothing, and the next job's git clean failed on
+// the open server.log. A runner job's checkout is a test checkout like a worktree: own port, and --stop stops it.
+test("a PC runner job's checkout, a clone, tests on its own port", () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cb-pg-'));
+  const slot = join(tmp, 'slot');
+  try {
+    mkdirSync(join(slot, '.git'), { recursive: true });
+    const port = testPgPort(slot, 'win32', { CB_RUNNER_JOB: '1' });
+    assert.ok(port >= 15435 && port < 16454, `port ${port} in the worktree range`);
+    assert.equal(testPgPort(slot, 'win32', {}), 5434, 'the same clone outside a job');
+    assert.equal(testPgPort(slot, 'linux', { CB_RUNNER_JOB: '1' }), 5434);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
