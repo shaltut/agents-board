@@ -53,6 +53,13 @@ test('no name is listed twice', () => {
   assert.deepEqual([...new Set(names)].sort(), Object.keys(OPS).sort(), 'the check reads every list');
 });
 
+// these two loosen how the worker API binds a write to its key (server/worker.ts bind): a new one is a decision
+test('only the relay\'s two delivery writes are bound by the seat they name, and one of them takes "relay" as its actor', () => {
+  const flagged = (flag: 'toOwnSeat' | 'relayActor') => Object.keys(OPS).filter((fn) => OPS[fn]![flag]).sort();
+  assert.deepEqual(flagged('toOwnSeat'), ['answer_delivered', 'ask_delivered']);
+  assert.deepEqual(flagged('relayActor'), ['answer_delivered']);
+});
+
 test('OPS holds nothing cb does not call', () => {
   assert.deepEqual(Object.keys(OPS).filter((fn) => !CALLED.includes(fn)), []);
 });

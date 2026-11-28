@@ -43,7 +43,8 @@ test('every function of this slice that writes and that a key may call names a m
     where p.pronamespace = 'cb'::regnamespace and p.provolatile = 'v' and p.proname = any(${mine}::text[])`;
   const unbound = writes.filter((f: any) => !f.args.includes('machine') && !f.args.includes('actor')).map((f: any) => f.proname);
   assert.deepEqual(unbound, ['ask_delivered']);
-  assert.deepEqual(unbound.filter((fn: string) => OPS[fn]!.kinds.length), []);
+  // bound by the seat it delivered to instead (test/worker-delivery.test.ts)
+  assert.deepEqual(unbound.filter((fn: string) => OPS[fn]!.kinds.length && !OPS[fn]!.toOwnSeat), []);
 });
 
 test('work_still_open takes its card numbers through call(), as an array', async () => {
