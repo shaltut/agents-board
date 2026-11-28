@@ -13,6 +13,7 @@ import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
 import { notify, workerApp } from './worker.ts';
+import { clientIp } from './client-ip.ts';
 import { releaseApp, loadRelease, servedSha } from './release.ts';
 import { readRoleSeeds } from '../db/roles.ts';
 
@@ -47,12 +48,6 @@ async function userOf(c: Context<any>): Promise<Who | null> {
   const [u] = await sql`select name, display, role from cb.users where token = ${t}`;
   return (u as Who | undefined) ?? null;
 }
-// The address a login is counted against: the hop our own proxy added (the last X-Forwarded-For entry), else a direct
-// connection. Cloudflare's cf-connecting-ip only with CB_BEHIND_CLOUDFLARE=1 (a tunnel, or a proxied DNS record): when
-// nginx is reachable directly, a client can send that header itself and get a fresh lockout on every try.
-const clientIp = (c: Context<any>) => (process.env.CB_BEHIND_CLOUDFLARE === '1' && c.req.header('cf-connecting-ip')?.trim())
-  || c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim() || 'direct';
-
 app.use('*', async (c, next) => {
   const token = c.req.query('u');
   if (!token) return next();

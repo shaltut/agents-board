@@ -15,6 +15,7 @@ after(() => Promise.all([...clients.map((c) => c.end()), closeWorker(), serverSq
 
 /** A wiped board: the dashboard's connection (it issues and revokes keys) and a session's (psql with no special name). */
 async function board() {
+  await closeWorker(); // each test starts with nothing counted against any key or address
   const sql = await freshDb();
   const session = postgres(TEST_URL, { onnotice: () => {}, max: 1, connection: { application_name: 'cb' } });
   clients.push(sql, session);
@@ -482,6 +483,16 @@ test('where a key was last used from is the address the sign-in limit counts', a
   try {
     await app.request('/w/v1/hello', { headers: { ...bearer(key), 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '192.0.2.1' } });
   } finally { delete process.env.CB_BEHIND_CLOUDFLARE; }
-  const [row] = await sql`select last_used_from from cb.worker_keys where id = ${idOf(key)}`;
-  assert.equal(row.last_used_from, '203.0.113.9');
+  const lastFrom = async () => (await sql`select last_used_from from cb.worker_keys where id = ${idOf(key)}`)[0].last_used_from;
+  assert.equal(await lastFrom(), '203.0.113.9');
+  // an open stream's checks keep the address it came from
+  process.env.CB_API_PING_MS = '100';
+  try {
+    const open = await app.request('/w/v1/events?ch=cb', { headers: { ...bearer(key), 'x-forwarded-for': '203.0.113.10' } });
+    await sql`update cb.worker_keys set last_used_at = now() - interval '2 minutes', last_used_from = null where id = ${idOf(key)}`;
+    await new Promise((r) => setTimeout(r, 500));
+    await open.body!.cancel();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await lastFrom(), '203.0.113.10');
+  } finally { delete process.env.CB_API_PING_MS; }
 });
