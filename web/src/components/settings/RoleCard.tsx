@@ -147,9 +147,10 @@ function SeatRows({ role, squad, options, edit, modelsOf }: {
 }
 
 /** Backups a seat moves to if its agent stops (nothing switches to one yet: it is carried on each start). */
-function Backups({ list, onChange, own, options, label, modelsOf }: {
+function Backups({ list, onChange, own, options, label, modelsOf, machine }: {
   list: Fallback[]; onChange: (l: Fallback[] | undefined) => void; own: Fallback; options: SquadOptions; label: string
   modelsOf: (agent: string) => ModelList | null
+  machine: string
 }) {
   const [agent, setAgent] = useState('codex')
   const [model, setModel] = useState('')
@@ -174,7 +175,7 @@ function Backups({ list, onChange, own, options, label, modelsOf }: {
       {list.length < max && (
         <div className="flex flex-wrap items-center gap-2">
           <AgentField value={agent} onChange={(a) => { setAgent(a); setModel(a === 'claude' ? 'sonnet' : ''); setEffort(undefined) }} label={`Backup agent for ${label}`} options={options} backup />
-          <ModelField key={agent} agent={agent} list={modelsOf(agent)} value={model} onChange={setModel} label={`Backup model for ${label}`} options={options} />
+          <ModelField key={`${agent}-${machine}`} agent={agent} list={modelsOf(agent)} value={model} onChange={setModel} label={`Backup model for ${label}`} options={options} />
           <EffortField agent={agent} model={model} list={modelsOf(agent)} value={effort ?? ''} onChange={setEffort} label={`Backup effort for ${label}`} options={options} />
           <Button variant="outline" size="sm" disabled={!model || !!problem || dup}
             onClick={() => { onChange([...list, { agent, model, ...(effort ? { effort } : {}) }]); setModel(agent === 'claude' ? 'sonnet' : ''); setEffort(undefined) }}><Plus /> Add a backup</Button>
@@ -253,7 +254,7 @@ export function RoleCard({ role, squad, options, seats, supervised, problems, ed
                 : `${machineName} has not sent its ${agentLabel(agent)} models yet. Run cb models report there to get a list to pick from.`}
             </p>
           )}
-          <Backups list={spec.fallback ?? []} own={{ agent, model: spec.model ?? '' }} options={options} label={name} modelsOf={modelsOf}
+          <Backups list={spec.fallback ?? []} own={{ agent, model: spec.model ?? '' }} options={options} label={name} modelsOf={modelsOf} machine={spec.machine}
             onChange={(l) => edit((s) => patchRole(s, role, { fallback: l }, defaults))} />
           <SeatRows role={role} squad={squad} options={options} edit={edit} modelsOf={modelsOf} />
           <div className="border-t pt-2 text-sm">
