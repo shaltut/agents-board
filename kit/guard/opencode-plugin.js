@@ -27,4 +27,11 @@ export const CbGuard = async () => ({
     const why = judge(input?.tool, output?.args, input?.sessionID);
     if (why !== null) throw new Error(why);
   },
+  // #4892: with its server password a seat could drive its own server. OpenCode lays this env over its own for every
+  // shell it starts (the bash tool, a ! command, a terminal), so the shells of a seat get it empty. process.env stays
+  // as it is: the server's sign-in reads the password from there
+  'shell.env': async (_input, output) => {
+    if (!process.env.CB_ROLE && !process.env.CB_AGENT) return;
+    output.env.OPENCODE_SERVER_PASSWORD = '';
+  },
 });

@@ -106,21 +106,21 @@ test('#4817: with both plugins installed, OpenCode 1.x still stops a blocked cal
 });
 
 // #4892: a seat that reads its own server password can drive its own server. The probe runs as the model's shell command
-// and writes yes or no only: whether any of its variables is named like a server password, and whether any value is the
-// password (compared by hash, so the probe file never holds it)
+// and writes yes or no only: which of its variables are named like a server password and hold something, and whether any
+// value is the password (compared by hash, so the probe file never holds it)
 const probe = (password: string) => `import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 const sha = (v) => createHash('sha256').update(v).digest('hex');
 writeFileSync('probe.json', JSON.stringify({
-  named: Object.keys(process.env).filter((k) => /^OPENCODE_(SERVER_)?PASSWORD$/i.test(k)),
+  named: Object.keys(process.env).filter((k) => /^OPENCODE_(SERVER_)?PASSWORD$/i.test(k) && process.env[k] !== ''),
   value: Object.values(process.env).some((v) => sha(String(v)) === '${createHash('sha256').update(password).digest('hex')}'),
 }));
 `;
 
-test('#4892: a shell command of an OpenCode 1.x seat sees neither the server password nor its name, and the server still asks for it', { skip, timeout: 240_000 }, async (t) => {
+test('#4892: a shell command of an OpenCode 1.x seat sees no server password, under its name or any other, and the server still asks for it', { skip, timeout: 240_000 }, async (t) => {
   const { work, bare } = await session(t, ['node probe.mjs'], (password) => ({ 'probe.mjs': probe(password) }));
   const seen = JSON.parse(readFileSync(join(work, 'probe.json'), 'utf8')) as { named: string[]; value: boolean };
-  console.log(`#4892 probe: password-named variables in the shell: ${seen.named.length ? seen.named.join(', ') : 'none'}; the value under any name: ${seen.value ? 'yes' : 'no'}`);
+  console.log(`#4892 probe: password-named variables holding something in the shell: ${seen.named.length ? seen.named.join(', ') : 'none'}; the value under any name: ${seen.value ? 'yes' : 'no'}`);
   assert.equal(await bare(), 401, 'a request without the password is refused');
   assert.deepEqual(seen, { named: [], value: false });
 });

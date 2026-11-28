@@ -1406,9 +1406,50 @@ const TEMPLATE_COPY = /^\s*(?:cp|copy|copy-item|cpi)\s+(?:-\S+\s+)*["']?[^\s"']+
 const EXCLUDE = /--exclude(?:-dir)?=\S*/gi;
 const dequote = (t) => t.replace(/""|''/g, '');
 const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials or a seat token file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+// #4892: an OpenCode 1.x seat's server password lets its holder drive that seat's server. The board's plugin empties it
+// in the seat's shells; this refuses asking for it by name, and another process's environment, where it still is. A
+// mention that expands nothing (a search of the code, a message) passes. Each pattern starts at a literal
+const PASSWORD = String.raw`OPENCODE_SERVER_PASSWORD(?!\w)`;
+// $NAME, ${NAME}, $env:NAME, %NAME%, !NAME!, the Env: drive, and [Environment]::GetEnvironmentVariable
+const PASSWORD_EXPANDED = new RegExp(String.raw`\$(?:\{[#!]?)?(?:env:)?${PASSWORD}|[%!]OPENCODE_SERVER_PASSWORD(?::[^%!\s]{0,20})?[%!]|(?<![\w$])env:[\\/]?(?:${PASSWORD}|OPENCODE\w{0,40}\*)|\]::\s{0,5}GetEnvironmentVariable\s{0,5}\(\s{0,5}["']${PASSWORD}`, 'i');
+// code an interpreter runs
+const RUNS_CODE = /(?<![\w.$\\/-])(?:node|bun|deno|python3?|py|ruby|perl)(?:\.exe)?(?![\w.-])/i;
+const PASSWORD_IN_CODE = new RegExp(String.raw`(?:process\.env(?:\.|\[\s{0,5}\\?["'\x60])|(?:getenv|environ(?:\.get)?|ENV(?:\.fetch)?)\s{0,5}[([{]\s{0,5}\\?["'])${PASSWORD}`, 'i');
+const PRINTS_NAMED = /(?<![\w.$\\/-])(?:printenv|(?:declare|typeset|export)\s+-p)(?![\w.-])/i;
+const PASSWORD_WORD = new RegExp(String.raw`(?<![\w$])${PASSWORD}`, 'i');
+// the whole environment listed, then filtered for it
+const DUMPS = /^\s*(?:env|printenv|set|export\s+-p|(?:get-childitem|gci|ls|dir)\s+env:[\\/]?)\s*$/i;
+const FILTERS_PASSWORD = /^\s*(?:grep|egrep|fgrep|rg|findstr|select-string|sls|where-object|where|\?)(?![\w.-])[^\n]*(?:opencode|passw)/i;
+const PROC_ENVIRON_PATH = String.raw`proc[\\/]+[^\\/\s"';|&]{1,40}[\\/]+(?:task[\\/]+[^\\/\s"';|&]{1,40}[\\/]+)?environ(?![\w.-])`;
+const PROC_ENVIRON = new RegExp(String.raw`(?<![\w.-])\/${PROC_ENVIRON_PATH}`, 'i');
+// ps that prints each process's environment: BSD's e among the dashless letters, and macOS's -E
+const PS_WORD = /(?<![\w.$\\/-])ps(?![\w.\\/-])/;
+const PS_BSD_ENV = /^[acfghjlmrstuvwxz]*e[acefghjlmrstuvwxz]*$/;
+const PS_DASH_ENV = /^-(?!EA$)[AaCcefhjLlMmrSTuvwXx]*E[AaCcefhjLlMmrSTuvwXx]*$/;
+function psShowsEnv(seg) {
+  const at = PS_WORD.exec(seg);
+  if (!at) return false;
+  const words = seg.slice(at.index + 2).split(/\s+/).filter(Boolean);
+  return PS_BSD_ENV.test(words[0] ?? '') || words.some((w) => PS_DASH_ENV.test(w));
+}
+const SERVER_PASSWORD = 'server password (#4892): an OpenCode seat\'s server password lets its holder drive that seat\'s server, so no seat prints or reads it, or reads another process\'s environment (/proc/<pid>/environ, ps e, ps -E), where it still is. Searching the code for the name is fine. Anything you need from a process: cb ask';
+function passwordRead(text) {
+  if (PASSWORD_EXPANDED.test(text) || (RUNS_CODE.test(text) && PASSWORD_IN_CODE.test(text))) return true;
+  let dumped = false;
+  for (const seg of text.match(SEGMENTS) ?? []) {
+    if (dumped && FILTERS_PASSWORD.test(seg)) return true;
+    dumped = DUMPS.test(seg);
+    if (PRINTS_NAMED.test(seg) && PASSWORD_WORD.test(seg)) return true;
+    if (PROC_ENVIRON.test(seg) && SECRET_READER.test(seg)) return true;
+    if (psShowsEnv(seg)) return true;
+  }
+  return false;
+}
+// cheap first: a text with none of these asks for neither
+const PASSWORD_HINT = /opencode|passw|environ|(?<![\w.$\\/-])ps\s/i;
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
-  return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
+  return typeof path === 'string' && path !== '' && (SECRET_NAME.test(` ${path}`) || PROC_ENVIRON.test(` ${path}`));
 }
 // Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first). A
 // backtick substitution inside a message runs before the message goes anywhere (review I1), so with one the message
@@ -1417,8 +1458,12 @@ export function secretPath(path) {
 // (called through, not built here: rawAndJoined is defined further down)
 function secretRead(raw) { return rawAndJoined(secretReadOne)(raw); }
 function secretReadOne(command) {
-  if (!SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
+  const named = SECRET_NAME.test(command) || SECRET_NAME.test(dequote(command));
+  const asks = PASSWORD_HINT.test(dequote(command));
+  if (!named && !asks) return null;
   const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
+  if (asks && passwordRead(text)) return SERVER_PASSWORD;
+  if (!named) return null;
   for (const seg of text.match(SEGMENTS) ?? []) {
     if (TEMPLATE_COPY.test(seg)) continue;
     if (SECRET_NAME.test(seg) && SECRET_READER.test(seg)) return SECRET;
