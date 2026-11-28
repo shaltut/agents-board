@@ -24,7 +24,7 @@ import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
-import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { help, unknownHelp, unknownCommand, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
 import { startedAs } from './started-as.ts';
 import { needAddress, updateCheck } from './update.ts';
@@ -1133,7 +1133,7 @@ ${body}`, json: pg };
       return { out: page };
     }
     default:
-      throw new Error(`unknown command "${cmd}". Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb start (what to do next) or cb help (the manual)`);
+      throw new Error(unknownCommand(cmd!));
   }
 }
 
