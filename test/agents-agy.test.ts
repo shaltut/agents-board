@@ -125,6 +125,8 @@ test('detectQuotaStop: real-looking banner text at the tail', () => {
   assert.deepEqual(q('  generating and executing: transport error (ResourceExhausted, HTTP 429): Third-party quota reached. Please switch to Gemini models or upgrade your subscription to increase your limits.\n  > '),
     { kind: 'quota', raw: 'Third-party quota reached. Please switch to Gemini models' });
   assert.equal(q('the card says: third-party quota reached, so we moved\n> '), null, 'the words in prose are not the banner');
+  // #4787: a narrow pane draws the sentence over several lines
+  assert.equal(q('  (ResourceExhausted, HTTP 429): Third-party quota\n  reached. Please switch to\n  Gemini models or upgrade\n> ')?.kind, 'quota');
   assert.equal(q("Your organization's prepaid balance is insufficient. Contact your administrator to add funds")?.kind, 'quota');
   assert.deepEqual(q('rate limit active for gemini-4-neon; retry in 42s.'), { kind: 'rate_limit', raw: 'rate limit active for gemini-4-neon', retryAfterSec: 42 });
   assert.equal(q('429 Too Many Requests')?.kind, 'rate_limit');

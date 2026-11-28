@@ -4793,9 +4793,10 @@ begin
                   count(*) filter (where e.data ->> 'what' = 'restore'), p)
       from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since having count(*) > 0
     union all
-    select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' when 'failed' then ' failed to start' else ' blocked' end
+    select 12, false, e.id, (e.data ->> 'session') || case e.data ->> 'what' when 'down_again' then ' down again' when 'failed' then ' failed to start'
+                                                        when 'quota' then ' stopped by its quota' else ' blocked' end
                             || coalesce(': ' || (e.data ->> 'note'), '')
-      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed')
+      from cb.events e where e.project = p and e.kind = 'supervisor' and e.at > since and e.data ->> 'what' in ('down_again', 'blocked', 'failed', 'quota')
     union all
     -- 13: a staged card no builder or reviewer takes because it names no repo, in a project of several (#3703)
     -- (several repos open parts only at build: at review the lead names one)
@@ -4850,7 +4851,7 @@ begin
     -- #3221: a digest with a new P0 or a session the supervisor could not keep up is never held by the lead's relay
     urgent := newp0 or exists (select 1 from cb.events e where e.project = r.slug and e.kind = 'supervisor'
                                   and e.at > coalesce(last_at, now() - interval '15 minutes')
-                                  and e.data ->> 'what' in ('down_again', 'blocked', 'failed'));
+                                  and e.data ->> 'what' in ('down_again', 'blocked', 'failed', 'quota'));
     -- the body without its stage line: a byte-identical one is not sent again (a new P0 always is)
     select string_agg(x.v, E'\n' order by x.n) into txt from jsonb_array_elements_text(lines) with ordinality x(v, n) where x.n > 1;
     h := md5(coalesce(txt, ''));
@@ -6652,6 +6653,10 @@ begin
         'last_restore_failed', coalesce(r.failed, false),
         'down_again_logged', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
                                         and e.data ->> 'session' = a.actor and e.at > coalesce(r.at, '-infinity')),
+        -- #4787: its quota stop is on the board, and it has neither bound anew nor done anything there since: said once
+        'quota_told', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'quota' and e.data ->> 'session' = a.actor
+                                and e.at > greatest(coalesce(s.started_at, '-infinity'),
+                                                    coalesce((select max(x.at) from cb.events x where x.actor = a.actor), '-infinity'))),
         -- a down_again since the name last bound: no automatic restore until it binds again (no crash loop)
         'down_again_since_bind', exists (select 1 from cb.events e where e.actor = 'supervisor' and e.data ->> 'what' = 'down_again'
                                             and e.data ->> 'session' = a.actor and e.at > coalesce(s.started_at, '-infinity'))
@@ -6702,8 +6707,8 @@ begin
   note := nullif(left(trim(note), 200), '');
   hit := cb._sensitive(note);
   if hit is not null then raise exception 'the note looks like %; the board keeps no such text', hit; end if;
-  if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again', 'restart') then
-    raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again, restart';
+  if what is null or what not in ('start', 'close', 'restore', 'blocked', 'failed', 'runner', 'down_again', 'restart', 'quota') then
+    raise exception 'what must be one of start, close, restore, blocked, failed, runner, down_again, restart, quota';
   end if;
   insert into cb.events (actor, project, kind, summary, data)
   values ('supervisor', case when project is null then null else cb.read_project(project) end, 'supervisor',

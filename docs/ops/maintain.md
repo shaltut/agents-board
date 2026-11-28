@@ -611,6 +611,16 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   for Enable. Never the lead or a hand-started session, and a seat holding a card of an enabled project is kept. After
   Enable, the seats that hold cards are restored as above, whatever was restored before the disable. A squad without
   `"supervise": true` gets only the disable message;
+- looks for a seat stopped by its model's quota (#4787). This one runs for **every enabled project with a squad**,
+  with or without a pipeline or `"supervise": true`, since it only reads screens and tells (it still needs `cb
+  supervise` running): for each seat of the squad, and the lead, that herdr shows
+  not working (`idle`, `done`, `blocked`), it reads the last lines of its screen (`herdr pane read`) and asks the
+  agent's adapter. A quota stop is a `quota` board event (`quota <seat> (herdr pane <id>)`, also a digest line), and
+  the lead is told once: again only after the seat has done something on the board, or bound anew, and stopped again.
+  A stopped lead is only in the digest. A rate limit the CLI retries is ignored, and no pane text goes to the board.
+  Nothing is closed or switched. The words can also be ordinary output at the bottom of an idle screen, so look at the
+  pane before acting. `--dry-run` reads the screens too and prints `would say ...`; a screen it cannot read is said
+  once in its log (`cannot check <seat> for a quota stop`);
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
