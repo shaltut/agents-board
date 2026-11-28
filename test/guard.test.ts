@@ -1146,6 +1146,21 @@ test('#4741: a command string a shell, eval or rg --pre runs is walked like the 
   assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
 });
 
+// PR 142 review (R2): after text that throws the quote count off, only the second reading sees what follows, so it must
+// read the command strings too. Each prefix leaves the first reading inside a quote that the shell has closed
+const thrownOff = ["echo $'a\\'b'; ", "cat <<EOF\ndon't\nEOF\n", 'Get-ChildItem "C:\\"; ', 'Write-Output "a\u201D; '];
+const hiddenStrings = ['bash -c su', 'bash -c "sudo codex"', "sh -c 'batch'", 'eval sudo codex', 'eval "at now"', 'cmd /c "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x',
+  'pwsh -c "Start-ScheduledTask x"', "iex 'Start-ScheduledTask x'", 'rg --pre=sudo x f', 'env -S su', 'env -S "sudo codex"', 'ssh "$H" "sudo codex"',
+  'bash -c "bash -c \'sudo codex\'"', 'bash -c "ssh localhost uptime; true"'];
+const hiddenStringsFine = ['bash -c "ls -la"', 'bash -c ls', 'eval echo hi', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'rg --pre cat x f', 'env -S "ls -la"',
+  'bash -c "ls; true"', 'eval "$(direnv hook bash)"', 'git commit -m "eval sudo codex"'];
+test('#4741: a command string stays judged after text that throws the quote count off', () => {
+  for (const p of thrownOff) {
+    for (const c of hiddenStrings) assert.match(evaluate({ tool: 'shell', command: p + c, role: 'builder' }).reason ?? '', /fresh environment/, p + c);
+    for (const c of hiddenStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: p + c, role: 'builder' }), { allow: true }, p + c);
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1223,6 +1238,11 @@ test('long commands stay fast', () => {
     ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
     // #4741: a code string is walked once however two readings find it, and its words are read once per level
     ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of eval words after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval '))],
+    ['code strings, 200 KB of eval after open parentheses after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval x ( '))],
+    // two readings of one eval line find two strings at each level, "x <inner>" and "<inner>": the work must not double per level
+    ['code strings, eval of a word and a quoted eval nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, the same nest after an open quote, as a builder', asBuilder('echo "a”; ' + Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
     ['code strings, 200 KB of eval after open parentheses, as a builder', asBuilder(kb200('eval x ( '))],
     ['code strings, quoted -c strings nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'bash -c ' + JSON.stringify(c), 'ls ' + 'x '.repeat(50000)))],
     ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
