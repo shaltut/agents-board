@@ -92,13 +92,19 @@ test('a copy keeps its card lines through the file and counts them; a copy from 
 });
 
 // PR 106 review L2: a pane that never gets another relay (herdr never reuses a pane id) leaves its held file behind
-test('sweepHeld: removes held files older than the hold window, keeps fresh ones and other files', () => {
+// PR 165 review: the same session's copy is good for a day (above), so another pane's relay starting must not remove
+// it sooner: its own relay may be down longer than the hold window
+test('sweepHeld: removes held files too old for any relay to use, keeps younger ones and other files', () => {
   const dir = fs.mkdtempSync(join(tmpdir(), 'cb-sweep-'));
   try {
-    for (const f of ['cb-relay-old.held', 'cb-relay-new.held', 'cb-relay-old.log']) fs.writeFileSync(join(dir, f), '[]');
-    const old = new Date(Date.now() - HOLD_MS - 60_000);
-    for (const f of ['cb-relay-old.held', 'cb-relay-old.log']) fs.utimesSync(join(dir, f), old, old);
+    const ages: Record<string, number> = { 'cb-relay-old.held': SAME_SESSION_MS + 60_000, 'cb-relay-down.held': HOLD_MS + 60_000,
+      'cb-relay-new.held': 0, 'cb-relay-old.log': SAME_SESSION_MS + 60_000 };
+    for (const [f, age] of Object.entries(ages)) {
+      fs.writeFileSync(join(dir, f), '[]');
+      const then = new Date(Date.now() - age);
+      fs.utimesSync(join(dir, f), then, then);
+    }
     sweepHeld(dir, Date.now());
-    assert.deepEqual(fs.readdirSync(dir).sort(), ['cb-relay-new.held', 'cb-relay-old.log']);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['cb-relay-down.held', 'cb-relay-new.held', 'cb-relay-old.log']);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
