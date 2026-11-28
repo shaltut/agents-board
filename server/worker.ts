@@ -43,12 +43,16 @@ class Refused extends Error {
 }
 const noSuchFunction = (name: string, why = 'does not exist') => new Refused(404, `function cb.${name} ${why}`, '42883');
 
+// the database's own codes for taking no connection: too many, starting up, shutting down, the connection class
+const NO_CONNECTION = /^(53300|57P0[123]|08...)$/;
+
 /** The reply for a failed request. sent: the call may have reached the database. never_ran is the client's word that it
  *  is safe to try again, so it is said only before that. Nothing of an error's query, parameters or address goes out. */
 export function failure(e: any, sent: boolean): Reply {
   if (e instanceof Refused) return e.reply;
   if (e?.name === 'PostgresError') {
-    return { status: 400, body: { ok: false, code: e.code, error: e.message, ...(e.detail ? { detail: e.detail } : {}), ...(e.hint ? { hint: e.hint } : {}) } };
+    const body = { ok: false as const, code: e.code, error: e.message, ...(e.detail ? { detail: e.detail } : {}), ...(e.hint ? { hint: e.hint } : {}) };
+    return !sent && NO_CONNECTION.test(e.code) ? { status: 503, body: { ...body, never_ran: true } } : { status: 400, body };
   }
   return sent ? { status: 500, body: { ok: false, error: 'server error' } }
     : { status: 503, body: { ok: false, error: 'the board database is not reachable', never_ran: true } };
