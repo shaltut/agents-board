@@ -2120,7 +2120,8 @@ test('#4828: a PowerShell variable that takes a git command\'s output is not the
   // a comparison of that variable is no git subcommand of a read-only role
   assert.equal(kindOf('$h = git rev-parse HEAD; if ($h -eq "abc") { echo same }', 'reviewer'), 'allow');
   // the git call after the = is still judged, and so is the variable used as the program
-  for (const c of ['$x = git push origin main', '$x =git push -f origin feat/my-card', '$r = git push origin HEAD']) {
+  for (const c of ['$x = git push origin main', '$x =git push origin main', '$x =git push -f origin feat/my-card', '$r = git push origin HEAD',
+    '$p =gh pr merge 5']) {
     assert.notEqual(kindOf(c), 'allow', c);
   }
   assert.notEqual(kindOf('$x = git commit -m x', 'reviewer'), 'allow');
