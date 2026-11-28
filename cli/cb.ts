@@ -17,7 +17,7 @@ import { squadTrust } from './squad-trust.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
-import { faultHook } from './fault-hook.ts';
+import { faultHook, commandIndex } from './fault-hook.ts';
 import { faultsCmd } from './faults.ts';
 import { triageCmd } from './triage.ts';
 import { stageWordsFor } from './stage-words.ts';
@@ -57,15 +57,17 @@ const unmark = (v: any): any => typeof v === 'string' ? v.replace(TEXT, '') : Ar
 const fault = faultHook(process.argv.slice(2), () => OPTIONS, () => sql);
 
 // cb run <recipe> --<param> <value>...: the free --<param> flags are split out before parseArgs, which would refuse them
-const split = process.argv[2] === 'run' ? splitRunArgs(process.argv.slice(3), new Set(Object.keys(OPTIONS))) : null;
+const argv = process.argv.slice(2);
+const cmdPos = commandIndex(argv, OPTIONS);
+const split = argv[cmdPos] === 'run' ? splitRunArgs(argv.slice(cmdPos + 1), new Set(Object.keys(OPTIONS))) : null;
 const runParams = split?.params ?? {};
 let parsed;
 try {
   parsed = parseArgs({ allowPositionals: true, options: OPTIONS,
-    args: (split ? ['run', ...split.rest] : process.argv.slice(2)).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
+    args: (split ? [...argv.slice(0, cmdPos + 1), ...split.rest] : argv).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
 } catch (e: any) {
   const name = /Unknown option '([^']+)'/.exec(e?.message)?.[1];
-  const first = process.argv[2] && !process.argv[2].startsWith('-') ? ` ${process.argv[2]}` : '';
+  const first = argv[cmdPos] ? ` ${argv[cmdPos]}` : '';
   console.error(`cb: ${name ? `unknown option ${name}` : e?.message}. Run: cb help${first} (it lists the valid options)`);
   process.exit(1);
 }
