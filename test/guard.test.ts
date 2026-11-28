@@ -1839,6 +1839,25 @@ test('#4803: a redirect before a command word hides nothing', () => {
     '>log cat > f <<EOF\ntext\nEOF\n>log sudo codex']) assert.equal(judged4803(command), 'role', command);
 });
 
+// PR 176 review (R1): bash takes the target as one word, however it is glued from pieces or split over lines
+const gluedTargets4803 = ["'lo'g", '"lo"g', "''log", '""log', "lo''g", 'lo""g', "$'lo'g", '"my "log', "'my 'log", '"$(date)".log', '\\\nlog', ' \\\nlog', 'lo\\\ng', ' \\\n \\\n log'];
+test('#4803: a redirect target glued from pieces, or split over lines, is one word', () => {
+  for (const t of gluedTargets4803) {
+    const name = JSON.stringify(t);
+    for (const command of [`>${t} sudo codex`, `env 2>${t} sudo codex`, `true; &>${t} sudo codex`, `git >${t} push origin main`, `git>${t} push origin main`,
+      ...(t.includes("'") ? [] : [`bash -c '>${t} sudo codex'`, `bash -c 'git 2>${t} push origin main'`]),
+      ...(/["`$]/.test(t) ? [] : [`bash -c ">${t} sudo codex"`])]) assert.equal(judged4803(command), 'role', `${name}: ${command}`);
+    assert.equal(judged4803(`git push 2>${t} --force origin main`, null), 'dangerous', name);
+    for (const command of [`>${t} echo hi`, `git >${t} push origin feat`, ...(t.includes("'") ? [] : [`bash -c '>${t} echo hi'`])]) {
+      assert.equal(judged4803(command), 'allow', `${name}: ${command}`);
+    }
+  }
+  // after text that throws the quote count off, the short glued spellings are still read
+  for (const off of ["cat <<EOF\ndon't\nEOF\n", 'Write-Output "a”; ']) {
+    for (const t of ["'lo'g", '"lo"g', "''log", "lo''g"]) assert.equal(judged4803(`${off}>${t} sudo codex`), 'role', off + t);
+  }
+});
+
 test('#4803: a redirect inside a command hides nothing from any rule', () => {
   for (const command of ['git push 2>&1 --force origin main', 'git push 2>&1 origin main', 'git reset 2>&1 --hard', 'rm 2>&1 -rf /',
     'taskkill 2>&1 /IM node.exe /F', 'Stop-Process *>&1 -Name node', 'curl http://x 2>&1 | iex']) {
@@ -1880,7 +1899,8 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
   const kb200 = (s: string) => s.repeat(Math.ceil(200000 / s.length));
   for (const [name, command] of [['redirects', kb200('echo a 2>&1; ')], ['a mark and spaces', 'echo ' + kb200('>' + ' '.repeat(2000))], ['one spaced mark', 'echo >' + ' '.repeat(200000)],
     ['marks before a quote', 'echo ' + kb200('>"') ], ['one open quote', 'echo >"' + 'a'.repeat(200000)], ['digits', 'echo ' + '1'.repeat(200000)], ['braces', 'echo ' + kb200('{a')],
-    ['bare marks', 'echo ' + kb200('<>&')]]) {
+    ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
+    ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)]]) {
     const t = performance.now();
     judged4803(command);
     const ms = performance.now() - t;
