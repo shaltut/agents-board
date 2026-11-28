@@ -92,34 +92,50 @@ async function whoIs(conn: any, key: Credential, from: string | null): Promise<W
 // looked up at a time, and one key arriving many times at once (a machine's seats after a restart) is one look-up.
 // So an address that is being refused keeps its working keys, and strangers never hold the whole pool.
 const proven = new Set<string>(); // credentials (key id and secret's hash) that signed in
-const failures = new Map<string, { n: number; since: number }>(); // by address
 const checking = new Map<string, Promise<Who>>();
+// failed sign-ins by address, in one minute that starts over for all: nothing to prune, however many addresses
+const failures = new Map<string, { n: number }>();
+let failuresSince = 0;
+const isRefusal = (e: unknown) => e instanceof Refused && e.reply.status === 401;
 
-function signIn(key: Credential, address: string): Promise<Who> {
-  const cred = `${key.id}:${key.hash.toString('base64')}`;
-  const refused = (e: unknown) => e instanceof Refused && e.reply.status === 401;
-  if (proven.has(cred)) {
-    return whoIs(db(), key, address).catch((e) => {
-      if (refused(e)) proven.delete(cred); // revoked: a stranger from now on
-      throw e;
-    });
-  }
+/** A key that has not worked yet, looked up if its address and the board still have room for it. */
+function stranger(cred: string, key: Credential, address: string): Promise<Who> {
   const going = checking.get(cred);
   if (going) return going;
-  const now = Date.now(), stale = (f: { since: number }) => now - f.since >= 60_000;
-  if (failures.size > 1000) for (const [a, f] of failures) if (stale(f)) failures.delete(a);
-  let f = failures.get(address);
-  if (!f || stale(f)) failures.set(address, (f = { n: 0, since: now }));
-  if (f.n >= BAD_PER_MINUTE) throw wait(Math.max(1, Math.ceil((f.since + 60_000 - now) / 1000)), 'too many failed sign-ins from this address');
+  const now = Date.now();
+  if (now - failuresSince >= 60_000) { failures.clear(); failuresSince = now; }
+  const count = failures.get(address) ?? { n: 0 };
+  if (count.n >= BAD_PER_MINUTE) throw wait(Math.max(1, Math.ceil((failuresSince + 60_000 - now) / 1000)), 'too many failed sign-ins from this address');
   if (checking.size >= UNPROVEN_AT_ONCE) throw wait(1, 'the board is checking other new keys');
-  const count = f;
   count.n++; // counted before the look-up, so a burst cannot pass the limit
+  failures.set(address, count);
   const look = whoIs(db(), key, address).then(
     (who) => { count.n--; proven.add(cred); return who; },
-    (e) => { if (!refused(e)) count.n--; throw e; }, // a database that does not answer is nobody's failed sign-in
+    (e) => { if (!isRefusal(e)) count.n--; throw e; }, // a database that does not answer is nobody's failed sign-in
   ).finally(() => checking.delete(cred));
   checking.set(cred, look);
   return look;
+}
+
+/** Who the request's key is, counted against the key's rate. Only the holder of a key's secret counts against it. */
+async function signIn(key: Credential, address: string): Promise<Who> {
+  const cred = `${key.id}:${key.hash.toString('base64')}`;
+  const count = () => {
+    const over = overLimit(key.id);
+    if (over) throw wait(over, 'too many requests with this key');
+  };
+  if (!proven.has(cred)) {
+    const who = await stranger(cred, key, address);
+    count();
+    return who;
+  }
+  count(); // over its limit, a key that has worked is not even looked up
+  try {
+    return await whoIs(db(), key, address);
+  } catch (e) {
+    if (isRefusal(e)) proven.delete(cred); // revoked: a stranger from now on
+    throw e;
+  }
 }
 
 /** So many at once for one key and in all. take: the slot's release, or null when there is none. */
@@ -251,8 +267,6 @@ export function workerApp(listen: () => Promise<unknown>) {
       const who = await signIn(key, from);
       const release = servedSha();
       if (release) c.header('X-CB-Code', release); // only a signed-in worker is told what the board runs
-      const over = overLimit(key.id);
-      if (over) throw wait(over, 'too many requests with this key');
       res = await run(c, { key, who, from, ran: () => { sent = true; } });
     } catch (e: any) {
       const reply = failure(e, sent);
