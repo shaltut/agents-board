@@ -919,3 +919,16 @@ test('#4787: a pane that cannot be read is said once, until it reads again', asy
   broken = true;
   assert.equal(said(await tick(d)), 1);
 });
+
+test('#4806: the supervisor says which projects it acts on, at its first tick and when the list changes', async () => {
+  const { sql, sup } = await setup(['sv', 'two']);
+  await sql`select cb.project_pipeline('two', false, 'ahmed')`;
+  const d = deps(sup, fakeHerdr().run);
+  const named = async () => (await tick(d)).filter((l) => l.startsWith('acts on'));
+  assert.deepEqual(await named(), ['acts on: sv, two']);
+  assert.deepEqual(await named(), [], 'said once');
+  await sql`select cb.project_state('two', 'disabled', 'ahmed')`;
+  assert.deepEqual(await named(), ['acts on: sv, two (winding down)']);
+  for (const p of ['sv', 'two']) await sql`select cb.squad_set(${p}, ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`;
+  assert.deepEqual(await named(), ['acts on: no project (no squad has supervise on)']);
+});
