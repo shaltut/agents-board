@@ -24,7 +24,7 @@ import { stageWordsFor } from './stage-words.ts';
 import { splitRunArgs, runCmd, jobsCmd, endedCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
-import { help, unknownHelp, unknownCommand, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { help, unknownHelp, unknownCommand, COMMANDS, flagsOf, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
 import { startedAs } from './started-as.ts';
 import { needAddress, updateCheck } from './update.ts';
@@ -48,8 +48,6 @@ const OPTIONS = {
   ended: { type: 'boolean' }, mine: { type: 'boolean' },
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
-
-const EDIT_FLAGS = new Set(['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic', 'labels', 'repo', 'link', 'pr', 'commit', 'branch', 'as', 'json']);
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
 const TEXT = '\u0001';
@@ -770,9 +768,6 @@ async function run(): Promise<unknown> {
     }
     case 'edit': {
       need(1, 'edit <id> --title/--body/--priority/--assignee/--project/--type/--epic   e.g. cb edit 42 --priority P1');
-      // #4738: a flag edit does not read was dropped and "updated" printed. Status has its own rules: cb move
-      const extra = Object.keys(o).filter((k) => !EDIT_FLAGS.has(k));
-      if (extra.length) throw new Error(`cb edit does not take ${extra.map((k) => `--${k}`).join(', ')}: nothing was changed. ${o.status !== undefined ? `For a status run: cb move ${args[0]!.replace('#', '')} ${o.status} (to finish a card: cb done)` : 'Run: cb help edit'}`);
       await guard(args[0]);
       const fields: Record<string, unknown> = {};
       for (const k of ['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic'] as const) if (o[k] !== undefined) fields[k] = o[k];
@@ -1170,8 +1165,27 @@ function actionable(m: string) {
   return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
 }
 
+/** #4754 (and #4738 for edit): a flag the command does not read was dropped and the command ran, so --dry-run did the
+ *  real thing. Refused before the command starts. */
+function refuseUnread() {
+  if (!cmd || !Object.hasOwn(COMMANDS, cmd)) return; // an unknown command has its own message
+  const shorts = Object.fromEntries(Object.entries(OPTIONS).flatMap(([name, v]: [string, any]) => (v.short ? [[v.short, name]] : [])));
+  const takes = flagsOf(cmd, shorts);
+  const sub = cmd === 'squad' && args[0] ? ` ${args[0]}` : '';
+  if (cmd === 'squad' && !['up', 'trust'].includes(args[0] ?? '')) takes.delete('dry-run'); // squad set writes
+  const extra = Object.keys(o).filter((k) => !takes.has(k));
+  if (!extra.length) return;
+  const id = String(args[0] ?? '<id>').replace('#', '');
+  // status and a PR have their own places: say where, since an agent that typed them means them
+  const how = cmd === 'edit' && o.status !== undefined ? `For a status run: cb move ${id} ${o.status} (to finish a card: cb done)`
+    : cmd === 'move' && o.pr !== undefined ? `Put the PR in the note: cb move ${id} review "PR <url>"`
+    : `Run: cb help ${cmd}`;
+  throw new Error(`cb ${cmd}${sub} does not take ${extra.map((k) => `--${k}`).join(', ')}: nothing was changed. ${how}`);
+}
+
 async function main() {
   if (o.help) { console.log(help(cmd) ?? help()); return; }
+  refuseUnread();
   let r: any;
   try {
     r = await run();
