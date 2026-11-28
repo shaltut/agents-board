@@ -351,6 +351,38 @@ test('the one-shot code and runner reading stays linear (#4658)', () => {
   }
 });
 
+// #4865: the first statement of a PowerShell filter block starts with the pipeline's own item. That is a value
+test('a pipeline item in Where-Object or ForEach-Object is a value, not a program named by a variable (#4865)', () => {
+  const reads = [
+    // the card's three shapes, made up
+    "cb sessions --json | ConvertFrom-Json | Where-Object { $_.role -eq 'builder' }",
+    "herdr agent list --json | ConvertFrom-Json | Where-Object { $_.name -like 'web*' } | Select-Object name",
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'relay' } | Select-Object ProcessId",
+    // the other spellings of the same
+    'Get-Process | ForEach-Object { $_.Name }', "Get-Process | ?{ $_.Id -gt 4 }", 'Get-Process | % { $PSItem.Name }',
+    "Get-Process | where-object -FilterScript { $PSItem.Parent.Name -eq 'x' -and $_.Id }", "Get-ChildItem | Where-Object { $_ -like '*.ts' }",
+    'pwsh -NoProfile -Command "Get-Process | Where-Object { $_.Name -eq \'node\' }"',
+  ];
+  for (const c of reads) assert.deepEqual(seat(c), {}, c);
+});
+
+test('a variable as the program stays refused outside that one place (#4865)', () => {
+  const refused = [
+    // no filter block before it, or another block
+    '$_.exe', 'echo x; $_.exe', '& { $_.exe }', 'Get-Process | Sort-Object { $_.Name }', 'function Where-Object { $_.exe }', 'if x; then { $_.exe; }; fi',
+    // bash runs these: a ; or a new line ends the command that took the { as an argument
+    'Where-Object; { $_.exe; }', 'Where-Object {; $_.exe; }', 'Where-Object {\n$_.exe\n}', 'Where-Object { \n $_.exe\n}',
+    // a function by that name: its body runs when it is called
+    'Where-Object() { $_.exe; }; Where-Object',
+    // a substitution runs it, and any other variable is still a program the guard cannot read
+    'Where-Object { $($_.exe) }', 'Where-Object { `$_.exe` }', 'Where-Object { $tool }', 'Where-Object { $env:SHELL }', 'Where-Object { ${_}sh }',
+    'Where-Object { $_sh }', 'Where-Object { & $_.Path }', 'Where-Object { . $_.Path }',
+    // only the block's first statement
+    'Get-Process | ForEach-Object { $_.Name; $x }',
+  ];
+  for (const c of refused) assert.equal(seat(c).hookSpecificOutput?.permissionDecision, 'deny', c);
+});
+
 test('update_plan is allowed; view_image is a read with the secret rule; spawn_agent stays denied (#4626)', () => {
   const b = { CB_ROLE: 'builder', CB_AGENT: 'codex' };
   assert.equal(run(call('update_plan', { plan: [{ step: 'x', status: 'pending' }] }), b).stdout, '{}');
