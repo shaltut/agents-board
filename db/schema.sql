@@ -5779,8 +5779,12 @@ begin
       k := coalesce(nullif(repo, ''), (select h.key from jsonb_each(sq->'repos') h where h.value->>'home' = 'true' limit 1)) || ':' || k;
     end if;
   end if;
-  select b.agent, b.model into bk from cb.seat_backups b where b.project = project and b.actor = actor; -- #4787
-  if found then return jsonb_build_object('seat', k, 'agent', bk.agent, 'model', bk.model); end if;
+  select b.agent, b.model, b.effort into bk from cb.seat_backups b where b.project = project and b.actor = actor; -- #4787
+  if found then
+    -- the effort it is started with (#4766): the backup's, else its role's where it keeps the role's agent (seatSpec)
+    return jsonb_build_object('seat', k, 'agent', bk.agent, 'model', bk.model, 'effort', coalesce(bk.effort,
+      case when bk.agent = coalesce(sq->'roles'->role->>'agent', 'claude') then sq->'roles'->role->>'effort' end));
+  end if;
   ag := coalesce(sq->'roles'->role->'seats'->k->>'agent', sq->'roles'->role->>'agent', 'claude');
   return jsonb_build_object('seat', k, 'agent', ag,
     'model', coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, ag)),
@@ -6789,7 +6793,7 @@ end $$;
 
 -- #4787: the supervisor records that a seat now runs the n-th backup (from 1) its squad names for it (the seat's own
 -- list, else its role's), before it starts it there. Never the lead.
-create function cb.seat_switch(project text, actor text, n int) returns jsonb language plpgsql as $$
+create function cb.seat_switch(project text, actor text, n int, planned jsonb) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare p text := cb.read_project(project); s record; sq jsonb; k text; list jsonb; b jsonb;
 begin
@@ -6797,10 +6801,15 @@ begin
   if not cb._switching(p) then
     raise exception 'automatic backup is off for %: Ahmed turns it on in its settings, for a squad the supervisor runs', p;
   end if;
+  -- planned: the squad the supervisor chose the backup from. n means nothing in another one, so a squad saved since then
+  -- records nothing; the lock holds a save back until this one is recorded, and that save then ends it
+  select pr.squad into sq from cb.projects pr where pr.slug = p for share;
+  if sq is distinct from planned then
+    raise exception 'the squad of % changed since the switch was planned: nothing is recorded, the next check plans again', p;
+  end if;
   select x.role, x.area, x.repo into s from cb.sessions x where x.actor = actor and x.project = p order by x.last_seen desc limit 1;
   if not found then raise exception 'no session % in %', actor, p; end if;
   if cb._role(actor) = 'lead' then raise exception 'the lead is never switched: restart it by hand'; end if;
-  select pr.squad into sq from cb.projects pr where pr.slug = p;
   k := cb._seat_want(p, actor, s.role, s.area, s.repo) ->> 'seat';
   list := coalesce(sq -> 'roles' -> s.role -> 'seats' -> k -> 'fallback', sq -> 'roles' -> s.role -> 'fallback');
   if n >= 1 then b := list -> (n - 1); end if; -- below 1: -> would count from the end

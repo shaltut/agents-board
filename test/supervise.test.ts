@@ -68,7 +68,7 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
   closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>(),
-  unreadTold: new Set<string>() });
+  unreadTold: new Set<string>(), sighted: new Map<string, string>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();

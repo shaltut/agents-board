@@ -631,10 +631,14 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   (settings page, off by default: a switch can send the project's code to the backup's provider) and the squad is
   supervised. The words must also stand where the CLI prints its own limit message (at the start of a line, the input
   area right below, nothing the agent printed after it); elsewhere the lead is only told. A seat, never the lead, seen
-  stopped like that at two checks in a row with nothing done on the board in between is
+  stopped like that at two checks in a row, in the same pane, with nothing done on the board in between is
   closed with its cards, which stay its own, and started under its name on the first later entry of its `fallback`
   list that this machine can start; at most 2 a tick, each taking one of the 3 starts. The lead is told at the first
   sighting what will happen, and after the switch. Each is a `switch` board event (`switch <seat> (sonnet to haiku)`).
+  Only the check just before counts: a check that finds the seat working, cannot read its screen or sees anything
+  else starts over, and so does a restarted supervisor, so single runs (`--once`) never switch. The `quota` note on the
+  board is not one of the two. A squad saved while a switch is under way stops it: nothing is recorded or started on
+  the old choice, and a seat already closed is restored on the next check.
   A stop on the backup goes to the next entry; with none left the seat stays (`no_backup`, said once). A seat herdr
   shows `blocked` that its agent adapter will not close is not switched: its log says `skip closing` each tick. If the
   start on the backup fails, the seat is restored on that backup, not moved to the next. **There is no automatic way
