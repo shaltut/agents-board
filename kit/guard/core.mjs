@@ -3061,7 +3061,7 @@ const TARGET_PART = String.raw`\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([
 const LOOSE_QUOTED = String.raw`"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|'[^'\s;&|()<>]{0,200}'|"[^"\\\s;&|()<>$\x60]{0,200}"`;
 const REDIRECT = new RegExp(`${REDIRECT_MARK}(?:${LOOSE_QUOTED}|${TARGET_PART})+`, 'g');
 const SHELL_NEXT = String.raw`('[^']*'|"(?:\\[\s\S]|[^"\\])*")|\\[\s\S]|${REDIRECT_MARK}`;
-const CASE_WORD = /(?<![\w-])case(?![\w-])/y;
+const CASE_WORD = /(?<![\w.-])case(?![\w.-])/y; // case.txt and my.case are names
 // where the redirect target at i ends, read as one shell word: quotes, $( ), ${ }, <( ), >( ) and backticks nest. -1: it
 // does not close. -2: a substitution holds what this count cannot follow (case, a comment, a heredoc). powershell: the
 // backtick is the escape and a backslash is plain. One pass
@@ -3094,8 +3094,10 @@ function wordEnd(text, i, powershell) {
   }
   return open.length ? -1 : Math.min(i, text.length);
 }
-// a string handed to a shell, as the text just before its quote shows
-const SHELL_STRING = /(?<![\w-])(?:(?:ba|da|z|k)?sh(?:[ \t]+-\w+)*[ \t]+-\w*c|eval)[ \t]+$/;
+// a string handed to a shell, as the text just before its quote shows: the shell (or its .exe), any unquoted words, the
+// option holding c and any options after it; or eval. The c option splits at its first c, so a long one is read once
+const SHELL_STRING = /(?<![\w-])(?:(?:ba|da|z|k)?sh(?:\.[eE][xX][eE])?["']?(?:[ \t]+[^\s"';&|<>()]+)*?[ \t]+-[abd-zA-Z0-9_]*c\w*(?:[ \t]+-[^\s"';&|<>()]*)*|eval(?:[ \t]+--)?)[ \t]+$/;
+const SHELL_STRING_REACH = 300; // how far back the shell's name is looked for
 // as bash counts quotes: each redirect goes with its whole target. A quoted piece that is no target is read the same way
 // inside, a few deep: a command string's own redirects go too. At a target that does not end the reading stops and, for
 // shell text (this command's, or a string handed to a shell), says so (lost.found). A target that does not close under
@@ -3108,7 +3110,7 @@ function shellUnredirected(text, left, depth = 0, lost = {}) {
     let swap = match, end = next.lastIndex;
     if (quoted !== undefined) {
       if (depth < 3 && /[<>]/.test(quoted)) {
-        const handed = SHELL_STRING.test(text.slice(Math.max(0, m.index - 80), m.index));
+        const handed = SHELL_STRING.test(text.slice(Math.max(0, m.index - SHELL_STRING_REACH), m.index));
         swap = quoted[0] + shellUnredirected(quoted.slice(1, -1), left, depth + 1, handed ? lost : {}) + quoted[0];
       }
     } else if (!match.startsWith('\\')) {
