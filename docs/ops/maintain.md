@@ -453,7 +453,10 @@ supervisor reach the board through its API with a per-machine key. **Every step 
     [Users](#users)) empties the column the old server signs people in by.
   - **Stop the old `cb supervise` before you start the new one** (#4895). The old one holds a database lock the new one
     does not look at, so both would run ([Supervisor](#supervisor)).
-- **Check which client address the public proxy hands the board.** The limits on failed sign-ins, the password login
+- **Check which client address the public proxy hands the board.** *Fixed on the live proxy on 2026-11-28, with the
+  second way below, and proven: a made-up `X-Real-IP` was logged as the caller's real address, and Cloudflare refused
+  a request that set `CF-Connecting-IP` itself. Run the check again at cut-over: a rebuilt proxy host loses the line.*
+  The limits on failed sign-ins, the password login
   and the workers' keys alike, count per address: the last `X-Forwarded-For` entry the proxy adds. Nginx Proxy Manager's
   stock `nginx.conf` takes the client address from `X-Real-IP` when a request comes from a range it trusts, Cloudflare's
   among them. Cloudflare does not set that header, so one a client sends could arrive as its address, a new one on every
