@@ -496,6 +496,11 @@ Set up, once, on the PC:
    - Placeholders in `steps`, `finally` and `cwd` are written `{name}` (declared in `params`; at most one per step
      argument). Write `{{` and `}}` for literal braces (inline JS, JSON: `fs.rmSync('dist', {{force:true}})`), so
      misspelled parameter names are still refused at start (#3773).
+   - A DB recipe whose tests start Postgres on the PC (this repo's own `test` recipe) gets a cluster per slot: every job
+     has `CB_RUNNER_JOB=1`, so `db/pg.ts` treats the slot like a worktree (own port, `.pgdata` in the slot), and a
+     `finally` step `node db/setup.ts --test --stop` stops it. A cluster left running anyway (a runner crash, a commit
+     older than #4756) is stopped before the slot's next `git clean`, which cannot delete its open log; only a postmaster
+     whose command line names that slot's `.pgdata` is stopped.
 3. After any change to `cli/recipes.ts` or `runner.json`, restart BOTH `cb runner` and `cb supervise`: the supervisor
    validates runner.json with the code it loaded at start.
    Restarting the runner is safe: a job that was running ends `error: runner restarted`, the requester is told, queued jobs go on.
