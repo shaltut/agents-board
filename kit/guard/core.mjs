@@ -1711,24 +1711,63 @@ function applyWrite(vars, { key, value }) {
     vars.set('VPS', UNKNOWN_HOST);
   } else vars.set(key, value === undefined ? UNKNOWN_HOST : sshValue(key, value, vars.get(key)));
 }
-function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
+// #4767: reading quotes as bash does is right for plain text only. Where bash and PowerShell count them differently (a
+// smart quote, a backslash before a quote, a here-string, <# #>, --%), where bash nests them ("$( )", "${ }"), where a
+// quote may not be one at all (a comment, a heredoc body, one left open), or where a search runs its own text (an alias
+// or function, git grep -O, rg --pre), that reading can take a real command for quoted data. Such a command is read a
+// second time, flat: cut at every ; & | and newline, as before PR 124. The second reading can only add a block
+const MISCOUNTS = /#|--%|`|\$[({[']|@["']|\\["';&|]|[\u2018-\u201E]/;
+const REDEFINES = /(?:^|[;&|\n(])[ \t\r]*(?:alias|function)\s|\([ \t]{0,4}\)[ \t\r]{0,4}\{/;
+const SEARCH_PROGRAM = /(?:^|[ \t])(?:--pre(?![\w-])|--op|-[A-Za-z]{0,8}O)/;
+const CLOSED_TEXT = /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^"'\\]+)*/y;
+const leftOpen = (text) => {
+  CLOSED_TEXT.lastIndex = 0;
+  CLOSED_TEXT.exec(text);
+  return text[CLOSED_TEXT.lastIndex] === '"' || text[CLOSED_TEXT.lastIndex] === "'";
+};
+const HEREDOC_WORD = /<<-?[ \t]*(["']?)(\w+)\1/;
+// a heredoc body is not shell text, so a quote it leaves open pairs with a later one. Each line is read once
+function bodyLeavesQuote(text) {
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const header = HEREDOC_WORD.exec(lines[i]);
+    if (!header) continue;
+    if (leftOpen(lines[i].slice(0, header.index)) || lines[i].indexOf('<<', header.index + 2) >= 0) return true;
+    let end = i + 1;
+    while (end < lines.length && lines[end].trim() !== header[2]) end++;
+    if (end === lines.length || leftOpen(lines.slice(i + 1, end).join('\n'))) return true;
+    i = end;
+  }
+  return false;
+}
+const countLost = (text) => MISCOUNTS.test(text) || REDEFINES.test(text) || leftOpen(text)
+  || (/grep|\brg\b/i.test(text) && SEARCH_PROGRAM.test(text.replace(/["'\\]/g, ''))) || (text.includes('<<') && bodyLeavesQuote(text));
+function freshRead(command, hosts, role, deployHost, depth = 0) {
+  return freshEnvOne(command, hosts, role, deployHost, depth)
+    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true) : null);
+}
+// flat: the second reading. It follows no string into a nested one (the first reading does), so the two stay linear
+function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
-  const raw = blankComments(stripMessages(String(command ?? '')));
+  const stripped = stripMessages(String(command ?? ''));
+  const raw = flat ? stripped : blankComments(stripped);
   const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
-  const writes = varWrites(raw);
+  // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
+  const writes = varWrites(blankComments(stripped));
   let written = 0;
-  for (const segment of raw.matchAll(SEGMENT)) {
+  for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
     if (!FRESH_NAME.test(seg) && !FRESH_NAME.test(unhide(seg))) continue;
-    const tokens = [...seg.matchAll(GIT_TOKEN)], w = tokens.map((m) => m[0]);
+    // flat: a quote the cut left alone is dropped, never read as opening a word that swallows the rest
+    const tokens = [...seg.matchAll(flat ? WORD : GIT_TOKEN)], w = tokens.map((m) => m[0]);
     const u = w.map(unquote), names = w.map(cmdName);
     const runsQuote = runnerArg(w, u, names, false);
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
-      if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
-        const why = freshEnvOne(u[i], hosts, role, vars.get('VPS'), depth + 1);
+      if (!flat && /["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
+        const why = freshRead(u[i], hosts, role, vars.get('VPS'), depth + 1);
         if (why) return why;
       }
       if (/^[({`]$/.test(w[i])) { cmd = true; continue; }
@@ -1751,7 +1790,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
           const s = ENV_SPLIT.exec(option);
           if (s) {
             const split = option.slice(s[0].length) || (u[++i] ?? '');
-            const why = freshEnvOne([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
+            const why = flat ? null : freshRead([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
             if (why) return why;
             cmd = false;
             break;
@@ -1774,7 +1813,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
 }
 const freshEnv = (raw, hosts, role = null, deployHost) => {
   const joined = joinLines(raw);
-  return freshEnvOne(raw, hosts, role, deployHost) ?? (joined === raw ? null : freshEnvOne(joined, hosts, role, deployHost));
+  return freshRead(raw, hosts, role, deployHost) ?? (joined === raw ? null : freshRead(joined, hosts, role, deployHost));
 };
 const FRESH_ENV = (what) => `starting a process with a fresh environment (${what}): another user (sudo, su), a login to this machine, a scheduler (at, cron, systemd-run, schtasks, launchctl), WSL, WMI, or a pane that tmux, screen or herdr starts or types into gives it an environment without CB_ROLE and CB_AGENT, so it runs outside the seat with the dangerous-command rules only. Run the command in this pane itself; for a change to how your seat runs: cb ask`;
 
