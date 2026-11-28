@@ -1548,9 +1548,6 @@ test('long commands stay fast', () => {
     ['#4815, 200 KB of launcher then filled words, as a builder', asBuilder(kb200('timeout $a x '))],
     ['#4815, 200 KB of filled words before a config subcommand, as a builder', asBuilder(kb200('$a config '))],
     ['#4815, 200 KB of assignments then filled pairs, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $b '))],
-    // one filled pair, then one segment of brackets that never close, or of nested git substitutions: the pair reads it once
-    ['#4836, a filled pair before 200 KB of open brackets, as a builder', asBuilder('"$a$b" "$c$d" ' + kb200('w ( '))],
-    ['#4836, a filled pair before 200 KB of nested git substitutions, as a builder', asBuilder('"$a$b" "$c$d" ' + kb200('$( git '))],
     ['#4826, 200 KB of filled words before unknown words and main, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a p ') + ' main')],
     ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
     ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
@@ -2057,7 +2054,10 @@ test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
-    'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+    'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+  // #4836: a PowerShell target with a backtick escape is refused by the #4815 filled-program push rule. A false block,
+  // tracked on that card: this row pins what the guard does until it is fixed
+  assert.equal(judged4803('Get-Date > "$name`.txt"'), 'role');
 });
 
 test('#4803: a heredoc header before the command word hides nothing', () => {
@@ -2234,69 +2234,6 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
 });
 
-// #4836: a filled program and first argument are refused when both are plain variables or the segment could push
-test('#4836: a filled pair that is not two plain variables and shows no push passes', () => {
-  // the shapes of past commands this repo's seats ran, made up (B5)
-  const allowed = [
-    'echo "$b $(git rev-parse --short HEAD)"',
-    'for d in a b; do echo "$d: $(git -C $d log -1 --oneline)"; done',
-    "powershell -NoProfile -Command '\"$($_.ProcessId) parent $($_.ParentProcessId)\"'",
-    'Get-Date > "$name`.txt"',
-    'echo "$name`.txt"',
-    '$id: $(date)',
-    '"$k=$v" "$other-file"',
-    // the words of a git call inside a substitution that closes in the segment are that call's own
-    'echo "$b $(git log --oneline -1) done"',
-    'echo "$b $(git status -s)"',
-  ];
-  for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
-});
-
-test('#4836: a filled pair stays refused when both are plain variables, or the segment shows a push', () => {
-  const plain = ['$O $c --help', 'for c in run serve; do $O $c --help; done', '${tool} ${sub}', '$env:TOOL $args', '%TOOL% %SUB%',
-    '"$G" "$@"', '$G $1', '${GIT:-git} $SUB', '& $g $env:SUB'];
-  // not two plain variables, but the segment names a protected branch, push, --force or a refspec
-  const signals = ['$id: $(date) main', '$id: $(date) push', '$k=$v "$a$b" --force', '$k=$v "$a$b" --force-with-lease origin',
-    '"$a$b" "$c$d" origin feat/x:feat/y', '"$a$b" "$c$d" origin +feat/x', '"$a$b" "$c$d" origin HEAD', '"$a$b" "$c$d" origin refs/heads/x',
-    '"$a$b" "$c$d" origin :feat/x', 'timeout 5 "$a$b" "p$x" origin master'];
-  for (const c of [...plain, ...signals]) {
-    const r = evaluate({ tool: 'shell', command: c, role: 'builder' });
-    assert.equal(r.allow, false, c);
-  }
-  for (const c of plain) {
-    assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason!, /both filled in by the shell.*write the command's own name/, c);
-  }
-  // a URL is no refspec
-  assert.equal(kindOf('"$a$b" "$c$d" https://example.invalid/x'), 'allow');
-});
-
-// the lead's reviews of ce3f33a and ddca32e: any option after the pair is a push signal, whatever the pair looks like
-test('#4836 review: any option after a filled pair is a push signal', () => {
-  const refused = ['$G $S$T --mirror', '$G $S$T --all origin', '$G $S$T -uf origin feat', '$G $S$T --tags -f', '$G p$S -f origin feat',
-    '$G "$a$b" -d origin feat', 'timeout 5 $G p$S --prune origin',
-    // no pair is excused as printed text: a name=... argument or a label
-    '$G alias.p=$P p -f origin feat', '$G: $(date) -f origin feat'];
-  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
-});
-
-test('#4836 review: a substitution is skipped only when it closes in the segment; one left open is refused', () => {
-  const refused = ['$G $(git config x.y) -f origin feat', '"$a$b" $(git config x.y) --force', '$G $(git config x.y) origin feat:other',
-    '$G $(git rev-parse $(git config x.y)) --mirror', '$G $(git config x.y) origin HEAD',
-    // the substitution goes on past a pipe or a ;, so what follows it is not in this segment: a git one too
-    '$G $(printf %s%s pu sh|cat) origin feat', '$G $(git remote | head -1) feat:main', '$G $(git remote; echo x) feat:main',
-    // a backtick substitution closes at the second backtick
-    '$G `git remote | head -1` feat:main', '$G "$a$b" `echo x;echo y` --force origin feat',
-    'echo "$G `git remote | head -1` feat:main"', "bash -c '$G `git remote | head -1` feat:main'"];
-  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
-});
-
-test('#4836 review: false blocks accepted so that the rules stay simple', () => {
-  // a pipe inside a substitution, and an option of another program's substitution
-  const refused = ['echo "$w base=$(git grep -c x | wc -l)"', 'echo "$j: $(cb job log 1 | head -1)"',
-    'echo "$f crlf=$(grep -c x $f) lines=$(wc -l < $f)"', '$id: $(date -u)', 'echo "$f $(git show HEAD:package.json | wc -l)"'];
-  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
-});
-
 test('#4826: a filled program with a word that is no git command and a protected branch is read as git', () => {
   // an alias set by an earlier statement or in the environment makes the unknown word a push
   const blocked = ['$G p origin main', '"$GIT" p origin master', '%GIT% p origin main', '& $g p origin main', 'cmd /c %GIT% p origin main',
@@ -2318,6 +2255,35 @@ test('#4826: a filled program with a word that is no git command and a protected
   for (const c of allowed) assert.equal(protectedPush(c, ['main', 'master']), null, c);
   // no read-only rule comes with it: a reviewer's filled program with an unknown word and no protected branch runs
   assert.equal(kindOf('$NODE report summary', 'reviewer'), 'allow');
+});
+
+test('#4833: git command names are case-sensitive, alias names are not: another case of one is an alias', () => {
+  // an alias named push (set by an earlier statement or in the environment) answers to PUSH
+  for (const c of ['git PUSH origin main', 'git Push origin main', 'git PUSH origin HEAD:master', 'timeout 5 git PUSH origin main',
+    'git -C /x PUSH origin main', '$G PUSH origin main', '& $g Push origin main', 'xargs git PUSH origin main', 'git SEND-PACK origin main',
+    'export GIT_CONFIG_PARAMETERS=x; git PUSH origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.ok(protectedPush('git PUSH origin develop', ['develop']), 'a configured branch, with or without a role');
+  // a read-only role runs git subcommands by their own names
+  for (const c of ['git COMMIT -m x', 'git Commit -m x']) assert.notEqual(kindOf(c, 'reviewer'), 'allow', c);
+  for (const c of ['git checkout main', 'git push origin feat/my-card', 'git status', 'git PUSH origin feat/my-card', 'echo "git PUSH origin main"']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
+});
+
+test('#4833: a redirect that takes no file word hides no branch after it', () => {
+  const shapes = ['git p origin 2>&1 B', '$G p origin 2>&1 B', 'git push origin 2>&1 B', '$G push origin 2>&1 B', 'git p origin >&2 B',
+    'git p origin 1>&- B', 'git p origin <&- B', 'git p origin *>&1 B', 'git p origin 3>&2 B', 'git subtree push --prefix x origin 2>&1 B',
+    'git $S origin 2>&1 B', 'git p origin > out.txt B', 'git p origin 2>$null B', 'git p origin &>log B', 'git p 2>&1 origin 2>&1 B'];
+  for (const s of shapes) {
+    assert.notEqual(kindOf(s.replace(/B$/, 'main')), 'allow', s);
+    assert.equal(evaluate({ tool: 'shell', command: s.replace(/B$/, 'develop'), protectedBranches: ['develop'] }).allow, false, `no role: ${s}`);
+  }
+  for (const c of ['git push origin feat/x 2>&1 | tee main', 'git lg 2>&1 | grep main', 'git status 2>&1 && echo main', 'git p origin feat/x > main',
+    'git checkout main 2>&1']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
 });
 
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a

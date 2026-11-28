@@ -690,9 +690,6 @@ const globRe = (e) => new RegExp(`^${e.split('*').map(literal).join('.*')}$`);
 // own, so a push's arguments never run into the next block); words end at whitespace and ( ) { } outside quotes.
 const SEGMENT = KILL_SEGMENT;
 const WORD = new RegExp(String.raw`(?:${QUOTED}|\\.|[^\s(){}"'\\])+`, 'g');
-// a segment's words as WORD cuts them, and its round brackets, in order; scanCommands keeps each segment's text for it
-const WORD_OR_BRACKET = new RegExp(`${WORD.source}|[()]`, 'g');
-const segmentSource = new WeakMap();
 // one layer of quoting off, as the shell does: "..." (\" \\ \$ \` inside unescaped), '...' as is, \x outside quotes.
 // The regex is built once, and a word with no quote or backslash is returned as is (the replace would change nothing):
 // every scan unquotes every word, so this is most of a scan's cost on a long command.
@@ -778,9 +775,8 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(name
     if (/^\|&?\n*$/.test(gap)) piped[k] = into[k + 1] || piped[k + 1];
     else if (gap === '&' && /[<>]$/.test(text.slice(segs[k].start, segs[k].end))) piped[k] = piped[k + 1];
   }
-  for (const [k, { raw, name, start, end }] of segs.entries()) {
+  for (const [k, { raw, name }] of segs.entries()) {
     const w = raw.map(unquote);
-    segmentSource.set(w, text.slice(start, end));
     const found = w.map((_x, i) => isHit(w, name, i));
     const hits = found.filter(Boolean).length;
     if (hits > MAX_COMMANDS_PER_SEGMENT) {
@@ -857,50 +853,7 @@ function filledGit(w, i) {
 const beforeProgram = (x, k, w) => ASSIGNMENT.test(x) || SHELL_KEYWORD.has(x) || LAUNCHERS.has(cmdName(x)) || RUNS_REST_SHELL.has(cmdName(x))
   || x.startsWith('-') || /^\/\/?[ck]$/i.test(x) || /^\d+(?:\.\d+)?[smhd]?$/.test(x) || (k > 0 && w[k - 1].startsWith('-'));
 const isProgram = (w, i) => i >= FILLED_REACH || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).every(beforeProgram);
-// in a seat, a program and its first argument both filled in may be git push, and the guard can read neither. #4836:
-// refused only when both are plain variables ($x, ${x}, ${x[@]}, ${x:-y}, $env:x, %x%: nothing in the line says what they
-// hold), or the segment could push: from the first argument on, a protected branch, push, --force, a refspec, any other
-// option, or a substitution left open (couldPush). Other filled text ($(...), $id:, name=$v, a backtick escape) passes
-// without those
-const PLAIN_VAR = /^(?:\$(?:(?:env|script|global|local|private|using):)?(?:\w+(?:\[[\w@*]*\])?|\{(?:env:)?\w+(?:\[[\w@*]*\])?\}|[@*])|\$\w+:-[^$`]*|%[A-Za-z_]\w*%)$/i;
-// src:dst (not a URL or a drive letter), +ref, refs/... or HEAD
-const REFSPEC = /^(?![A-Za-z]:[\\/])(?:\+?[\w./*-]*:(?!\/\/)[\w./*-]+|\+[\w./*-]+|refs\/\S+|HEAD)$/;
-const pushSignal = (x) => x.toLowerCase() === 'push' || /^--force(?:$|[-=])/.test(x) || REFSPEC.test(x)
-  || namesBranch([x], (b) => b === 'main' || b === 'master') !== null;
-// What in a segment says a filled pair could push. The words of a git call inside a substitution ($(git rev-parse --short
-// HEAD)) are that call's own, judged by git's rules, up to its closing bracket. Returns the last word that is a push
-// signal, the last other -word, and the word opening the last substitution of another program that does not close in the
-// segment (a pipe inside it ends the segment, so what follows it is not read here); -1 for none
-function readPush(w) {
-  const open = []; // brackets not yet closed: a substitution or not, git's or not (null until its first word), the word before
-  let k = 0, inGit = 0, signal = -1, option = -1;
-  for (const [t] of segmentSource.get(w).matchAll(WORD_OR_BRACKET)) {
-    if (t === '(') open.push({ subst: k > 0 && w[k - 1].endsWith('$'), git: null, at: k - 1 });
-    else if (t === ')') { if (open.pop()?.git) inGit--; }
-    else {
-      const top = open[open.length - 1];
-      if (top && top.git === null) {
-        top.git = top.subst && cmdName(w[k]) === 'git';
-        if (top.git) inGit++;
-      }
-      if (!inGit && pushSignal(w[k])) signal = k;
-      else if (!inGit && /^-./.test(w[k])) option = k;
-      k++;
-    }
-  }
-  const unclosed = open.reduce((at, f) => (f.subst && !f.git ? Math.max(at, f.at) : at), -1);
-  return { signal, option, unclosed };
-}
-// printed text, not a command git would take: a label before a substitution ($id: $(date)), or name=... in the argument's
-// place (crlf=$(...)). For such a pair an option or an open substitution says nothing
-const printedPair = (w, i, j) => (w[i].endsWith(':') && w[j] === '$') || /^[\w.-]+=/.test(w[j]);
-const pushRead = new WeakMap(); // read once per segment
-const couldPush = (w, i, j) => {
-  if (!pushRead.has(w)) pushRead.set(w, readPush(w));
-  const { signal, option, unclosed } = pushRead.get(w);
-  return signal >= j || (!printedPair(w, i, j) && (option > j || unclosed >= j));
-};
-const refusedPair = (w, i, j) => (PLAIN_VAR.test(w[i]) && PLAIN_VAR.test(w[j])) || couldPush(w, i, j);
+// in a seat, a program and its first argument both filled in may be git push, and the guard can read neither
 const bothFilled = (word, first) => `${word.slice(0, 40)} ${first.slice(0, 40)}: the command and its first argument are both filled in by the shell, so the guard cannot tell it is not a git push: write the command's own name`;
 const gitOrFilled = (w, name, i) => GIT.has(name[i]) || filledGit(w, i) >= 0;
 // what the block adds for such a word, and the mark protectedPush puts on its branch so pushReason can add it
@@ -1039,7 +992,7 @@ function gitHides(w, i, j, role, text) {
   if (!READ_ONLY_ROLES.includes(role)) return null;
   if (RO_GIT_WRITES.has(sub) || (sub === 'hash-object' && w.slice(j + 1).some((x) => /^-[^-]*w/.test(x)))) return `git ${sub}: ${readsOnly(role)}`;
   // git as the command: first in its segment, or after assignments, launchers (sudo git ci) and $( (x=$(git ci))
-  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub.toLowerCase())) {
+  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub)) { // as written (#4833): git's own names are case-sensitive
     return `git ${sub} is not a git command (an alias, or a word the shell fills in): a ${role} runs git subcommands by their own names; ${readsOnly(role)}`;
   }
   return null;
@@ -1138,7 +1091,9 @@ function subtreePush(w, j, hit) {
 function aliasPush(w, i, j, hit) {
   const sub = w[j];
   if (sub === undefined || !isCommandWord(w, i)) return null;
-  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
+  // as written (#4833): git runs its own commands by their exact names, but finds an alias in any case, so PUSH is an
+  // alias named push, not git push
+  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub)) return null;
   // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
   const words = stopArgs(w.slice(j + 1));
   const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
@@ -1159,7 +1114,7 @@ function hiddenPushes(text, hit, list) {
     if (!filledName(w[i]) || w[i].endsWith('=')) return -1;
     const read = filledOptions(w, i);
     const word = read === -1 ? undefined : w[read.j];
-    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word.toLowerCase())) return -1;
+    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word)) return -1;
     if (!lastNamed.has(w)) lastNamed.set(w, w.findLastIndex((x) => namesBranch([x], hit) !== null));
     return lastNamed.get(w) > read.j && isProgram(w, i) ? read.j : -1;
   };
@@ -2659,7 +2614,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
   const git = scanCommands(unbrace(command), GIT, (w, i) => {
     const filled = filledGit(w, i); // #4815: a command the shell fills in, read as git
     const j = filled < 0 ? gitSub(w, i) : filled;
-    if (filled >= 0 && filledPart(w[j] ?? '')) return isProgram(w, i) && refusedPair(w, i, j) ? bothFilled(w[i], w[j]) : null;
+    if (filled >= 0 && filledPart(w[j] ?? '')) return isProgram(w, i) ? bothFilled(w[i], w[j]) : null;
     const why = gitHides(w, i, j, role, command) // #4638: aliases, push and commit plumbing, a read-only role's git ci
       ?? (w[j] === 'push' ? pushRules(w, j) : null);
     return why && filled >= 0 ? why + filledNote(w[i]) : why;
