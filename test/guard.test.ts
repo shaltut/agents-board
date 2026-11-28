@@ -203,6 +203,27 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4622 (PR 77 round 6, m1): a quoted phrase ("$A log", "$C d") names no git command. It is let through only where the
+// whole command is one plain echo or printf line: an allow list, so nothing can run or pass on what the line prints
+test('#4622: only a lone echo or printf line may hold a quoted phrase after a variable', () => {
+  passes('builder', ['echo "$A b" "$C d" opencode.json', "  echo '$A b' \"$C d\" opencode.json",
+    'printf "%s" "${A} b" "$C d" opencode.json', 'printf "%s\n" "$A b" "$C d" opencode.json',
+    'echo "$USER said" "$A hello there" opencode.json', 'echo %A% "%C% d" opencode.json']);
+  const line = 'echo "$A b" "$C d" opencode.json';
+  blocksByRole('builder', [
+    // any other command word, or a word before the echo
+    'caffeinate "$A log" "$A log" opencode.json', `nice ${line}`, `VAR=1 ${line}`,
+    // anything beside the line: a pipe, another command, a second line, a group
+    `${line} | cat`, `${line}; true`, `${line} && true`, `true || ${line}`, `${line} &`, `${line}\ntrue`, `(${line})`, `{ ${line}; }`,
+    // anything in it that is not plain text or a plain variable
+    'echo "$(true) b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
+    'echo $A x$B opencode.json',
+    // m2, kept: two whole variables may be git and a writing command
+    'python3 tools/check.py $A $B opencode.json',
+    // PR 172 review (R2), as written there: what echo prints is parsed again by sh; ssh behind another word reads its
+    // words again
+    'G=$(which git); X=eckout; echo $G "ch$X --" opencode.json | sh', 'caffeinate ssh host $GIT "$X now" opencode.json']);
+});
 // #4768, #4770: the guard drops a heredoc body only where bash reads one. In each of these bash 5.2 runs the line the
 // guard dropped as file text (checked in a shell with a harmless echo in its place)
 const hiddenByHeredoc: [string, (c: string) => string][] = [
@@ -251,7 +272,7 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # inside $(( ))', (c) => `echo $(( 1 # )) '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside (( ))', (c) => `(( 1 # )); echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
-  ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside a [[ =~ ]] pattern', (c) => `[[ a =~ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   // PR 161 review (R2): PowerShell refuses a << only where it starts a token. Glued to a word it is part of that word
   ...['cat > a', 'cat', 'cb log 1 -b -', 'cb log 1 0', 'git commit -F -', 'cat =', 'cat > a -'].map((head): [string, (c: string) => string] =>
@@ -867,8 +888,37 @@ const secretReads = [
   // bash comment's trailing \)
   'Get-ChildItem C:\\work\\\ncat .env', 'echo a\\\ncat .env', 'ls # x\\\ncat .env',
   'Set-Location C:\\tmp\\\nGet-Content .env', 'Get-ChildItem C:\\work\\\r\ncat .env',
+  // #4882: the relay's bridge file holds the token its local socket runs any SQL for: by full path, by the temp
+  // variable, and by every glob that reaches it; the seat's token file by a glob too
+  'cat /tmp/cb-relay-ab12cd34ef56.bridge', `cat "$TMPDIR/cb-relay-ab12cd34ef56.bridge"`, String.raw`type %TEMP%\cb-relay-ab12cd34ef56.bridge`,
+  String.raw`Get-Content $env:TEMP\cb-relay-ab12cd34ef56.bridge`, String.raw`type C:\Temp\cb-relay-ab12cd34ef56.bridge`, 'cp /tmp/cb-relay-ab12cd34ef56.bridge /tmp/x',
+  String.raw`Copy-Item "$env:TEMP\cb-relay-*.bridge" .`, 'cat /tmp/cb-relay-*.bridge', 'cat /tmp/cb-relay-????????????.bridge',
+  'cat /tmp/cb-relay-[0-9a-f]*.bridge', 'cat /tmp/cb-relay-*', String.raw`gc $env:TEMP\cb-relay-ab12*`, 'head /tmp/cb-relay-ab12cd34ef56.*',
+  'grep token $TEMP/*.bridge', 'base64 < /tmp/cb-relay-ab12cd34ef56.bridge', 'cat /tmp/cb-relay-*.bridge*', `cat "$TMPDIR"/cb-seat-*.claude.json`,
+  String.raw`Get-Content $env:TEMP\cb-seat-*.opencode.json`,
+  // PR 203 review: a glob typed without the hyphen reaches the same files, and so does one ending at .json
+  'tail -n 50 /tmp/cb-relay*', String.raw`Get-Content $env:TEMP\cb-relay* -Tail 20`, String.raw`type %TEMP%\cb-relay*`, 'tail /tmp/cb-relay*.bridge',
+  'cat /tmp/cb-relay*.br*', 'cat /tmp/cb-seat*', String.raw`type %TEMP%\cb-seat*`, 'cat /tmp/cb-seat*.json', 'cat /tmp/cb-seat-????????????.json',
+  'cat /tmp/cb-seat*.claude.json', 'cat /tmp/cb-seat*.js*',
+  // PR 203 second review: a glob that stops before the name is spelled out reaches both token files
+  'cat /tmp/cb-*', 'cat /tmp/cb*', 'cat /tmp/cb-r*', 'cat /tmp/cb-rel*', String.raw`type %TEMP%\cb*`, 'head -n 5 /tmp/cb-s*', 'cat /tmp/cb*.json',
+  'cat /tmp/cb-*.bridge', 'cat /tmp/cb-rel?y*',
+  // #4903: the braced temp variable, the usual macOS spelling, with no slash after it
+  'cat ${TMPDIR}cb-seat-ab12.claude.json', 'cat "${TMPDIR}cb-relay-ab12cd34ef56.bridge"', 'cat ${TMPDIR}cb-relay*', 'tail ${TMPDIR}cb*',
 ];
 const secretUses = [
+  // #4882: the relay's other files stay readable, and so does the code that names the bridge file
+  'tail -n 50 /tmp/cb-relay-ab12cd34ef56.log', 'tail -f /tmp/cb-relay-*.log', String.raw`Get-Content $env:TEMP\cb-relay-*.log -Tail 20`,
+  'cat /tmp/cb-relay-ab12cd34ef56.pid', 'cat /tmp/cb-relay-*.log*', 'ls /tmp/cb-relay-*', 'rm /tmp/cb-relay-ab12cd34ef56.bridge',
+  'cat cli/bridge.ts', 'grep -n "files.bridge" cli/bridge.ts', 'grep -rn "cb-relay-" cli', 'grep -n "cb-relay-bridge-" cli/bridge.ts',
+  // PR 203 review: a glob over the other files stays readable, a cut-short extension too; so do the markers squad up reads
+  'cat /tmp/cb-relay-*.lo*', 'tail /tmp/cb-relay*.log', 'cat /tmp/cb-relay*.pid', 'cat /tmp/cb-relay-*.he*', 'grep -n "cb-relay" cli/relay.ts',
+  'grep -rn "cb-seat-ready" cli', 'grep -rn "cb-seat-refused" cli/agents', 'ls /tmp/cb-seat*',
+  // names that cannot reach a token file, globs that end in another file's extension, and a look at the folder
+  'cat /tmp/cbor*', 'cat /tmp/cb-job-7*', 'tail /tmp/cb-*.log', 'cat /tmp/cb-r*.log', 'cat /tmp/cb*.pid', 'cat /tmp/cb-*.lo*', 'ls /tmp/cb-*', 'rm /tmp/cb*',
+  String.raw`grep -n "cb\.next" db/schema.sql`, 'cat ${TMPDIR}cb-relay-ab12cd34ef56.log',
+  // an escaped star in a search for the rule itself is no glob
+  String.raw`grep -c "cb-relay-\*.bridge" kit/permissions/builder.json`,
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
   'docker compose --env-file .env up -d', 'cat ~/.ssh/id_ed25519.pub', 'cat src/env.ts', 'grep -rn process.env src',
   'cat environment.md', `cb log 1 "the key lives in deploy/.env: cat it yourself"`, 'ls -la', 'cat key.txt', 'cat monkey.ts',
@@ -1655,6 +1705,7 @@ test('long commands stay fast', () => {
     ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['#4622, a 200 KB echo line that a pipe disqualifies, as a builder', asBuilder('echo ' + kb200('"a b" ') + '$X opencode.json | cat')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
