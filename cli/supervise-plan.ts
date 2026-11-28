@@ -3,10 +3,14 @@ import { herdrName, launchFor, runsOn, seatSpec, wantList, type Launch, type Squ
 
 export type Session = { actor: string; role: string; area: string | null; repo: string; machine: string | null; pane: string | null; live: boolean;
   holds: number; questions: number; jobs: number; asks: number; last_event: string | null; closing: boolean; last_restore: string | null;
+  jobs_running?: number; // of jobs, those running now (#4559); absent (an older board): none
+  bound?: string | null; // the project its latest session is bound to (#4559); null or absent: not known
   last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean;
   agent?: string | null; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
   model?: string | null }; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
 export type State = { project: string; squad: Squad; supervised: boolean;
+  // #4559 slice 3: a supervised squad's project that gets no work (disabled, archived), and since when
+  winding_down?: boolean; state_at?: string | null;
   // builder and reviewer: per repo (#3703); owner: per area
   waiting: { builder: Record<string, number>; reviewer: Record<string, number>; qa: number; investigator: number; architect: number; owner: Record<string, number> };
   // #4593 review 100 F1: of the waiting cards, those kept for an agent (for: labels), by the agents named ("codex",
@@ -37,6 +41,13 @@ export type Restart = { launch: Launch; from: string; to: string };
 export type Refused = { session: string; to: string; why: string };
 export type TickPlan = { restore: Launch[]; start: Launch[]; close: string[]; notes: { what: 'down_again'; session: string }[]; leaving: Leaving[];
   restart: Restart[]; refused: Refused[]; settled: string[] };
+
+/** #4559 (Q3018): how long a seat of a project that gets no work is quiet before it is closed. */
+export const WIND_DOWN_AFTER = 10 * 60_000;
+/** Whether a seat has been quiet that long, counted from the project's state change at the earliest: every seat has
+ *  that long after a disable to reach a safe point. */
+export const windDownQuiet = (s: Pick<Session, 'last_event'>, stateAt: string | null | undefined, now: number) =>
+  !!s.last_event && now - Math.max(Date.parse(s.last_event), stateAt ? Date.parse(stateAt) : 0) >= WIND_DOWN_AFTER;
 
 /** herdr agent_status values that mean ready for input; an unfocused pane stays `done` after its turn, never `idle`. */
 export const READY = new Set(['idle', 'done']);
@@ -72,7 +83,7 @@ export function mayBeLeaving(state: State, herdrLive: Set<string>): boolean {
 export function planTick(i: TickInput): TickPlan {
   const { state, herdrLive, herdrDown, now } = i;
   const plan: TickPlan = { restore: [], start: [], close: [], notes: [], leaving: [], restart: [], refused: [], settled: [] };
-  if (!state.supervised) return plan;
+  if (!state.supervised && !state.winding_down) return plan;
   const { squad, project } = state;
   const by = new Map(state.sessions.map((s) => [s.actor, s]));
   const machineOf = (n: string) => n.split('@')[1];
@@ -85,6 +96,21 @@ export function planTick(i: TickInput): TickPlan {
   const take = (n: string) => { startsLeft--; if (isMac(n)) macRoom--; };
   const room = (n: string) => startsLeft > 0 && (!isMac(n) || macRoom > 0);
   const wanted = wantList(project, squad).filter((w) => w.role !== 'lead');
+  // #4559 slice 3 (Q3018): a project that gets no work only closes. Its squad's seats (this version's and earlier
+  // ones'), never the lead, whom nothing would start again, or a hand-started session. A seat is closed once herdr shows
+  // it ready and it has been quiet 10 minutes, with the cards it holds (Q3017); its own running job waits for its end,
+  // while a queued one cannot start until the project is enabled. All that qualify are planned: the supervisor stops
+  // after WIND_DOWN_CLOSES that reached /exit, so one the board refuses takes no place from the others
+  if (state.winding_down) {
+    const mine = new Set(wanted.map((w) => w.name));
+    for (const s of state.sessions) {
+      if (s.role === 'lead' || !(mine.has(s.actor) || i.pastSeats?.has(s.actor))) continue;
+      if (s.bound && s.bound !== project) continue; // it moved to another project and only holds a card here
+      if (isLive(s.actor) && !s.closing && !s.jobs_running && !herdrDown.has(machineOf(s.actor)) && safe(s.actor)
+        && windDownQuiet(s, state.state_at, now)) plan.close.push(s.actor);
+    }
+    return plan;
+  }
   const restored = new Set<string>();
   const idle = (s: Session) => s.live && !s.holds && !s.questions && !s.jobs && !s.asks && !s.closing;
   // #3770: a name an earlier version of this squad generated but this one does not (its role moved machine, its count

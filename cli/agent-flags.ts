@@ -19,7 +19,7 @@ const SAMPLE: Record<AgentKind, { model: string; effort?: string; env?: Record<s
 };
 const ROLES = ['builder', 'reviewer'];
 const FLAG = /^-{1,2}[A-Za-z]/;
-const BOARD = resolve(import.meta.dirname, '..');
+export const BOARD = resolve(import.meta.dirname, '..');
 
 /** The flags (never their values) an adapter's launches pass, in order, once each; `pairs`, each flag with the plain
  *  word after it (a value, checked only where the help lists the flag's possible values); `env`, the launch env (the
@@ -100,13 +100,16 @@ export function findOnPath(exe: string, env: NodeJS.ProcessEnv = process.env, pl
 // each with its own timeout and tree kill.
 const RUNNER = `
 const { spawn, spawnSync } = require('node:child_process');
-const { file, args, shell, ms } = JSON.parse(process.argv[1]);
+const { file, args, shell, ms, cap = 262144 } = JSON.parse(process.argv[1]);
 const win = process.platform === 'win32';
 const run = (arg) => new Promise((resolve) => {
-  const child = shell ? spawn('"' + file + '" ' + arg, { shell: true, windowsHide: true, detached: !win })
-    : spawn(file, [arg], { windowsHide: true, detached: !win });
+  const words = [].concat(arg); // one word, or the words of a command
+  const child = shell ? spawn('"' + file + '" ' + words.join(' '), { shell: true, windowsHide: true, detached: !win })
+    : spawn(file, words, { windowsHide: true, detached: !win });
+  child.stdin.on('error', () => {});
+  child.stdin.end(); // nothing to type: a CLI that asks gets end of input, not a wait
   let out = '', err = '', done = false, timedOut = false, timer;
-  const add = (s, d) => (s.length > 262144 ? s : s + d);
+  const add = (s, d) => (s.length > cap ? s : s + d);
   child.stdout.on('data', (d) => { out = add(out, d); });
   child.stderr.on('data', (d) => { err = add(err, d); });
   const finish = (status, error) => {
@@ -128,10 +131,12 @@ Promise.all(args.map(run)).then((r) => { process.stdout.write(JSON.stringify(r))
 type Ran = { status: number | null; out: string; err: string; error: string | null };
 /** spawnSync's shape as the probe uses it; a test passes its own to see what the runner is started with. */
 export type SpawnSyncFn = (cmd: string, args: string[], opts: { encoding: 'utf8'; timeout: number; windowsHide: boolean; maxBuffer: number; env: NodeJS.ProcessEnv }) => { stdout: string; status: number | null; error?: Error };
-function runCli(file: string, args: string[], timeoutMs: number, env: NodeJS.ProcessEnv, spawn: SpawnSyncFn): Ran[] {
+/** Each entry of args is one run: a word, or a list of words. The words are fixed, never input (a .cmd runs under a
+ *  shell). cap: how many characters of each stream are kept. */
+export function runCli(file: string, args: (string | string[])[], timeoutMs: number, env: NodeJS.ProcessEnv, spawn: SpawnSyncFn, cap?: number): Ran[] {
   const shell = /\.(?:cmd|bat)$/i.test(file);
-  const r = spawn(process.execPath, ['-e', RUNNER, JSON.stringify({ file, args, shell, ms: timeoutMs })],
-    { encoding: 'utf8', timeout: timeoutMs + 10_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env });
+  const r = spawn(process.execPath, ['-e', RUNNER, JSON.stringify({ file, args, shell, ms: timeoutMs, cap })],
+    { encoding: 'utf8', timeout: timeoutMs + 10_000, windowsHide: true, maxBuffer: 24 * 1024 * 1024, env });
   try {
     const ran = JSON.parse(r.stdout) as Ran[];
     if (Array.isArray(ran) && ran.length === args.length) return ran;

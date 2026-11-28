@@ -54,30 +54,33 @@ export interface Preview {
   jobs_waiting: number; jobs_running: number; questions: number; github_watches: number
 }
 
-/** The confirm dialog: title, the sentence under it, one line per thing it touches, and the button. Every line is
- *  already true at this slice: the supervisor's closing of idle seats (slice 3) and the cancelling of waiting jobs on
- *  archive (slice 4) are left out until they ship. */
+/** The confirm dialog: title, the sentence under it, one line per thing it touches, and the button. */
 export function confirmText(to: 'disabled' | 'archived', pv: Preview): { title: string; lead: string; lines: string[]; button: string } {
   const n = pv.name
+  // the test runs line: what happens to the waiting ones differs; running ones finish either way
+  const runs = (waiting: string) => (pv.jobs_waiting > 0 || pv.jobs_running > 0) && [
+    pv.jobs_waiting > 0 && `${plural(pv.jobs_waiting, 'test run')} waiting ${waiting}.`,
+    pv.jobs_running > 0 && `${pv.jobs_running} running ${pv.jobs_running === 1 ? 'finishes' : 'finish'}.`,
+  ].filter(Boolean).join(' ')
   if (to === 'archived') {
     return {
       title: `Archive ${n}?`,
       lead: 'Nothing new may be filed there, by anyone. Nothing is deleted.',
       lines: [
         'Every card stays readable, with every page, memory and the squad.', // no count: the row and the preview count open cards differently
+        runs('will be cancelled'),
         `It folds away under Archived on this page and leaves every project list.`,
         `Unarchive brings it back as disabled; enable it after that.`,
-      ],
+      ].filter((x): x is string => !!x),
       button: `Archive ${n}`,
     }
   }
   const lines = [
     pv.seats_live > 0 && `${plural(pv.seats_live, 'seat')} live: each gets a notice, stops at a safe point and writes where it stands.`,
+    // true only where the supervisor runs the squad, and the preview does not say whether it does: so the line does
+    pv.seats_live > 0 && 'Where the supervisor runs the squad, it closes each seat once idle 10 minutes; after Enable it restores the seats that hold cards.',
     pv.in_progress > 0 && `${plural(pv.in_progress, 'card')} in progress ${pv.in_progress === 1 ? 'keeps its holder' : 'keep their holders'}.`,
-    (pv.jobs_waiting > 0 || pv.jobs_running > 0) && [
-      pv.jobs_waiting > 0 && `${plural(pv.jobs_waiting, 'test run')} waiting ${pv.jobs_waiting === 1 ? 'stays' : 'stay'} waiting.`,
-      pv.jobs_running > 0 && `${pv.jobs_running} running ${pv.jobs_running === 1 ? 'finishes' : 'finish'}.`,
-    ].filter(Boolean).join(' '),
+    runs(`${pv.jobs_waiting === 1 ? 'stays' : 'stay'} waiting`),
     pv.questions > 0 && `${plural(pv.questions, 'question')} for you ${pv.questions === 1 ? 'leaves' : 'leave'} Today and Telegram until you enable it.`,
     pv.github_watches > 0 && `${plural(pv.github_watches, 'GitHub repo watch', 'GitHub repo watches')} ${pv.github_watches === 1 ? 'stops' : 'stop'} until you enable it.`,
   ].filter((x): x is string => !!x)

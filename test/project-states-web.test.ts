@@ -50,27 +50,36 @@ test('the confirm dialog says what disabling touches, from the preview, and prom
   assert.equal(d.lead, 'No new work starts there. Nothing is deleted, and Enable brings it all back.');
   assert.deepEqual(d.lines, [
     '4 seats live: each gets a notice, stops at a safe point and writes where it stands.',
+    'Where the supervisor runs the squad, it closes each seat once idle 10 minutes; after Enable it restores the seats that hold cards.',
     '2 cards in progress keep their holders.',
     '3 test runs waiting stay waiting. 1 running finishes.',
     '1 question for you leaves Today and Telegram until you enable it.',
     '1 GitHub repo watch stops until you enable it.',
   ]);
   const one = confirmText('disabled', pv({ seats_live: 1, in_progress: 1, jobs_waiting: 1, jobs_running: 0, questions: 2, github_watches: 2 }));
-  assert.deepEqual(one.lines, ['1 seat live: each gets a notice, stops at a safe point and writes where it stands.', '1 card in progress keeps its holder.',
+  assert.deepEqual(one.lines, ['1 seat live: each gets a notice, stops at a safe point and writes where it stands.',
+    'Where the supervisor runs the squad, it closes each seat once idle 10 minutes; after Enable it restores the seats that hold cards.', '1 card in progress keeps its holder.',
     '1 test run waiting stays waiting.', '2 questions for you leave Today and Telegram until you enable it.', '2 GitHub repo watches stop until you enable it.']);
   const none = confirmText('disabled', pv({ seats_live: 0, in_progress: 0, jobs_waiting: 0, jobs_running: 0, questions: 0, github_watches: 0 }));
   assert.deepEqual(none.lines, ['Nothing is running there now.']);
-  const a = confirmText('archived', pv({ open: 41 }));
+  const a = confirmText('archived', pv({ open: 41, jobs_waiting: 0, jobs_running: 0 }));
   assert.equal(a.title, 'Archive Cedar?');
   assert.equal(a.button, 'Archive Cedar');
   assert.match(a.lines.join(' '), /Every card stays readable/);
   assert.doesNotMatch(a.lines.join(' '), /\d/, 'no count: the row and the preview count open cards differently (review N1)');
   assert.match(a.lines.join(' '), /Unarchive brings it back as disabled/);
   for (const t of [d, one, none, a].flatMap((x) => [x.title, x.lead, x.button, ...x.lines])) {
-    assert.doesNotMatch(t, /supervisor|closes? (them|it)/i, 'slice 3 (the supervisor closing idle seats) is not shipped yet');
-    assert.doesNotMatch(t, /cancel/i, 'slice 4 (archive cancels waiting jobs) is not shipped yet');
     assert.doesNotMatch(t, RAW, `no stored value in "${t}"`);
   }
+});
+
+test('the archive dialog says its waiting test runs are cancelled and running ones finish (slice 4); disabling cancels none', () => {
+  const lines = (o: Partial<Preview>) => confirmText('archived', pv(o)).lines.filter((l) => /test run|running/.test(l));
+  assert.deepEqual(lines({}), ['3 test runs waiting will be cancelled. 1 running finishes.']);
+  assert.deepEqual(lines({ jobs_waiting: 1, jobs_running: 0 }), ['1 test run waiting will be cancelled.']);
+  assert.deepEqual(lines({ jobs_waiting: 0, jobs_running: 2 }), ['2 running finish.']);
+  assert.deepEqual(lines({ jobs_waiting: 0, jobs_running: 0 }), []);
+  assert.doesNotMatch(confirmText('disabled', pv()).lines.join(' '), /cancel/i);
 });
 
 test('the banner on a chosen project that gets no work; nothing while it is enabled', () => {

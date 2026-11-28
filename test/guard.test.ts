@@ -1099,6 +1099,97 @@ function machineBudget() {
   return Math.max(1000, Math.round(best * 25));
 }
 
+// #4767: PR 124 reads quotes as bash does for plain text. Where bash and PowerShell, or a comment or a heredoc body,
+// count them differently, that reading took a real command for quoted data. Such a command is read a second time the old
+// way, cut at every separator. "launch" stands for the seat leaving: sudo, a scheduler, a pane launch
+const miscounts = [
+  // a lone quote in a heredoc body or a comment pairs with a later one, and hides what is between
+  "cat <<'EOF'\ndon't\nEOF\nsudo codex\necho 'x'", 'cat <<EOF\nsay "hi\nEOF\nsudo codex\necho "x"',
+  "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
+  // PowerShell: no backslash escapes, a smart quote closes a string, and here-strings, <# #> and --% quote differently
+  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`, String.raw`echo "C:\w\" ; sudo codex ; echo "x\"`, String.raw`rg "a\"x ; schtasks /run /tn y ; echo "b\"c`,
+  'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
+  'echo "a\u201D ; sudo codex ; echo \u201Cb"', 'rg "a\u201D|schtasks /run /tn y|rg \u201Cb" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`,
+  'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "', 'echo `" ; sudo codex ; echo `"',
+  'rg x {# "\n|sudo codex|\n{# "',
+  // bash nests a new string inside "$( )" and "${ }"
+  'grep x "$(echo " "; sudo codex; echo " ")"', 'echo "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
+  'grep x "$(echo "|sudo codex|echo ")"', 'grep x "${y:-"|sudo codex|echo "}"',
+  // the search itself runs its text: a program flag, or the search word made into something else
+  "git grep -O'x;batch' y", "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`, "alias grep=eval; grep 'true;batch'",
+  "grep() { eval \"$1\"; }; grep 'true;batch'",
+  // PR 159 review (R1) 1: a delimiter that is not a plain word, so the guard cannot place the body
+  "cat <<'E-O-F'\ndon't\nE-O-F\nsudo codex\ncat <<'E-O-F'\nwon't\nE-O-F", "cat <<\\EOF\ndon't\nEOF\nsudo codex\ncat <<\\EOF\nwon't\nEOF",
+  "cat <<EOF.1\ndon't\nEOF.1\nsudo codex\ncat <<EOF.1\nwon't\nEOF.1",
+  // 2: a line bash does not take as the end: blanks after or before the word, or a tab under << without the -
+  "cat <<'EOF'\nEOF \ndon't\nEOF\nsudo codex\ncat <<'EOF'\nEOF \nwon't\nEOF", "cat <<'EOF'\n  EOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n  EOF\nwon't\nEOF",
+  "cat <<'EOF'\n\tEOF\ndon't\nEOF\nsudo codex\ncat <<'EOF'\n\tEOF\nwon't\nEOF",
+  // 3: other function bodies, and PowerShell's alias setters
+  "grep() ( eval \"$1\" ); grep 'true;batch'", "grep()\n{\n eval \"$1\"\n}\ngrep 'true;batch'", "grep () if true; then eval \"$1\"; fi; grep 'true;batch'",
+  "Set-Alias grep Invoke-Expression; grep 'true;batch'", "New-Alias rg iex; rg 'true;batch'", "sal grep iex; grep 'true;batch'", "nal rg iex; rg 'true;batch'",
+];
+const miscountFine = [
+  `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', \'\'\'\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n\'\'\')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
+  'grep -E "before|at|after" notes.md', 'rg "x;at;y" src', 'grep "a|batch|b" f', 'grep -E "(at|on) the end" notes.md',
+  "cat <<'EOF' > n.md\nit isn't, and it won't\nEOF\ngrep \"a|batch|b\" f",
+  'grep "a|batch|b" <<< "$x"'.replace('$x', 'x'), "cat <<-EOF > n.md\n\tbody\n\tEOF\ngrep \"a|batch|b\" f", "cat <<EOF > n.md\nbody\nEOF\nrg \"x;at;y\" src",
+];
+test('#4767: a launch that a quote miscount would hide is blocked; plain quoted searches stay allowed', () => {
+  for (const c of miscounts) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
+  for (const c of miscountFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+});
+
+const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
+  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
+  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
+  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
+  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval eval eval eval eval sudo codex', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
+  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
+  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
+  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
+  // a -- or -Command before the string is not its first word
+  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
+  // a quoted flag, and cmd switches that carry a value
+  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'",
+  // the name that carries the string, split by quotes or a backslash, with the launcher in the string split too
+  // (no piece of the split word may read as a launcher by itself, or the segment is walked anyway)
+  String.raw`s\h -c 's"u"do codex'`, `s'h' -c 's"u"do codex'`, `b"as"h -c 's"u"do codex'`, String.raw`e\val 's"u"do codex'`, `e""val 's"u"do codex'`, `e'v'al 's"u"do codex'`,
+  String.raw`r\g --pre 's"u"do' x f`, `r'g' --pre 's"u"do' x f`, `c""md /c 's"u"do codex'`, `c'm'd /c 's"u"do codex'`, `i'e'x 's"u"do codex'`,
+  // Git Bash writes cmd's switch with two slashes
+  'cmd //c schtasks /run /tn x', 'cmd.exe //k sudo codex', 'cmd //c "su"','cmd //v:off//c schtasks /run /tn x',
+  // Invoke-Expression takes its string after common parameters too, and any parameter may bind its value with a colon
+  'iex -Command:"sudo codex"', "iex -c:'Start-ScheduledTask x'", 'Invoke-Expression -Verbose "sudo codex"', "iex -ea 0 'sudo codex'", 'iex -ErrorAction SilentlyContinue "sudo codex"',
+  "iex -vb -Debug -wa:0 -ov x -Command 'sudo codex'", 'iex -Command: "sudo codex"', "iex -Verbose:$false -c 'sudo codex'"];
+const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
+  'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log',
+  'cmd //c "dir /b"', 'cmd //c ver', 'iex -Verbose "Get-Date"', "iex -ea 0 'Get-ScheduledTask'", 'iex -Command:"Get-Date"', `echo "it's fine" && s'h' -c 'echo a'`];
+test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
+  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
+  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  // the lead keeps its herdr prompt inside a string too, and nothing else (its ssh is judged by #4707's deploy-host rule)
+  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'herdr agent prompt w1:p2 hi'`, role: 'lead' }), { allow: true });
+  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
+});
+
+// PR 142 review (R2): after text that throws the quote count off, only the second reading sees what follows, so it must
+// read the command strings too. Each prefix leaves the first reading inside a quote that the shell has closed
+const thrownOff = ["echo $'a\\'b'; ", "cat <<EOF\ndon't\nEOF\n", 'Get-ChildItem "C:\\"; ', 'Write-Output "a\u201D; '];
+const hiddenStrings = ['bash -c su', 'bash -c "sudo codex"', "sh -c 'batch'", 'eval sudo codex', 'eval "at now"', 'cmd /c "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x',
+  'pwsh -c "Start-ScheduledTask x"', "iex 'Start-ScheduledTask x'", 'rg --pre=sudo x f', 'env -S su', 'env -S "sudo codex"', 'ssh "$H" "sudo codex"',
+  'bash -c "bash -c \'sudo codex\'"', 'bash -c "ssh localhost uptime; true"'];
+const hiddenStringsFine = ['bash -c "ls -la"', 'bash -c ls', 'eval echo hi', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'rg --pre cat x f', 'env -S "ls -la"',
+  'bash -c "ls; true"', 'eval "$(direnv hook bash)"', 'git commit -m "eval sudo codex"'];
+test('#4741: a command string stays judged after text that throws the quote count off', () => {
+  for (const p of thrownOff) {
+    for (const c of hiddenStrings) assert.match(evaluate({ tool: 'shell', command: p + c, role: 'builder' }).reason ?? '', /fresh environment/, p + c);
+    for (const c of hiddenStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: p + c, role: 'builder' }), { allow: true }, p + c);
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1163,6 +1254,36 @@ test('long commands stay fast', () => {
     ['kill scan, 200 KB of kill words', () => check(kb200('kill '))],
     ['kill scan, 200 KB of taskkill /pid', () => check(kb200('taskkill /pid 1 '))],
     ['kill scan, 200 KB of quoted words', () => check('echo ' + kb200('"a b" '))],
+    // #4767: the second reading and what decides it are each read once
+    ['second reading, 200 KB of separators after a comment, as a builder', asBuilder('ls # ' + kb200('; '))],
+    ['second reading, 200 KB of escaped quotes, as a builder', asBuilder('echo # ' + escaped)],
+    ['miscount check, 200 KB of heredoc headers, as a builder', asBuilder(kb200("<<'a'\n"))],
+    ['miscount check, 200 KB of short heredocs, as a builder', asBuilder(kb200('x <<a\nb\na\n'))],
+    ['miscount check, 200 KB of heredoc marks on one line, as a builder', asBuilder(kb200('<<a '))],
+    ['miscount check, 200 KB quote left open, as a builder', asBuilder('echo "' + kb200('a '))],
+    ['miscount check, 200 KB of parentheses, as a builder', asBuilder('grep x ' + kb200('( '))],
+    ['miscount check, 200 KB of newlines after empty parentheses, as a builder', asBuilder('grep x ()' + '\n'.repeat(200000))],
+    ['miscount check, 200 KB of empty parentheses, as a builder', asBuilder('grep x ' + kb200('() \n'))],
+    ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
+    // #4741: a code string is walked once however two readings find it, and its words are read once per level
+    ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of eval words after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval '))],
+    ['code strings, 200 KB of iex parameters, as a builder', asBuilder('iex ' + kb200('-ea 0 '))],
+    ['code strings, a 200 KB cmd double-slash option word, as a builder', asBuilder('cmd ' + kb200('//a') + ' x')],
+    ['code strings, 200 KB of quote-split words, as a builder', asBuilder(kb200('s"h" x; '))],
+    ['code strings, 200 KB of lone quotes and backslashes, as a builder', asBuilder(kb200('a\\b \' " '))],
+    ['code strings, 200 KB of eval after open parentheses after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval x ( '))],
+    // two readings of one eval line find two strings at each level, "x <inner>" and "<inner>": the work must not double per level
+    ['code strings, eval of a word and a quoted eval nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, the same nest after an open quote, as a builder', asBuilder('echo "a”; ' + Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, 200 KB of eval after open parentheses, as a builder', asBuilder(kb200('eval x ( '))],
+    ['code strings, quoted -c strings nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'bash -c ' + JSON.stringify(c), 'ls ' + 'x '.repeat(50000)))],
+    ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
+    ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
+    ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
+    ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
+    ['code strings, one 200 KB -c string left open, as a builder', asBuilder("sh -c '" + kb200('a '))],
+    ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
@@ -1604,7 +1725,7 @@ const card4734Runs = [
   "at \"-b\"",
   "at '-b'",
   "at -\"\"b",
-  "at -\b",
+  "at -\\b",
   "at \\-b",
   "at -m\"\"b",
   "at \"-t\" 202601011200",
@@ -1625,4 +1746,16 @@ const card4734Runs = [
 test('#4734: the reported script and search commands pass; a real launch by that word, however spelled, stays blocked', () => {
   for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
+});
+// #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
+// seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
+test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
+  const edit = (text: string) => ["cd /c/w/x && python - <<'EOF'", 's = open("cli/x.ts").read()',
+    's = s.replace("OLD", """' + text + '""")', 'open("cli/x.ts", "w").write(s)', 'EOF'].join('\n');
+  assert.deepEqual(evaluate({ tool: 'shell', command: edit('const total = items.length'), role: 'builder' }), { allow: true }, 'the control');
+  for (const text of ["fail('the value is unset: pass --name')", "spawnSync('rm', ['-f', file], { env: process.env })", 'export const line = [ ${k}= ]']) {
+    const r = evaluate({ tool: 'shell', command: edit(text), role: 'builder' });
+    assert.equal(r.kind, 'role', text);
+    assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
+  }
 });
