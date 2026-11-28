@@ -2343,9 +2343,11 @@ const fenceWrite = rawAndJoined(fenceWriteOne);
 // #4775: double quotes do not stop a substitution from running. The command with the quotes closed before each $( ) or
 // backtick substitution inside them and opened again after it ("a $(x) b" read as "a "$(x)" b"), so what runs is not
 // blanked as text. Quotes and comments inside a substitution are its own: ")" there closes nothing. One pass.
+// The backtick is written \x60 throughout: a raw one shifts what kit/fault-line.mjs --words reads as strings here.
+const QUOTED_TICK = 'q' + TICK;
 function unquotedSubstitutions(text) {
-  if (!/\$\(|`/.test(text)) return text;
-  const open = []; // '"', '(' and '`' not yet closed; 'q(' and 'q`' are substitutions that stand inside double quotes
+  if (!/\$\(|\x60/.test(text)) return text;
+  const open = []; // not yet closed: ", ( and TICK; 'q(' and QUOTED_TICK are substitutions inside double quotes
   let out = '', done = 0, i = 0;
   const quote = () => { out += text.slice(done, i) + '"'; done = i; };
   while (i < text.length) {
@@ -2357,12 +2359,12 @@ function unquotedSubstitutions(text) {
       i += 2;
       continue;
     }
-    if (c === '`') {
-      const closes = top === '`' || top === 'q`';
+    if (c === TICK) {
+      const closes = top === TICK || top === QUOTED_TICK;
       if (top === '"') quote();
-      if (closes) open.pop(); else open.push(top === '"' ? 'q`' : '`');
+      if (closes) open.pop(); else open.push(top === '"' ? QUOTED_TICK : TICK);
       i++;
-      if (top === 'q`') quote();
+      if (top === QUOTED_TICK) quote();
       continue;
     }
     if (top === '"') { if (c === '"') open.pop(); i++; continue; }
