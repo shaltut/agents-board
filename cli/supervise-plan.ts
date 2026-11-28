@@ -8,7 +8,8 @@ export type Session = { actor: string; role: string; area: string | null; repo: 
   last_restore_failed: boolean; down_again_logged: boolean; down_again_since_bind: boolean;
   agent?: string | null; // the agent the session runs (#4002); null or absent (a holder with no session row): claude
   quota_told?: boolean; // #4787: its quota stop is already on the board, and it has done nothing there since
-  model?: string | null }; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
+  model?: string | null; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
+  effort?: string | null }; // the effort it said it was started with (#4766: a level or 'default'); null or absent: unknown, never judged
 export type State = { project: string; squad: Squad; supervised: boolean;
   // #4806: false: no stages, so no waiting work is counted; absent (an older board): stages. supervised_unstaged: a
   // squad the supervisor runs there (the tick reads it into supervised)
@@ -38,8 +39,8 @@ export type TickInput = { state: State; herdrLive: Set<string>; herdrStatus: Rec
 // work, on a machine that is not one of the squad's, or every seat while the squad names none besides the lead (empty).
 // The supervisor never closes or frees these: a person hands over.
 export type Leaving = { session: string; why: 'busy' | 'down' | 'machine' | 'empty' };
-// restart (#4332, Q2970): an idle seat on an old agent or model, closed then started on its seat's setting (launch).
-// from/to: what it runs and what the squad names, in runsOn words. refused: a seat on an old setting whose new one this
+// restart (#4332, Q2970): an idle seat on an old agent, model or effort, closed then started on its seat's setting (launch).
+// from/to: what it runs and what the squad names, in runsOn words, with the effort where one is named or differs. refused: a seat on an old setting whose new one this
 // machine cannot start (why): kept as it is, said once. settled: seats restartTried names that now run their seat's
 // setting (bound again on it, by the restart or by hand): forgotten, so a later change back to that setting is acted on
 export type Restart = { launch: Launch; from: string; to: string };
@@ -64,10 +65,15 @@ const LEAVING_CLOSES = 2; // a bad squad save cannot drain a squad in one tick
 // recycle a whole squad at once, and each restart takes a start from the tick's shared budget
 const RESTART_AFTER = 5 * MIN, RESTARTS = 2;
 
-/** Whether a session runs another setting than its seat's (#4332): another agent, or a model it named that does not
- *  contain the seat's (case-insensitive, as the digest's wrong-model line reads it: claude-opus-4-5 runs opus). */
-export function onOldSetting(s: Pick<Session, 'agent' | 'model'>, want: { agent: string; model: string }): boolean {
-  if ((s.agent ?? 'claude') !== want.agent) return true;
+/** Whether the effort a session was started with is not its seat's (#4766); a seat with none runs the 'default'. */
+const effortDiffers = (s: Pick<Session, 'effort'>, want: { effort?: string }) => !!s.effort && s.effort !== (want.effort ?? 'default');
+
+/** Whether a session runs another setting than its seat's (#4332): another agent, a model it named that does not
+ *  contain the seat's (case-insensitive, as the digest's wrong-model line reads it: claude-opus-4-5 runs opus), or
+ *  another effort. The effort is the one it was started with, never one read from it later: an agent may run a lower
+ *  level than asked, which would restart it for nothing. */
+export function onOldSetting(s: Pick<Session, 'agent' | 'model' | 'effort'>, want: { agent: string; model: string; effort?: string }): boolean {
+  if ((s.agent ?? 'claude') !== want.agent || effortDiffers(s, want)) return true;
   return !!s.model && !s.model.toLowerCase().includes(want.model.toLowerCase());
 }
 
@@ -234,7 +240,9 @@ export function planTick(i: TickInput): TickPlan {
   for (const w of wanted) {
     const s = by.get(w.name);
     if (!s?.live) continue;
-    const spec = seatSpec(squad, w), to = runsOn(spec);
+    const spec = seatSpec(squad, w), moved = effortDiffers(s, spec);
+    // the setting's words, also what restartTried keys on: a later effort is another setting
+    const to = runsOn(spec) + (spec.effort || moved ? ` effort ${spec.effort ?? 'default'}` : '');
     if (!onOldSetting(s, spec)) { if (i.restartTried?.has(w.name)) plan.settled.push(w.name); continue; }
     if (closing.has(w.name) || i.restartTried?.get(w.name) === to) continue;
     const l = launchFor(project, squad, w), why = i.startProblem?.(l) ?? null;
@@ -242,7 +250,8 @@ export function planTick(i: TickInput): TickPlan {
     if (restartsLeft <= 0 || startsLeft <= 0 || !idle(s) || !safe(w.name) || !ok(w.name) || i.launched.has(w.name)
       || !s.last_event || now - Date.parse(s.last_event) < RESTART_AFTER) continue;
     const agent = s.agent ?? 'claude';
-    plan.restart.push({ launch: l, from: s.model ? runsOn({ agent, model: s.model }) : agent, to });
+    const from = (s.model ? runsOn({ agent, model: s.model }) : agent) + (moved ? ` effort ${s.effort}` : '');
+    plan.restart.push({ launch: l, from, to });
     restartsLeft--; startsLeft--; // its close frees its own machine slot: no Mac room taken
   }
   return plan;

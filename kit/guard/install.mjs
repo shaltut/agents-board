@@ -7,7 +7,7 @@
 // with Ahmed's yes.
 // --agents (#4609) also copies each named agent's shim beside core.mjs, probes it there before the swap, and wires it:
 // Codex's hooks.json + [features] hooks = true (CODEX_HOME or ~/.codex), agy's .agents/hooks.json in each --seat folder
-// (kept out of git), OpenCode's plugins/cb-guard.js (XDG_CONFIG_HOME or ~/.config). Every hook runs the installed copy,
+// (kept out of git), OpenCode's plugins/cb-guard.js for 1.x and cb-guard-v2.js for 2.x (XDG_CONFIG_HOME or ~/.config). Every hook runs the installed copy,
 // never the checkout, so a git pull cannot change a live guard unprobed. Other hook entries are never touched, and a
 // second run changes nothing. Seats never write these files (the fence keeps them out); a person runs this.
 import { spawnSync } from 'node:child_process';
@@ -113,6 +113,7 @@ const AGENT_PROBES = {
       { name: 'opencode: git reset --hard blocks', input: { tool: 'bash', args: { command: 'git reset --hard' }, sessionID: 'probe' }, want: DANGER },
       { name: 'opencode: in a seat, a tool the shim does not know blocks', input: { tool: 'cb_unlisted_tool_probe', args: {}, sessionID: 'probe' }, env: { CB_ROLE: 'builder', CB_AGENT: 'opencode' }, want: 'Blocked: ' },
       { name: 'opencode: outside a seat, a tool the shim does not know passes', input: { tool: 'cb_unlisted_tool_probe', args: {}, sessionID: 'probe' }, want: 'allow' },
+      { name: 'opencode 2.x: git reset --hard in its shell tool blocks', input: { tool: 'shell', args: { command: 'git reset --hard' }, sessionID: 'probe' }, want: DANGER },
       { name: 'opencode: malformed input blocks', raw: 'not json', want: 'Blocked: ' },
     ],
   },
@@ -371,12 +372,15 @@ function writeIfChanged(file, text, changed) {
 const runsFile = (command, file, win, home) => typeof command === 'string' && words(command).some((w) => hookPath(w, win, home) === hookPath(fwd(file), win, home));
 const namesShim = (command, shim) => typeof command === 'string' && words(command).some((w) => basename(fwd(w)).toLowerCase() === shim);
 const codexDir = (env, home) => env.CODEX_HOME || join(home, '.codex');
-const opencodePlugin = (env, home) => join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'plugins', 'cb-guard.js');
+// OpenCode loads every file in its plugins folder. 1.x runs cb-guard.js; 2.x never does, and runs cb-guard-v2.js (#4817)
+const OPENCODE_PLUGINS = { 'cb-guard.js': 'opencode-plugin.js', 'cb-guard-v2.js': 'opencode-plugin-v2.js' };
+const opencodePlugins = (env, home) => Object.entries(OPENCODE_PLUGINS)
+  .map(([name, template]) => ({ file: join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'plugins', name), template }));
 const codexCommand = (node, shim) => `${quoteIfSpaced(fwd(node))} ${quoteIfSpaced(fwd(shim))}`;
 // agy runs hooks through cmd /c on Windows: forward slashes, no quotes, and node from PATH (a missing node is a deny there)
 const agyCommand = (shim) => `node ${fwd(shim)}`;
-const renderPlugin = (node, shim) => {
-  const tpl = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'opencode-plugin.js'), 'utf8');
+const renderPlugin = (template, node, shim) => {
+  const tpl = readFileSync(join(dirname(fileURLToPath(import.meta.url)), template), 'utf8');
   return tpl.replace('"__CB_NODE__"', JSON.stringify(fwd(node))).replace('"__CB_SHIM__"', JSON.stringify(fwd(shim)));
 };
 
@@ -462,7 +466,7 @@ export function wireAgents(targetDir, { agents = [], seats = [], env = process.e
     }
   })();
 
-  if (agents.includes('opencode')) writeIfChanged(opencodePlugin(env, home), renderPlugin(node, join(target, AGENT_SHIMS.opencode)), changed);
+  if (agents.includes('opencode')) for (const p of opencodePlugins(env, home)) writeIfChanged(p.file, renderPlugin(p.template, node, join(target, AGENT_SHIMS.opencode)), changed);
   return { ok: problems.length === 0, changed, problems };
 }
 
@@ -499,11 +503,13 @@ export function checkAgentWiring(targetDir, { agents = [], seats = [], env = pro
     }
   }
   if (agents.includes('opencode')) {
-    const file = opencodePlugin(env, home), shim = join(target, AGENT_SHIMS.opencode);
-    const text = readText(file);
-    if (text === null) problems.push(`opencode: no ${file}: ${fix('opencode')}`);
-    else if (text !== renderPlugin(node, shim)) problems.push(`opencode: ${file} is not the plugin this checkout writes for ${shim}: ${fix('opencode')}`);
-    else probeThrough('opencode', shim);
+    const shim = join(target, AGENT_SHIMS.opencode), before = problems.length;
+    for (const { file, template } of opencodePlugins(env, home)) {
+      const text = readText(file);
+      if (text === null) problems.push(`opencode: no ${file}: ${fix('opencode')}`);
+      else if (text !== renderPlugin(template, node, shim)) problems.push(`opencode: ${file} is not the plugin this checkout writes for ${shim}: ${fix('opencode')}`);
+    }
+    if (problems.length === before) probeThrough('opencode', shim);
   }
   return { ok: problems.length === 0, problems, probes };
 }
