@@ -1525,11 +1525,50 @@ function blankSearchPatterns(text) {
   endCommand();
   return parts.join('');
 }
-function freshEnvOne(command, hosts, role) {
+// #4741: the strings a command runs as commands: a POSIX shell's -c string, eval's and iex's arguments, what follows cmd /c or
+// pwsh -c (any prefix of -Command), and rg's --pre program. Quoted or not, each is walked like the command line itself;
+// without a | or ; inside, the segment walk saw such a string as one word. Nested past CODE_DEPTH, it blocks.
+const CODE_CARRIER = /sh|eval|iex|invoke-expression|cmd|\brg\b/i;
+const CODE_DEPTH = 4;
+const SHELL_PIECE = /\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])|([^'"\\$]+|[\s\S])/g;
+// a word as the shell hands it on: quotes gone, 's'"udo x" joined
+const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, plain) => single ?? double?.replace(/\\(["\\$`])/g, '$1') ?? escaped ?? plain);
+function codeStrings(name, args) {
+  const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
+  if (name === 'eval' || name === 'iex' || name === 'invoke-expression') return rest(0);
+  if (name === 'cmd') {
+    for (let k = 0; k < args.length; k++) {
+      const m = /^\/(?:[a-z]?\/)*[ck](.*)$/i.exec(args[k]);
+      if (m) return m[1] ? [[m[1], ...args.slice(k + 1)].map(shellValue).join(' ')] : rest(k + 1);
+    }
+    return [];
+  }
+  if (name === 'pwsh' || name === 'powershell') {
+    const k = args.findIndex((x) => /^(?:--?|\/)c/i.test(x) && '-command'.startsWith(`-${x.replace(/^(?:--?|\/)/, '').toLowerCase()}`));
+    return k < 0 ? [] : rest(k + 1);
+  }
+  if (name === 'rg') {
+    return args.flatMap((x, k) => {
+      const m = /^--pre(?:=(.*))?$/.exec(shellValue(x));
+      return m ? [m[1] ?? shellValue(args[k + 1] ?? '')] : [];
+    });
+  }
+  if (!SCRIPT_SHELLS.has(name)) return [];
+  let runs = false;
+  for (let k = 0; k < args.length; k++) {
+    const x = shellValue(args[k]);
+    if (x === '--') return runs && k + 1 < args.length ? [shellValue(args[k + 1])] : [];
+    if (!/^[-+]./.test(x)) return runs ? [x] : []; // the first operand: the command after -c, else a script file
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(x)) runs = true;
+    if (/^(?:[-+][A-Za-z]*[oO]|--rcfile|--init-file)$/.test(x)) k++;
+  }
+  return [];
+}
+function freshEnvOne(command, hosts, role, depth = 0) {
   const raw = stripMessages(String(command ?? ''));
   for (const seg of blankSearchPatterns(raw).match(SEGMENTS) ?? []) {
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
-    if (!FRESH_NAME.test(seg)) continue;
+    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) continue;
     const w = seg.match(WORD) ?? [];
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
@@ -1541,6 +1580,11 @@ function freshEnvOne(command, hosts, role) {
       const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role)
         ?? (name === 'at' && w.slice(0, i).some((x) => cmdName(x) === 'xargs') ? name : null);
       if (why) return FRESH_ENV(why);
+      for (const code of codeStrings(name, w.slice(i + 1))) {
+        if (depth >= CODE_DEPTH) return FRESH_ENV('a command string nested too deep to read');
+        const inner = freshEnvOne(code, hosts, role, depth + 1);
+        if (inner) return inner;
+      }
       cmd = false;
     }
   }

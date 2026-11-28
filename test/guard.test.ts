@@ -434,7 +434,6 @@ const searchFine = [
   'cd cli && LC_ALL=C grep -E "a|batch|b" relay.ts | head -5', 'cb bug "guard: blocked" -b "the search was grep -E \\"a|batch|b\\" cli/relay.ts" -l guard',
   `python3 - <<'EOF'\nimport re\nat = 1\nx = re.compile('foo|at|bar')\nEOF`,
 ];
-// A lone quoted command after bash -c, sh -c, eval or rg --pre is not pinned: this rule never walked it (main allows it too)
 const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$(echo x | batch)" f', 'grep `true; batch -f j` f',
   "bash <<'EOF'\nat now\nEOF", "bash -c 'true | batch'", 'echo "see grep " ; sudo codex exec x "y"', "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
   "git grep -O'x;batch' y", "alias grep=eval; grep 'true;batch'", "grep() { eval \"$1\"; }; grep 'true;batch'",
@@ -443,6 +442,25 @@ const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$
 test('#4736: a quoted search pattern or bug body naming a launcher passes; the same word where something runs it is blocked', () => {
   for (const c of searchFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of searchStillRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
+});
+
+// #4741: the string a shell is given to run (bash -c, cmd /c, pwsh -c, eval, rg --pre) is a command, quoted or not. With
+// no | or ; inside it, the segment walk saw one word and never read it
+const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
+  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
+  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
+  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
+  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval echo hi', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"'];
+const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
+  'bash deploy.sh -c "sudo codex"', 'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log'];
+test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
+  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
+  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  // the lead keeps its herdr prompt and deploy ssh inside a string too, and nothing else
+  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'ssh "$VPS" uptime'`, role: 'lead' }), { allow: true });
+  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
 });
 
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
@@ -977,6 +995,13 @@ test('long commands stay fast', () => {
     ['search blanking, a 200 KB option word, as a builder', asBuilder('grep -' + 'a'.repeat(200000) + ' x')],
     ['at, 200 KB of at segments, as a builder', asBuilder(kb200('at -m x$; at < 0; '))],
     ['at, a 200 KB time word, as a builder', asBuilder('at ' + 'a'.repeat(200000))],
+    // #4741: a code string is walked at most CODE_DEPTH deep, and its words are read once per level
+    ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
+    ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
+    ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
+    ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
+    ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
