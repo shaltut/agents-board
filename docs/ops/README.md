@@ -80,7 +80,8 @@ signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ah
 - Passwords: bcrypt (pgcrypto, cost 10), at least 8 characters. The cookie `cb_user` is HttpOnly, SameSite=Lax, and
   Secure when the proxy says `X-Forwarded-Proto: https`. 5 wrong passwords for one name from one address lock that
   pair for 2 minutes (the address is the last X-Forwarded-For hop, the one the proxy adds; `cf-connecting-ip` only
-  with `CB_BEHIND_CLOUDFLARE=1`, since a client reaching nginx directly could send it).
+  with `CB_BEHIND_CLOUDFLARE=1`, since a client reaching nginx directly could send it). A proxy told to take the
+  client address from a header the client sends breaks this: [check it](maintain.md#cut-over-workers-off-the-database-3222-s7).
 - CSRF: a POST whose `Origin` is not the board's own `Host` is refused. The proxy must pass `Host` through unchanged.
 - An admin's token (their cookie) is never shown or sent anywhere; a member's link is their token, shown only on the
   Users page, to admins.

@@ -453,6 +453,28 @@ supervisor reach the board through its API with a per-machine key. **Every step 
     [Users](#users)) empties the column the old server signs people in by.
   - **Stop the old `cb supervise` before you start the new one** (#4895). The old one holds a database lock the new one
     does not look at, so both would run ([Supervisor](#supervisor)).
+- **Check which client address the public proxy hands the board.** The limits on failed sign-ins, the password login
+  and the workers' keys alike, count per address: the last `X-Forwarded-For` entry the proxy adds. Nginx Proxy Manager's
+  stock `nginx.conf` takes the client address from `X-Real-IP` when a request comes from a range it trusts, Cloudflare's
+  among them. Cloudflare does not set that header, so one a client sends could arrive as its address, a new one on every
+  try, and no limit would hold. Look, then try it through the public name with an address from a range kept for
+  documentation (on the proxy's host; `<proxy>` is its container):
+
+  ```bash
+  docker exec <proxy> nginx -T 2>/dev/null | grep -n "real_ip\|include .*ip_ranges"
+  curl -s -H "X-Real-IP: 192.0.2.123" https://<public url>/healthz
+  docker exec <proxy> sh -c 'grep -h "192.0.2.123" /data/logs/*access.log | tail -3'
+  ```
+
+  A log line naming `192.0.2.123` as the client means the proxy believed it. No line is a pass only if the log does show
+  your `/healthz` request, under another address. If it believed it, fix it before the cut-over, either way:
+  - Let only Cloudflare's ranges reach the proxy's ports 80 and 443, **then** set `CB_BEHIND_CLOUDFLARE=1` in
+    `deploy/.env` and `dc up -d board`: the board then reads `cf-connecting-ip`, which Cloudflare writes itself. Set the
+    rule at the cloud provider's firewall (a `ufw` rule does not cover a port Docker publishes). It holds for every
+    site on that proxy, so each must come through Cloudflare. A tunnel in place of the open ports does the same.
+  - Or stop the proxy reading `X-Real-IP` for the board's host, leave `CB_BEHIND_CLOUDFLARE=0`, and run the check again.
+
+  Never set `1` while anything but Cloudflare can reach those ports.
 - Every machine has its keys installed, and `cb key check` passes for each kind on each machine.
 - A fresh backup: `sudo /opt/claude-board/deploy/backup.sh`. Keep that file: it is the board as it was. It holds client
   work, and until step 6 the sign-in values in older backups still matter.

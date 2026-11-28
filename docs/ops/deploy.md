@@ -73,10 +73,13 @@ today `board.example.com` points at the PC's Cloudflare tunnel, and one hostname
 
 1. **DNS:** in Cloudflare (the `example.com` zone), replace the `board` record (today a CNAME to the tunnel) with an
    A record to vps2's public IP, set up like the other vps2 sites (`blog`, `uptime`: proxied, orange cloud; checked
-   2026-11-12). Leave `CB_BEHIND_CLOUDFLARE=0`: the board then counts failed sign-ins per Cloudflare edge address,
-   which is stricter (rarely, someone failing on your name through the same edge can lock it for 2 minutes) but
-   can't be bypassed. `1` is only safe if vps2's 80/443 accept Cloudflare's addresses alone; otherwise anyone reaching
-   vps2's IP directly could send a made-up `cf-connecting-ip` and get a fresh count on every try.
+   2026-11-12). With `CB_BEHIND_CLOUDFLARE=0` the board counts failed sign-ins per address the proxy hands it, meant to
+   be the Cloudflare edge's. **That holds only if the proxy does not take the client address from a header the client
+   sends:** NPM's stock config reads `X-Real-IP` on requests from Cloudflare, and then the limit can be dodged. Check it
+   with the steps in [maintain.md](maintain.md#cut-over-workers-off-the-database-3222-s7), "Before the day". When it
+   does hold, `0` is strict (rarely, someone failing on your name through the same edge can lock it for 2 minutes). `1`
+   is only safe if vps2's 80/443 accept Cloudflare's addresses alone; otherwise anyone reaching vps2's IP directly
+   could send a made-up `cf-connecting-ip` and get a fresh count on every try.
 2. **NPM's admin page** listens on the VPS's loopback: from the PC, `ssh -L 8181:127.0.0.1:81 vps2`, then open
    http://localhost:8181 and sign in (Ahmed's NPM account).
 3. **Hosts → Proxy Hosts → Add Proxy Host:**
