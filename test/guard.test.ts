@@ -1288,6 +1288,12 @@ test('long commands stay fast', () => {
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, (again: number) => unknown][] = [
+    // #4823: the stdin-fed walk
+    ['#4823, 200 KB of quoted stages piped into sh', asBuilder(kb200("echo 'a sudo' | ") + 'sh')],
+    ['#4823, 14,000 different quoted words in one stage piped into sh', asBuilder(Array.from({ length: 14000 }, (_, i) => `'at ${i}'`).join(' ') + ' | sh')],
+    ['#4823, 200 KB of segments before a pipe into sh', asBuilder(kb200("echo 'x at';") + 'ls | sh')],
+    ['#4823, 200 KB of here-strings', asBuilder(kb200("bash <<< 'at x';"))],
+    ['#4823, a pipe and then 200 KB of open braces', asBuilder('echo at |' + kb200(' {') + ' x | sh')],
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
     // earlier < feed is a running flag, not a look-back from every by-name lookup
     // secret files (#4347): names everywhere, with and without a reader, and one 200 KB word ending in .key
@@ -2145,5 +2151,24 @@ test('#4773: a text-only edit by an interpreter heredoc stays refused, and the r
     const r = evaluate({ tool: 'shell', command: edit(text), role: 'builder' });
     assert.equal(r.kind, 'role', text);
     assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
+  }
+});
+
+// every string here is only asked of the guard, never run
+test('#4823: a command string fed to a shell on stdin, and a launcher after !, are judged', () => {
+  const blocked = ["bash <<< 'at now < job'", "bash -s <<< 'sudo -u bob claude'", 'sh<<<"sudo id"', "cat <<< 'sudo id' | bash",
+    "echo 'at now < job' | bash", "echo 'sudo -u bob claude' | sh", 'echo sudo -u bob claude | sh', "printf '%s\n' 'sudo id' | sh", "printf 'cd x\nsudo id\n' | sh",
+    "printf 'cd x\nat now\n' | sh", "'sudo id' | iex", "echo 'sudo id' | pwsh -c -", "echo 'sudo id' |& sh", "echo 'sudo id' | tee log | sh", "echo 'sudo id' 2>&1 | bash",
+    "echo 'sudo id' | env bash", "echo 'sudo id' |\nbash", "echo 'sudo id' | \n bash", "(echo 'sudo id') | sh", "(echo 'sudo id'; echo ls) | sh", "{ echo 'sudo id'; } | sh",
+    "echo 'sudo id' ${X} | sh", "echo 'sudo id' | { bash; }", "bash -c \"echo 'sudo id' | sh\"",
+    '! sudo -u bob claude', '! batch < j', '! at now < job', 'ls && ! sudo id', '! ! sudo id', 'coproc sudo id'];
+  const reads = ["echo 'sudo is not allowed here'", "echo 'run sudo id by hand' >> notes.md", "grep -r 'sudo id' docs | head", "echo 'sudo id' | grep sudo",
+    "git log --grep 'sudo id' | cat", '! grep -q sudo notes.md', "if grep -q 'sudo id' f; then ls; fi", "echo 'sudo id' || bash x.sh", "echo 'sudo id'; ls | head",
+    "python -c 'print(1)' <<< 'sudo id'", "wc -c <<< 'sudo id'", "echo 'do not use sudo' | sh", "ls | bash x.sh; echo 'sudo id'",
+    // a search for the word sh runs no shell
+    "echo 'at the end'; git diff --stat | grep sh", "echo 'at the end'; ls | rg bash", "ls | findstr cmd; echo 'sudo id'"];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const command of blocked) assert.match(evaluate({ tool: 'shell', command, role }).reason ?? '', /fresh environment/, `${role}: ${JSON.stringify(command)}`);
+    for (const command of reads) assert.deepEqual(evaluate({ tool: 'shell', command, role }), { allow: true }, `${role}: ${JSON.stringify(command)}`);
   }
 });

@@ -1733,7 +1733,7 @@ function seatVarChangeOne(command) {
 // an interpreter runs: a child given an env of its own (env: {} or env= without process.env or os.environ, clearEnv,
 // unsetenv_others, os.exec*e and os.spawn*e), a delete or pop of a name the guard cannot read, EnvironmentVariables.Clear().
 const FRESH_WRAP = new Set(['nohup', 'time', 'nice', 'command', 'builtin', 'exec', 'xargs', 'setsid', 'stdbuf', 'ionice', 'then', 'do', 'else', 'if', 'while',
-  'until', '!', '{', 'call', 'start', 'start-process', 'saps', 'busybox']);
+  'until', '!', '{', 'call', 'start', 'start-process', 'saps', 'busybox', 'coproc']);
 // a cheap first test: a segment that names none of the launchers is not walked word by word
 const FRESH_NAME = /sudo|doas|su\b|runuser|pkexec|runas|psexec|ssh|mosh|systemd-run|\bat\b|batch|crontab|launchctl|wsl|schtasks|scheduled|explorer|tmux|screen|herdr/i;
 const OTHER_USER = new Set(['sudo', 'doas', 'su', 'runuser', 'pkexec', 'runas', 'psexec', 'psexec64']);
@@ -2049,6 +2049,38 @@ function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set
   return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
     ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
+// #4823: the words that reach a shell on its stdin. A segment before a stage that is piped into a shell (or iex) feeds it,
+// whatever lies between (tee, a ( ) or { } group): failing closed costs only a quoted line that starts with a launcher.
+// So does a here-string in a stage that names a shell. Returns (segment index) -> fed. One pass over the words
+const MORE_STDIN_SHELLS = new Set(['fish', 'ash', 'mksh']);
+// a stage that starts with one of these searches its input for the word sh: it runs none of it (rg --pre runs files)
+const SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'findstr', 'select-string']);
+const PIPE_END = /(?<!\|)\|&?[\s{}]*$/;
+function stdinFed(raw, segments) {
+  const runs = segments.map((m) => {
+    const names = (m[0].replace(/[<>]+/g, ' ').match(WORD) ?? []).map(cmdName);
+    return !SEARCHES.has(names[0]) && names.some((n) => PIPE_RUNNERS.has(n) || MORE_STDIN_SHELLS.has(n));
+  });
+  let lastPiped = 0, pending = false, end = 0;
+  for (const [k, m] of segments.entries()) {
+    pending ||= PIPE_END.test(raw.slice(end, m.index));
+    end = m.index + m[0].length;
+    if (!m[0].trim()) continue;
+    if (pending && runs[k]) lastPiped = k;
+    pending &&= /[<>]$/.test(m[0]); // the & of 2>&1 cuts a stage in two: its tail is the same stage
+  }
+  return (k) => k < lastPiped || (runs[k] && segments[k][0].includes('<<<'));
+}
+// the command lines a fed segment hands over: each quoted word, and the words echo or printf print, as one line. A \n
+// written for printf or echo -e ends a line
+const FEED_PRINTERS = new Set(['echo', 'printf', 'write-output', 'write-host']);
+function fedLines(seg) {
+  const w = seg.replace(/<<</g, ' <<< ').match(GIT_TOKEN) ?? [];
+  const lines = new Set(w.flatMap((x) => (/["']/.test(x) ? [unquote(x)] : [])));
+  const at = w.findIndex((x) => FEED_PRINTERS.has(cmdName(x)));
+  if (at >= 0) lines.add(w.slice(at + 1).map(unquote).join(' '));
+  return [...lines].join('\n').replace(/\\n/g, '\n');
+}
 // flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
 // A string it follows gets the second reading only, so the readings never multiply from one level to the next
 function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
@@ -2059,9 +2091,23 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
   const writes = varWrites(blankComments(stripped));
   let written = 0;
-  for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
+  const segments = [...raw.matchAll(flat ? SEGMENTS : SEGMENT)];
+  const fed = raw.includes('|') || raw.includes('<<<') ? stdinFed(raw, segments) : () => false;
+  const followWith = (text) => {
+    const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
+    if (walked.has(key)) return null;
+    walked.add(key);
+    return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
+  };
+  for (const [k, segment] of segments.entries()) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
+    if (fed(k)) {
+      while (written < writes.length && writes[written].at <= segment.index) applyWrite(vars, writes[written++]);
+      const text = fedLines(seg);
+      const why = text && text !== seg ? followWith(text) : null;
+      if (why) return why;
+    }
     if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
       // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
       const plain = unhide(seg.replace(/["']/g, ''));
@@ -2072,12 +2118,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
     const u = w.map(unquote), names = w.map(cmdName);
     const runsQuote = runnerArg(w, u, names, false);
     const cut = flat && leftOpen(seg);
-    const follow = (text) => {
-      const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
-      if (walked.has(key)) return null;
-      walked.add(key);
-      return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
-    };
+    const follow = followWith;
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
@@ -2090,6 +2131,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       const originalName = cmdName(w[i]), name = FRESH_NAME.test(originalName) ? originalName : cmdName(unhide(unquote(w[i])));
       if (!cmd) continue;
       if (ASSIGNMENT.test(u[i])) continue;
+      if (u[i] === '!') continue; // cmdName takes the ! off, so the set below never saw it (#4823)
       if (FRESH_WRAP.has(name)) {
         // Wrapper option values (xargs -a file sudo) are not command words.
         while (u[i + 1]?.startsWith('-')) {
