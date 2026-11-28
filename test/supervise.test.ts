@@ -157,12 +157,9 @@ test('#4806: with no stages the supervisor restores a down holder and closes a d
   const h = fakeHerdr();
   h.live.set('sv-b1-macbook', 'w1:p7'); h.live.set('sv-b3-macbook', 'w1:p8');
   const out = await tick(deps(sup, h.run));
-  assert.ok(out.some((l) => l.endsWith('restored sv-B2@macbook')), out.join('
-'));
-  assert.ok(out.includes('closed sv-B3@macbook'), out.join('
-'));
-  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('
-'));
+  assert.ok(out.some((l) => l.endsWith('restored sv-B2@macbook')), out.join(String.fromCharCode(10)));
+  assert.ok(out.includes('closed sv-B3@macbook'), out.join(String.fromCharCode(10)));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join(String.fromCharCode(10)));
   assert.equal((await events(sql, 'start')).length, 0);
 });
 
