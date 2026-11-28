@@ -311,12 +311,15 @@ test('a shim copied without core.mjs, or beside a broken one, still denies', () 
     writeFileSync(join(dir, 'broken', 'core.mjs'), 'export const x = ;\n');
     assert.match(runHook(shell('ls'), seat(), join(dir, 'broken', 'shim-agy.mjs')).reason ?? '', /^Blocked: guard failed to load core/);
     mkdirSync(join(dir, 'mixed')); copyFileSync(SHIM, join(dir, 'mixed', 'shim-agy.mjs'));
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => { throw new Error("boom"); };\n');
+    const hosts = 'export const localHosts = () => [];\n'; // the shim asks core for these before evaluate (#4707)
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => { throw new Error("boom"); };\n');
     const mixed = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
     assert.equal(mixed.decision, 'deny');
     assert.match(mixed.reason ?? '', /^Blocked: guard error \(boom\)/);
-    writeFileSync(join(dir, 'mixed', 'core.mjs'), 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
-    assert.equal(runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs')).decision, 'deny');
+    writeFileSync(join(dir, 'mixed', 'core.mjs'), hosts + 'export const evaluate = () => undefined;\n'); // no verdict is not an allow
+    const silent = runHook(shell('ls'), seat(), join(dir, 'mixed', 'shim-agy.mjs'));
+    assert.equal(silent.decision, 'deny');
+    assert.match(silent.reason ?? '', /gave no decision/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
