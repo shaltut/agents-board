@@ -69,7 +69,8 @@ flowchart LR
 - **The relay** (`cli/relay.ts`) is one process per seat. It `LISTEN`s on the board and pushes answers and messages
   into the running agent session through that agent's adapter.
 - **The server** (`server/main.ts`) serves the web UI, the HTTP API (including `/api/rpc/<function>`), live updates
-  over server-sent events and `/healthz`. It also runs the Telegram poller and a GitHub watch.
+  over server-sent events and `/healthz`. It also runs the Telegram poller and a GitHub watch. It serves the **worker
+  API** (`/w/v1`, a key per machine; no worker uses it yet: [docs/ops](docs/ops/README.md#who-can-do-what)).
 - **The web dashboard** (`web/`, React + Vite) and **Telegram** are how the owner reads questions and answers them.
   Teammates can sign in with a member role and see only what is handed to them.
 - **Squads** are a lead plus role seats (architect, owner, builder, reviewer, qa, investigator) described by a squad

@@ -19,6 +19,9 @@ const CALLED = [...new Set([
   ...named(read('cli/cb.ts'), /(?<![\w.])call\(/g),
   ...named(read('cli/squad-up.ts'), /\bcallFn\(/g),
   ...named(read('cli/squad-trust.ts'), /\bcallFn\(/g),
+  // the runner's three files name theirs through board(), which is call() on the runner's own connection
+  ...['cli/runner.ts', 'cli/runner-board.ts', 'cli/runner-job.ts'].flatMap((f) => named(read(f), /(?<![\w.])board\(/g)),
+  ...named(read('cli/triage.ts'), /(?<![\w.])call\(/g),
 ])].sort();
 
 const returnsRows = (fn: string) => {

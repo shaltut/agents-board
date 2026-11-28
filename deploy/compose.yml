@@ -58,6 +58,7 @@ services:
       GH_TOKEN: ${GH_TOKEN:-}
       CB_BEHIND_CLOUDFLARE: ${CB_BEHIND_CLOUDFLARE:-0}
       CB_TRUST_LOCAL: "0"
+      CB_API_RATE: ${CB_API_RATE:-}
     # gh's login (`dc exec board gh auth login`) lives here, so it survives rebuilds
     volumes:
       - ghconfig:/home/node/.config/gh

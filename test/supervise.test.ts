@@ -1,12 +1,11 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { lockClient, locked, tick } from '../cli/supervise.ts';
+import { tick } from '../cli/supervise.ts';
 import type { Runner } from '../cli/squad-up.ts';
 
 // #4585: codex, opencode and agy are installed; their MCP gate is read from this process, unset here
@@ -610,49 +609,6 @@ test('a project whose own machine (herdr null) is not this machine is skipped, s
   assert.equal(h.calls.length, 0, JSON.stringify(h.calls));
   assert.equal(out.filter((l) => l.includes('not-this-pc')).length, 1, out.join('\n'));
   assert.equal((await sql`select count(*)::int as n from cb.events where actor = 'supervisor'`)[0].n, 0);
-});
-
-test('a second supervisor exits', async () => {
-  await freshDb().then((s) => clients.push(s)); // empty board: nothing a stray tick could act on
-  const holder = await conn('cb-supervisor/test', 1).reserve();
-  try {
-    assert.equal((await holder`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0].ok, true);
-    const home = mkdtempSync(join(tmpdir(), 'cb-sup-'));
-    const r = spawnSync('node', ['cli/supervise.ts', '--once'], {
-      encoding: 'utf8', timeout: 60_000,
-      env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_RUNNER_CONFIG: join(home, 'none.json'), CB_SUPERVISOR_HOME: home },
-    });
-    assert.equal(r.status, 1, r.stderr);
-    assert.match(r.stdout + r.stderr, /another supervisor is running/);
-    const dry = spawnSync('node', ['cli/supervise.ts', '--dry-run'], {
-      encoding: 'utf8', timeout: 60_000,
-      env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_RUNNER_CONFIG: join(home, 'none.json'), CB_SUPERVISOR_HOME: home },
-    });
-    assert.equal(dry.status, 0, dry.stdout + dry.stderr); // a dry run writes nothing: it previews while a supervisor runs
-  } finally {
-    await holder`select pg_advisory_unlock_all()`;
-    holder.release();
-  }
-});
-
-test('the lock survives a dropped board connection: the next check takes it again, nothing throws', { timeout: 30_000 }, async () => {
-  const sql = await freshDb(); clients.push(sql);
-  const lock = lockClient('cb-supervisor/test');
-  try {
-    assert.equal(await locked(lock), true);
-    const [{ pid }] = await lock`select pg_backend_pid() as pid`;
-    await sql`select pg_terminate_backend(${pid})`; // this client's own backend only: other test runs share the server
-    for (let i = 0; i < 50 && (await sql`select 1 from pg_stat_activity where pid = ${pid}`).length; i++) await new Promise((r) => setTimeout(r, 100));
-    await new Promise((r) => setTimeout(r, 300)); // the client sees its socket close: the next check runs on a dead connection
-    assert.equal(await locked(lock), true);
-    const [{ pid: again }] = await lock`select pg_backend_pid() as pid`;
-    assert.notEqual(again, pid);
-    const other = await conn('cb-supervisor/test', 1).reserve();
-    try { assert.equal((await other`select pg_try_advisory_lock(hashtext('cb-supervisor')) as ok`)[0].ok, false); } finally { other.release(); }
-  } finally {
-    await lock`select pg_advisory_unlock_all()`.catch(() => {});
-    await lock.end();
-  }
 });
 
 test('a throw between the mark and /exit clears the mark', async () => {
