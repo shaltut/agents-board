@@ -90,17 +90,27 @@ test('over the API an answer is marked delivered only to who it goes to', async 
   assert.equal(await status(sql, id), 'answered');
 });
 
-test('who an answer goes to: the seat now in the pane it replies to, that pane\'s own name, or the asker', async () => {
+test('an answer that replies to a pane is not the asker\'s to mark, from its machine or any other', async () => {
+  const { sql, a, b } = await board();
+  const id = await answered(sql, { machine: 'boxb', pane: 'p1' }); // asked by W1@boxa; the answer goes to boxb's pane
+  const [code, said] = await outcome(await call(a, 'answer_delivered', mark(id, 'W1@boxa')));
+  assert.equal(code, 400, said);
+  assert.match(said, /answer goes to/);
+  assert.equal(await status(sql, id), 'answered');
+  assert.equal((await call(b, 'answer_delivered', mark(id, 'W1@boxb'))).status, 200);
+});
+
+test('who an answer goes to: the seat now in the pane it replies to or that pane\'s own name; with no pane, the asker', async () => {
   const { sql } = await board();
   const pane = { machine: 'boxa', pane: 'p2' };
   const deliver = (id: string, to: string | null) => sql`select cb.answer_delivered(${id}, ${to}, 'relay')`;
-  for (const to of ['W2@boxa', 'p2@boxa', 'W1@boxa']) {
-    const id = await answered(sql, pane);
+  for (const [replyTo, to] of [[pane, 'W2@boxa'], [pane, 'p2@boxa'], [{ machine: 'boxa', pane: '' }, 'W1@boxa']] as const) {
+    const id = await answered(sql, replyTo);
     await deliver(id, to);
     assert.equal(await status(sql, id), 'delivered', to);
   }
   const id = await answered(sql, pane);
-  for (const to of ['W1@boxb', 'p1@boxa']) await assert.rejects(deliver(id, to), /answer goes to/, to);
+  for (const to of ['W1@boxa', 'W1@boxb', 'p1@boxa']) await assert.rejects(deliver(id, to), /answer goes to/, to);
   await sql`select cb.iam('boxa', 'p2', 'W3@boxa', 'demo')`; // the pane has another seat now
   await assert.rejects(deliver(id, 'W2@boxa'), /answer goes to/);
   await deliver(id, 'W3@boxa');
@@ -115,7 +125,7 @@ test('a send-back is marked told only for who it goes to', async () => {
   const { sql, a } = await board();
   await sql`select cb.ask(project => 'demo', body => 'which one?', actor => 'W1@boxa')`;
   const [{ id }] = await sql`select max(id) as id from cb.questions`;
-  await sql`select cb.send_back(${String(id)}, 'unclear')`;
+  await sql`select cb.send_back(${String(id)}, 'clarify')`;
   const told = async () => (await sql`select sent_back ->> 'delivered_to' as to from cb.questions where id = ${id}`)[0].to;
   const [code] = await outcome(await call(a, 'answer_delivered', mark(String(id), 'W2@boxa')));
   assert.equal(code, 400);
