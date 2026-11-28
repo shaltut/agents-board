@@ -6751,10 +6751,11 @@ create function cb._quota_noted(who text, what text, bound timestamptz) returns 
                          coalesce((select max(x.at) from cb.events x where x.actor = 'supervisor' and x.data ->> 'what' = 'switch'
                                      and x.data ->> 'session' = who), '-infinity')))
 $$;
--- #4787: whether a project's stopped seats are moved to their backups: Ahmed's switch on, in a squad the supervisor runs
+-- #4787: whether a project's stopped seats are moved to their backups: Ahmed's switch on, in a squad the supervisor
+-- runs, with stages or without (#4877, Q3232)
 create function cb._switching(p text) returns boolean language sql stable as $$
   select coalesce((select pr.auto_backup and pr.squad ->> 'supervise' = 'true' from cb.projects pr where pr.slug = p), false)
-     and coalesce(cb._pipeline(p) and cb._live(p), false)
+     and coalesce(cb._live(p), false)
 $$;
 -- #4787: whether a seat may be closed with the cards it holds, to start again on its backup: its quota stop stands
 create function cb._may_switch(who text) returns boolean language sql stable as $$
