@@ -200,6 +200,38 @@ export function patchRole(sq: Squad, role: Role, patch: Partial<RoleSpec>, defau
   return next
 }
 
+/** The squad with one seat set differently (#4763). A model or effort given empty goes: the seat takes the role's. A new
+ *  agent drops the effort; back on the role's agent the model goes too, and on another agent the seat names its own ('' until
+ *  one is picked, which checkSquad flags). A seat with nothing of its own is not kept: squad_set refuses an empty one. */
+export function patchSeat(sq: Squad, role: Role, key: string, patch: SeatSpec, defaults: Record<string, string>): Squad {
+  const next = clone(sq)
+  const spec = next.roles[role]
+  if (!spec) return next
+  const roleAgent = spec.agent ?? 'claude'
+  const seat: SeatSpec = { ...spec.seats?.[key] }
+  if ('agent' in patch) {
+    delete seat.effort
+    const agent = patch.agent || roleAgent
+    if (agent === roleAgent) { delete seat.agent; delete seat.model }
+    else { seat.agent = agent; seat.model = agent === 'claude' ? defaults[role] ?? 'sonnet' : '' }
+  }
+  if ('model' in patch) { if (patch.model || seat.agent) seat.model = patch.model ?? ''; else delete seat.model }
+  if ('effort' in patch) { if (patch.effort) seat.effort = patch.effort; else delete seat.effort }
+  const all = { ...spec.seats }
+  if (Object.keys(seat).length) all[key] = seat; else delete all[key]
+  if (Object.keys(all).length) spec.seats = all; else delete spec.seats
+  return next
+}
+
+/** What a seat's empty choices say. model undefined: the seat is on another agent, so it must pick a model. */
+export function seatBlank(role: RoleSpec, seat: SeatSpec): { model: string | undefined; effort: string } {
+  const same = (seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude')
+  return {
+    model: same ? `Same as the role: ${modelLabel(role.model)}` : undefined,
+    effort: same && role.effort ? `Same as the role: ${role.effort} effort` : 'Default effort',
+  }
+}
+
 /** The squad with one area added or removed (with repos an area names its repo); removing the last turns owners off. */
 export function setAreas(sq: Squad, areas: Area[]): Squad {
   const next = clone(sq)
