@@ -2074,7 +2074,7 @@ test('#4836: every other filled pair stays refused', () => {
     'Get-Date > "$name`.txt"$x`.y',
     // a pair beside an exempt target
     '$G $S > "$name`.txt"', 'Get-Date > "$name`.txt" ; $G "$a$b" origin feat/x',
-    // what three reviews of a read-the-signals rule found; the lead ruled it out
+    // what a rule that read the line for push signals let through (the lead's reviews, which ruled it out)
     '$G $(git remote | head -1) feat:main', '$G alias.p=$P p -f origin feat', '$G: $(echo origin feat)',
     '$G `git remote | head -1` feat:main', '$G $(git config x.y) origin feat'];
   for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
