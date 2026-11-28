@@ -44,6 +44,10 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   // argument must not be listed here (test/worker-api.test.ts checks). The two reads give counts and cancelled ids.
   ...list(runner, 'job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings'),
   ...list({ ...runner, ...rows }, 'jobs_cancelled'),
+  // the supervisor's: not served yet either. The slice that puts the supervisor on its own key gives them its kind;
+  // tell and jobs_list, which it also calls, are a seat's today and need the supervisor's kind then too.
+  ...list(never, 'board_now lease_release lease_renew lease_take seat_switch supervise_log supervise_mark supervise_state'),
+  ...list({ ...never, ...rows }, 'sessions_live squad_history supervised_projects'),
   // a write that names neither a machine nor an actor, so the worker API has nothing to bind to the key: not served until
   // the slice that moves the relay (S3) gives it one
   ...list(never, 'ask_delivered'),
