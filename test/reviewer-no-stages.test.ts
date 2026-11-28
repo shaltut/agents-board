@@ -73,5 +73,6 @@ test('the reviewer role text says what to do in a project without stages', async
   // #4749: the lead merges from the reviewer's word, so a GO there goes to the lead too; in that bullet, not only in the
   // pipeline rule further down ("the lead only if the PR comment failed")
   const bullet = t.split('\n').find((line: string) => line.startsWith('- A project with no stages'));
-  assert.match(bullet!, /On a GO.*tell the lead too.*PR.*full head sha.*merge/);
+  // #3221 (Q3128): the card note already reaches the builder, so the GO is told once, to the lead; findings to both
+  assert.match(bullet!, /say a GO once: tell the lead only.*PR.*full head sha.*merge.*Findings: tell the builder too/);
 });
