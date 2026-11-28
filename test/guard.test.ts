@@ -906,6 +906,34 @@ test('guard: quoted, escaped, lower-case and brace spellings of HOME drop the $H
   }
 });
 
+// #4729, the PR 132 review: a brace expansion inside a word can spell the name; a lower-case or wildcard name can reach a
+// PowerShell setter from another segment; and reading HOME with a default or trimmed is a read, like ${HOME}
+test('guard: the PR 132 review spellings drop the $HOME/ exemption; default-value reads keep it (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // brace expansion inside the name
+    `declare H{O,}ME=${sh}`, `export H{O,}ME=${sh}`, `declare {H,}OME=${sh}`, `declare HOM{E,}=${sh}`, `read -r H{O,}ME <<< ${sh}`,
+    `declare H{O..O}ME=${sh}`, `declare H{{O,},}ME=${sh}`, `bash -c "declare H{O,}ME=x"`,
+    // the name and the setter in different segments
+    `$n='home'; Set-Variable $n ${ps} -Force`, `$p=@{Name='home';Value=${ps};Force=$true}; Set-Variable @p`,
+    `'home' | % { Set-Variable $_ ${ps} -Force }`, `Get-Variable home | Set-Variable -Value ${ps} -Force`,
+    // wildcard names, which PowerShell matches against HOME
+    `Set-Variable -Name hom? -Value ${ps} -Force`, `Set-Variable -Name ho*e -Value ${ps} -Force`,
+    `Set-Variable -Name HOM[E] -Value ${ps} -Force`, `Set-Item variable:hom* ${ps} -Force`,
+    `Get-Variable hom* | Set-Variable -Value ${ps} -Force`, `$n='hom*'; Set-Variable $n ${ps} -Force`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`cd "\${HOME:-/tmp}" && ${fetch}`, `test -n "\${HOME+x}" && ${fetch}`, `cd \${HOME-/tmp} && ${fetch}`,
+    `echo \${HOME:+yes} && ${fetch}`, `echo \${HOME#/} \${HOME%/} && ${fetch}`, `cb log 1 "set up home"; ${fetch}`,
+    `git commit -m "Set Home"; ${fetch}`, `set -e; ls src/*.ts; ${fetch}`, `git log HEAD@{1}..HEAD; ${fetch}`,
+    `cat src/{a,b}.ts; ${fetch}`, `curl -d '{"a":1,"b":2}' x; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
 // #4729: bash drops a backslash before an ordinary letter, so g\it is git (and g\h is gh, a\z is az) to every rule that
 // reads those commands; a Windows path to git.exe stays git, and a quoted 'g\it' keeps its backslash
 test('guard: a backslash inside the git, gh or az name does not hide the command (#4729)', () => {
@@ -987,6 +1015,9 @@ test('long commands stay fast', () => {
     // #4729: the PowerShell setter test reads each segment once; the quote-stripped copy is made once per text
     ['git settings, 200 KB of setter words beside a $HOME/ value', asBuilder(kb200('sv ni set ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // PR 132 review: the brace and wildcard tests read each word and statement once
+    ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of setters and wildcard starts', asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

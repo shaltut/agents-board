@@ -814,23 +814,43 @@ function runsValues(w, i, j) {
 // path segment, so /home/ubuntu and "home page" keep the exemption, and $home/ is no exemption)
 const HOME_NAMED = /(?<![$\w{/\\.])(?:HOME|USERPROFILE)\b(?![/\\.])/;
 // (#4729: a name is the same name quoted, escaped, continued or in braces (HO""ME, \HOME, HO`ME, {HOME,x}), so a copy of
-// the text without those is read too, its plain ${HOME} reads written $HOME first; and PowerShell reads a variable's name
-// in any case, so home after a setter in its segment, or on the variable: or env: drive, counts as well)
-const bareText = (t) => t.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '')
-  .replace(/\$\{(HOME|USERPROFILE)\}/g, '$$$1').replace(/[\\`]\r?\n/g, '').replace(/["'`\\^]/g, '').replace(/[{},]/g, ' ');
-const PS_SETTER = /(?<![\w-])(?:set-variable|new-variable|remove-variable|set-item|new-item|setenvironmentvariable|set|sv|nv|rv|si|ni)(?![\w-])/i;
+// the text without those is read too. Reads are written $HOME first, with a default or a trim too (${HOME:-/tmp}): they
+// set nothing. PowerShell reads a variable's name in any case, from any part of the command, and matches * ? [ against
+// it, so these count too, outside message text: a brace expansion inside a word (H{O,}ME); a setter anywhere with home
+// anywhere; home or a wildcard on the variable: or env: drive; a wildcard after a setter or Get-Variable in its
+// statement; and, with a setter anywhere, a quoted wildcard name ($n='hom*'). Blocking too much is the accepted cost)
+const unquotedText = (t) => t.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '')
+  .replace(/\$\{(HOME|USERPROFILE)(?:\}|(?=:?[-+]|[#%]))/g, '$$$1 ').replace(/[\\`]\r?\n/g, '').replace(/["'`\\^]/g, '');
+const bareText = (t) => unquotedText(t).replace(/[{},]/g, ' ');
+// a word bash or zsh may expand into the name: braces with a list or a range, touching a letter (each word read once)
+const braceWord = (word) => {
+  if (!word.includes('{')) return false;
+  const w = word.replace(/\$\{[^{}]*\}/g, '$');
+  return w.includes('{') && w.includes('}') && (w.includes(',') || w.includes('..')) && /\w\{|\}\w/.test(w);
+};
+const SETTERS = 'set-variable|new-variable|remove-variable|set-item|new-item|setenvironmentvariable|set|sv|nv|rv|si|ni';
+const PS_SETTER = new RegExp(String.raw`(?<![\w-])(?:${SETTERS})(?![\w-])`, 'i');
+const PS_REACH = new RegExp(String.raw`(?<![\w-])(?:${SETTERS}|get-variable|gv)(?![\w-])`, 'i');
 const ANY_CASE_HOME = /(?<![\w$])(?:home|userprofile)\b(?![/\\.])/i;
 const DRIVE_HOME = /\b(?:variable|global|script|local|private|env):\/?(?:home|userprofile)\b(?![/.])/i;
-// segments as the shell splits them (a quoted ; ends none), each read once from its first setter: linear
-const setsHome = (seg) => {
-  const t = bareText(seg);
-  const m = PS_SETTER.exec(t);
-  return !!m && ANY_CASE_HOME.test(t.slice(m.index + m[0].length));
+const DRIVE_WILD = /\b(?:variable|env):\/?[\w-]*[*?[]/i;
+const QUOTED_WILD = /(["'])(?=[\w\]]{0,32}[*?[])[\w*?[\]]{1,32}\1/;
+// a statement keeps its pipeline (gv hom* | sv); a quoted ; ends none. Each is read once from its first setter: linear
+const NAME_STATEMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[^;&\n"'\\])+`, 'g');
+const wildAfterSetter = (statement) => {
+  const t = bareText(statement);
+  const m = PS_REACH.exec(t);
+  return !!m && /[*?[]/.test(t.slice(m.index + m[0].length).replace(/\$\?/g, ''));
 };
 function namesHome(text) {
   if (HOME_NAMED.test(text)) return true;
   const bare = bareText(text);
-  return HOME_NAMED.test(bare) || DRIVE_HOME.test(bare) || (joinLines(text).match(KILL_SEGMENT) ?? []).some(setsHome);
+  if (HOME_NAMED.test(bare) || DRIVE_HOME.test(bare)) return true;
+  const code = joinLines(stripMessages(text));
+  const loose = bareText(code);
+  if (unquotedText(code).split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
+  if (PS_SETTER.test(loose) && (ANY_CASE_HOME.test(loose) || QUOTED_WILD.test(code))) return true;
+  return (code.match(NAME_STATEMENT) ?? []).some(wildAfterSetter);
 }
 // (the command is read only when a value has such a path start, once per text: nested values stay linear, r3-2)
 const homeNamed = new Map();
