@@ -1900,6 +1900,30 @@ test('#4789: find -exec, -execdir, -ok and -okdir start a command of their own',
   }
 });
 
+// PR 173 review (R1)
+test('#4789: a find or an action spelled with quotes or a backslash is still one', () => {
+  const split = ['f\\ind . -exec ls {} + -exec sh -c su \\;', "f''ind . -exec ls {} + -exec sh -c su \\;", 'fi""nd . -exec ls {} \\; -exec sudo codex \\;',
+    "find . -exec ls {} + -ex''ec sh -c su \\;", 'find . -exec ls {} + -ex\\ec sudo codex \\;', "find . -ex''ec sudo codex \\;", "f''ind . -exec sudo codex \\;"];
+  for (const off of ['', ...thrownOff]) refused(split.map((c) => off + c));
+  letThrough(["f''ind . -name sudo", 'f\\ind . -exec ls {} + -exec ls -la \\;']);
+});
+
+test('#4789: a long run of find actions is read in linear time', () => {
+  const budget = machineBudget();
+  for (const action of ['true', 'eval true', 'env -S true', 'sh -c true', 'powershell x', 'rg x']) {
+    const command = 'find .' + ` -exec ${action} \\;`.repeat(1600);
+    const t = performance.now();
+    assert.deepEqual(verdict(command), { allow: true }, action);
+    const ms = performance.now() - t;
+    assert.ok(ms < budget, `1600 actions of ${action} took ${Math.round(ms)} ms (this machine's budget: ${budget} ms)`);
+  }
+  // an action ends at find's end mark only: an -exec or a + among its words is one of its arguments
+  refused(['find . -exec rg -e -exec --pre sudo x \\;', 'find . -exec rg -e + --pre sudo x \\;']);
+  // with no end mark between them each action's words run to the end of the segment, so past a handful it is refused unread
+  letThrough(['find .' + ' -exec grep -e x'.repeat(5)]);
+  refused(['find .' + ' -exec eval true'.repeat(40)]);
+});
+
 test('#4789: Windows PowerShell runs its bare words as the command', () => {
   refused(['powershell Start-ScheduledTask -TaskName x', 'powershell -NoProfile schtasks /run /tn x', 'powershell.exe wsl codex',
     'powershell -ExecutionPolicy Bypass -NoLogo Start-ScheduledTask x', 'powershell -ep bypass -w hidden Start-ScheduledTask x',
@@ -1913,4 +1937,11 @@ test('#4789: after the end of rg\'s options nothing is its pre-processor option'
   // a -- that may be the value of the option before it ends nothing, and a real pre-processor before the mark still counts
   refused(['rg -e -- --pre sudo x', 'rg --regexp -- --pre=sudo x', 'rg -ne -- --pre sudo x', 'rg --pre sudo -- x f', 'rg $FLAGS -- --pre sudo x',
     'rg x f > -- --pre sudo']);
+  // PR 173 review (R1): a word the shell expands (a glob, a splat) may turn into -e, and a redirect's target is no
+  // argument at all, so the word before it may take the --
+  const maybeValue = ['rg * -- --pre sudo input.txt', 'rg @argv -- --pre sudo input.txt', 'rg ? -- --pre sudo x', 'rg [-]e -- --pre sudo x', 'rg a,-e -- --pre sudo x',
+    'rg -e > out -- --pre sudo x', 'rg -e 2> err -- --pre sudo x', 'rg -e 2>/dev/null -- --pre sudo x', 'rg -e <<< w -- --pre sudo x', 'rg -e < in -- --pre sudo x',
+    'rg %F% -- --pre sudo x', 'rg "$F" -- --pre sudo x'];
+  for (const off of ['', ...thrownOff]) refused(maybeValue.map((c) => off + c));
+  letThrough(["rg 'a*b' -- --pre=sudo f", "rg --glob='*.ts' -- --pre=sudo", 'rg "TODO" src -- --pre=sudo', 'rg -F src/a.ts -- --pre=sudo']);
 });
