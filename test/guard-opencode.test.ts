@@ -19,6 +19,32 @@ function run(input: string, env: Record<string, string> = {}) {
 }
 const bash = (command: string, env: Record<string, string> = {}, tool = 'bash') => run(JSON.stringify({ tool, args: { command }, sessionID: 's1' }), env);
 
+// #4892: a seat that reads its server password can drive its own server. 1.x is one process, so the plugin empties the
+// variable in what it starts and leaves the process its own, which the server's sign-in reads
+test('#4892: the 1.x plugin empties the server password in the shells of a seat and leaves the server its own', async () => {
+  const plugin = await import('../kit/guard/opencode-plugin.js' as string) as { CbGuard: () => Promise<Record<string, (i: unknown, o: { env: Record<string, string> }) => Promise<void>>> };
+  const hooks = await plugin.CbGuard();
+  const names = ['OPENCODE_SERVER_PASSWORD', 'CB_ROLE', 'CB_AGENT'];
+  const saved = names.map((k) => [k, process.env[k]] as const);
+  const after = async (env: Record<string, string>) => {
+    for (const k of names) delete process.env[k];
+    Object.assign(process.env, env);
+    const output = { env: { KEEP: '1' } as Record<string, string> };
+    await hooks['shell.env']!({ cwd: '.' }, output);
+    assert.equal(process.env.OPENCODE_SERVER_PASSWORD, env.OPENCODE_SERVER_PASSWORD, 'the process keeps its own');
+    return output.env;
+  };
+  try {
+    for (const seat of [{ CB_ROLE: 'builder' }, { CB_AGENT: 'opencode' }] as Record<string, string>[]) {
+      assert.deepEqual(await after({ ...seat, OPENCODE_SERVER_PASSWORD: 'synthetic' }), { KEEP: '1', OPENCODE_SERVER_PASSWORD: '' });
+    }
+    // not a board seat: the plugin changes nothing
+    assert.deepEqual(await after({ OPENCODE_SERVER_PASSWORD: 'synthetic' }), { KEEP: '1' });
+  } finally {
+    for (const [k, v] of saved) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
 test('allow prints exactly {}', () => {
   assert.equal(bash('ls -la').raw, '{}');
   assert.equal(bash('git status', { CB_ROLE: 'builder' }).raw, '{}');

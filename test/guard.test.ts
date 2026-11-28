@@ -942,6 +942,57 @@ test('secret files (#4347): no seat reads one into its context; using one where 
   assert.deepEqual(shell('cat .env'), {});
 });
 
+// #4892: an OpenCode 1.x seat's server password lets its holder drive that seat's server. The plugin empties it in the
+// seat's shells; the guard refuses asking for it by name, and reading another process's environment, where it still is
+const passwordReads = [
+  'echo $OPENCODE_SERVER_PASSWORD', 'echo "${OPENCODE_SERVER_PASSWORD}"', 'curl -u "opencode:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/session', 'echo ${#OPENCODE_SERVER_PASSWORD}',
+  'echo $env:OPENCODE_SERVER_PASSWORD', 'Write-Output ${env:OPENCODE_SERVER_PASSWORD}', 'cmd /c echo %OPENCODE_SERVER_PASSWORD%', 'cmd /v /c echo !OPENCODE_SERVER_PASSWORD!',
+  'Get-Content Env:OPENCODE_SERVER_PASSWORD', 'gci env:OPENCODE*', String.raw`Get-Item -Path Env:\OPENCODE_SERVER_PASSWORD`, '[Environment]::GetEnvironmentVariable("OPENCODE_SERVER_PASSWORD")',
+  'printenv OPENCODE_SERVER_PASSWORD', 'declare -p OPENCODE_SERVER_PASSWORD', 'env | grep OPENCODE', 'printenv | grep -i password', 'Get-ChildItem Env: | Where-Object Name -like "*PASSWORD*"',
+  'node -p process.env.OPENCODE_SERVER_PASSWORD', `node -e "console.log(process.env['OPENCODE_SERVER_PASSWORD'])"`, `python -c "import os; print(os.environ['OPENCODE_SERVER_PASSWORD'])"`,
+  `python3 -c 'import os; print(os.getenv("OPENCODE_SERVER_PASSWORD"))'`, 'echo .\necho $OPENCODE_SERVER_PASSWORD', 'echo $OPENCODE_SERVER_\\\nPASSWORD',
+  // another process's environment
+  'cat /proc/$PPID/environ', String.raw`tr '\0' '\n' < /proc/1234/environ`, 'strings /proc/*/environ', 'xargs -0 -n1 < /proc/self/environ', 'grep -a PASS /proc/${PPID}/task/1/environ',
+  // the pid as the shell fills it in (PR 213 lead review)
+  'cat /proc/$(pidof opencode)/environ | tr x y', 'xargs -0 -L1 -a /proc/$(pgrep -f opencode)/environ', 'cat /proc/`pgrep opencode`/environ', 'strings /proc/"$pid"/environ',
+  `cat /proc/'1234'/environ`, 'cat /proc/$(pgrep -f "opencode serve" | head -1)/environ', 'cat /proc/$(cat /tmp/pid)/task/$(pidof x)/environ', 'cat "/proc/$(pidof opencode)/environ"',
+  'cat /proc/$((PPID))/environ', 'cat /proc/${PIDS[0]}/environ', 'cat /proc/"$(pidof opencode)"/environ', 'cat /proc/$(ps -o ppid= -p $$ | tr -d " ")/environ',
+  'ps eww', 'ps eww -p $PPID', 'ps auxe', 'ps auxeww | grep opencode', 'ps -wwE -p 4242', 'ps -p 4242 -E',
+];
+const passwordUses = [
+  'grep -rn OPENCODE_SERVER_PASSWORD cli kit', 'rg "OPENCODE_SERVER_PASSWORD" docs', 'git log -S OPENCODE_SERVER_PASSWORD --oneline',
+  'git commit -m "fix: the plugin empties OPENCODE_SERVER_PASSWORD in shells"', 'cb log 1 "a shell saw OPENCODE_SERVER_PASSWORD"',
+  'grep -rn "env.OPENCODE_SERVER_PASSWORD" test', 'echo $OPENCODE_SERVER_PASSWORD_FILE_NAME', 'echo $OPENCODE_DISABLE_AUTOUPDATE', 'env | grep CB_ROLE', 'env | sort', 'printenv PATH',
+  'ps -ef', 'ps aux | grep node', 'ps -e -o pid,etime', 'ps -o etime= -p 4242', 'ps -p 4242', 'ps -Name node', 'ps node -ErrorAction SilentlyContinue', 'ps -EA SilentlyContinue',
+  'cat /proc/$(pidof node)/status', 'cat /proc/"$pid"/cmdline | tr x y', 'echo $(nproc) && cat src/environ.ts', 'grep -rn "/proc/$pid" docs; cat docs/environ.md',
+  'cat /proc/cpuinfo', 'cat src/environment.ts', 'cat docs/proc/environment.md', 'node --test test/guard-opencode.test.ts',
+];
+test('#4892: no seat asks for its server password or reads another process\'s environment', () => {
+  blocksByRole('builder', passwordReads);
+  passes('builder', passwordUses);
+  for (const role of ROLES.filter((r) => r !== 'builder')) {
+    blocksByRole(role, passwordReads.filter((_, i) => i % 5 === 0));
+    passes(role, passwordUses.filter((_, i) => i % 4 === 0));
+  }
+  assert.match(shell('echo $OPENCODE_SERVER_PASSWORD', { CB_ROLE: 'builder' }).reason!, /#4892/);
+  // a hand-started session is the owner's
+  assert.deepEqual(shell('echo $OPENCODE_SERVER_PASSWORD'), {});
+  // for an agent that reads files itself
+  for (const p of ['/proc/4242/environ', '/proc/self/task/7/environ']) assert.equal(secretPath(p), true, p);
+  for (const p of ['/proc/cpuinfo', 'src/environ.ts']) assert.equal(secretPath(p), false, p);
+});
+
+test('#4892: long runs of names, flags and process paths are read in linear time', () => {
+  const budget = machineBudget();
+  const kb = (s: string) => s.repeat(Math.ceil(200000 / s.length));
+  for (const [name, command] of [['expansion starts', 'echo ' + kb('${#')], ['env drives', 'gci ' + kb('env:/')], ['percent names', 'echo ' + kb('%OPENCODE_SERVER_PASSWORD:')],
+    ['process paths', 'cat ' + kb('proc/x/task/')], ['open substitutions', 'cat environ ' + kb('/proc/$(')], ['nested opens', 'cat environ /proc/$(' + kb('(')], ['many substitutions', 'cat environ ' + kb('/proc/$((a)(b)')],
+    ['quoted pids', 'cat environ ' + kb('/proc/"$(x')], ['backtick pids', 'cat environ ' + kb('/proc/`')], ['paired pieces', 'cat environ ' + kb('/proc/""\'\'``$(a)$(a)')],['ps words', 'ps ' + kb('-a ')], ['one long ps flag', 'ps -' + 'a'.repeat(200000) + '!'], ['one long bsd cluster', 'ps ' + 'e'.repeat(200000) + '!'],
+    ['ps runs', kb('ps ')], ['environment calls', 'node -e ' + kb('getenv( ')], ['dumps and filters', kb('env | ')], ['printenv runs', 'printenv ' + kb('printenv ')]]) {
+    withinBudget(name!, (again) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'builder' }), budget);
+  }
+});
+
 // review #6 I4: for an adapter whose agent reads files natively (agy's read_file), the same names as a path check
 test('secretPath: the secret names as a file path, any separator', () => {
   for (const p of ['deploy/.env', String.raw`C:\w\app\.env.local`, '/home/u/.ssh/id_ed25519', 'secrets/tls.key', '.pgpass', '/home/u/.aws/credentials'])
