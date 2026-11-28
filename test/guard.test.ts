@@ -487,9 +487,18 @@ const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -
   "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
   String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
   'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
-  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval echo hi', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"'];
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval echo hi', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
+  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
+  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
+  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
+  // a -- or -Command before the string is not its first word
+  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
+  // a quoted flag, and cmd switches that carry a value
+  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'"];
 const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
   'bash deploy.sh -c "sudo codex"', 'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
   'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log'];
 test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
   for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
@@ -1038,6 +1047,8 @@ test('long commands stay fast', () => {
     ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
     ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
     ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
+    ['code strings, one 200 KB -c string left open, as a builder', asBuilder("sh -c '" + kb200('a '))],
+    ['code strings, 200 KB of closed quotes before an open one, as a builder', asBuilder('sh -c ' + kb200('"a" ') + "'")],
     ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
     // PR 139 review (R2) H6: a newline is a separator and was also \s, so each one re-read every later one
     ['search blanking, 200 KB of newlines, as a builder', asBuilder('grep x' + '\n'.repeat(200000))],

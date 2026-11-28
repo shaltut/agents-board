@@ -1572,18 +1572,32 @@ const CODE_DEPTH = 4;
 const SHELL_PIECE = /\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])|([^'"\\$]+|[\s\S])/g;
 // a word as the shell hands it on: quotes gone, 's'"udo x" joined
 const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, plain) => single ?? double?.replace(/\\(["\\$`])/g, '$1') ?? escaped ?? plain);
-function codeStrings(name, args) {
+// A segment's text up to a quote that does not close in it. Where one is left, a ; | & or newline inside a string cut the
+// segment there: the words after the quote are that string's first command, with its arguments
+const CLOSED_TEXT = /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^"'\\]+)*/y;
+const leftOpen = (seg) => {
+  CLOSED_TEXT.lastIndex = 0;
+  CLOSED_TEXT.exec(seg);
+  return seg[CLOSED_TEXT.lastIndex] === '"' || seg[CLOSED_TEXT.lastIndex] === "'";
+};
+// pwsh takes any prefix of these as the option that starts the command, and -cwa
+const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-commandwithargs'.startsWith(`-${f}`))(x.replace(/^(?:--?|\/)/, '').toLowerCase());
+function codeStrings(name, args, cut = false) {
   const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
-  if (name === 'eval' || name === 'iex' || name === 'invoke-expression') return rest(0);
+  if (name === 'eval') return rest(shellValue(args[0] ?? '') === '--' ? 1 : 0);
+  if (name === 'iex' || name === 'invoke-expression') {
+    const first = shellValue(args[0] ?? '');
+    return rest(first === '--' || PS_COMMAND(first) ? 1 : 0);
+  }
   if (name === 'cmd') {
     for (let k = 0; k < args.length; k++) {
-      const m = /^\/(?:[a-z]?\/)*[ck](.*)$/i.exec(args[k]);
+      const m = /^\/(?:[a-z](?::[^\s/]*)?\/)*[ck](.*)$/i.exec(shellValue(args[k]));
       if (m) return m[1] ? [[m[1], ...args.slice(k + 1)].map(shellValue).join(' ')] : rest(k + 1);
     }
     return [];
   }
   if (name === 'pwsh' || name === 'powershell') {
-    const k = args.findIndex((x) => /^(?:--?|\/)c/i.test(x) && '-command'.startsWith(`-${x.replace(/^(?:--?|\/)/, '').toLowerCase()}`));
+    const k = args.findIndex((x) => PS_COMMAND(shellValue(x)));
     return k < 0 ? [] : rest(k + 1);
   }
   if (name === 'rg') {
@@ -1596,8 +1610,13 @@ function codeStrings(name, args) {
   let runs = false;
   for (let k = 0; k < args.length; k++) {
     const x = shellValue(args[k]);
-    if (x === '--') return runs && k + 1 < args.length ? [shellValue(args[k + 1])] : [];
-    if (!/^[-+]./.test(x)) return runs ? [x] : []; // the first operand: the command after -c, else a script file
+    // the command is one word; in a string the split cut open, the words after it are its arguments
+    const operand = (j) => (cut ? rest(j) : j < args.length ? [shellValue(args[j])] : []);
+    if (x === '--' || x === '-') return runs ? operand(k + 1) : [];
+    const fish = name === 'fish' ? /^--command(?:=([\s\S]*))?$/.exec(x) : null;
+    if (fish?.[1] !== undefined) return [fish[1]];
+    if (fish) runs = true;
+    if (!/^[-+]./.test(x)) return runs ? operand(k) : []; // the first operand: the command after -c, else a script file
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(x)) runs = true;
     if (/^(?:[-+][A-Za-z]*[oO]|--rcfile|--init-file)$/.test(x)) k++;
   }
@@ -1623,7 +1642,7 @@ function freshEnvOne(command, hosts, role, depth = 0) {
       const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, atSafe)
         ?? (name === 'at' && w.slice(0, i).some((x) => cmdName(x) === 'xargs') ? name : null);
       if (why) return FRESH_ENV(why);
-      for (const code of codeStrings(name, w.slice(i + 1))) {
+      for (const code of codeStrings(name, w.slice(i + 1), CODE_CARRIER.test(seg) && leftOpen(seg))) {
         if (depth >= CODE_DEPTH) return FRESH_ENV('a command string nested too deep to read');
         const inner = freshEnvOne(code, hosts, role, depth + 1);
         if (inner) return inner;
