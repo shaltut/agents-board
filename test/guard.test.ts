@@ -622,6 +622,24 @@ test('#4669 N1: the lead keeps herdr agent prompt, herdr pane send-keys and the 
     'tmux new -d codex', 'sudo codex', 'mosh "$VPS"']) assert.equal(ev(c, 'lead').kind, 'role', `lead: ${c}`);
 });
 
+// #4775: double quotes do not stop a substitution from running, so the seat variables are judged inside one too
+test('#4775: a seat variable changed inside a double-quoted substitution is blocked', () => {
+  for (const command of [
+    'echo "$(unset CB_ROLE; cb mine)"', 'echo "$(env -u CB_ROLE cb mine)"', 'echo "`unset CB_ROLE; cb mine`"', 'x="$(CB_ROLE=lead cb mine)"',
+    'echo "a $(date) b $(unset CB_AGENT) c"', 'echo "$(echo ")"; unset CB_ROLE)"', 'echo "$(echo "$(unset CB_ROLE)")"',
+    'echo "$( (cd x); export CB_ROLE=lead )"', 'echo "n: $(unset CB_ROLE\ncb mine)"', 'cb log 1 "$(unset CB_ROLE; cb mine)"',
+  ]) {
+    const out = evaluate({ tool: 'shell', command, role: 'builder' });
+    assert.equal(out.allow, false, `must block: ${JSON.stringify(command)}`);
+  }
+  for (const command of [
+    'echo "$(date)" "unset CB_ROLE is blocked"', 'cb log 1 "$(date): never unset CB_ROLE"', "echo '$(unset CB_ROLE)'",
+    'echo "\\$(unset CB_ROLE)"', 'echo "role: $(printenv CB_ROLE)"', 'echo "$(git log -1 --format=%s) (unset CB_ROLE)"',
+  ]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
 // #4669: a shell script the seat wrote (or found) and then runs is judged for the same two rules, from its text: the
 // shim passes readScript, which reads a local file (none: nothing to judge)
 test('#4669: running a shell script that changes the seat variables or starts a fresh environment is blocked', () => {
@@ -1371,6 +1389,8 @@ test('long commands stay fast', () => {
     ["#4777, 200 KB of $' with escaped ends", () => uncommented("echo $'\\' ".repeat(20000) + '# "')],
     ['#4777, 200 KB of heredoc openers with no end line', () => uncommented('cat <<EOF # "\n'.repeat(14000))],
     ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
+    ['#4775, 200 KB of quoted substitution openers, as a builder', asBuilder('echo "$('.repeat(25000))],
+    ['#4775, 200 KB of quoted substitutions, as a builder', asBuilder('echo "$(date)";'.repeat(13000))],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],

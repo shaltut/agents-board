@@ -2244,7 +2244,50 @@ const NOCLOBBER = /(&?>>?&?)[|!]/g;
 // as > before the split, or its & cut the target off into a segment of its own
 const BOTH_TO = />&(?![ \t]*[\d-])/g;
 const fenceWrite = rawAndJoined(fenceWriteOne);
-const seatVarChange = rawAndJoined(seatVarChangeOne);
+// #4775: double quotes do not stop a substitution from running. The command with the quotes closed before each $( ) or
+// backtick substitution inside them and opened again after it ("a $(x) b" read as "a "$(x)" b"), so what runs is not
+// blanked as text. Quotes and comments inside a substitution are its own: ")" there closes nothing. One pass.
+function unquotedSubstitutions(text) {
+  if (!/\$\(|`/.test(text)) return text;
+  const open = []; // '"', '(' and '`' not yet closed; 'q(' and 'q`' are substitutions that stand inside double quotes
+  let out = '', done = 0, i = 0;
+  const quote = () => { out += text.slice(done, i) + '"'; done = i; };
+  while (i < text.length) {
+    const c = text[i], top = open[open.length - 1];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '$' && text[i + 1] === '(') {
+      if (top === '"') quote();
+      open.push(top === '"' ? 'q(' : '(');
+      i += 2;
+      continue;
+    }
+    if (c === '`') {
+      const closes = top === '`' || top === 'q`';
+      if (top === '"') quote();
+      if (closes) open.pop(); else open.push(top === '"' ? 'q`' : '`');
+      i++;
+      if (top === 'q`') quote();
+      continue;
+    }
+    if (top === '"') { if (c === '"') open.pop(); i++; continue; }
+    if (c === "'") { const end = text.indexOf("'", i + 1); i = end < 0 ? i + 1 : end + 1; continue; }
+    if (c === '#' && (i === 0 || COMMENT_START.test(text[i - 1]))) { const nl = text.indexOf('\n', i); i = nl < 0 ? text.length : nl; continue; }
+    if (c === '"' || c === '(') open.push(c);
+    else if (c === ')' && (top === '(' || top === 'q(')) {
+      open.pop();
+      i++;
+      if (top === 'q(') quote();
+      continue;
+    }
+    i++;
+  }
+  return done ? out + text.slice(done) : text;
+}
+const seatVarChangeRead = rawAndJoined(seatVarChangeOne);
+const seatVarChange = (raw) => {
+  const opened = unquotedSubstitutions(raw);
+  return seatVarChangeRead(raw) ?? (opened === raw ? null : seatVarChangeRead(opened));
+};
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
   const text = stripMessages(command).replace(URL_WORD, ' ').replace(NOCLOBBER, '$1 ').replace(BOTH_TO, '> ');
