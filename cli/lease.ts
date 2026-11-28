@@ -3,6 +3,7 @@
 // over an API. Renewed on its own timer, on a thread of its own, apart from the tick.
 import { Worker } from 'node:worker_threads';
 import { DeadlineError, withDeadline } from './deadline.ts';
+import type { Runner } from './squad-up.ts';
 
 export const RENEW_MS = 30_000;
 // how long after the last renewal the lease is still counted on: the board gives 180 s, less room for a late answer
@@ -103,6 +104,9 @@ export function keepAliveApart(token: string, o: { app: string; every?: number; 
   thread.on('exit', (code) => gone(`the lease renewal thread ended (${code})`));
   return {
     beat: () => { thread.postMessage('beat'); },
+    sure: () => true,
     stop: async () => { over = true; await thread.terminate(); },
   };
 }
+
+export const fenced = (run: Runner, _renewal: () => { beat(): void; sure(): boolean } | undefined): Runner => run;
