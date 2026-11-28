@@ -1120,6 +1120,57 @@ test('#4767: a launch that a quote miscount would hide is blocked; plain quoted 
   for (const c of miscountFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
 });
 
+const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -c "at now"', 'eval "at now"', 'eval sudo codex', 'eval "sudo" "codex"',
+  "sh -c 'tmux new -d codex'", "echo '* * * * * codex' | bash -c crontab", 'bash -c su', "bash -lc 'sudo codex'", "bash --norc -o pipefail -c 'sudo codex'",
+  "bash -c -x 'sudo codex'", "bash -c -- 'sudo codex'", '/bin/zsh -c "ssh localhost x"', "timeout 5 sh -c 'sudo codex'", "env A=1 dash -c 'sudo codex'", "xargs sh -c 'sudo codex'",
+  String.raw`bash -c "bash -c \"sudo codex\""`, `bash -c "sh -c 'eval sudo codex'"`, `sh -c 's'"udo codex"`, String.raw`bash -c $'sudo codex'`, 'cmd /c "schtasks /run /tn x"',
+  'cmd.exe /C schtasks /run /tn x', 'pwsh -c "Start-ScheduledTask x"', 'powershell -NoProfile -Command "Start-ScheduledTask x"', 'pwsh -NoProfile -co sudo codex',
+  "rg --pre 'sudo' x f", 'rg --pre=sudo x f', 'eval eval eval eval eval eval eval eval eval eval sudo codex', "iex 'Start-ScheduledTask x'", 'Invoke-Expression "sudo codex"',
+  // PR 142 review (R2): a lone - ends the options too; a ; | & or newline inside the string cuts the segment mid-quote
+  'bash -c - "sudo codex"', 'bash -c "ssh localhost uptime; true"', 'bash -c "true; at now; true"', "bash -c 'at now; true'", "bash -c 'schtasks /run /tn x; true'",
+  'sh -c "herdr pane run w1:p2 codex; true"', 'bash -c "ssh localhost uptime | cat"', 'bash -c "ssh localhost uptime && true"',
+  // a -- or -Command before the string is not its first word
+  'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
+  // a quoted flag, and cmd switches that carry a value
+  'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'",
+  // the name that carries the string, split by quotes or a backslash, with the launcher in the string split too
+  // (no piece of the split word may read as a launcher by itself, or the segment is walked anyway)
+  String.raw`s\h -c 's"u"do codex'`, `s'h' -c 's"u"do codex'`, `b"as"h -c 's"u"do codex'`, String.raw`e\val 's"u"do codex'`, `e""val 's"u"do codex'`, `e'v'al 's"u"do codex'`,
+  String.raw`r\g --pre 's"u"do' x f`, `r'g' --pre 's"u"do' x f`, `c""md /c 's"u"do codex'`, `c'm'd /c 's"u"do codex'`, `i'e'x 's"u"do codex'`,
+  // Git Bash writes cmd's switch with two slashes
+  'cmd //c schtasks /run /tn x', 'cmd.exe //k sudo codex', 'cmd //c "su"','cmd //v:off//c schtasks /run /tn x',
+  // Invoke-Expression takes its string after common parameters too, and any parameter may bind its value with a colon
+  'iex -Command:"sudo codex"', "iex -c:'Start-ScheduledTask x'", 'Invoke-Expression -Verbose "sudo codex"', "iex -ea 0 'sudo codex'", 'iex -ErrorAction SilentlyContinue "sudo codex"',
+  "iex -vb -Debug -wa:0 -ov x -Command 'sudo codex'", 'iex -Command: "sudo codex"', "iex -Verbose:$false -c 'sudo codex'"];
+const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
+  'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
+  'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log',
+  'cmd //c "dir /b"', 'cmd //c ver', 'iex -Verbose "Get-Date"', "iex -ea 0 'Get-ScheduledTask'", 'iex -Command:"Get-Date"', `echo "it's fine" && s'h' -c 'echo a'`];
+test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
+  for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
+  for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  // the lead keeps its herdr prompt inside a string too, and nothing else (its ssh is judged by #4707's deploy-host rule)
+  assert.deepEqual(evaluate({ tool: 'shell', command: `bash -c 'herdr agent prompt w1:p2 hi'`, role: 'lead' }), { allow: true });
+  assert.equal(evaluate({ tool: 'shell', command: "bash -c 'sudo codex'", role: 'lead' }).kind, 'role');
+});
+
+// PR 142 review (R2): after text that throws the quote count off, only the second reading sees what follows, so it must
+// read the command strings too. Each prefix leaves the first reading inside a quote that the shell has closed
+const thrownOff = ["echo $'a\\'b'; ", "cat <<EOF\ndon't\nEOF\n", 'Get-ChildItem "C:\\"; ', 'Write-Output "a\u201D; '];
+const hiddenStrings = ['bash -c su', 'bash -c "sudo codex"', "sh -c 'batch'", 'eval sudo codex', 'eval "at now"', 'cmd /c "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x',
+  'pwsh -c "Start-ScheduledTask x"', "iex 'Start-ScheduledTask x'", 'rg --pre=sudo x f', 'env -S su', 'env -S "sudo codex"', 'ssh "$H" "sudo codex"',
+  'bash -c "bash -c \'sudo codex\'"', 'bash -c "ssh localhost uptime; true"'];
+const hiddenStringsFine = ['bash -c "ls -la"', 'bash -c ls', 'eval echo hi', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'rg --pre cat x f', 'env -S "ls -la"',
+  'bash -c "ls; true"', 'eval "$(direnv hook bash)"', 'git commit -m "eval sudo codex"'];
+test('#4741: a command string stays judged after text that throws the quote count off', () => {
+  for (const p of thrownOff) {
+    for (const c of hiddenStrings) assert.match(evaluate({ tool: 'shell', command: p + c, role: 'builder' }).reason ?? '', /fresh environment/, p + c);
+    for (const c of hiddenStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: p + c, role: 'builder' }), { allow: true }, p + c);
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1195,6 +1246,25 @@ test('long commands stay fast', () => {
     ['miscount check, 200 KB of newlines after empty parentheses, as a builder', asBuilder('grep x ()' + '\n'.repeat(200000))],
     ['miscount check, 200 KB of empty parentheses, as a builder', asBuilder('grep x ' + kb200('() \n'))],
     ['miscount check, 200 KB of tabs before heredoc ends, as a builder', asBuilder('x <<-EOF\n' + kb200('\t\t\t\tx\n'))],
+    // #4741: a code string is walked once however two readings find it, and its words are read once per level
+    ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
+    ['code strings, 200 KB of eval words after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval '))],
+    ['code strings, 200 KB of iex parameters, as a builder', asBuilder('iex ' + kb200('-ea 0 '))],
+    ['code strings, a 200 KB cmd double-slash option word, as a builder', asBuilder('cmd ' + kb200('//a') + ' x')],
+    ['code strings, 200 KB of quote-split words, as a builder', asBuilder(kb200('s"h" x; '))],
+    ['code strings, 200 KB of lone quotes and backslashes, as a builder', asBuilder(kb200('a\\b \' " '))],
+    ['code strings, 200 KB of eval after open parentheses after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval x ( '))],
+    // two readings of one eval line find two strings at each level, "x <inner>" and "<inner>": the work must not double per level
+    ['code strings, eval of a word and a quoted eval nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, the same nest after an open quote, as a builder', asBuilder('echo "a”; ' + Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],
+    ['code strings, 200 KB of eval after open parentheses, as a builder', asBuilder(kb200('eval x ( '))],
+    ['code strings, quoted -c strings nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'bash -c ' + JSON.stringify(c), 'ls ' + 'x '.repeat(50000)))],
+    ['code strings, 200 KB of shell -c segments, as a builder', asBuilder(kb200('bash -c "ls"; '))],
+    ['code strings, 200 KB of shell options, as a builder', asBuilder('bash ' + kb200('-x ') + '-c ls')],
+    ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
+    ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
+    ['code strings, one 200 KB -c string left open, as a builder', asBuilder("sh -c '" + kb200('a '))],
+    ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
