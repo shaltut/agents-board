@@ -8,6 +8,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { seatKey } from '../bridge.ts';
 import { stripClaudeOnly, withNoPrompt } from './env.ts';
+import { checkedEffort } from './effort.ts';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 
 export type OpencodeEndpoint = { port: number; password: string; username?: string; updatedAt: number };
@@ -162,6 +163,7 @@ export function makeOpencodeAdapter(f: Fetch = (u, i) => fetch(u, i), readEp: ty
     // FREELLMAPI_URL and FREELLMAPI_API_KEY come from the pane's own env and are never copied into a LaunchSpec. The folder rule
     // applies to a freellmapi/* model and to no model at all (OpenCode then takes its config default, freellmapi/auto).
     buildLaunch(l: LaunchInput) {
+      checkedEffort('opencode', l.name, l.effort); // throws on any effort: the TUI takes none
       const model = l.model ?? '';
       if (model && !OPENCODE_MODEL.test(model)) throw new Error(`opencode model must be provider/model (got ${JSON.stringify(l.model)})`);
       const cwd = normalizeAbs(l.cwd);

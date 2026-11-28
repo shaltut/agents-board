@@ -5,6 +5,7 @@ import { writeFileSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { BASH } from './bash.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -450,7 +451,7 @@ test('tick: hostile titles, actors and PR links print as inert commands in bash 
   ];
   for (const [sh, flags, script] of shells) {
     const cwd = mkdtempSync(join(dir, `${sh}-`));
-    const run = spawnSync(sh, [...flags, script], { cwd, encoding: 'utf8' });
+    const run = spawnSync(sh === 'bash' ? BASH : sh, [...flags, script], { cwd, encoding: 'utf8' });
     if (run.error) continue; // shell not installed here
     assert.equal(run.status, 0, `${sh}: ${run.stderr}`);
     assert.deepEqual(readdirSync(cwd), [], `${sh} ran something:\n${cmds.join('\n')}`);

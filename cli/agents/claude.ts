@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { seatKey } from '../bridge.ts';
 import type { AgentAdapter, AgentState, QuotaSignal, SeatHandle } from './types.ts';
 import { claudePreseed } from './trust.ts';
+import { checkedEffort } from './effort.ts';
 
 export type ClaudeEndpoint = { socket: string; token: string; pid?: number; sessionId?: string; updatedAt: number };
 
@@ -137,11 +138,12 @@ export const claudeAdapter: AgentAdapter = {
   // The args after `--` of `herdr agent start <name> --kind claude --pane <pane>`, as cli/squad-up.ts has always sent them.
   buildLaunch(l) {
     checkRoleSettings(l.role);
+    const effort = checkedEffort('claude', l.name, l.effort);
     const board = l.board.replace(/[\/]+$/, '');
     const mcp = claudeAdapter.mcpOff(board);
     return {
       kind: 'claude',
-      args: ['--model', l.model, '--permission-mode', 'bypassPermissions', '--settings', `${board}/kit/permissions/${l.role}.json`, ...mcp.args],
+      args: ['--model', l.model, ...(effort ? ['--effort', effort] : []), '--permission-mode', 'bypassPermissions', '--settings', `${board}/kit/permissions/${l.role}.json`, ...mcp.args],
       env: { ...(l.env ?? {}), ...mcp.env },
     };
   },

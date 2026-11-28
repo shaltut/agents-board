@@ -24,7 +24,7 @@ export type DisableAskSpec = { toolName: string; mechanism: 'hook' | 'permission
 /** How a seat starts with no MCP server (#4392): `args` and `env` for this run only (buildLaunch adds them; never the
  *  user's own config). What they cannot turn off is the adapter's `mcpGate`. */
 export type McpOffSpec = { args: string[]; env: Record<string, string>; note: string };
-export type LaunchInput = { name: string; role: string; area?: string; repo: string; agent: AgentKind; model: string; board: string; cwd: string; env?: Record<string, string> };
+export type LaunchInput = { name: string; role: string; area?: string; repo: string; agent: AgentKind; model: string; effort?: string; board: string; cwd: string; env?: Record<string, string> };
 
 export interface AgentAdapter {
   readonly kind: AgentKind;
