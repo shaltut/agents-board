@@ -303,7 +303,8 @@ export function jobEnv(from: NodeJS.ProcessEnv, cfg: RunnerConfig, recipe: Pick<
   // child) must not take a committed git.exe / docker.exe from its cwd before PATH. Inert elsewhere.
   const extra = lane === undefined ? recipe.env
     : Object.fromEntries(Object.entries(recipe.env).map(([k, v]) => [k, v.replaceAll(LANE, String(lane))]));
-  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', NoDefaultCurrentDirectoryInExePath: '1', ...extra };
+  // CB_RUNNER_JOB: the checkout is a runner's slot, so its tests get their own Postgres (db/pg.ts ownTestPg, #4756)
+  return { ...out, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', CB_RUNNER_JOB: '1', NoDefaultCurrentDirectoryInExePath: '1', ...extra };
 }
 
 /** The lowest DB lane (1..lanes) no running job holds, or undefined when all are taken. */

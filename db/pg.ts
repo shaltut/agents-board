@@ -6,7 +6,7 @@ import { join } from 'node:path';
 const ROOT = join(import.meta.dirname, '..');
 const PGDATA = join(ROOT, '.pgdata');
 const BIN = process.env.CB_PG_BIN ?? 'C:/Program Files/PostgreSQL/16/bin';
-const pgCtl = join(BIN, 'pg_ctl.exe');
+export const pgCtl = join(BIN, 'pg_ctl.exe');
 
 /** #4482: spawnSync with a deadline: a stalled child (initdb, pg_ctl, the port probe) throws in words instead of
  *  leaving a test run silent. A timed-out child throws, never returns: its null status read
@@ -79,9 +79,12 @@ const answers = (port: number) =>
 /** #4413: a Windows worktree tests against its own cluster (its .pgdata, its own port). All worktrees used to share
  *  127.0.0.1:5434, served by whichever worktree's cluster started first: eight parallel runs ran out of its 100
  *  connections ("too many clients") and failed when that cluster was in crash recovery. The main checkout, and every
- *  other platform (Postgres started by hand), keep 5434. */
-export function ownTestPg(root = ROOT, platform = process.platform): boolean {
-  return platform === 'win32' && (statSync(join(root, '.git'), { throwIfNoEntry: false })?.isFile() ?? false);
+ *  other platform (Postgres started by hand), keep 5434.
+ *  #4756: so does a PC runner job's checkout (CB_RUNNER_JOB=1, cli/recipes.ts jobEnv). A slot is a clone, not a
+ *  worktree: on 5434 its --test started a cluster that --test --stop never stopped, and the next job's git clean failed
+ *  on the open server.log; other slots, and the main checkout, shared that port. */
+export function ownTestPg(root = ROOT, platform = process.platform, env = process.env): boolean {
+  return platform === 'win32' && (env.CB_RUNNER_JOB === '1' || (statSync(join(root, '.git'), { throwIfNoEntry: false })?.isFile() ?? false));
 }
 
 /** Where a worktree's port search starts: FNV-1a of its path, so the same worktree gets the same port each run. */
@@ -105,8 +108,8 @@ const binds = (p) => new Promise((r) => { const v = net.createServer(); v.once('
 /** The port a test run on this checkout uses: 5434; for a worktree, the port its running cluster listens on, else
  *  CB_TEST_PG_PORT (test/helpers.ts sets it, so its db/setup.ts --test child picks the same port), else the first free
  *  one from testPortStart (15435-16453: below Windows' excluded dynamic ranges). */
-export function testPgPort(root = ROOT, platform = process.platform): number {
-  if (!ownTestPg(root, platform)) return 5434;
+export function testPgPort(root = ROOT, platform = process.platform, env = process.env): number {
+  if (!ownTestPg(root, platform, env)) return 5434;
   const dir = join(root, '.pgdata');
   if (running(dir)) {
     const port = Number(readFileSync(join(dir, 'postmaster.pid'), 'utf8').split(/\r?\n/)[3]);
@@ -133,7 +136,7 @@ export function ensureTestPg(url: string, root = ROOT): void {
 
 /** Stops a worktree's test cluster: run it before removing the worktree (a running Postgres holds the folder). */
 export function stopTestPg(root = ROOT): { ok: boolean; message: string } {
-  if (!ownTestPg(root)) return { ok: true, message: 'no test cluster of its own here (not a Windows worktree)' };
+  if (!ownTestPg(root)) return { ok: true, message: 'no test cluster of its own here (not a Windows worktree or runner job)' };
   const dir = join(root, '.pgdata');
   if (!running(dir)) return { ok: true, message: `no test cluster running in ${dir}` };
   const r = spawnWithin(pgCtl, ['-D', dir, 'stop', '-w'], { encoding: 'utf8' }, START, `pg_ctl stop in ${dir}`);
