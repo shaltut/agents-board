@@ -230,6 +230,13 @@ test('never_ran is said only when the call cannot have run', () => {
   for (const sent of [false, true]) assert.ok(!JSON.stringify(failure(lost, sent).body).includes('db:5432'), 'no address in the reply');
   const refused = Object.assign(new Error('no such task'), { name: 'PostgresError', code: 'P0001', detail: 'd', hint: 'h', query: 'select secret', parameters: ['secret'] });
   assert.deepEqual(failure(refused, true), { status: 400, body: { ok: false, code: 'P0001', error: 'no such task', detail: 'd', hint: 'h' } });
+  // a database that takes no connection answers with a code of its own (too many, starting up): still never sent
+  for (const code of ['53300', '57P03', '57P01', '08006']) {
+    const full = Object.assign(new Error('sorry'), { name: 'PostgresError', code });
+    assert.deepEqual(failure(full, false), { status: 503, body: { ok: false, code, error: 'sorry', never_ran: true } }, code);
+    assert.deepEqual([failure(full, true).status, 'never_ran' in failure(full, true).body], [400, false], code);
+  }
+  assert.equal(failure(refused, false).status, 400, 'any other database error says the same again');
 });
 
 /** An open event stream, read in the background. */
