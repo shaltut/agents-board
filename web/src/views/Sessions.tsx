@@ -5,7 +5,7 @@ import { ArrowLeft } from 'lucide-react'
 import { get, qs, rpc, useDigest, useProjects, useQuestions, useTasks, type CbEvent, type Task } from '@/lib/api'
 import { ago, splitActor, STATUS } from '@/lib/format'
 import { go, type Route } from '@/lib/route'
-import { liveSeats } from '@/lib/projects'
+import { liveRows } from '@/lib/projects'
 import { cn } from '@/lib/utils'
 import { ActorChip, Priority, ProjectChip, StatusDot, TaskId } from '@/components/Chips'
 import { Timeline } from '@/components/Timeline'
@@ -37,7 +37,7 @@ export function Sessions({ route }: { route: Route }) {
   const pipeline = !!projects?.find((p) => p.slug === route.project)?.pipeline
   const { data: digest = [] } = useDigest(route.project, pipeline)
   if (route.actor) return <SessionDetail route={route} row={rows.find((s) => s.actor === route.actor)} />
-  const data = route.project ? rows : liveSeats(rows, projects ?? [])
+  const data = route.project ? rows : liveRows(rows, projects ?? [])
   const live = data.filter((s) => s.live).length
   const asking = data.filter((s) => s.open_questions > 0).length
 
