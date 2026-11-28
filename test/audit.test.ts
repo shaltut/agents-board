@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import postgres from 'postgres';
-import { TEST_URL } from './helpers.ts';
+import { freshDb, TEST_URL } from './helpers.ts';
 import { applySchema } from '../db/apply.ts';
 import { loadRoleTexts } from '../db/roles.ts';
 import { audit, readOnly } from '../db/audit.ts';
@@ -19,6 +19,7 @@ const connectTo = (db: string) => postgres(urlOf(db), { max: 1, onnotice: () => 
 let admin: any;
 
 before(async () => {
+  await (await freshDb()).end(); // starts this checkout's test cluster
   admin = connectTo('postgres');
   for (const db of [LIVE, REF]) {
     await admin.unsafe(`create database ${db}`);
