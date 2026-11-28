@@ -186,6 +186,9 @@ test('a model that is two known names joined is refused on save, so a CLI save c
   const joined = 'gemini-4-neon-highgemini-4-neon-xhigh';
   await assert.rejects(sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
     builder: { count: 1, machine: 'macbook', agent: 'agy', model: joined } } })}, 'ahmed')`, /two model names joined/);
+  // and the same name twice, which the page refuses too
+  await assert.rejects(sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
+    builder: { count: 1, machine: 'macbook', agent: 'agy', model: 'gemini-4-neon-highgemini-4-neon-high' } } })}, 'ahmed')`, /two model names joined/);
   // a single known name still saves
   await sql`select cb.squad_set('other', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles,
     builder: { count: 1, machine: 'macbook', agent: 'agy', model: 'gemini-4-neon-xhigh' } } })}, 'ahmed')`;

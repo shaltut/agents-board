@@ -238,6 +238,9 @@ test('a model field that appended a second pick is caught and refused, never sav
   const joined = 'gemini-4-neon-highgemini-4-neon-xhigh';
   // the picker slip: the second choice was appended to the first, with no separator
   assert.deepEqual(joinedModels(joined, known), ['gemini-4-neon-high', 'gemini-4-neon-xhigh']);
+  // the same name picked twice is a join too, as the server judges it (PR 123 review)
+  assert.deepEqual(joinedModels('gemini-4-neon-highgemini-4-neon-high', known), ['gemini-4-neon-high', 'gemini-4-neon-high']);
+  assert.match(modelProblem('agy', 'gemini-4-neon-highgemini-4-neon-high', known) ?? '', /two model names joined/);
   // not a join: a known name itself, a new name, or nothing
   assert.equal(joinedModels('gemini-4-neon-xhigh', known), null);
   assert.equal(joinedModels('gemini-4-neon-low', known), null);

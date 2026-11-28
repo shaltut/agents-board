@@ -219,7 +219,7 @@ export function joinedModels(model: string, known: readonly string[]): [string, 
   for (const a of known) {
     if (a && v.length > a.length && v.startsWith(a)) {
       const b = v.slice(a.length)
-      if (b !== a && known.includes(b)) return [a, b]
+      if (known.includes(b)) return [a, b]
     }
   }
   return null
