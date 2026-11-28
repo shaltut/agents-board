@@ -117,7 +117,11 @@ test('machine_models_set refuses a bad report by name', async () => {
   await assert.rejects(set('pc', { codex: 'gpt-7' }), /codex models must be a list of at most 500/);
   await assert.rejects(set('pc', { codex: Array.from({ length: 501 }, (_, i) => ({ id: `m-${i}` })) }), /at most 500/);
   await assert.rejects(set('pc', one, ' '), /actor is required/);
-  await assert.rejects(set('pc', one, 'ahmed'), /only Ahmed's dashboard can act as ahmed/);
+  // freshDb connects as the dashboard: a session's connection may not take Ahmed's name
+  await assert.rejects(sql.begin(async (tx: any) => {
+    await tx`set local application_name = 'cb'`;
+    await tx`select cb.machine_models_set('pc', ${sql.json(one)}, 'ahmed')`;
+  }), /only Ahmed's dashboard can act as ahmed/);
 });
 
 test('cb models shows what each machine sent', async () => {
