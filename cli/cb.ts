@@ -728,7 +728,7 @@ async function run(): Promise<unknown> {
       return stepOut(await callFn('next_step', { id: args[0] }));
     }
     case 'pass': {
-      need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>] [--repo <repo>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9');
+      need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>] [--repo <repo>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9 (or https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/9)');
       await guard(args[0]);
       await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
       return stepOut(await callFn('next_step', { id: args[0] }));
