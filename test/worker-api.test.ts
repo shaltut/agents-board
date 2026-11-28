@@ -391,6 +391,26 @@ test('keys the board has not seen work are checked four at a time; one key arriv
   assert.deepEqual((await Promise.all(same)).map((r) => r.status), Array(12).fill(200));
 });
 
+test('a key over its limit is refused without asking the database', async () => {
+  const { sql, session } = await board();
+  const key = await issue(sql);
+  process.env.CB_API_RATE = '3';
+  let release!: () => void, locked!: () => void;
+  const held = new Promise<void>((r) => { release = r; }), isLocked = new Promise<void>((r) => { locked = r; });
+  try {
+    assert.equal((await from(key, '192.0.2.60')).status, 200); // 1 of 3
+    const lock = session.begin(async (tx: any) => { await tx`lock table cb.worker_keys in access exclusive mode`; locked(); await held; });
+    await isLocked;
+    let statuses!: Promise<Response>[];
+    try {
+      statuses = Array.from({ length: 5 }, () => Promise.resolve(from(key, '192.0.2.60')));
+      const over = await Promise.race([Promise.all(statuses.slice(2)), new Promise<null>((r) => setTimeout(() => r(null), 2000))]);
+      assert.deepEqual(over?.map((r) => r.status), [429, 429, 429], 'answered while the database holds the others');
+    } finally { release(); await lock; }
+    assert.deepEqual((await Promise.all(statuses)).map((r) => r.status), [200, 200, 429, 429, 429]);
+  } finally { release?.(); delete process.env.CB_API_RATE; }
+});
+
 /** A call whose body is sent only when let go. waiting: the board holds the call and is reading it. first: sent at once. */
 function slowCall(key: string, fn: string, args: object, first = '') {
   let ctrl!: ReadableStreamDefaultController<Uint8Array>, asked!: () => void, sentFirst = !first;
