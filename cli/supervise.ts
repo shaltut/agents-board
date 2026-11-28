@@ -526,7 +526,6 @@ if (import.meta.main) {
   // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
   let current: AbortController | undefined; // the running tick's
   let renewal: ReturnType<typeof keepAliveApart> | undefined;
-  const run = fenced(realRun, () => renewal); // each herdr call: a word to the renewal thread, and refused once the lease is not sure
   const giveBack = async () => { await renewal?.stop(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
   if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
     process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); giveBack().finally(() => process.exit(0)); });
@@ -544,6 +543,7 @@ if (import.meta.main) {
       // it catches a hang, not a slow tick; the DB waits above have their own 30 s. A tick given up on is aborted, so
       // it stops at its next step instead of acting on with its log writes failing (review I1, I2)
       const stop = current = new AbortController();
+      const run = fenced(realRun, () => renewal); // this tick's herdr calls: a word to the renewal thread, refused once the lease is not sure
       try {
         for (const line of await withDeadline(tick({ sql, run, dryRun, now, memory, runnerConfig, probe, signal: stop.signal }), TICK_MS, 'the tick')) say(line);
       } finally { stop.abort(); }

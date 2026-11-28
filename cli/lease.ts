@@ -121,12 +121,17 @@ export function keepAliveApart(token: string, o: { app: string; every?: number; 
 
 /** Every herdr call of the supervisor goes through this: a word to the renewal thread, then the question whether the
  *  lease still stands. While a seat's start holds the main thread, what the thread reports waits in the queue, so each
- *  call asks for itself. A call already running is not cut off. No renewal (a dry run): as it is. */
-export const fenced = (run: Runner, renewal: () => { beat(): void; sure(): boolean } | undefined): Runner => (m, args, timeout) => {
-  const r = renewal();
-  if (r) {
-    r.beat();
-    if (!r.sure()) throw new Error('the supervisor lease cannot be counted on: no herdr call is made');
-  }
-  return run(m, args, timeout);
-};
+ *  call asks for itself. One made per tick: once refused, it stays refused, so a tick that was stopped does not go on
+ *  half done when the lease comes back. A call already running is not cut off. No renewal (a dry run): as it is. */
+export function fenced(run: Runner, renewal: () => { beat(): void; sure(): boolean } | undefined): Runner {
+  let refused = false;
+  return (m, args, timeout) => {
+    const r = renewal();
+    if (r) {
+      r.beat();
+      refused ||= !r.sure();
+      if (refused) throw new Error('the supervisor lease cannot be counted on: no herdr call is made');
+    }
+    return run(m, args, timeout);
+  };
+}
