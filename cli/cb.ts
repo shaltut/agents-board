@@ -98,8 +98,10 @@ const relayKeys = () => [seatKey(machine(), pane), ...(process.env.CLAUDE_CODE_M
 let sql: any = direct;
 // doctor and update look at this machine (and the board's web address), never through a relay: they must work on a
 // stale worker and while the database is down (cb update reads the board's schema once, directly, before installing)
-const offline = cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
-if (pane && !process.env.PGAPPNAME && cmd !== 'help' && !offline && !o.help)
+// The manual (cb, cb help) too: it is compiled in, so it never asks who this pane is (#4755)
+const manual = cmd === undefined || cmd === 'help';
+const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults';
+if (pane && !process.env.PGAPPNAME && !offline && !o.help)
   for (const k of relayKeys()) {
     const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
     if (bridged) { sql = bridged; break; }
@@ -1167,7 +1169,8 @@ const HINTS: [RegExp, string][] = [
 function actionable(m: string) {
   for (const [re, hint] of HINTS) if (re.test(m)) m += `. ${hint}`;
   if (namesCommand(m) || /keep working/i.test(m)) return m; // #4515: "Keep working meanwhile." too (a lost read names no check)
-  return `${m}. Run: cb help${cmd && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
+  // never "cb help help": it is the command that just failed (#4755). A message that ends a sentence takes no extra dot
+  return `${m}${/[.?!]$/.test(m) ? '' : '.'} Run: cb help${cmd && cmd !== 'help' && Object.hasOwn(COMMANDS, cmd) ? ` ${cmd}` : ''}`;
 }
 
 async function main() {
