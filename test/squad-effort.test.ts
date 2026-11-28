@@ -96,11 +96,11 @@ test('a seat takes its own effort, else its role\'s when it runs the role\'s age
   assert.ok(!('effort' in seatSpec(MIXED, wantList('demo', MIXED).find((w) => w.role === 'lead')!)));
 });
 
-test('the effort reaches the launch command; the seat\'s first prompt is unchanged', () => {
+test('the effort reaches the launch command, and the seat\'s first prompt says it (#4766)', () => {
   const l = launchFor('demo', MIXED, want('demo-B1@pc'));
   assert.equal(l.effort, 'high');
   assert.ok(pair(launchSpec(l).spec.args, '--effort', 'high'));
-  assert.doesNotMatch(l.prompt, /effort/);
+  assert.match(l.prompt, / --effort high, then /);
 });
 
 test('squad show names the effort each line runs at', () => {
