@@ -5,10 +5,9 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { killChild, killMarked } from './own-kill.ts';
 import { runJob, servesFolder } from '../cli/runner-job.ts';
 import { ensurePg } from '../db/pg.ts';
 import { loadConfig } from '../cli/recipes.ts';
@@ -20,12 +19,14 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
 const freePort = () => new Promise<number>((ok) => { const s = createServer().listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 
 const kids: ChildProcess[] = [];
-const pids: number[] = []; // slow.mjs processes: on POSIX they outlive a killed runner
 const clients: any[] = [];
 after(async () => {
-  // #4922: by now most of these have ended, and another job's process may have their number
-  for (const k of kids) killChild(k);
-  killMarked(pids, MARK);
+  // #4922: nothing here is ended by a process number, which can be anyone's once its process has ended. A slow job step
+  // still running (on POSIX it outlives a killed runner) leaves when it sees the stop file; this file's own children are
+  // ended through their handles, which does nothing for one that has ended.
+  writeFileSync(STOP, '');
+  for (const k of kids) k.kill('SIGKILL');
+  await sleep(1000); // a slow step looks every 200 ms, and holds its slot's folder until it has left
   await Promise.all(clients.map((c) => c.end()));
   rmSync(TMP, { recursive: true, force: true, maxRetries: 5 }); // the repos, slot clones, homes
 });
@@ -37,7 +38,7 @@ await sql`insert into cb.sessions (machine, pane, actor, project, role) values (
 const session = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'claude-session' } }); clients.push(session);
 
 const TMP = mkdtempSync(join(tmpdir(), 'cbr-'));
-const MARK = basename(TMP); // on the command line of every process the cleanup may have to end by its number
+const STOP = join(TMP, 'stop'); // test/fixtures/slow.mjs ends when this file is there
 const ORIGIN = join(TMP, 'origin.git'), WORK = join(TMP, 'work'), HOME = join(TMP, 'home');
 writeFileSync(join(TMP, 'gitconfig'), '');
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: join(TMP, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -53,7 +54,7 @@ git('remote', 'add', 'origin', ORIGIN);
 const MAIN = commit('main', {
   'ok.mjs': "console.log('ok');\n",
   'fail.mjs': "console.log('failing'); process.exitCode = 3;\n",
-  'slow.mjs': "console.log('pid ' + process.pid); setTimeout(() => {}, 60000);\n",
+  'slow.mjs': readFileSync('test/fixtures/slow.mjs', 'utf8').replace("'__STOP__'", () => JSON.stringify(STOP)),
   'env.mjs': "const n = ['CB_DATABASE_URL', 'DATABASE_URL', 'RUNNER_MARKER'].filter((k) => process.env[k]); console.log('CB=' + (n.join(',') || 'none'));\n",
   // 3 MB, no newline; masking lengthens each address, so only a cut applied last keeps the summary short
   'big.mjs': "process.stdout.write('a@b.co '.repeat(450000)); process.exitCode = 1;\n",
@@ -75,20 +76,20 @@ const node = (...a: string[]) => ['node', ...a];
 const recipes = {
   ok: { steps: [node('ok.mjs')], timeout: 60 },
   fail: { steps: [node('fail.mjs')], timeout: 60 },
-  slow: { steps: [node('slow.mjs', MARK)], timeout: 3 },
+  slow: { steps: [node('slow.mjs')], timeout: 3 },
   env: { steps: [node('env.mjs')], timeout: 60 },
   big: { steps: [node('big.mjs')], timeout: 60 },
   nocmd: { steps: [['no-such-program-xyz']], timeout: 60 },
   cmdfile: { steps: [['tool.cmd']], timeout: 60 },
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
-  cleanup: { steps: [node('slow.mjs', MARK)], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
+  cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
   named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
   insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 4 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
-  multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs', MARK)], timeout: 60 },
+  multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
-  wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs', MARK] : ['sh', '-c', `node slow.mjs ${MARK}`]], timeout: 60 },
+  wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   // #4417: counts with nothing failing, then a non-zero exit (lefthook's program-script-tests: 542 passed, 0 failed, exit 1)
   quiet: { steps: [node('ok.mjs'), node('-e', "console.log('ℹ pass 3'); console.log('ℹ fail 0'); console.error('worker crashed after the run'); process.exit(1)")], timeout: 60 },
@@ -147,7 +148,7 @@ const ended = (id: number, ms = 60_000) => until(`job #${id} to end`, async () =
 const logOf = (id: number) => { try { return readFileSync(join(HOME, 'logs', `${id}.log`), 'utf8'); } catch { return ''; } };
 const pidOf = (id: number) => until(`job #${id} to print its pid`, () => {
   const m = /pid (\d+)/.exec(logOf(id));
-  if (m) { pids.push(Number(m[1])); return Number(m[1]); }
+  if (m) return Number(m[1]);
 }, 20_000, 50);
 const raw = async (project: string, recipe: string, sha: string, params: object = {}) => {
   const [row] = await sql`insert into cb.jobs (project, recipe, params, sha, requester) values (${project}, ${recipe}, ${sql.json(params as any)}, ${sha}, 'B1@mac') returning id`;
@@ -359,7 +360,7 @@ test('the log server answers peers only', async () => {
   const denied = await fetch(`http://127.0.0.1:${port2}/jobs/${id}/log`);
   assert.equal(denied.status, 403);
   assert.match(await denied.text(), /this machine may not read job logs/);
-  killChild(other.child);
+  other.child.kill('SIGKILL');
   await other.exited;
 });
 
@@ -379,12 +380,12 @@ test('a restarted runner ends its running job, kills what it left running and ru
   assert.ok(alive(pid), 'the orphan is still running before the restart');
   // a decoy record whose pid was reused by another node.exe (an agent session, a relay): on Windows every recorded root
   // is node.exe (the launcher), so only the launcher's own mark (its slot's .nostart path) in the command line counts
-  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', '--', MARK], { detached: true, stdio: 'ignore', windowsHide: true });
-  pids.push(decoy.pid!);
+  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+  kids.push(decoy);
   writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'node.exe' : 'node'}\n`);
   // a record from before the last boot is never acted on, even when its pid carries the mark
   const stale = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', '--', join(HOME, 'state', 'slot-3.nostart')], { detached: true, stdio: 'ignore', windowsHide: true });
-  pids.push(stale.pid!);
+  kids.push(stale);
   writeFileSync(join(HOME, 'state', 'slot-3.pids'), `${stale.pid} ${WIN ? 'node.exe' : 'node'}\n`);
   utimesSync(join(HOME, 'state', 'slot-3.pids'), new Date('2000-01-01'), new Date('2000-01-01'));
   const ok = await add('ok');
