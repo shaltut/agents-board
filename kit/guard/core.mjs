@@ -822,8 +822,9 @@ const PS_SETTER = /(?<![\w-])(?:set-variable|new-variable|remove-variable|set-it
 const ANY_CASE_HOME = /(?<![\w$])(?:home|userprofile)\b(?![/\\.])/i;
 const DRIVE_HOME = /\b(?:variable|global|script|local|private|env):\/?(?:home|userprofile)\b(?![/.])/i;
 // segments as the shell splits them (a quoted ; ends none), each read once from its first setter: linear
+// (#4737: ('HO'+'ME') is HOME; the blanks around + are bounded, so the join stays linear)
 const setsHome = (seg) => {
-  const t = bareText(seg);
+  const t = bareText(seg).replace(/[ \t]{0,4}\+[ \t]{0,4}/g, '');
   const m = PS_SETTER.exec(t);
   return !!m && ANY_CASE_HOME.test(t.slice(m.index + m[0].length));
 };
@@ -1825,6 +1826,37 @@ Ask on Agents Board instead, then KEEP WORKING on something else:
 - Add --blocking -t <task id> only if that task truly cannot continue; it parks the task in Blocked.
 - The answer arrives in this session by itself (cb relay); without a relay, check with \`cb pending\`. More: cb help ask`;
 
+// #4737: the command with split or built spellings of git, gh and az read out, judged beside the command as written (never
+// instead of it: which shell runs it is not known here, so this reading can only add a block). In order: $'...' decoded
+// ($'g\x69t'); $(echo g) and its backtick form read as the word; {gi,} as gi; the name's letters joined across what a
+// shell can drop between them (a backtick, ^, "", '', a backslash, $(), $(true), ${x}, $@, $*, $!, $1); and $x where the
+// same command sets x to one of the names. A name built any other way (from two variables, a file, a decoder) is not
+// read: server-side branch protection is the fence for those.
+const ANSI_C = /\$'((?:\\.|[^'\\])*)'/g;
+const ANSI_ESCAPE = /\\(?:x([\da-f]{1,2})|u([\da-f]{1,4})|([0-7]{1,3})|([\s\S]))/gi;
+const ANSI_NAMED = { n: '\n', t: '\t', r: '\r' };
+const ansiText = (body) => body.replace(ANSI_ESCAPE, (_all, hex, uni, oct, ch) => (ch !== undefined ? ANSI_NAMED[ch] ?? ch
+  : String.fromCharCode(oct !== undefined ? parseInt(oct, 8) : parseInt(hex ?? uni, 16))));
+const requote = (s) => (s.includes("'") ? `"${s.replace(/["\\$`]/g, '\\$&')}"` : `'${s}'`);
+const ECHOED = /(?:\$\(\s*(?:echo|printf)\s+(["']?)([\w.-]*)\1\s*\)|`(?:echo|printf)[ \t]+(["']?)([\w.-]*)\3`)/g;
+const EMPTY_BRACE = /\{([a-z]{1,3}),\}/gi;
+const GAP = String.raw`(?:\`|\^|""|''|\\|\$\(\s*(?:true|:)?\s*\)|\$\{\w*\}|\$[@*!1-9])`;
+// no gap holds a name's first letter except inside ${...}, where a word character or { is before it: so a match never
+// starts inside another's gaps, and the unbounded * stays linear
+// (cmd drops a caret before the first letter too: ^g^i^t)
+const SPLIT_NAME = new RegExp(String.raw`(?<![\w{$])\^?(?:g${GAP}*i${GAP}*t|g${GAP}*h|a${GAP}*z)(?!\w)`, 'gi');
+const GAPS = new RegExp(GAP, 'g');
+const NAME_SET = /(?<![\w$-])\$?([a-z_]\w*)[ \t]*=[ \t]*(["']?)(git|gh|az)\2(?![\w=./\\-])/gi;
+const VAR_USE = /\$(?:\{(\w+)\}|(\w+))/g;
+export function revealed(command) {
+  const text = command.replace(ANSI_C, (_all, body) => requote(ansiText(body)))
+    .replace(ECHOED, (_all, _q, a, _p, b) => a ?? b)
+    .replace(EMPTY_BRACE, '$1')
+    .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''));
+  const set = new Map([...text.matchAll(NAME_SET)].map((m) => [m[1], m[3]]));
+  return set.size ? text.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : text;
+}
+
 // One decision for one tool call. req: { tool: 'shell' | 'edit' | 'ask' | 'unknown'; command?; role?; protectedBranches?;
 // allowAsk?; agent? (CB_AGENT); paths? (an edit's targets, editTargets) }. Returns { allow: true } or { allow: false, kind, reason }: kind 'dangerous' (a dangerous command or a
 // CB_PROTECTED_BRANCHES push), 'role' (a role rule), 'input' (unreadable input, unknown tool or role) or 'ask'. The
@@ -2303,12 +2335,16 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      const danger = check(command);
-      if (danger) return block('dangerous', danger);
-      const branch = protectedPush(command, Array.isArray(protectedBranches) ? protectedBranches : []);
-      if (branch) return block('dangerous', pushReason(branch));
-      const byRole = checkRole(command, role, { readScript, hosts });
-      if (byRole) return block('role', byRole);
+      // #4737: judged as written, then with split and built names read out (only when that changes something)
+      const shown = revealed(command);
+      for (const text of shown === command ? [command] : [command, shown]) {
+        const danger = check(text);
+        if (danger) return block('dangerous', danger);
+        const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
+        if (branch) return block('dangerous', pushReason(branch));
+        const byRole = checkRole(text, role, { readScript, hosts });
+        if (byRole) return block('role', byRole);
+      }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
       const session = stdin === true && role ? stdinSession(command) : null;
       return session ? block('role', SESSION(session)) : { allow: true };
