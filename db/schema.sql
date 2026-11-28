@@ -6300,7 +6300,8 @@ $$;
 
 -- Everything the Runners page shows, in one read. project narrows the job lists only: the runners, the counts of the
 -- whole queue and every place number stay the machine's, so a wait still makes sense. why: the first reason that stops
--- the job, over the runners that offer it, the least stopped one counted: held, no runner, not answering (3 minutes
+-- the job: its project gets no work (#4559: no hold release or runner state would start it), else, over the runners
+-- that offer it, the least stopped one counted: held, no runner, not answering (3 minutes
 -- without a beat, the supervisor's threshold), paused or draining, no DB lane free, no slot free; else it starts next.
 -- A slot or lane count is the lower of what the runner reported and Ahmed's setting (either may be unknown).
 create function cb.runner_queue(project text default null, hours int default 24) returns jsonb language plpgsql stable as $$
@@ -6324,6 +6325,8 @@ begin
       from cb.jobs x where x.state = 'queued'
     ), w as (
       select q.*, coalesce(
+        (select jsonb_build_object('reason', 'project', 'state', pr.state, 'words', cb._state_words(pr.slug))
+           from cb.projects pr where pr.slug = q.project and pr.state <> 'enabled'),
         (select jsonb_build_object('reason', 'held', 'by', hd.held_by, 'at', hd.held_at) from cb.job_holds hd where hd.project = q.project),
         (select why from (
            select case when not rs.alive then 5 when rs.mode <> 'on' then 4 when q.db and rs.busy_db >= rs.lanes then 3
@@ -6769,6 +6772,7 @@ end $$;
 create function cb.project_state(project text, state text, actor text default null) returns jsonb language plpgsql as $$
 #variable_conflict use_variable
 declare a text; p text; s text := lower(trim(coalesce(state, ''))); cur cb.projects; verb text; msg text; who text; n int := 0;
+  jb cb.jobs; stopped int := 0;
 begin
   perform cb.dashboard_only('Projects');
   a := cb.set_actor(actor);
@@ -6808,7 +6812,18 @@ begin
   if s = 'enabled' then perform pg_notify('cb_jobs', '0'); end if;  -- the runner takes the waiting jobs now
   -- its open questions leave (or come back to) Today, the lamp and Telegram: the readers of the questions channel re-read
   perform pg_notify('cb', 'questions');
-  return jsonb_build_object('project', p, 'state', cur.state, 'state_by', cur.state_by, 'state_at', cur.state_at, 'told', n, 'changed', true);
+  -- #4559 slice 4: an archive cancels the project's waiting jobs, as cb.job_cancel does, and tells who asked for each;
+  -- running ones finish (disable already stopped new claims). Last: cb.tell sets the actor to runner
+  if s = 'archived' then
+    for jb in update cb.jobs x set state = 'cancelled', summary = 'cancelled: the project was archived', finished_at = now()
+              where x.project = p and x.state = 'queued' returning x.* loop
+      stopped := stopped + 1;
+      perform pg_notify('cb_jobs', jb.id::text);
+      perform cb._job_tell(jb);
+    end loop;
+  end if;
+  return jsonb_build_object('project', p, 'state', cur.state, 'state_by', cur.state_by, 'state_at', cur.state_at, 'told', n, 'changed', true,
+    'jobs_cancelled', stopped);
 end $$;
 
 -- What disabling (or archiving) this project would touch, in one read: the confirm dialog's counts. Reads only.

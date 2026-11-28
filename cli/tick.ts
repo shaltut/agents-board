@@ -34,8 +34,10 @@ const SHA = /^[0-9a-f]{40}$/;
  *  env or .env. Any other link is null: an Azure DevOps PR in any spelling, or another site's, is not a PR of that repo,
  *  and gh can't read it (#3746). */
 export function prRef(link: string, project: string) {
-  const u = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(link);
-  const bare = u ? undefined : /^#?(\d+)\/?$/.exec(link)?.[1];
+  const v = link.trim();
+  // GitHub's from the start: another site's path may spell github.com/ too
+  const u = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?=$|[/?#])/.exec(v);
+  const bare = u ? undefined : /^#?(\d+)\/?$/.exec(v)?.[1];
   if (!u && !bare) return null;
   const key = `GITHUB_REPO_${project.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
   const repo = u ? u[1] : process.env[key] || dotenv(key), n = u ? u[2] : bare;
