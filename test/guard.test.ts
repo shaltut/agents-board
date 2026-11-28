@@ -1133,11 +1133,21 @@ const codeStrings = ['bash -c "sudo codex exec x"', "sh -c 'batch' < j", 'bash -
   'eval -- "at now"', 'eval "--" sudo codex', 'iex -Command "Start-ScheduledTask x"', "Invoke-Expression -co 'sudo codex'",
   // a quoted flag, and cmd switches that carry a value
   'cmd "/c" "schtasks /run /tn x"', 'cmd /v:off/c schtasks /run /tn x', 'cmd /e:on/c "schtasks /run /tn x"', 'pwsh "-c" "Start-ScheduledTask x"',
-  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'"];
+  "powershell '-Command' 'sudo codex'", 'pwsh -CommandWithArgs "sudo codex"', "pwsh -cwa 'sudo codex'", "fish --command 'sudo codex'", "fish --command='sudo codex'",
+  // the name that carries the string, split by quotes or a backslash, with the launcher in the string split too
+  // (no piece of the split word may read as a launcher by itself, or the segment is walked anyway)
+  String.raw`s\h -c 's"u"do codex'`, `s'h' -c 's"u"do codex'`, `b"as"h -c 's"u"do codex'`, String.raw`e\val 's"u"do codex'`, `e""val 's"u"do codex'`, `e'v'al 's"u"do codex'`,
+  String.raw`r\g --pre 's"u"do' x f`, `r'g' --pre 's"u"do' x f`, `c""md /c 's"u"do codex'`, `c'm'd /c 's"u"do codex'`, `i'e'x 's"u"do codex'`,
+  // Git Bash writes cmd's switch with two slashes
+  'cmd //c schtasks /run /tn x', 'cmd.exe //k sudo codex', 'cmd //c "su"','cmd //v:off//c schtasks /run /tn x',
+  // Invoke-Expression takes its string after common parameters too, and any parameter may bind its value with a colon
+  'iex -Command:"sudo codex"', "iex -c:'Start-ScheduledTask x'", 'Invoke-Expression -Verbose "sudo codex"', "iex -ea 0 'sudo codex'", 'iex -ErrorAction SilentlyContinue "sudo codex"',
+  "iex -vb -Debug -wa:0 -ov x -Command 'sudo codex'", 'iex -Command: "sudo codex"', "iex -Verbose:$false -c 'sudo codex'"];
 const codeStringsFine = ['bash -c "ls -la"', "sh -c 'echo sudo is not run here'", 'eval "$(ssh-agent -s)"', 'eval "$(direnv hook bash)"', "bash -c 'sudo --version'", 'bash -c "crontab -l"',
   'sh -x build.sh', 'bash -C -x run', 'cmd /c "dir /b"', 'pwsh -c "Get-ScheduledTask"', 'pwsh -NoProfile -File x.ps1', 'rg --pre cat x f',
   'bash -c "ls; true"', 'bash -c "echo a | wc -l"', "bash -c 'echo $1' _ x", 'eval -- "$(direnv hook bash)"',
-  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log'];
+  'git commit -m "eval sudo codex"', 'cb log 1 "bash -c su"', `grep -n "bash -c 'sudo'" f`, 'echo "bash -c sudo"', 'node -c "sudo.js"', 'python -c "print(1)"', 'git -c core.pager=cat log',
+  'cmd //c "dir /b"', 'cmd //c ver', 'iex -Verbose "Get-Date"', "iex -ea 0 'Get-ScheduledTask'", 'iex -Command:"Get-Date"', `echo "it's fine" && s'h' -c 'echo a'`];
 test('#4741: a command string a shell, eval or rg --pre runs is walked like the command line', () => {
   for (const c of codeStrings) for (const role of ['builder', 'reviewer']) assert.match(evaluate({ tool: 'shell', command: c, role }).reason ?? '', /fresh environment/, `${role}: ${c}`);
   for (const c of codeStringsFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
@@ -1239,6 +1249,10 @@ test('long commands stay fast', () => {
     // #4741: a code string is walked once however two readings find it, and its words are read once per level
     ['code strings, 200 KB of eval words, as a builder', asBuilder(kb200('eval '))],
     ['code strings, 200 KB of eval words after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval '))],
+    ['code strings, 200 KB of iex parameters, as a builder', asBuilder('iex ' + kb200('-ea 0 '))],
+    ['code strings, a 200 KB cmd double-slash option word, as a builder', asBuilder('cmd ' + kb200('//a') + ' x')],
+    ['code strings, 200 KB of quote-split words, as a builder', asBuilder(kb200('s"h" x; '))],
+    ['code strings, 200 KB of lone quotes and backslashes, as a builder', asBuilder(kb200('a\\b \' " '))],
     ['code strings, 200 KB of eval after open parentheses after an open quote, as a builder', asBuilder('echo "; ' + kb200('eval x ( '))],
     // two readings of one eval line find two strings at each level, "x <inner>" and "<inner>": the work must not double per level
     ['code strings, eval of a word and a quoted eval nested 8 deep around 100 KB, as a builder', asBuilder(Array.from({ length: 8 }).reduce<string>((c) => 'eval x ' + JSON.stringify(c), 'ls ' + 'y '.repeat(50000)))],

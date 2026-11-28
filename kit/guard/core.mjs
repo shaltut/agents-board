@@ -1719,17 +1719,31 @@ const SHELL_PIECE = /\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])|([^'"\\
 // a word as the shell hands it on: quotes gone, 's'"udo x" joined
 const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, plain) => single ?? double?.replace(/\\(["\\$`])/g, '$1') ?? escaped ?? plain);
 const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-commandwithargs'.startsWith(`-${f}`))(x.replace(/^(?:--?|\/)/, '').toLowerCase());
+// -Verbose and -Debug, however far abbreviated
+const PS_SWITCH = (f) => /^-(?:vb|db)$/i.test(f) || ['-verbose', '-debug'].some((s) => f.length > 1 && s.startsWith(f.toLowerCase()));
 // cut: the second reading split this command inside a quote, so a shell's command string may be every word that is left
 function codeStrings(name, args, cut) {
   const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
   if (name === 'eval') return rest(shellValue(args[0] ?? '') === '--' ? 1 : 0);
   if (name === 'iex' || name === 'invoke-expression') {
-    const first = shellValue(args[0] ?? '');
-    return rest(first === '--' || PS_COMMAND(first) ? 1 : 0);
+    // it takes -Command and PowerShell's common parameters: two are switches, the rest take a value, any may bind it with a colon
+    let k = 0;
+    while (k < args.length) {
+      const x = shellValue(args[k]);
+      if (x === '--') return rest(k + 1);
+      if (!x.startsWith('-') && !PS_COMMAND(x)) break;
+      const colon = x.indexOf(':'), flag = colon < 0 ? x : x.slice(0, colon);
+      if (PS_COMMAND(flag)) {
+        return colon < 0 ? rest(k + 1) : [[x.slice(colon + 1), ...args.slice(k + 1).map(shellValue)].join(' ').trim()];
+      }
+      k += colon >= 0 || PS_SWITCH(flag) ? 1 : 2;
+    }
+    return rest(k);
   }
   if (name === 'cmd') {
     for (let k = 0; k < args.length; k++) {
-      const m = /^\/(?:[a-z](?::[^\s/]*)?\/)*[ck](.*)$/i.exec(shellValue(args[k]));
+      // a second slash is Git Bash's way to write one
+      const m = /^\/\/?(?:[a-z](?::[^\s/]*)?\/\/?)*[ck](.*)$/i.exec(shellValue(args[k]));
       if (m) return m[1] ? [[m[1], ...args.slice(k + 1)].map(shellValue).join(' ')] : rest(k + 1);
     }
     return [];
@@ -1822,7 +1836,11 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
-    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg) && !FRESH_NAME.test(unhide(seg))) continue;
+    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
+      // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
+      const plain = unhide(seg.replace(/["']/g, ''));
+      if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
+    }
     // flat: a quote the cut left alone is dropped, never read as opening a word that swallows the rest
     const tokens = [...seg.matchAll(flat ? WORD : GIT_TOKEN)], w = tokens.map((m) => m[0]);
     const u = w.map(unquote), names = w.map(cmdName);
