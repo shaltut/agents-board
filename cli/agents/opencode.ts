@@ -12,7 +12,8 @@ import { checkedEffort } from './effort.ts';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 import { atBannerSpot } from './screen.ts';
 
-export type OpencodeEndpoint = { port: number; password: string; username?: string; updatedAt: number };
+/** `session`: the one session to send to, set by a 2.x launch (cli/agents/opencode2-launch.ts). */
+export type OpencodeEndpoint = { port: number; password: string; username?: string; session?: string; updatedAt: number };
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** provider/model, the spec's section 3 regex for opencode (cb._check_model). */
@@ -23,13 +24,13 @@ const USERNAME = /^[A-Za-z0-9._-]+$/; // a ":" would break Basic auth
 const validPort =(p: unknown): p is number => typeof p === 'number' && Number.isInteger(p) && p >= 1024 && p <= 65535;
 
 /** Atomic and 0600: a reader sees the old file or the new one. The caller (squad-up, before `herdr agent start`) picks the port and password. */
-export function writeOpencodeEndpoint(machine: string, pane: string, ep: { port: number; password: string; username?: string }): void {
+export function writeOpencodeEndpoint(machine: string, pane: string, ep: { port: number; password: string; username?: string; session?: string }): void {
   if (!validPort(ep.port) || !ep.password) throw new Error('opencode endpoint needs a port 1024-65535 and a password');
   if (ep.username !== undefined && !USERNAME.test(ep.username)) throw new Error('opencode endpoint username must match [A-Za-z0-9._-]+');
   const file = opencodeEndpointPath(machine, pane), tmp = `${file}.tmp.${process.pid}`;
   try {
     rmSync(tmp, { force: true });
-    writeFileSync(tmp, JSON.stringify({ port: ep.port, password: ep.password, username: ep.username, updatedAt: Date.now() }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(tmp, JSON.stringify({ port: ep.port, password: ep.password, username: ep.username, session: ep.session, updatedAt: Date.now() }), { mode: 0o600, flag: 'wx' });
     renameSync(tmp, file);
   } catch (e) {
     try { rmSync(tmp, { force: true }); } catch {}
@@ -42,7 +43,8 @@ export function readOpencodeEndpoint(machine: string, pane: string): OpencodeEnd
     const o = JSON.parse(readFileSync(opencodeEndpointPath(machine, pane), 'utf8'));
     if (!o || !validPort(o.port) || typeof o.password !== 'string' || !o.password) return null;
     if (o.username !== undefined && o.username !== null && !(typeof o.username === 'string' && USERNAME.test(o.username))) return null;
-    return { port: o.port, password: o.password, username: typeof o.username === 'string' ? o.username : undefined, updatedAt: Number(o.updatedAt) || 0 };
+    return { port: o.port, password: o.password, username: typeof o.username === 'string' ? o.username : undefined,
+      ...(typeof o.session === 'string' ? { session: o.session } : {}), updatedAt: Number(o.updatedAt) || 0 };
   } catch { return null; }
 }
 
