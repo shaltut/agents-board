@@ -173,3 +173,24 @@ test('the digest says when the squad has no seat of the agent a card waits for',
   await sql`select cb.squad_set('demo', ${sql.json(squad())}, 'ahmed')`;
   assert.match(await digest(), /waiting for a Codex seat: the squad has none/);
 });
+
+// #4679 (PR 100 N2, lead's decision): a card sent back goes to the same kind of agent
+test('cb fail keeps the for: label, and the history does not say it came off; a later pass still takes it off', async () => {
+  const sql = await db();
+  await pipeline(sql);
+  const id = await staged(sql, 'sent back', 'review', ['for:codex', 'guard']);
+  await sql`update cb.tasks set assignee = 'R1@pc' where id = ${id}`;
+  await sql`select cb.stage_fail(${String(id)}, 'missing a test', null, 'R1@pc')`;
+  const card = async () => (await sql`select stage, labels from cb.tasks where id = ${id}`)[0];
+  assert.equal((await card()).stage, 'build');
+  assert.deepEqual((await card()).labels.sort(), ['for:codex', 'guard']);
+  const notes = (await sql`select summary from cb.events where task_id = ${id}`).map((e: any) => e.summary).join('\n');
+  assert.doesNotMatch(notes, /for one stage only/);
+  // in the same transaction as a fail, the next pass must not inherit it
+  await sql.begin(async (tx) => {
+    await tx`update cb.tasks set stage = 'review', assignee = 'R1@pc' where id = ${id} and set_config('cb.stage_ok', 'on', true) = 'on'`;
+    await tx`select cb.stage_fail(${String(id)}, 'again', null, 'R1@pc')`;
+    await tx`select cb._stage_move(${id}, 'review', null, 'rebuilt')`;
+  });
+  assert.deepEqual((await card()).labels, ['guard']);
+});

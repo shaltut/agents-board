@@ -644,3 +644,14 @@ test('a parts card at done keeps who built and reviewed each part', async () => 
     design: 'zed-O1@pc', 'build:api': 'zed-B1@mac', 'review:api': 'zed-R1@mac',
     'build:dashboard': 'zed-dashboard-B1@mac', 'review:dashboard': 'zed-dashboard-R1@mac' });
 });
+
+// #4679: a part sent back moves the card too, and that move keeps a for: label
+test('a part sent back by its reviewer keeps the card\'s for: label', async () => {
+  const sql = await setup();
+  const id = await atReview(sql);
+  await claim(sql, 'zed-R1@mac');
+  await sql`update cb.tasks set labels = '{for:claude}' where id = ${id}`;
+  await fail(sql, id, 'zed-R1@mac', 'no test');
+  assert.equal((await card(sql, id)).stage, 'build');
+  assert.deepEqual((await sql`select labels from cb.tasks where id = ${id}`)[0].labels, ['for:claude']);
+});

@@ -3987,7 +3987,9 @@ begin
   -- #4593 review 100 F2 (lead's ruling): a for: label binds the next claim only: a card that passes its stage loses it,
   -- and the history says so in plain words. Entering its first stage (from none) keeps it. #4679: so does a move into or
   -- out of approval, which no seat claims: a label set at design holds through to the build
-  if fromst is null or to_stage = fromst or 'approval' in (fromst, to_stage) then kept := '{}'; end if;
+  -- Nor does cb fail take it off (cb.keep_for, set by cb.stage_fail): the card goes back to the same kind of agent
+  if fromst is null or to_stage = fromst or 'approval' in (fromst, to_stage)
+     or current_setting('cb.keep_for', true) = 'on' then kept := '{}'; end if;
   if cardinality(kept) > 0 then
     note := concat_ws('; ', nullif(note, ''), format('it was kept for %s for one stage only, so any seat may take it now', cb._agents_words(kept)));
   end if;
@@ -4193,7 +4195,9 @@ begin
     -- back to its builder; a merged part reopened by qa needs a new merge commit
     update cb.task_parts p set stage = 'build', status = 'next', assignee = p.crew ->> 'build', commit = null, since = now(), nudged_at = null
      where p.task_id = tid and p.repo = pt.repo;
+    perform set_config('cb.keep_for', 'on', true);
     perform cb._parts_sync(tid, pt.repo || ': ' || trim(why), jsonb_build_object('repo', pt.repo));
+    perform set_config('cb.keep_for', '', true);
     -- the card stays in Next and unheld: its builder hears of it only by message (busy or not)
     insert into cb.events (actor, project, task_id, kind, summary, data)
     select 'board', t.project, tid, 'message', format('#%s part %s is back with you at build: %s', tid, pt.repo, trim(why)),
@@ -4201,7 +4205,9 @@ begin
      where nullif(trim(pt.crew ->> 'build'), '') is not null;
     return 'build';
   end if;
+  perform set_config('cb.keep_for', 'on', true);
   perform cb._stage_move(tid, nxt, case nxt when 'design' then t.crew ->> 'design' else t.crew ->> 'build' end, trim(why));
+  perform set_config('cb.keep_for', '', true);
   -- the parts wait for re-approval, held by nobody: cb._parts_open gives each back to its builder. Their holders (but
   -- the one sending it back) are told: nothing else reaches them.
   if nxt = 'design' then
