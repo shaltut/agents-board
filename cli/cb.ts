@@ -1,11 +1,13 @@
-// cb — Agents Board CLI. Talks to Postgres directly (works without the web server).
+// cb — Agents Board CLI. Talks to Postgres directly (works without the web server), through named functions only
+// (cli/board.ts, #3222).
 import { parseArgs } from 'node:util';
 import { hostname, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { callFn, useDb } from '../server/rpc.ts';
+import { useDb } from '../server/rpc.ts';
+import { call, useBoard } from './board.ts';
 import { tick, dur } from './tick.ts';
 import { sql as direct, databaseUrl, machine, dotenv } from '../server/db.ts';
 import { openBridge, seatKey } from './bridge.ts';
@@ -112,7 +114,8 @@ const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost
 // Local is by name only: this machine's own Tailscale name or address counts as remote. cb start answers at once: it is
 // advice that always exits 0.
 if (!localBoard && cmd !== 'start') sql = withConnectRetry(sql);
-useDb(sql);
+useDb(sql); // cb tick and the other modules that call callFn
+useBoard(sql);
 
 let sessionProject: string | null = null;
 
@@ -120,7 +123,7 @@ let sessionProject: string | null = null;
 async function resolveActor() {
   if (!pane) return;
   // the relay hands it over with the hello when it holds it (#3256): one round trip a command instead of two
-  const [s] = sql.binding ? [sql.binding] : await sql`select actor, project from cb.sessions where machine = ${machine()} and pane = ${pane}`;
+  const [s] = sql.binding ? [sql.binding] : await call('session_binding', { machine: machine(), pane });
   if (s && !explicitActor) actor = s.actor;
   sessionProject = s?.project ?? null;
 }
@@ -181,16 +184,13 @@ async function fromStdin(text: string | null | undefined, what: string): Promise
   return s.replace(/\s+$/, '');
 }
 
-async function addImages(tx: any, id: unknown, pics: ReturnType<typeof images>, replace: boolean) {
-  for (const [n, p] of pics.entries())
-    await tx`select cb.question_image_add(id => ${String(id)}, data => ${p.data}, caption => ${p.caption},
-                                          replace_all => ${replace && n === 0}, actor => ${actor})`;
-}
+/** Pictures as cb.ask_post and cb.reask_post take them: inside the one call, so they are stored with it or not at all. */
+const pictures = (pics: ReturnType<typeof images>) => pics.map((p: any) => ({ caption: p.caption, data: p.data.toString('base64') }));
 
 /** cb.mine rows, a part holder's (#3703) showing the part it holds: [part api: in_progress], as cb next does.
  *  repo desc: the Map keeps the last, so the first part by repo wins, as in mine, resume and stage_pass. */
 async function partShown(rows: any[], who: string) {
-  const held = new Map((await sql`select task_id, repo from cb._held_parts() where assignee = ${who} order by repo desc`).map((h: any) => [Number(h.task_id), h.repo]));
+  const held = new Map((await call('held_parts_of', { who })).map((h: any) => [Number(h.task_id), h.repo]));
   return rows.map((t) => held.has(Number(t.id)) ? { ...t, status: `part ${held.get(Number(t.id))}: ${t.status}` } : t);
 }
 
@@ -282,9 +282,9 @@ const stepOut = (s: any) => ({ out: !s.takes_it ? `#${s.id} → ${s.stage_words}
 async function guard(id: string | undefined) {
   const n = Number(String(id ?? '').replace(/^#/, ''));
   if (!sessionProject || !Number.isInteger(n)) return;
-  const [t] = await sql`select project from cb.tasks where id = ${n}`;
-  if (t && t.project !== sessionProject)
-    throw new Error(`#${n} is in ${t.project}; this session works in ${sessionProject}. Check the id: cb mine lists yours, cb brief your project's. Only ${t.project}'s own sessions change it.`);
+  const project = await call('task_project', { id: n });
+  if (project && project !== sessionProject)
+    throw new Error(`#${n} is in ${project}; this session works in ${sessionProject}. Check the id: cb mine lists yours, cb brief your project's. Only ${project}'s own sessions change it.`);
 }
 
 /** Claude can hand its inbox to a relay here: in this env, or in a live endpoint file (never existsSync on a pipe). */
@@ -308,12 +308,9 @@ function relayOn(): boolean | null {
 
 /** cb start: where this session stands and the one thing to run next. Read-only. --json (#4513): who, project, relay, and the text. */
 async function start(): Promise<{ out: string; json: unknown }> {
-  const [row] = pane ? await sql`select actor, project from cb.sessions where machine = ${machine()} and pane = ${pane}` : [];
+  const [row] = pane ? await call('session_binding', { machine: machine(), pane }) : [];
   const relay = relayOn();
-  const projects = async () => (await sql`select p.slug,
-      count(t.id) filter (where t.status = 'next')::int as next, count(t.id) filter (where t.status = 'in_progress')::int as doing,
-      (select count(*)::int from cb.sessions s where s.project = p.slug and s.last_seen > now() - interval '90 seconds') as live
-    from cb.projects p left join cb.tasks t on t.project = p.slug where p.state = 'enabled' group by p.slug order by p.slug`) // #4559: only projects that get work
+  const projects = async () => (await call('start_projects')) // #4559: only projects that get work
     .map((p: any) => `    ${p.slug.padEnd(16)} ${p.next} next, ${p.doing} in progress, ${p.live} sessions live`).join('\n') || '    (none yet: cb help project)';
   const via = o.as ? '--as' : process.env.CB_ACTOR ? '$CB_ACTOR' : row?.project ? 'bound to this pane' : 'not bound'; // the relay's own row (before cb iam) has no project
   const done = () => {
@@ -340,15 +337,15 @@ async function start(): Promise<{ out: string; json: unknown }> {
     return done();
   }
 
-  const mine: any = await callFn('mine', { actor });
+  const mine: any = await call('mine', { actor });
   // cb.mine also lists tasks reassigned away in the last 24h: never tell the agent to continue those
   const open = mine.filter(openFor(actor)), held = await mineLines(mine, actor, '  ');
   const project = sessionProject;
-  const queue = project ? await callFn('task_queue', { project, actor, lim: 3 }) as any[] : []; // what cb next would take: same filter and order
-  const qs = await sql`select id, status, body, sent_back from cb.questions where asked_by = ${actor} and status in ('open', 'answered', 'sent_back') order by id`;
+  const queue = project ? await call('task_queue', { project, actor, lim: 3 }) as any[] : []; // what cb next would take: same filter and order
+  const qs: any[] = await call('my_questions', { who: actor });
   const cut = (s: string) => (s.length > 100 ? s.slice(0, 99) + '…' : s);
   // Ahmed's asks (#936) waiting on this session's reply: a resumed session lost the terminal they were pushed into
-  const asks = (await callFn('asks_list', { to_actor: actor, include_closed: false }) as any[]).filter((a) => a.awaiting);
+  const asks = (await call('asks_list', { to_actor: actor, include_closed: false }) as any[]).filter((a) => a.awaiting);
   if (asks.length) out.push('AHMED ASKS YOU', ...asks.map((a) =>
     `  A${a.id}${a.late ? ` LATE ${dur((Date.now() - +new Date(a.delivered_at)) / 60000)}` : ''}${a.from_terminal ? ' (asked in your terminal)' : ''}: ${cut(flat(a.body))}`));
   out.push(`YOUR TASKS (cb mine)`, ...(held.open.length ? held.open : ['  none']), ...held.gone,
@@ -356,16 +353,15 @@ async function start(): Promise<{ out: string; json: unknown }> {
     ...(qs.length ? ['YOUR QUESTIONS', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${cut(q.body)}`)] : []), '', 'NEXT');
   const doing = open.find((t: any) => t.status === 'in_progress');
   // #4559: the bound project gets no work: that block replaces the next step (Ahmed's asks and answers still come first)
-  const [off] = project ? await sql`select cb._wait_words(${project}) as words`.catch(() => [null]) : [null];
-  if (off?.words) {
-    out.splice(out.length - 1, 1, 'PROJECT DISABLED', `  ${off.words}.`, '', 'NEXT');
+  const words: any = project ? await call('start_words', { project, actor }).catch(() => null) : null;
+  if (words?.wait) {
+    out.splice(out.length - 1, 1, 'PROJECT DISABLED', `  ${words.wait}.`, '', 'NEXT');
     for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
     if (qs.some((q: any) => q.status === 'answered')) out.push('  cb pending                      an answer to your question is waiting: act on it, then cb delivered <qid> <you>');
     out.push(doing ? `  wrap up #${doing.id}: push your work, cb log ${doing.id} "<where it stands>", release any lock, then wait` : '  wait: take no new card; you will be told when it is enabled',
       '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
     return done();
   }
-  const [review] = project ? await sql`select cb._review_words(${project}, ${actor}) as words`.catch(() => [null]) : [null];
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -374,11 +370,11 @@ async function start(): Promise<{ out: string; json: unknown }> {
   if (doing) {
     // a staged card in a pipeline project finishes with its stage's command, never cb done
     // a part holder (#3703): its part's line
-    const [st] = await sql`select cb._finish_line(t, ${actor}) as finish from cb.tasks t where t.id = ${doing.id} and t.stage is not null and cb._pipeline(t.project)`;
-    out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
+    const finish = await call('task_finish_line', { id: doing.id, actor });
+    out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${finish ? `${finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
-  else if (review?.words) out.push(`  ${review.words}.`); // #4744
+  else if (words?.review) out.push(`  ${words.review}.`); // #4744
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return done();
@@ -389,9 +385,8 @@ async function start(): Promise<{ out: string; json: unknown }> {
  *  under --json: a text move or done keeps its one query (a round trip each from a remote machine). */
 async function released(id: string) {
   const n = Number(id.replace(/^#/, ''));
-  const [{ status }] = o.json ? await sql`select status from cb.tasks where id = ${n}` : [{ status: null }];
-  const rows = await sql`select t.id, t.status, t.blocked_on, cb._waits_on(t.id) as waits from cb.task_blockers b join cb.tasks t on t.id = b.task
-    where b.blocker = ${n} and t.status not in ('done', 'cancelled') order by t.id`;
+  const status = o.json ? await call('task_status', { id: n }) : null;
+  const rows: any[] = await call('released_by', { blocker: n });
   return { text: rows.map((t: any) => t.status !== 'blocked' ? `\n#${t.id} unblocked: now ${t.status}`
     : `\n#${t.id} still blocked${t.waits.length ? `: waits on #${t.waits.join(', #')}` : t.blocked_on ? `: on Q${t.blocked_on}` : ''}`).join(''),
     json: { id: n, status, released: rows.map((t: any) => ({ id: Number(t.id), status: t.status,
@@ -414,36 +409,36 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
       if (!o.kind) throw new Error('say what it is: -k fact (system state), gotcha (a trap), rule (standing practice: Ahmed confirms), runbook (a procedure). Details: cb help mem');
       const project = a.length > 1 ? a[0] : sessionProject;
       if (!project) throw new Error('name the project (or global): cb mem add <project> "<title>" -k <kind>, or bind this pane first with cb iam <name> <project>');
-      const m: any = await callFn('mem_add', { project, title: a.length > 1 ? a.slice(1).join(' ') : a[0], kind: o.kind, body: o.body ?? '',
+      const m: any = await call('mem_add', { project, title: a.length > 1 ? a.slice(1).join(' ') : a[0], kind: o.kind, body: o.body ?? '',
         task_id: o.task ?? null, review: o.review ?? null, links: links(), machine: o.machine ?? null,
         tags: o.labels ? o.labels.split(',') : [], actor, propose: o.propose ?? false });
       return { out: after(m, 'added'), json: m };
     }
     if (sub === 'rule') {
       if (!a.length) throw new Error('usage: cb mem rule Q<id> ["<the rule in one line>"]   e.g. cb mem rule Q29 "Money PRs: merge on two GOs, owe the docs as a task"');
-      const m: any = await callFn('mem_rule', { question: a[0], title: a.slice(1).join(' ') || null, actor });
+      const m: any = await call('mem_rule', { question: a[0], title: a.slice(1).join(' ') || null, actor });
       return { out: after(m, 'added').replace(' proposed', ` proposed from Q${m.source.question_id}`), json: m };
     }
     if (sub === 'find') {
       if (!a.length) throw new Error('usage: cb mem find "<words>" [--project <p>] [--all]');
       const q = a.join(' '), scope = o.project ?? sessionProject ?? null, include_old = !!o.all;
       const oldHint = include_old ? '' : ' (--all adds retired and replaced entries)';
-      const rows: any = await callFn('mem_find', { q, project: scope, include_old });
+      const rows: any = await call('mem_find', { q, project: scope, include_old });
       if (rows.length || !scope) return { out: rows.map(memLine).join('\n') || `nothing about "${q}"${oldHint}`, json: rows };
       if (o.project) return { out: `nothing about "${q}" in ${scope} (drop --project to search every project${include_old ? '' : '; --all adds retired and replaced entries'})`, json: [] };
       // #660: a session that inherited a pane binding searches that project without knowing it: widen once, and say so
-      const wide = (await callFn('mem_find', { q, project: null, include_old }) as any[]).filter((m) => m.project && m.project !== scope);
+      const wide = (await call('mem_find', { q, project: null, include_old }) as any[]).filter((m) => m.project && m.project !== scope);
       return wide.length
         ? { out: [`nothing about "${q}" in ${scope}; in other projects:`, ...wide.map((m) => `  ${m.project}: ${memLine(m)}`)].join('\n'), json: wide }
         : { out: `nothing about "${q}" in ${scope} or any other project${oldHint}`, json: [] };
     }
     if (sub === 'list') {
-      const rows: any = await callFn('mem_list', { project: a[0] ?? sessionProject ?? null, kind: o.kind ?? null, include_old: !!o.all });
+      const rows: any = await call('mem_list', { project: a[0] ?? sessionProject ?? null, kind: o.kind ?? null, include_old: !!o.all });
       return { out: rows.map(memLine).join('\n') || 'no memory here yet: cb mem add <project> "<title>" -k fact', json: rows };
     }
     if (sub === 'show') {
       if (!a.length) throw new Error('usage: cb mem show M<id>');
-      const m: any = await callFn('mem_show', { id: a[0] });
+      const m: any = await call('mem_show', { id: a[0] });
       const src = Object.entries(m.source ?? {}).map(([k, v]) => `${k}=${v}`).join(' ');
       const lk = Object.entries(m.links ?? {}).map(([k, v]) => `${k}=${v}`).join(' ');
       return { out: [memLine(m), m.body, `${m.project ?? 'global'}${m.machine ? `, ${m.machine} only` : ''} · by ${m.created_by} ${String(m.created_at).slice(0, 10)}` +
@@ -452,14 +447,14 @@ async function mem(): Promise<{ out?: string; json?: unknown }> {
     }
     if (sub === 'supersede') {
       if (a.length < 2) throw new Error('usage: cb mem supersede M<id> "<new title>" [-b "<body>"]');
-      const m: any = await callFn('mem_supersede', { id: a[0], title: a.slice(1).join(' '), body: o.body ?? null, actor });
+      const m: any = await call('mem_supersede', { id: a[0], title: a.slice(1).join(' '), body: o.body ?? null, actor });
       const old = String(a[0]).replace(/^m/i, '');
       return { out: m.status === 'active' ? `M${m.id} replaces M${old}: ${m.title}`
         : `M${m.id} proposed to replace M${old}: Ahmed confirms it on the Memory page; M${old} stays until then`, json: m };
     }
     if (sub === 'retire') {
       if (!a.length) throw new Error('usage: cb mem retire M<id> ["why"]');
-      await callFn('mem_retire', { id: a[0], why: a.slice(1).join(' ') || null, actor });
+      await call('mem_retire', { id: a[0], why: a.slice(1).join(' ') || null, actor });
       return { out: `M${String(a[0]).replace(/^m/i, '')} retired`, json: { id: Number(String(a[0]).replace(/^m/i, '')), status: 'retired' } };
     }
     if (sub === 'confirm')
@@ -478,7 +473,7 @@ async function run(): Promise<unknown> {
       need(2, 'tag <id> <tag>... [-<tag>]...   e.g. cb tag 42 ocr tamarind -old');
       await guard(args[0]);
       const tags = args.slice(1);
-      const now: any = await callFn('task_tag', { id: args[0], actor,
+      const now: any = await call('task_tag', { id: args[0], actor,
         add: tags.filter((x) => !x.startsWith('-')), remove: tags.filter((x) => x.startsWith('-')).map((x) => x.slice(1)) });
       return { out: `#${args[0].replace(/^#/, '')} tags: ${now.length ? now.join(', ') : '(none)'}`, json: now };
     }
@@ -489,7 +484,7 @@ async function run(): Promise<unknown> {
       // Admin and password: the Users page's, or the VPS shell's (PGAPPNAME=cb-web) for the first admin, before anyone can sign in.
       if (args[0] === 'role') {
         need(3, 'user role <name> admin|member');
-        await callFn('user_set_role', { name: args[1], role: args[2], actor });
+        await call('user_set_role', { name: args[1], role: args[2], actor });
         return { out: `${args[1].trim().toLowerCase()} is now ${args[2].trim().toLowerCase()}`, json: { name: args[1].trim().toLowerCase(), role: args[2].trim().toLowerCase() } };
       }
       if (args[0] === 'password') {
@@ -497,21 +492,18 @@ async function run(): Promise<unknown> {
         if (process.stdin.isTTY) throw new Error('pipe the password in: read -rs PW && printf %s "$PW" | cb user password <name>');
         let pw = '';
         for await (const chunk of process.stdin) pw += chunk;
-        await callFn('user_password', { name: args[1], password: pw.replace(/\r?\n$/, ''), actor });
+        await call('user_password', { name: args[1], password: pw.replace(/\r?\n$/, ''), actor });
         return { out: `password set for ${args[1].trim().toLowerCase()}: they sign in on the board's login page`, json: { name: args[1].trim().toLowerCase(), password_set: true } };
       }
       if (args[0] !== 'add') throw new Error(`unknown user command "${args[0]}". Run: cb user add <name> ["Display Name"]; list people with cb users`);
       // The link is a member's login, so a session never gets it (cb.user_add returns it to the dashboard only).
-      await callFn('user_add', { name: args[1], display: args[2] ?? null, actor, ...(o.admin ? { role: 'admin' } : {}) });
-      const [u] = await sql`select name, display, role from cb.users where name = ${args[1].trim().toLowerCase()}`;
+      await call('user_add', { name: args[1], display: args[2] ?? null, actor, ...(o.admin ? { role: 'admin' } : {}) });
+      const [u] = await call('user_show', { who: args[1].trim().toLowerCase() });
       return { out: u.role === 'admin' ? `added ${u.name} (${u.display}) as admin: set a password (cb user password ${u.name}) and they sign in on the login page`
         : `added ${u.name} (${u.display}): Ahmed copies their link from the Users page`, json: u };
     }
     case 'users': {
-      const rows = await sql`select u.name, u.display, u.role,
-        (select count(*)::int from cb.questions q where q.assigned_to = u.name and q.status = 'open') as open_questions,
-        (select count(*)::int from cb.tasks t where t.assignee = u.name and t.status not in ('done','cancelled')) as open_tasks
-        from cb.users u order by u.name`;
+      const rows: any[] = await call('users_overview');
       return { out: rows.map((r: any) => `${r.name.padEnd(12)} ${r.display}${r.role === 'admin' ? ' (admin)' : ''}: ${r.open_questions} questions, ${r.open_tasks} tasks open`).join('\n') || 'no users (cb user add cai "Cai")', json: rows };
     }
     case 'github': {
@@ -522,13 +514,13 @@ async function run(): Promise<unknown> {
         need(2, 'github add <owner/repo> [--project <project>] [--to <session>] [--cards-in <project,...>]   or   cb github remove <owner/repo>');
         const repo = args[1];
         if (sub === 'remove') {
-          await callFn('github_watch_remove', { repo, actor });
+          await call('github_watch_remove', { repo, actor });
           return { out: `stopped watching ${repo}; its cards stay on the board`, json: { repo, watched: false } };
         }
         // --cards-in (#4334): more projects whose cards a PR may name (fix/<card>-..., "(card <n>)"); "" clears them
         const cardsIn = o['cards-in'] === undefined ? null : String(o['cards-in']).split(',').map((x) => x.trim()).filter(Boolean);
         // the pane's project is the default only for a repo not watched yet (SQL decides): a bare re-add changes nothing
-        const v: any = await callFn('github_watch_add', { repo, project: o.project ?? null, tell: o.to ?? null, cards_in: cardsIn,
+        const v: any = await call('github_watch_add', { repo, project: o.project ?? null, tell: o.to ?? null, cards_in: cardsIn,
           default_project: sessionProject, actor });
         return { out: `watching ${repo}: ${v.to} is told, PR cards go in ${v.project}${v.card_projects?.length
           ? ` (a PR naming a card in ${[v.project, ...v.card_projects].join(', ')} logs on that card)` : ''}, events from ${v.since} on`, json: v };
@@ -537,12 +529,12 @@ async function run(): Promise<unknown> {
         // a login whose PRs, comments, reviews and commits the watch drops (Ahmed's own workers post as one): his call
         need(2, 'github mute <login>   or   cb github unmute <login>');
         const login = args[1].toLowerCase();
-        const next = await callFn('github_mute', { login: args[1], mute: sub === 'mute', actor });
+        const next = await call('github_mute', { login: args[1], mute: sub === 'mute', actor });
         return { out: sub === 'mute' ? `muted ${login}: its PRs, comments, reviews and commits no longer reach the watch (failed CI runs still do)`
           : `unmuted ${login}`, json: next };
       }
       if (sub) throw new Error(`unknown github command "${sub}": cb github lists, cb github add <owner/repo>, cb github remove <owner/repo>, cb github mute <login>`);
-      const { watches, muted }: any = await callFn('github_watches', {});
+      const { watches, muted }: any = await call('github_watches', {});
       const out = watches.map((v: any) => {
         const cards = Object.entries(v.prs ?? {});
         return [`${v.repo} → ${v.to} (${v.project}${v.card_projects?.length ? `; named cards also in ${v.card_projects.join(', ')}` : ''}) · last poll ${v.last_ok ? `${dur((Date.now() - Date.parse(v.last_ok)) / 60000)} ago` : 'never'} · since ${v.since}` +
@@ -556,16 +548,16 @@ async function run(): Promise<unknown> {
       need(2, 'assign <Q12|#34> <user|ahmed>   hand a question or task to a user (ahmed takes a question back)');
       const target = args[0], to = args[1] === 'ahmed' ? null : args[1];
       if (/^q\d+$/i.test(target)) {
-        await callFn('question_assign', { id: target.slice(1), to_user: to, actor });
+        await call('question_assign', { id: target.slice(1), to_user: to, actor });
         return { out: `Q${target.slice(1)} → ${to ?? 'ahmed'}`, json: { id: Number(target.slice(1)), kind: 'question', assigned_to: to } };
       }
       await guard(target);
-      if (to && !(await sql`select 1 from cb.users where name = ${to}`).length) throw new Error(`unknown user ${to}: see cb users, or add them with cb user add ${to} "<Display Name>"`);
-      await callFn('task_update', { id: target, fields: { assignee: to }, actor });
+      if (to && !(await call('user_known', { who: to }))) throw new Error(`unknown user ${to}: see cb users, or add them with cb user add ${to} "<Display Name>"`);
+      await call('task_update', { id: target, fields: { assignee: to }, actor });
       return { out: `#${target.replace(/^#/, '')} → ${to ?? 'nobody'}`, json: { id: Number(target.replace(/^#/, '')), kind: 'task', assignee: to } };
     }
     case 'huddles': {
-      const rows: any = await callFn('huddles_list', { project: args[0] ?? sessionProject ?? null });
+      const rows: any = await call('huddles_list', { project: args[0] ?? sessionProject ?? null });
       const out = rows.map((h: any) => `huddle #${h.id} [${h.status}] ${h.topic}${h.task_id ? ` (task #${h.task_id})` : ''} · ${h.members.join(', ')} · ${h.messages} lines` +
         (h.summary ? `\n  outcome: ${h.summary}` : h.last ? `\n  last: ${h.last.actor}: ${h.last.summary}` : ''));
       return { out: out.join('\n') || 'no huddles', json: rows };
@@ -575,7 +567,7 @@ async function run(): Promise<unknown> {
       if (sub === 'open') {
         need(2, 'huddle open "<topic>" <session>... [-t task]   e.g. cb huddle open "Date parsing" W3@macbook -t 59');
         if (o.task) await guard(o.task);
-        const id = await callFn('huddle_open', { topic: args[1], members: args.slice(2), task: o.task ?? null, actor });
+        const id = await call('huddle_open', { topic: args[1], members: args.slice(2), task: o.task ?? null, actor });
         return { out: `huddle #${id} open with ${args.slice(2).join(', ') || 'nobody yet'}; talk with: cb huddle say ${id} "..."`,
           json: { id: Number(id), members: args.slice(2), task: o.task == null ? null : Number(String(o.task).replace('#', '')) } };
       }
@@ -583,23 +575,23 @@ async function run(): Promise<unknown> {
       const id = args[1].replace(/^#/, '');
       if (sub === 'say') {
         need(3, 'huddle say <id> "<message>"');
-        const ev = await callFn('huddle_say', { id, message: args.slice(2).join(' '), actor });
+        const ev = await call('huddle_say', { id, message: args.slice(2).join(' '), actor });
         return { out: `said in huddle #${id}`, json: { id: Number(ev), huddle: Number(id) } };
       }
       if (sub === 'add') {
         need(3, 'huddle add <id> <session>...');
-        const added: any = await callFn('huddle_add', { id, members: args.slice(2), actor });
+        const added: any = await call('huddle_add', { id, members: args.slice(2), actor });
         return { out: `huddle #${id}: added ${added.join(', ') || 'nobody new'}`, json: added };
       }
       if (sub === 'close') {
-        await callFn('huddle_close', { id, summary: args.slice(2).join(' ') || null, actor });
+        await call('huddle_close', { id, summary: args.slice(2).join(' ') || null, actor });
         return { out: `huddle #${id} closed`, json: { id: Number(id), status: 'closed' } };
       }
       if (sub === 'show') {
-        const [h] = await sql`select * from cb.huddles where id = ${Number(id)}`;
+        const [h] = await call('huddle_row', { id: Number(id) });
         if (!h) throw new Error(`no huddle #${id}: cb huddles lists them`);
-        const lines = await sql`select at, actor, summary from cb.events where kind = 'huddle' and (data ->> 'huddle')::bigint = ${Number(id)} order by id`;
-        const members = await sql`select actor from cb.huddle_members where huddle_id = ${Number(id)} order by added_at`;
+        const lines: any[] = await call('huddle_lines', { id: Number(id) });
+        const members: any[] = await call('huddle_member_names', { id: Number(id) });
         const head = `huddle #${h.id} [${h.status}] ${h.topic}${h.task_id ? ` (task #${h.task_id})` : ''} · ${h.project} · ${members.map((m: any) => m.actor).join(', ')}`;
         return { out: [head, ...lines.map((l: any) => `  ${new Date(l.at).toISOString().slice(11, 16)} ${l.actor}: ${l.summary}`)].join('\n'), json: { huddle: h, lines } };
       }
@@ -608,16 +600,15 @@ async function run(): Promise<unknown> {
     case 'tell': {
       need(2, 'tell <session> "<message>"   e.g. cb tell W2@macbook "take #19 next"');
       if (sessionProject) {
-        const [t] = await sql`select project from cb.sessions where actor = ${args[0]} order by last_seen desc limit 1`;
-        if (t?.project && t.project !== sessionProject)
-          throw new Error(`${args[0]} works in ${t.project}; this session works in ${sessionProject}. Sessions only talk inside their project: tell one of yours (cb sessions), or ask your orchestrator to pass it on.`);
+        const theirs = await call('session_project_of', { who: args[0] });
+        if (theirs && theirs !== sessionProject)
+          throw new Error(`${args[0]} works in ${theirs}; this session works in ${sessionProject}. Sessions only talk inside their project: tell one of yours (cb sessions), or ask your orchestrator to pass it on.`);
       }
-      const id = await callFn('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
+      const id = await call('tell', { to_actor: args[0], message: args.slice(1).join(' '), actor });
       // relay not live: a session still writing to the board only lost its relay (#4341); say which, and that it waits.
       // A name with no session row (a pane re-bound to another name, or a session that never started a relay) is not
       // "relay down", as in the digest; but if it wrote lately, say so rather than "it may be gone" (#4421)
-      const [s] = await sql`select coalesce((select max(last_seen) > now() - interval '90 seconds' from cb.sessions where actor = ${args[0]}), false) as live,
-        exists (select 1 from cb.sessions where actor = ${args[0]}) as has_row, cb._board_active(${args[0]}) as mins`;
+      const [s] = await call('tell_delivery', { who: args[0] });
       // one word for --json (#4453), the text below says the same in words
       const delivery = s.live ? 'live' : s.mins === null ? 'not_seen' : s.has_row ? 'relay_down' : 'no_session';
       const how = { live: 'relay live: delivered within seconds',
@@ -628,7 +619,7 @@ async function run(): Promise<unknown> {
         json: { id, to: args[0], delivery, last_wrote_mins: s.mins, waits_hours: delivery === 'live' ? null : 24 } };
     }
     case 'sessions': {
-      const rows: any = await callFn('sessions_overview', { project: args[0] ?? sessionProject ?? null });
+      const rows: any = await call('sessions_overview', { project: args[0] ?? sessionProject ?? null });
       const idle = (r: any) => (r.last ? (Date.now() - +new Date(r.last.at)) / 60000 : Infinity);
       const open = rows.filter((r: any) => r.live || r.doing.length || r.queued || r.open_questions);
       const out = open.map((r: any) => {
@@ -644,9 +635,9 @@ async function run(): Promise<unknown> {
     case 'session': {
       need(1, 'session <name>   e.g. cb session W6@macbook');
       const who = args[0];
-      const tasks = await sql`select id, status, priority, type, title, project from cb.tasks where assignee = ${who} and status not in ('done','cancelled') order by status, priority, rank`;
-      const qs = await sql`select id, status, body from cb.questions where asked_by = ${who} and status in ('open','answered') order by id`;
-      const ev = await sql`select at, kind, task_id, summary from cb.events where actor = ${who} order by id desc limit 10`;
+      const tasks: any[] = await call('session_tasks', { who });
+      const qs: any[] = await call('session_questions', { who });
+      const ev: any[] = await call('session_events', { who });
       const out = [`${who}: ${tasks.length} open tasks`, ...tasks.map((t: any) => '  ' + line(t)),
         qs.length ? 'QUESTIONS' : '', ...qs.map((q: any) => `  Q${q.id} ${q.status}: ${q.body}`),
         'RECENT', ...ev.map((e: any) => `  ${new Date(e.at).toISOString().slice(5, 16).replace('T', ' ')} ${e.kind}${e.task_id ? ` #${e.task_id}` : ''}: ${String(e.summary).slice(0, 120)}`)];
@@ -654,14 +645,14 @@ async function run(): Promise<unknown> {
     }
     case 'broadcast': {
       need(1, 'broadcast "<message>" --project <p> | --all');
-      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor, everyone: !!o.all });
+      const id = await call('broadcast', { message: args.join(' '), project: o.project ?? null, actor, everyone: !!o.all });
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: { id: Number(id), project: o.project ?? null } };
     }
     case 'relay': {
       if (!pane) throw new Error('cb relay needs a herdr pane ($HERDR_PANE_ID). Without a relay, run cb mine and cb pending between steps');
       // --agent, then $CB_AGENT, then the agent this pane is bound with, else claude
       const agent: string = o.agent || process.env.CB_AGENT ||
-        (await sql`select agent from cb.sessions where machine = ${machine()} and pane = ${pane}`.catch(() => []))[0]?.agent || 'claude';
+        (await call('session_binding', { machine: machine(), pane }).catch(() => []))[0]?.agent || 'claude';
       getAdapter(agent); // an agent cb cannot serve yet fails here, by name
       if (agent === 'claude' && !claudeInbox()) throw new Error('no session inbox here (needs a Claude Code session, 2.1.234+). Without a relay, run cb mine and cb pending between steps');
       // through the path cb was started with, not its real one: a release flip then restarts the relay (started-as.ts)
@@ -674,15 +665,15 @@ async function run(): Promise<unknown> {
       need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--effort <effort>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook iris --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
       // a Claude cb iam sends no agent: the 8 arguments a rolled-back cb.iam still takes (cli/iam-args.ts)
-      const p = await callFn('iam', iamArgs({ machine: machine(), pane, actor: args[0]!, project: args[1], role: o.role, area: o.area,
+      const p = await call('iam', iamArgs({ machine: machine(), pane, actor: args[0]!, project: args[1], role: o.role, area: o.area,
         model: o.model, repo: o.repo, agent: o.agent }, process.env.CB_AGENT));
       // #4766: after the bind, on its own: a board rolled back past it has no cb.seat_effort (42883) and still binds
       if (o.effort !== undefined) {
-        await sql`select cb.seat_effort(${machine()}, ${pane}, ${o.effort})`.catch((e: any) => { if (e.code !== '42883') throw e; });
+        await call('seat_effort', { machine: machine(), pane, effort: o.effort }).catch((e: any) => { if (e.code !== '42883') throw e; });
       }
-      const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
-      const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
-      const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
+      const [b] = await call('session_binding', { machine: machine(), pane });
+      const pack = b?.project ? packText(await call('mem_pack', { project: b.project, machine: machine() })) : '';
+      const goals = b?.project ? goalsText(await call('goals_list', { project: b.project }) as any[]) : '';
       return { json: { actor: p, machine: machine(), pane, project: b?.project ?? null, role: b?.role ?? null, area: b?.area ?? null },
         out: `this pane (${pane}@${machine()}) is ${p}${b?.role ? ` as ${b.role}${b.area ? ` (area ${b.area})` : ''}` : ''}${b?.project ? `, working on ${b.project}` : ' (no project: add one, cb iam <name> <project>)'}${pack ? `\n\n${pack}` : ''}${goals ? `\n\n${goals}` : ''}${b?.role ? `\n\nYour role: cb role ${b.role}` : ''}` };
     }
@@ -692,13 +683,13 @@ async function run(): Promise<unknown> {
       need(2, 'add <project> "<title>" ["<body>"] [-s next] [-p P1]   e.g. cb add iris "Fix month parse" "row 8812 reads 1900" -s next');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb add <project> "<title>" --stage build --why "<why>"');
       const tb = titleBody('add', args.slice(1), o.body);
-      const id = await callFn('task_add', { project: args[0], title: tb.title, body: tb.body ?? '',
+      const id = await call('task_add', { project: args[0], title: tb.title, body: tb.body ?? '',
         status: o.status ?? null, priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [],
         links: links(), assignee: o.assignee ?? null, actor, ...(o.type ? { type: o.type } : {}), ...(o.epic ? { epic: o.epic } : {}),
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       // --json (#4513): what was stored (a project alias resolved, the default status). #4559: and whether its project gets
       // work (a disabled one parks the card in its Backlog), so the filer is told
-      const [t] = await sql`select project, status, stage, cb._state_words(project) as words from cb.tasks where id = ${Number(id)}`;
+      const [t] = await call('task_filed', { id: Number(id) });
       const parked = t.words ? `#${id} filed in ${t.project}'s Backlog: ${t.words}; nobody picks it up until Ahmed enables it` : null;
       if (!o.json) return { out: parked ?? `#${id}` };
       return { json: { id: Number(id), project: t.project, status: t.status, stage: t.stage, ...(parked ? { disabled: t.words } : {}) } };
@@ -708,16 +699,12 @@ async function run(): Promise<unknown> {
       const tb = titleBody('bug', args.slice(1), o.body);
       if (!tb.body?.trim()) throw new Error('describe it: -b "what happened, how to reproduce, expected vs actual"');
       if (o.why && !o.stage) throw new Error('--why goes with --stage build: cb bug <project> "<title>" -b "<what happened>" --stage build --why "<why>"');
-      await sql`select cb.read_project(${args[0]})`; // a typo errors with the known projects instead of creating one
-      const id = await callFn('task_add', { project: args[0], title: tb.title, body: tb.body, status: 'next',
+      await call('read_project', { project: args[0] }); // a typo errors with the known projects instead of creating one
+      const id = await call('task_add', { project: args[0], title: tb.title, body: tb.body, status: 'next',
         priority: o.priority ?? 'P2', labels: o.labels ? o.labels.split(',') : [], links: links(), actor, type: 'bug',
         ...(o.stage ? { stage: o.stage, why: o.why ?? null } : {}), ...(o.repo ? { repos: repoList(o.repo) } : {}) });
       // orch: one of those told is the project's lead (the lead role, whatever its name; #3746)
-      const [{ project, all, stage, multi, orch, words }] = await sql`select t.project, cb.triagers(t.project) as all, t.stage,
-        t.repos is null and cb._multi_repo(t.project) as multi,
-        exists (select 1 from unnest(cb.triagers(t.project)) x where x <> ${actor} and cb._is_lead(x, t.project)) as orch,
-        cb._state_words(t.project) as words
-        from cb.tasks t where t.id = ${id}`;
+      const [{ project, triagers: all, stage, multi, orch, words }] = await call('bug_filed', { id, actor });
       // #4559 (Q3020): a disabled project takes the report but parks it, and nobody triages it there (cb.inbox)
       if (words) return { out: `#${id} bug filed in ${project}'s Backlog: ${words}; nobody picks it up until Ahmed enables it`, json: { id, project, told: [], stage, disabled: words } };
       const told = all.filter((a: string) => a !== actor);
@@ -729,48 +716,49 @@ async function run(): Promise<unknown> {
     case 'stage': {
       need(2, 'stage <id> build|none --why "<why>" [--repo <repo,repo>]   (the lead: a small bug or chore skips design; none = no code, worked the old way)');
       await guard(args[0]);
-      await callFn('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor, ...(o.repo ? { repos: repoList(o.repo) } : {}) });
-      return stepOut(await callFn('next_step', { id: args[0] }));
+      await call('stage_set', { id: args[0], stage: args[1], why: o.why ?? null, actor, ...(o.repo ? { repos: repoList(o.repo) } : {}) });
+      return stepOut(await call('next_step', { id: args[0] }));
     }
     case 'pass': {
       need(2, 'pass <id> "<summary>" [--pr <url>] [--commit <sha>] [--repo <repo>]   e.g. cb pass 42 "built, tests green" --pr https://github.com/o/r/pull/9 (or https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/9)');
       await guard(args[0]);
-      await callFn('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
-      return stepOut(await callFn('next_step', { id: args[0] }));
+      await call('stage_pass', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
+      return stepOut(await call('next_step', { id: args[0] }));
     }
     case 'fail': {
       need(2, 'fail <id> "<why>" [--to design] [--repo <repo>]   e.g. cb fail 42 "the error path is missing"');
       await guard(args[0]);
-      await callFn('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
-      return stepOut(await callFn('next_step', { id: args[0] }));
+      await call('stage_fail', { id: args[0], why: args.slice(1).join(' '), to_stage: o.to ?? null, actor, ...(o.repo ? { repo: o.repo.trim() } : {}) });
+      return stepOut(await call('next_step', { id: args[0] }));
     }
     case 'move':
       need(2, 'move <id> <status> ["<note>"]');
       await guard(args[0]);
-      await callFn('task_move', { id: args[0], status: args[1], note: args.slice(2).join(' ') || null, actor });
+      await call('task_move', { id: args[0], status: args[1], note: args.slice(2).join(' ') || null, actor });
       return released(args[0]).then((r) => ({ out: `#${args[0].replace('#', '')} → ${args[1]}${r.text}`, json: r.json }));
     case 'done':
       need(2, 'done <id> "<summary>" [--commit <sha>] [--pr <url>]   e.g. cb done 42 "Date parse fixed" --commit ab12cd3');
       await guard(args[0]);
-      await callFn('task_done', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
+      await call('task_done', { id: args[0], summary: args.slice(1).join(' '), links: links(), actor });
       return released(args[0]).then((r) => ({ out: `#${args[0].replace('#', '')} done${r.text}`, json: r.json }));
     case 'block':
     case 'unblock': {
       need(1, `${cmd} <task> --by <task>   e.g. cb ${cmd} 13 --by 12`);
       if (!o.by) throw new Error(`usage: cb ${cmd} <task> --by <task>   e.g. cb ${cmd} 13 --by 12. Details: cb help ${cmd}`);
       await guard(args[0]);
-      await callFn(cmd === 'block' ? 'task_block' : 'task_unblock', { task: args[0], blocker: o.by, actor });
-      const [t] = await sql`select id, status from cb.tasks where id = ${Number(args[0].replace(/^#/, ''))}`;
+      await call(cmd === 'block' ? 'task_block' : 'task_unblock', { task: args[0], blocker: o.by, actor });
+      const card = Number(args[0].replace(/^#/, ''));
+      const t = { id: card, status: await call('task_status', { id: card }) };
       const by = o.by.replace(/^#/, '');
       return { out: `#${t.id} ${cmd === 'block' ? 'waits on' : 'no longer waits on'} #${by} (now ${t.status})`,
         json: { id: Number(t.id), by: Number(by), waits: cmd === 'block', status: t.status } };
     }
     case 'goals': {
-      const rows: any = await callFn('goals_list', { project: args[0] ?? sessionProject ?? null });
+      const rows: any = await call('goals_list', { project: args[0] ?? sessionProject ?? null });
       return { out: goalsText(rows) || 'no active goals: Ahmed sets them on the Goals page (key 0)', json: rows };
     }
     case 'epics': {
-      const rows: any = await callFn('epics_list', { project: args[0] ?? sessionProject ?? null });
+      const rows: any = await call('epics_list', { project: args[0] ?? sessionProject ?? null });
       return { out: rows.map((e: any) => `E${e.id} [${e.status}] ${e.title} · ${e.project} · ${e.finished} of ${e.total} done`).join('\n')
         || 'no epics yet: Ahmed creates them on the Epics page (key 8)', json: rows };
     }
@@ -782,7 +770,7 @@ async function run(): Promise<unknown> {
       if (o.labels) fields.labels = o.labels.split(',');
       if (o.repo !== undefined) fields.repos = repoList(o.repo);
       const l = links(); if (Object.keys(l).length) fields.links = l;
-      await callFn('task_update', { id: args[0], fields, actor });
+      await call('task_update', { id: args[0], fields, actor });
       return { out: `#${args[0].replace('#', '')} updated`, json: { id: Number(args[0].replace('#', '')), changed: Object.keys(fields) } };
     }
     case 'page': {
@@ -795,11 +783,11 @@ async function run(): Promise<unknown> {
         if (!o.file) throw new Error('give the page text: -f <file>, or -f - for stdin');
         const body = o.file === '-' ? await fromStdin('-', 'page') : readFileSync(o.file, 'utf8');
         if (!o.area) await guard(args[1]);
-        const v = await callFn('page_set', { body, ...target, actor });
+        const v = await call('page_set', { body, ...target, actor });
         return { out: `page saved, v${v}`, json: { task: o.area ? null : Number(args[1].replace('#', '')), area: o.area ?? null,
           project: o.area ? target.project : null, version: Number(v) } };
       }
-      const pg = await callFn('page_get', target);
+      const pg = await call('page_get', target);
       if (!pg) throw new Error(`no page yet for ${o.area ? `area ${o.area}` : `#${args[1].replace('#', '')}`}: write it with cb page set`);
       if (o.approved && pg.approved_version == null) throw new Error('nothing approved on this page yet');
       const body = o.approved ? pg.approved_body : pg.body, ver = o.approved ? pg.approved_version : pg.version;
@@ -814,53 +802,51 @@ ${body}`, json: pg };
       need(2, 'log <task id> "<what happened>"   e.g. cb log 130 "B64 graded 27/32"');
       // `cb log 130 "..."` means task #130 (sessions kept typing it), not a project named "130"
       if (/^#?\d+$/.test(args[0]) && !o.task) {
-        const [t] = await sql`select project from cb.tasks where id = ${Number(args[0].replace('#', ''))}`;
-        if (!t) throw new Error(`no task #${args[0].replace('#', '')}: check the id (cb mine, cb brief). A project note is cb log <project> "..."`);
+        const project = await call('task_project', { id: Number(args[0].replace('#', '')) });
+        if (!project) throw new Error(`no task #${args[0].replace('#', '')}: check the id (cb mine, cb brief). A project note is cb log <project> "..."`);
         o.task = args[0].replace('#', '');
-        args[0] = t.project;
+        args[0] = project;
       }
       await guard(o.task);
-      return callFn('log', { project: args[0], summary: args.slice(1).join(' '), task_id: o.task ?? null, actor })
+      return call('log', { project: args[0], summary: args.slice(1).join(' '), task_id: o.task ?? null, actor })
         .then((ev) => ({ out: 'logged', json: { id: Number(ev), task: o.task == null ? null : Number(String(o.task).replace('#', '')) } }));
     case 'next': {
       const project = args[0] ?? sessionProject;
       if (!project) throw new Error('no project: say which (cb next iris) or bind this session once (cb iam <name> <project>)');
       if (sessionProject) {
-        const [{ p }] = await sql`select cb.resolve(${project}) as p`;
+        const p = await call('resolve', { project });
         if (p !== sessionProject) throw new Error(`this session works in ${sessionProject}; ${p}'s work is for ${p}'s sessions. Run: cb next (takes from ${sessionProject})`);
       }
-      const rows: any = await callFn('task_claim', { project, actor });
+      const rows: any = await call('task_claim', { project, actor });
       if (!rows.length) {
         // #4559: a disabled project hands out nothing: say so, and what to do meanwhile. Read only when nothing came, and a
         // board without the words (a rolled-back schema) still answers
-        const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
-        if (w?.words) return { out: w.words, json: null };
+        const why: any = await call('next_empty_words', { project, actor }).catch(() => null);
+        if (why?.wait) return { out: why.wait, json: null };
         // #4744: a reviewer in a project without stages: the lead hands out its reviews, so say that, not "nothing"
-        const [v] = await sql`select cb._review_words(cb.resolve(${project}), ${actor}) as words`.catch(() => [null]);
-        if (v?.words) return { out: v.words, json: null };
+        if (why?.review) return { out: why.review, json: null };
         // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
-        const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
-        return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
+        return { out: why?.skipped ? `nothing to claim (skipped ${why.skipped})` : 'nothing to claim', json: why?.skipped ? { claimed: null, skipped: why.skipped } : null }; // review 100 F3: --json says it too
       }
       const t = rows[0];
-      const staged = t.stage ? (await callFn('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
+      const staged = t.stage ? (await call('resume', { actor }) as any).cards.find((c: any) => c.id === t.id) : null; // stage null here = pipeline off: cb done
       // a part claim (#3703) leaves the card in Next: show the part taken and its status instead
       const shown = staged?.part ? { ...t, status: `part ${staged.part.repo}: ${staged.status}` } : t;
       return { out: `${line(shown)}${t.body ? '\n\n' + t.body : ''}${staged ? '\n\n' + cardBlock(staged, false) : ''}`, json: staged ? { ...t, ...staged } : t };
     }
     case 'resume': {
-      const r: any = await callFn('resume', { actor });
+      const r: any = await call('resume', { actor });
       return { out: resumeText(r), json: r };
     }
     case 'squad': {
       if (!['show', 'set', 'up', 'trust', 'primary'].includes(args[0] ?? '') || args.length !== (args[0] === 'primary' ? 3 : 2)) throw new Error('usage: cb squad show <project> [--json]  |  cb squad set <project> -f <file|-> [--overwrite]  |  cb squad up <project> [--dry-run]  |  cb squad trust <project> [--machine <m>] [--dry-run]  |  cb squad primary <project> <seat>');
       if (args[0] === 'primary') { // #4787: ends a seat's backup; there is no automatic way back
-        const ended = (await sql`select cb.seat_backup_clear(${args[1]}, ${args[2]}, ${actor}) as r`)[0].r;
+        const ended = await call('seat_backup_clear', { project: args[1], seat: args[2], actor });
         return { out: ended ? `${args[2]} is back on its squad setting: it changes at its next start, or the supervisor restarts it once idle` : `${args[2]} is on no backup`, json: { project: args[1], seat: args[2], ended } };
       }
       // #4575: Ahmed's one step per machine; it writes only this machine's agent config files, never the board
-      if (args[0] === 'trust') { const out = await squadTrust(args[1], { machine: o.machine, dryRun: !!o['dry-run'], callFn }); return { out, json: { project: args[1], lines: out.split('\n') } }; }
-      if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], callFn); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
+      if (args[0] === 'trust') { const out = await squadTrust(args[1], { machine: o.machine, dryRun: !!o['dry-run'], callFn: call }); return { out, json: { project: args[1], lines: out.split('\n') } }; }
+      if (args[0] === 'up') { const out = await squadUp(args[1], !!o['dry-run'], call); return { out, json: { project: args[1], dry_run: !!o['dry-run'], lines: out.split('\n') } }; }
       if (args[0] === 'set') {
         if (!o.file) throw new Error('give the squad file: -f <file>, or -f - for stdin');
         const text = o.file === '-' ? await fromStdin('-', 'squad') : readFileSync(o.file, 'utf8');
@@ -876,14 +862,14 @@ ${body}`, json: pg };
           throw new Error(`"version" in the squad file must be the number cb squad show ${args[1]} --json printed`);
         // a file with no version: the version just read is its base, so it may not undo a newer change unless --overwrite
         // says replace what is there. Even then a save made between this read and the set is refused (the race check).
-        const now = ((await callFn('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
+        const now = ((await call('squad_get', { project: args[1], with_version: true })) as any)?.version ?? 0;
         if (!hasVersion && now > 0 && !o.overwrite)
           throw new Error(`${args[1]}'s squad was saved as version ${now}, and this file has no version, so it could undo a newer change. Take the current squad with cb squad show ${args[1]} --json, edit that and set it again. (--overwrite replaces the current squad with this file, including any change made on the settings page.)`);
-        const saved: any = await callFn('squad_set', { project: args[1], squad: doc, actor, base: o.overwrite || !hasVersion ? now : base, with_version: true });
+        const saved: any = await call('squad_set', { project: args[1], squad: doc, actor, base: o.overwrite || !hasVersion ? now : base, with_version: true });
         return { out: saved.changed ? `squad saved for ${args[1]} (version ${saved.version})`
           : `nothing changed for ${args[1]}: the squad is already this (version ${saved.version})`, json: saved };
       }
-      const sq = await callFn('squad_get', { project: args[1], with_version: true }) as any;
+      const sq = await call('squad_get', { project: args[1], with_version: true }) as any;
       if (!sq) throw new Error(`${args[1]} has no squad yet: write one with cb squad set ${args[1]} -f <file>`);
       const { version: _v, ...plain } = sq;
       return { out: squadShow(plain), json: sq };
@@ -893,11 +879,11 @@ ${body}`, json: pg };
       if (args[0] === 'report') {
         const name = String(o.machine ?? machine()).toLowerCase();
         const lines = await reportModels({ machine: name, list: makeLister(),
-          save: async (m, lists) => (await sql`select cb.machine_models_set(${m}, ${JSON.stringify(lists)}::text::jsonb, ${actor}) as r`)[0].r });
+          save: async (m, lists) => await call('machine_models_set', { machine: m, lists, actor }) });
         return { out: lines.join('\n'), json: { machine: name, lines } };
       }
       if (o.machine !== undefined) throw new Error('--machine goes with report: cb models report --machine <name>');
-      const all = ((await callFn('squad_options', {})) as any).machine_models ?? {};
+      const all = ((await call('squad_options', {})) as any).machine_models ?? {};
       return { out: modelsShow(all), json: all };
     }
     case 'run':
@@ -944,9 +930,9 @@ ${body}`, json: pg };
       const project = o.project ?? sessionProject ?? null;
       // actor: the session named as the one to ask first is told seats ask it. A board whose schema predates #4525 has
       // only role_text(role): fall back to it, so the role is never lost
-      const text = await callFn('role_text', { role: args[0], project, actor }).catch((e: any) => {
+      const text = await call('role_text', { role: args[0], project, actor }).catch((e: any) => {
         if (!/function cb\.role_text\(.*\) does not exist/.test(e?.message ?? '')) throw e;
-        return callFn('role_text', { role: args[0] });
+        return call('role_text', { role: args[0] });
       }) as string;
       return { out: text, json: { role: args[0], project, text } };
     }
@@ -954,17 +940,16 @@ ${body}`, json: pg };
       need(1, 'show <task id>   e.g. cb show 42');
       if (!/^#?\d{1,15}$/.test(args[0])) throw new Error(`"${args[0]}" is not a task id: give the number, e.g. cb show 42`);
       const n = Number(args[0].replace('#', ''));
-      // #4512: the stage in words, as cb brief prints it (cb._brief_tasks: pipeline on and a stage set), in the same read
-      const [t] = await sql`select t.*, case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end as stage_words
-        from cb.tasks t where t.id = ${n}`;
-      if (!t) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
+      const [row] = await call('task_row', { id: n });
+      if (!row) throw new Error(`no task #${n}: check the id (cb mine, cb brief)`);
+      // #4512: the stage in words, as cb brief prints it; a parts card's (#3703) parts in plain words
+      const [{ stage_words, parts }] = await call('task_words', { id: n });
+      const t = { ...row, stage_words };
       // #4448: the last 10 notes by default; --all prints every one, and the NOTES line says how many are hidden
-      const notes = await sql`select at, actor, summary from cb.events where task_id = ${n} and kind in ('note', 'done') order by id desc limit ${o.all ? null : 10}`; // limit null = no limit; never a sql`` fragment (the relay bridge cannot carry one)
-      const [{ notes_total }] = await sql`select count(*)::int as notes_total from cb.events where task_id = ${n} and kind in ('note', 'done')`;
+      const notes: any[] = await call('task_notes', { id: n, lim: o.all ? null : 10 });
+      const notes_total = await call('task_notes_total', { id: n });
       const hidden = notes_total > notes.length ? `, ${notes.length} of ${notes_total} shown: cb show ${n} --all for every note` : '';
-      const goals = await sql`select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
-        where gt.task_id = ${n} and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank`;
-      const [{ parts }] = await sql`select cb._parts_words(${n}) as parts`; // a parts card (#3703): its parts in plain words
+      const goals: any[] = await call('task_goals', { task: n });
       return { out: [withStage(t), parts && `parts: ${parts}`, ...goals.map((g: any) => `in goal G${g.id} ${flat(g.title)}${g.status === 'paused' ? ' [paused]' : ': comes right after P0'}`),
         t.body && `\n${flat(t.body)}`, notes.length && `\nNOTES (newest first${hidden})`,
         ...notes.map((e: any) => `  ${new Date(e.at).toISOString().slice(0, 16).replace('T', ' ')} ${e.actor}: ${flat(e.summary)}`)]
@@ -975,7 +960,7 @@ ${body}`, json: pg };
       // two or more words: the first is the project (as cb mem add); one: --project, else this pane's, else every project
       const project = o.project ?? (args.length > 1 ? args[0] : sessionProject);
       const q = (o.project || args.length < 2 ? args : args.slice(1)).join(' ');
-      const find = (p: string | null) => callFn('task_find', { q, project: p, notes: !!o.notes, lim: o.all ? null : 20 });
+      const find = (p: string | null) => call('task_find', { q, project: p, notes: !!o.notes, lim: o.all ? null : 20 });
       let r: any = await find(project ?? null).catch((e: any) => {
         // cb search relay drops: the first word was taken as a project, not as the start of the words
         if (o.project || args.length < 2 || !/^unknown project /.test(e?.message ?? '')) throw e;
@@ -995,7 +980,7 @@ ${body}`, json: pg };
         ...(r.total > r.cards.length ? [`(${r.cards.length} of ${r.total} shown: --all lists every one)`] : [])].join('\n'), json: r };
     }
     case 'mine': {
-      const rows: any = await callFn('mine', { actor });
+      const rows: any = await call('mine', { actor });
       if (!rows.length) return { out: 'no tasks assigned to ' + actor, json: rows };
       const { open, gone, words } = await mineLines(rows, actor, '');
       // --json (#4513): open false = closed or moved off you in the last 24h, the text's second heading; stage_words as the
@@ -1012,47 +997,19 @@ ${body}`, json: pg };
       const reply_to = replyTo(), pics = images();
       const body = await fromStdin(args.slice(1).join(' '), 'question'), context = await fromStdin(o.context, 'context');
       const opts = o.option ? options() : null;
-      // one transaction: the question never shows on the board without the pictures it was asked with
-      let again = false;
-      const id = await sql.begin(async (tx) => {
-        // #3331: a resend of a question that is still open (the first run stored it, then failed or seemed to) returns
-        // that question instead of a second copy. Every field the asker gives must match, with a follow-up's task, reply
-        // pane and recipient taken from its parent and the ids read as cb.ask reads them: a wrong match would drop a
-        // question, a miss only repeats one. With pictures it always posts: new pictures must never be dropped silently.
-        // The lock: a resend while the first run's commit is still in flight waits for it, then sees it.
-        if (!pics.length) await tx`select pg_advisory_xact_lock(hashtext(${actor.trim()} || '|' || trim(${body}::text)))`;
-        const [dup] = pics.length ? [] : await tx`with a as (
-            select case when nullif(trim(${o.after ?? null}::text), '') is null then null
-                        else cb.norm_id(regexp_replace(trim(${o.after ?? null}::text), '^[qQ]', '')) end as par,
-                   case when nullif(trim(${o.task ?? null}::text), '') is null then null else cb.norm_id(${o.task ?? null}::text) end as tid)
-          select q.id from a left join cb.questions p on p.id = a.par cross join cb.questions q
-           where q.asked_by = ${actor.trim()} and q.project = cb.resolve(${args[0]}) and q.body = trim(${body}::text)
-             and q.options is not distinct from cb._options(${opts && JSON.stringify(opts)}::text::jsonb)
-             and q.parent_id is not distinct from a.par
-             and (${o.if ?? null}::text is null and q.if_answer is null or lower(q.if_answer) = lower(trim(${o.if ?? null}::text)))
-             and q.context is not distinct from ${context ?? null}::text and q.multi = ${!!o.multi} and q.blocking = ${!!o.blocking}
-             and q.task_id is not distinct from coalesce(a.tid, p.task_id)
-             and q.reply_to is not distinct from coalesce(${reply_to && JSON.stringify(reply_to)}::text::jsonb, p.reply_to)
-             and q.assigned_to is not distinct from coalesce(${o.to ?? null}::text, p.assigned_to)
-             and q.status in ('open', 'dormant') order by q.id limit 1`;
-        if (dup) { again = true; return dup.id; }
-        const qid = await callFn('ask', { project: args[0], body, options: opts,
-          multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: context ?? null, reply_to, actor, to_user: o.to ?? null,
-          parent: o.after ?? null, if_answer: o.if ?? null }, tx);
-        await addImages(tx, qid, pics, false);
-        return qid;
-      });
+      // one call, one transaction (cb.ask_post): never a question without its pictures, and a resend of one still open
+      // returns it (#3331)
+      const { id, again } = await call('ask_post', { project: args[0], body, options: opts,
+        multi: !!o.multi, blocking: !!o.blocking, task_id: o.task ?? null, context: context ?? null, reply_to, actor, to_user: o.to ?? null,
+        parent: o.after ?? null, if_answer: o.if ?? null, images: pictures(pics) });
       // #3331: the question is stored. Nothing after this may turn that into an error (a retry would ask it twice): the
       // reads below only shape the message, so a board that drops now costs their detail, never the exit code.
-      const [f] = o.after ? await sql`select parent_id, if_answer from cb.questions where id = ${Number(id)}`
+      const [f] = o.after ? await call('ask_parent', { id: Number(id) })
         .catch(() => [{ parent_id: String(o.after).trim().replace(/^[qQ#]+/, ''), if_answer: o.if ?? null }]) : [];
       // #550: without --reply-to the answer goes to the asking name; with no live relay on it, it waits in cb pending.
       let relay_live: boolean | null = null; // --json (#4453): null = not checked (--reply-to given, or the read failed)
       if (!o['reply-to']) try {
-        // same 90s as cb.sessions_overview. Written out twice, not as a shared sql`` fragment: a fragment is a Promise
-        // and the relay bridge cannot carry one ("#<Promise> could not be cloned", broke every ask with a live relay).
-        const [r] = await sql`select exists(select 1 from cb.sessions where actor = ${actor} and last_seen > now() - interval '90 seconds') as live,
-          (select actor from cb.sessions where machine = ${machine()} and pane = ${pane} and last_seen > now() - interval '90 seconds') as mine`;
+        const [r] = await call('ask_relay', { actor, machine: machine(), pane });
         relay_live = r.live;
         if (!r.live) console.error(`warning: no relay listens on ${actor}, so the answer will wait in cb pending --as ${actor}` +
           (r.mine && r.mine !== actor ? `. This pane's relay is ${r.mine}: ask without --as, or add --reply-to` : ''));
@@ -1067,9 +1024,9 @@ ${body}`, json: pg };
         (o.free ? `\nPosted with --free: Ahmed must type the answer. If he could pick instead (yes/no, approve?, A or B, who does it), run cb withdraw Q${id} and ask again with -o options (cb help ask).` : ''), json };
     }
     case 'pending': {
-      const rows: any = await callFn('answers_pending', { project: args[0] ?? sessionProject });
+      const rows: any = await call('answers_pending', { project: args[0] ?? sessionProject });
       const ids = rows.map((q: any) => q.parent_id).filter(Boolean);
-      const parents = new Map((ids.length ? await sql`select id, body, answer from cb.questions where id in ${sql(ids)}` : []).map((p: any) => [p.id, p]));
+      const parents = new Map((ids.length ? await call('questions_brief', { ids }) : []).map((p: any) => [p.id, p]));
       return { out: rows.length ? rows.map((q: any) => { const p: any = parents.get(q.parent_id);
         if (q.status === 'sent_back') { const by = q.sent_back.by === 'ahmed' ? 'Ahmed' : `${q.sent_back.by} (not Ahmed)`;
           return `Q${q.id} sent back by ${by} to ${q.asked_by}: ${flat(backWhy(q.sent_back.reason, q.sent_back.note?.slice(0, 500)))}` +
@@ -1083,40 +1040,36 @@ ${body}`, json: pg };
       need(1, 'reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]');
       const id = args[0].replace(/^q/i, ''), pics = images();
       const body = await fromStdin(args.slice(1).join(' ') || null, 'question'), context = await fromStdin(o.context, 'context');
-      // new -i pictures replace the old ones (without -i the question keeps its pictures). They go in first:
-      // cb.reask sees them in this transaction, which is what a "Show me" send-back needs.
-      await sql.begin(async (tx) => {
-        await addImages(tx, id, pics, true);
-        await callFn('reask', { id, body, options: o.option ? options() : null, free: !!o.free,
-          multi: o.multi ? true : null, context: context ?? null, actor }, tx);
-      });
-      const [w] = await sql`select q.status, q.assigned_to, u.display from cb.questions q left join cb.users u on u.name = q.assigned_to where q.id = ${Number(id)}`;
+      // new -i pictures replace the old ones (without -i the question keeps its pictures), in the same transaction
+      await call('reask_post', { id, body, options: o.option ? options() : null, free: !!o.free,
+        multi: o.multi ? true : null, context: context ?? null, actor, images: pictures(pics) });
+      const [w] = await call('question_state', { id: Number(id) });
       return { out: `Q${id} rewritten and back ${w?.display ? `with ${w.display}` : "on Ahmed's board"} — keep working; the answer arrives like any other`,
         json: { id: Number(id), status: w?.status ?? null, assigned_to: w?.assigned_to ?? null } };
     }
     case 'delivered':
       need(1, 'delivered <qid> [session]');
-      await callFn('answer_delivered', { id: args[0].replace(/^q/i, ''), delivered_to: args[1] ?? null, actor });
+      await call('answer_delivered', { id: args[0].replace(/^q/i, ''), delivered_to: args[1] ?? null, actor });
       return { out: `Q${args[0].replace(/^q/i, '')} delivered`, json: { id: Number(args[0].replace(/^q/i, '')), delivered_to: args[1] ?? null } };
     case 'withdraw':
       need(1, 'withdraw <qid>');
-      await callFn('withdraw', { id: args[0].replace(/^q/i, ''), actor });
+      await call('withdraw', { id: args[0].replace(/^q/i, ''), actor });
       return { out: `Q${args[0].replace(/^q/i, '')} withdrawn`, json: { id: Number(args[0].replace(/^q/i, '')), status: 'withdrawn' } };
     case 'reply': {
       need(2, 'reply A<id> "<text>" [--done]   e.g. cb reply A12 "B64 graded 27/32" --done');
       const id = args[0].replace(/^a/i, '');
-      await callFn('ask_reply', { id: args[0], message: args.slice(1).join(' '), done: !!o.done, actor });
+      await call('ask_reply', { id: args[0], message: args.slice(1).join(' '), done: !!o.done, actor });
       return { out: `replied to A${id}${o.done ? `; A${id} closed` : ': Ahmed reads it on Today (more: cb reply again; the last one with --done)'}`,
         json: { id: Number(id), closed: !!o.done } };
     }
     case 'asks': {
       if (args[0] === 'add') { // #951: what Ahmed asked in this terminal, onto the board so the reply lands on Today
         need(2, 'asks add "<what Ahmed asked you>" [-t <task>]   e.g. cb asks add "Why is B64 at 27/32?"');
-        const id = await callFn('ask_record', { body: args.slice(1).join(' '), task: o.task ?? null, project: sessionProject ?? null, actor });
+        const id = await call('ask_record', { body: args.slice(1).join(' '), task: o.task ?? null, project: sessionProject ?? null, actor });
         return { out: `A${id} recorded (asked in your terminal): reply on the board with cb reply A${id} "<reply>" (--done with the final one)`,
           json: { id: Number(id), task: o.task == null ? null : Number(String(o.task).replace('#', '')) } };
       }
-      const rows: any = await callFn('asks_list', { to_actor: actor, include_closed: false });
+      const rows: any = await call('asks_list', { to_actor: actor, include_closed: false });
       const hm = (t: string) => new Date(t).toISOString().slice(11, 16);
       return { out: rows.map((a: any) => [
         `A${a.id} [${a.state}${a.late ? ', late' : ''}] ${a.from_terminal ? 'asked in your terminal, recorded by you' : 'from Ahmed'} ${dur((Date.now() - +new Date(a.created_at)) / 60000)} ago${a.task_id ? ` · task #${a.task_id}` : ''}`,
@@ -1132,21 +1085,21 @@ ${body}`, json: pg };
       const [sub, name] = args;
       const show = (l: any) => `lock ${l.name}: ${l.holder ?? 'nobody'} holds it ${dur((Date.now() - +new Date(l.held_at)) / 60000)}${l.queue.length ? `, queue ${l.queue.join(', ')}` : ''}`;
       if (sub === 'queue') {
-        const rows: any = await callFn('lock_queue', { name: name ?? null });
+        const rows: any = await call('lock_queue', { name: name ?? null });
         return { out: rows.map(show).join('\n') || 'no locks held', json: rows };
       }
       need(2, 'lock take|release <name>   e.g. cb lock take db');
       if (sub === 'take') {
-        const l: any = await callFn('lock_take', { name, actor });
+        const l: any = await call('lock_take', { name, actor });
         const pos = l.queue.indexOf(actor) + 1;
         return { out: l.holder === actor ? `you hold lock ${l.name}`
           : `lock ${l.name} is held by ${l.holder} (${dur((Date.now() - +new Date(l.held_at)) / 60000)}); you are #${pos} in the queue: a message tells you when it is yours (exit 2 = queued, not held)`, json: l,
           code: l.holder === actor ? 0 : 2 }; // #741: scripts read exit 0 as "I hold it"
       }
       if (sub === 'release') {
-        const next: any = await callFn('lock_release', { name, actor, force: !!o.force });
+        const next: any = await call('lock_release', { name, actor, force: !!o.force });
         const n = name.trim().toLowerCase();
-        const [l]: any = await callFn('lock_queue', { name: n });
+        const [l]: any = await call('lock_queue', { name: n });
         return { out: `released lock ${n}; ${next ? `${next} holds it now` : l ? `${l.holder} holds it` : 'it is free'}`, json: next };
       }
       throw new Error(`unknown lock command "${sub}": take, release, queue`);
@@ -1154,13 +1107,13 @@ ${body}`, json: pg };
     case 'digest': {
       const project = args[0] ?? sessionProject;
       if (!project) throw new Error('no project: say which (cb digest iris) or bind this session once (cb iam <name> <project>)');
-      const lines: any = await callFn('digest', { project, cap: !o.all });
+      const lines: any = await call('digest', { project, cap: !o.all });
       return { out: lines.join('\n'), json: lines };
     }
     case 'brief': {
-      const b: any = await callFn('brief', { project: args[0] ?? sessionProject, tag: o.tag ?? null, ...(o.type ? { type: o.type } : {}) });
+      const b: any = await call('brief', { project: args[0] ?? sessionProject, tag: o.tag ?? null, ...(o.type ? { type: o.type } : {}) });
       // the same pack cb iam prints, with this machine's own entries (cb.brief can't know the machine)
-      if (b.memory && (args[0] ?? sessionProject)) b.memory = await callFn('mem_pack', { project: args[0] ?? sessionProject, machine: machine() });
+      if (b.memory && (args[0] ?? sessionProject)) b.memory = await call('mem_pack', { project: args[0] ?? sessionProject, machine: machine() });
       if (o.json) return { json: b };
       printBrief(b);
       return {};
