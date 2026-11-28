@@ -43,6 +43,9 @@ export interface AgentAdapter {
   detectQuotaStop(seat: SeatHandle, herdrAgent: { agent_status?: string } | null, paneTail?: string): QuotaSignal | null;
   guardInstallSpec(boardDir: string, platform: NodeJS.Platform): GuardInstallSpec;
   instructionMapping(launch: LaunchInput): InstructionMapping;
+  /** #4765: the user-level rules file this agent reads on this machine, for cli/agent-context.ts to copy the owner's
+   *  rules into. Null: it reads the source (Claude Code's user file) itself. */
+  userRulesFile(home: string, env: NodeJS.ProcessEnv): string | null;
   trustSpec(repoPaths: string[], platform: NodeJS.Platform): TrustSpec;
   disableAskSpec(): DisableAskSpec;
   mcpOff(board: string): McpOffSpec;

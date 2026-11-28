@@ -6,6 +6,7 @@ import { classifyAgentGet, realRun, type Runner } from '../squad-up.ts';
 import type { AgentAdapter, AgentState, DisableAskSpec, LaunchInput, QuotaSignal, SeatHandle } from './types.ts';
 import { stripClaudeOnly, withNoPrompt } from './env.ts';
 import { agyPreseed } from './trust.ts';
+import { join } from 'node:path';
 
 const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 const CLAUDE_ALIASES = new Set(['opus', 'sonnet', 'haiku', 'fable']);
@@ -112,6 +113,10 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
       };
     },
 
+    userRulesFile(home: string, env: NodeJS.ProcessEnv) {
+      return join(home, '.gemini', 'AGENTS.md');
+    },
+
     // agy never reads CLAUDE.md. AGENTS.md and GEMINI.md load from the launch folder up to the repo root; a repo's AGENTS.md
     // can be a bootstrap that points at CLAUDE.md.
     instructionMapping() {
@@ -119,7 +124,7 @@ export function createAgyAdapter(run: Runner): AgentAdapter {
         nativeFiles: ['AGENTS.md', 'GEMINI.md', '.agents/rules/*.md', '~/.gemini/AGENTS.md', '~/.gemini/config/rules/*.md'],
         extraArgs: [],
         env: {},
-        note: 'agy does not read CLAUDE.md: a repo needs an AGENTS.md (or an always_on rule) that points at it',
+        note: 'agy does not read CLAUDE.md: a repo needs an AGENTS.md (cli/agent-context.ts repo makes this one from CLAUDE.md) or an always_on rule',
       };
     },
 

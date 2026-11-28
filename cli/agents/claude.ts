@@ -203,6 +203,10 @@ export const claudeAdapter: AgentAdapter = {
     };
   },
 
+  userRulesFile() {
+    return null; // ~/.claude/CLAUDE.md is the source the others get a copy of
+  },
+
   instructionMapping() {
     return { nativeFiles: ['CLAUDE.md', '~/.claude/CLAUDE.md'], extraArgs: [], env: {}, note: 'Claude Code reads CLAUDE.md natively' };
   },
