@@ -525,20 +525,28 @@ function and trigger in the dump. Carry the **rows only** into a new cluster tha
 power (users, sign-ins, squads, role texts, settings, memory) before the board starts on it. **This path has not been
 rehearsed:** do it on a scratch cluster first, with someone watching the live one stays untouched.
 
-**6. End every sign-in (ruling D5).** Workers could read the database, and sign-in values were plain text in it before
-#4868; backups from then still hold them. Check first that **every admin has a password** (the audit says when one has
-none; set it as in [Users](#users)): an admin signs in by password only, so without one nobody gets back in. One command
-ends every signed-in browser and every member's link and clears any plain value left. It refuses while an admin has no
-password, and answers how many browsers and links it ended:
+**6. End every sign-in and expire every password (rulings D5 and Q3244).** Workers could read the database: sign-in
+values were plain text in it before #4868 (backups from then still hold them), and password hashes were readable too.
+Check first that **every admin has a password** (the audit says when one has none; set it as in [Users](#users)): an
+admin signs in by password only, so without one nobody gets back in. One command ends every signed-in browser and every
+member's link, clears any plain value left and marks every password expired. It refuses while an admin has no password,
+and answers how many browsers, links and passwords it ended. The restart closes the pages still open:
 
 ```bash
 dc exec -T db psql -U cb -d claude_board -c "select cb._cutover_end_sign_ins()"
+dc restart board
 ```
 
-Then each admin signs in with their password, and for each member: Users, **New link**, and send it (it is shown once).
-**A restore of a backup from before this step brings the old sign-ins back:** run the command again after any such
-restore. D5 does not cover passwords, and their hashes were readable as well: changing each admin's password here (at
-the top of the Users page) closes that too.
+**Sign in and set your new password straight away, and have each admin do the same.** An expired password opens
+nothing but the change to a new one, which must differ and ends every other sign-in of that name. Until the change,
+whoever knows the old password can be the one to make it. So if an admin's old password no longer works and they did
+not change it, treat the account as taken: reset it from the shell ([Users](#users)) and read the board's history for
+what was done under that name. Setting a password from the shell, or for someone on the Users page, also ends the
+expiry: make it one never used before.
+
+Then for each member: Users, **New link**, and send it (it is shown once). One who had a password is asked for the old
+one and a new one; if they have forgotten it, set one for them on the Users page. **A restore of a backup from before
+this step brings the old sign-ins and passwords back:** run both commands again after any such restore.
 
 **7. New keys and a new bot token.** Revoke every worker key and issue new ones (`cb key install <kind>` on each
 machine, then `cb key check`), and rotate the Telegram bot token ([Secrets](#secrets)).
