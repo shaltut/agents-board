@@ -304,23 +304,30 @@ function writesText(line) {
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
+// #4774: inner = cmd is the inside of a quoted word, which a rule reads as a command of its own. The word may have been
+// in double quotes, where a $( ) or backtick runs whatever quotes this reading sees around it, so text holding one stays
 let stripLast = null;
-export function stripMessages(cmd) {
-  if (stripLast && stripLast.in === cmd) return stripLast.out;
-  const out = stripMessagesOnce(cmd);
-  stripLast = { in: cmd, out };
+const SUBSTITUTES = /\$\(|\x60/;
+// in a word read again, a backtick may already stand as $ (the push and kill rules read it so), so there any $ counts
+const SUBSTITUTES_INNER = /[$\x60]/;
+const substitutes = (text, inner) => (inner ? SUBSTITUTES_INNER : SUBSTITUTES).test(text);
+export function stripMessages(cmd, inner = false) {
+  if (stripLast && stripLast.in === cmd && stripLast.inner === inner) return stripLast.out;
+  const out = stripMessagesOnce(cmd, inner);
+  stripLast = { in: cmd, inner, out };
   return out;
 }
-function stripMessagesOnce(cmd) {
+function stripMessagesOnce(cmd, inner) {
   const docs = [];
-  const text = replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all), docs);
-  return stripMessageArgs(text, docs);
+  const drops = (all, line) => writesText(line) && !(inner && substitutes(all, true));
+  const text = replaceHeredocs(cmd, (all, line, id) => (drops(all, line) ? `${line}\n${id}` : all), docs);
+  return stripMessageArgs(text, docs, inner);
 }
 
 // #4774: a message's text is dropped only where the shell reads it as one. The message command, and each quote that opens
 // its text, must be code to bashReader: not in a comment, not inside a quoted word, and not past something the reader
 // cannot follow (from there the text is judged as commands). docs: the heredocs already read, which it steps over.
-function stripMessageArgs(text, docs) {
+function stripMessageArgs(text, docs, inner) {
   const bash = bashReader(text);
   let k = 0;
   const isCode = (at) => {
@@ -335,7 +342,7 @@ function stripMessageArgs(text, docs) {
       bash.unsure = d.lost;
     }
     bash.read(at);
-    return !bash.unsure && bash.at() === at && bash.open.at(-1) !== '"';
+    return !bash.unsure && bash.at() === at && !inQuotes(bash.open.at(-1));
   };
   let out = '', done = 0;
   MESSAGE_AT.lastIndex = 0;
@@ -353,7 +360,7 @@ function stripMessageArgs(text, docs) {
         if (!q) continue;
         if (!isCode(i)) break args;
         // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
-        if ((/^herdr/.test(head) && /^["']!/.test(q)) || (/^"/.test(q) && /\$\(|`/.test(q))) continue;
+        if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && substitutes(q, inner))) continue;
         out += text.slice(done, i) + '""';
         done = i + q.length;
         bash.skip(done);
@@ -612,7 +619,7 @@ function scanKills(text, seen, inArgs) {
         || (name[i - 1] === 'done' && w[i].startsWith('<<<')))) fed = true;
       const args = segArgs || i <= argsEnd;
       // a quoted here-string of a lookup is fed to the loop's earlier stop: done <<< "$(pgrep node)"
-      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i]), seen, args || (fed && seen.stop))) return true;
+      if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && scanKills(stripMessages(w[i], true), seen, args || (fed && seen.stop))) return true;
       const n = name[i], prev = name[i - 1];
       // CIM/WMI Terminate, quoted or not: Invoke-CimMethod -MethodName "Terminate", -Name Terminate, @{ MethodName = 'Terminate' }
       // (-MethodName:Terminate too); its arguments, like any stop's, hold its source: -MethodName Terminate -Query "..."
@@ -744,8 +751,8 @@ function scannedName(raw, names) {
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
 // command (bash -c "...", ssh host '...') is read as a command too when quoted says so. Throws past
 // MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block).
-function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
-  const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
+function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, nested = false) {
+  const text = stripMessages(String(cmd ?? ''), nested).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
     return { start: m.index, end: m.index + m[0].length, raw, name: raw.map((x) => scannedName(x, names)) };
@@ -775,7 +782,7 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
     const isCommand = quoted(raw, w, name, piped[k]);
     for (let i = 0; i < w.length; i++) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
-        const inner = scanCommands(w[i], names, fn, quoted);
+        const inner = scanCommands(w[i], names, fn, quoted, true);
         if (inner) return inner;
       }
     }
@@ -2069,13 +2076,13 @@ const countLost = (text) => MISCOUNTS.test(text) || REDEFINES.test(text) || left
 // One seen before was walked and passed: a block would have ended the whole walk
 function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set()) {
   return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
-    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
+    ?? (countLost(stripMessages(String(command ?? ''), depth > 0)) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
 // flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
 // A string it follows gets the second reading only, so the readings never multiply from one level to the next
 function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
-  const stripped = stripMessages(String(command ?? ''));
+  const stripped = stripMessages(String(command ?? ''), depth > 0); // past 0 it is the inside of a followed string
   const raw = flat ? stripped : blankComments(stripped);
   const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
   // variables are tracked on the text without comments in both readings (same positions): what is set is bash's to say
