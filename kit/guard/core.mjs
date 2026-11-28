@@ -45,21 +45,156 @@ const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|bug|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
 // Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell. A header line holds <<'ID'
-// or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), never the line
-// right after the header. One pass (#4002): the regex form, /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3
+// or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), which may be the
+// line right after the header (#4768: an empty body). A body is dropped only where bash reads a heredoc (bashReader).
+// One pass (#4002): the regex form, /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3
 // [ \t]*(?=\n|$)/gm, searched to the end of the text again for every header without its end line ((headers x length):
 // 4 s on 156 KB through a role seat's six scans). Same matches: end lines are indexed once per word, a line's << are
 // tried last to first (the regex's greedy [^\n]*), and ^ and $ keep the m flag's line ends (\n, \r, U+2028, U+2029).
+
+// #4768, #4770: a body is dropped only where the shell reads a heredoc. Seats run bash and PowerShell and the guard is
+// told neither, so the reader holds a list of what may stand before a marker, all of which both shells read alike: words,
+// ; & | > ( ), plain '...' and "..." strings, $( ), $name, and simple ${name} forms. PowerShell has no heredoc (a << in
+// its code runs nothing), so what has to be ruled out is text that moves a quote in one of them only. Anything else (a
+// backtick, a backslash, <, a smart quote, $'..', $[ ], @'..', another heredoc, case, whose ) closes nothing) makes the
+// reader unsure for good: from there nothing is dropped, so the text is judged as commands.
+// Comments are never skipped: whether a # starts one differs between the shells and between places in one shell (1# in
+// PowerShell, $(( )), [[ =~ ]], a[ ] in bash). A # may stand only when the rest of its line holds nothing that changes
+// what is read, so that both readings come to the same thing (PLAIN_TAIL).
+// PowerShell also skips the syntax check inside a $( ) that is part of a command's name (x=$( ... ), ./"$( ... )"), so
+// there a << stops nothing. No body is dropped while inside a $( or a " that is glued to the word before it.
+// read(to) leaves at() === to when `to` is not inside a '...' word; open holds the " and ( not yet closed, as g and x
+// where they are glued to the word before them, and unchecked counts those two.
+const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}#-]/;
+const WORD_START = /[ \t\n;&|(]/;
+const PS_QUOTE = /[\u2018-\u201f]/; // PowerShell reads these as ' and "
+const PLAIN_SQ = /\x27[^\x27\u2018-\u201f]*\x27/y;
+// ${name}, ${#name}, ${name:0:7}, ${name:-plain words}: nothing inside that could open a quote, a substitution or a
+// second line
+const PLAIN_PARAM = /\$\{[#!]?\w+(?::?[-=?+][\w ./:-]*|(?::\d+){1,2})?\}/y;
+const PLAIN_TAIL = /[^\x22\x27\x60\\$()<\u2018-\u201f\r\n]*(?=\r?\n|$)/y; // the rest of a line after a #
+// after a \ inside "...": printable ASCII that bash leaves as it is (not " $ \ `, and no line end to join)
+const PLAIN_ESCAPED = /(?![\x22\x24\x5c\x60])[\x20-\x7e]/y;
+const inQuotes = (top) => top === '"' || top === 'g';
+const CASE_AT = /case[ \t\r\n]/y;
+const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
+function bashReader(text) {
+  let i = 0;
+  let plainTo = 0; // the line already checked for a #, so many of them on one line are checked once
+  const r = {
+    open: [],
+    low: 0, // the fewest open since the caller last set it
+    unchecked: 0,
+    unsure: false,
+    at: () => i,
+    skip(to) { i = to; },
+    read(to) {
+      const { open } = r;
+      const push = (e) => { open.push(e); if (e === 'g' || e === 'x') r.unchecked++; };
+      const close = () => { const e = open.pop(); if (e === 'g' || e === 'x') r.unchecked--; r.low = Math.min(r.low, open.length); };
+      const lost = () => { r.unsure = true; };
+      const startsWord = () => i === 0 || WORD_START.test(text[i - 1]);
+      while (i < to && !r.unsure) {
+        const c = text[i], quoted = inQuotes(open.at(-1));
+        if (c === '$') {
+          const d = text[i + 1];
+          if (d === '(') {
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+          }
+          if (d === '{') {
+            PLAIN_PARAM.lastIndex = i;
+            if (PLAIN_PARAM.test(text)) i = PLAIN_PARAM.lastIndex; else lost();
+            continue;
+          }
+          if (d === '[' || (d === "'" && !quoted)) lost();
+          i += d === '$' ? 2 : 1;
+          continue;
+        }
+        // Git Bash drops every carriage return (so one can join $ to (), PowerShell ends a line at it
+        if (c === '\r' && text[i + 1] !== '\n') lost();
+        if (quoted) {
+          if (c === '"') close();
+          else if (c === '`' || PS_QUOTE.test(c)) lost();
+          else if (c === '\\') { // PowerShell does not escape with \: the next character is read again on its own
+            PLAIN_ESCAPED.lastIndex = i + 1;
+            if (!PLAIN_ESCAPED.test(text)) lost();
+          }
+          i++;
+          continue;
+        }
+        if (c === '"' || c === "'") {
+          if (text[i - 1] === '@') { lost(); continue; } // a PowerShell here-string
+          if (c === '"') { push(startsWord() ? c : 'g'); i++; continue; }
+          PLAIN_SQ.lastIndex = i;
+          if (PLAIN_SQ.test(text)) i = PLAIN_SQ.lastIndex;
+          else if (text.indexOf("'", i + 1) < 0) i = text.length + 1;
+          else lost();
+          continue;
+        }
+        if (c === '#' && i >= plainTo) {
+          PLAIN_TAIL.lastIndex = i;
+          if (PLAIN_TAIL.test(text)) plainTo = PLAIN_TAIL.lastIndex; else lost();
+        }
+        if (c === '(') push(c);
+        else if (c === ')') { if (open.length) close(); else lost(); }
+        else if (c !== '\r' && !PLAIN_CODE.test(c)) lost();
+        else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
+        else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
+        i++;
+      }
+    },
+  };
+  return r;
+}
 const END_LINE = /\n[ \t]*(\w+)[ \t]*(?=\n|$)/gm; // a line holding only a word, from the \n before it
+// a line bash takes as the end inside $( ) or backticks, though more follows the word: EOF) or EOF`
+const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)\x60])/g;
+const LONE_CR = /\r(?!\n)/;
 const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
 const LINE_START = /^/gm;
 function replaceHeredocs(text, fn) {
-  const ends = new Map(); // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
-  for (const m of text.matchAll(END_LINE)) {
-    const e = ends.get(m[1]) ?? { at: [], k: 0 };
-    e.at.push([m.index, m.index + m[0].length]);
-    ends.set(m[1], e);
-  }
+  // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
+  const index = (re) => {
+    const map = new Map();
+    for (const m of text.matchAll(re)) {
+      const e = map.get(m[1]) ?? { at: [], k: 0 };
+      e.at.push([m.index, m.index + m[0].length]);
+      map.set(m[1], e);
+    }
+    return map;
+  };
+  const ends = index(END_LINE), closings = index(CLOSING_LINE);
+  // the first line of a word's list whose \n is at or after `from`; callers ask with a growing `from`
+  const lineFrom = (e, from) => {
+    while (e && e.k < e.at.length && e.at[e.k][0] < from) e.k++;
+    return e?.at[e.k];
+  };
+  const bash = bashReader(text);
+  // whether bash reads the heredoc found at `at` on the line ending at nl, with its body ending where the guard's does
+  const isHeredoc = (at, nl, f) => {
+    bash.read(at);
+    if (bash.unsure || bash.at() !== at || bash.unchecked || inQuotes(bash.open.at(-1))) return false;
+    // PowerShell refuses a << only where it starts a token: in cb log 1 -<<'EOF' it is part of the word, and line 2 runs
+    if (at && !WORD_START.test(text[at - 1])) { bash.unsure = true; return false; }
+    // <<'EOF'x: bash's delimiter is EOFx, so its body ends somewhere else
+    DELIMITER_END.lastIndex = at + f.header;
+    if (!DELIMITER_END.test(text)) { bash.unsure = true; return false; }
+    // the rest of the header line must end as it began: a quote left open or a trailing \ puts commands where the body seemed to be
+    const depth = bash.open.length;
+    bash.low = depth;
+    bash.skip(at + f.header);
+    bash.read(nl);
+    if (bash.unsure || bash.at() !== nl || bash.open.length !== depth || bash.low < depth) return false;
+    const closing = lineFrom(closings.get(f.id), nl);
+    if (closing && closing[0] < f.before) { bash.unsure = true; return false; }
+    // Git Bash drops every carriage return, so a lone one in the body may spell an earlier end line (\rEOF, E\rOF)
+    if (LONE_CR.test(text.slice(nl, f.before + 1))) { bash.unsure = true; return false; }
+    bash.skip(f.end);
+    // an end line bash does not take (blanks around it): bash's body goes on, so what follows cannot be read
+    const last = text.slice(f.before + 1, f.end);
+    if ((f.dash ? last.replace(/^\t+/, '') : last) !== f.id || (text[f.end] === '\r') !== (text[nl - 1] === '\r')) bash.unsure = true;
+    return true;
+  };
   let out = '';
   let pos = 0;
   for (let s = 0; ;) {
@@ -72,9 +207,10 @@ function replaceHeredocs(text, fn) {
       const h = HEADER_AT.exec(line);
       const e = h && ends.get(h[2]);
       if (!e) continue;
-      while (e.k < e.at.length && e.at[e.k][0] <= nl) e.k++; // its \n must come after the header's own
-      if (e.k < e.at.length) found = { id: h[2], end: e.at[e.k][1] };
+      const end = lineFrom(e, nl); // from the header line's own \n: the very next line may end it
+      if (end) found = { id: h[2], before: end[0], end: end[1], at: s + at, header: h[0].length, dash: h[0][2] === '-' };
     }
+    if (found && !isHeredoc(found.at, nl, found)) found = null;
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
     out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id);
