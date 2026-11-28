@@ -492,7 +492,8 @@ export async function squadUp(project: string, dryRun: boolean, callFn: (fn: str
     if (plan.heldBy[n]) lines.push(`skip ${n}: lead name held by project ${plan.heldBy[n]}`);
     else if (!herdrOnly.has(n)) lines.push(`skip ${n}: live`);
   }
-  for (const l of plan.herdrOnly) lines.push(`skip ${l.name}: running in herdr but not on the board (not bound?)`, `  ${promptCommand(l)}`);
+  for (const l of plan.herdrOnly) lines.push(`skip ${l.name}: running in herdr but not on the board (not bound?)`, `  ${promptCommand(l)}`,
+    `  if it was started by hand (no relay: cb sessions says "messages to it wait"), close its pane and run cb squad up ${project} again: seats start only through cb squad up`);
   for (const n of plan.refused) lines.push(`refused ${n}: the Mac already has ${MAC_CAP} live sessions`);
   const untrusted = new Map(toStart.map((l) => [l.name, trust?.(l, project) ?? null]));
   for (const l of toStart) {
