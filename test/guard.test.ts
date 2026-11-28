@@ -873,6 +873,110 @@ test('role rules: a shell behind a wrapper in a pipe, or dash and ksh, still run
   blocksByRole('builder', [`printf '${merge}' | grep bash`]);
 });
 
+// #4729 (PR 111 r4). R4-1: a quoted, escaped, lower-case or brace spelling of HOME is still a mention of HOME, so it
+// drops the $HOME/ exemption. Each hidden push is spelled so no other rule reads it (\x69, 'ma'+'in'): only this one blocks.
+test('guard: quoted, escaped, lower-case and brace spellings of HOME drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string, role: string) => evaluate({ tool: 'shell', command, role, protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // quoted and escaped names (bash), and PowerShell's backtick
+    `read -r HO""ME <<< ${sh}`, String.raw`read -r \HOME <<< ` + sh, `read -r "H"OME <<< ${sh}`, `read -r H'O'ME <<< ${sh}`,
+    `printf -v HO''ME '%s' ${sh}`, `export HO""ME=${sh}`, `declare -n r=HO""ME; r=${sh}`, String.raw`for HO\ME in ` + `${sh}; do :; done`,
+    'unset HO""ME; : ${HOME:=' + sh + '}', ': ${HOME:=' + sh + '}', 'Set-Variable -Name HO`ME -Value ' + ps + ' -Force',
+    // a name split over a continued line
+    'read -r HO\\\nME <<< ' + sh,
+    // brace spellings
+    `export {HOME,x}=${sh}`, `declare {HOME,x}=${sh}`, `read -r {HOME,x} <<< ${sh}`,
+    // PowerShell reads a variable's name in any case
+    `Set-Variable -Name home -Value ${ps} -Force`, `Set-Variable -Name Home -Value ${ps} -Force`, `sv home ${ps} -Force`,
+    `set home ${ps} -Force`, `New-Variable -Name home -Value ${ps} -Force`, 'Remove-Variable home -Force',
+    `Set-Variable -Value 'a;b' -Name home -Force`, String.raw`Set-Item Variable:\HOME -Value ` + `${ps} -Force`,
+    `Set-Item Variable:/HOME -Value ${ps} -Force`, `si variable:home ${ps} -Force`, `$global:home = ${ps}`,
+    `$env:home = ${ps}`, '${env:home} = ' + ps, `[Environment]::SetEnvironmentVariable('home', ${ps})`,
+  ].map((set) => `${set}; ${run}`);
+  const kept = ['echo "${HOME}"; ' + run, 'cd ${HOME} && ' + run, 'git -c core.sshCommand="ssh -i ${HOME}/.ssh/k" fetch',
+    `echo "$HOME"; ${run}`, `echo "home page"; ${run}`, `cd /home/ubuntu/w && ${run}`, `set -e; cd /home/ubuntu; ${run}`,
+    `git remote set-url origin /srv/home && ${run}`, `Set-Location home; ${run}`, `export HOMEBREW_PREFIX=/opt/homebrew; ${run}`,
+    String.raw`git -c core.sshCommand="ssh -i $USERPROFILE\.ssh\key" fetch`];
+  for (const role of ['lead', 'builder']) {
+    for (const c of blocked) assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    for (const c of kept) assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+  }
+});
+
+// #4729, the PR 132 review: a brace expansion inside a word can spell the name; a lower-case or wildcard name can reach a
+// PowerShell setter from another segment; and reading HOME with a default or trimmed is a read, like ${HOME}
+test('guard: the PR 132 review spellings drop the $HOME/ exemption; default-value reads keep it (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const sh = String.raw`$'/x;git push -q origin ma\x69n #'`;
+  const ps = `('/x;git push -q origin ma'+'in #')`;
+  const blocked = [
+    // brace expansion inside the name
+    `declare H{O,}ME=${sh}`, `export H{O,}ME=${sh}`, `declare {H,}OME=${sh}`, `declare HOM{E,}=${sh}`, `read -r H{O,}ME <<< ${sh}`,
+    `declare H{O..O}ME=${sh}`, `declare H{{O,},}ME=${sh}`, `bash -c "declare H{O,}ME=x"`,
+    // the name and the setter in different segments
+    `$n='home'; Set-Variable $n ${ps} -Force`, `$p=@{Name='home';Value=${ps};Force=$true}; Set-Variable @p`,
+    `'home' | % { Set-Variable $_ ${ps} -Force }`, `Get-Variable home | Set-Variable -Value ${ps} -Force`,
+    // wildcard names, which PowerShell matches against HOME
+    `Set-Variable -Name hom? -Value ${ps} -Force`, `Set-Variable -Name ho*e -Value ${ps} -Force`,
+    `Set-Variable -Name HOM[E] -Value ${ps} -Force`, `Set-Item variable:hom* ${ps} -Force`,
+    `Get-Variable hom* | Set-Variable -Value ${ps} -Force`, `$n='hom*'; Set-Variable $n ${ps} -Force`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`cd "\${HOME:-/tmp}" && ${fetch}`, `test -n "\${HOME+x}" && ${fetch}`, `cd \${HOME-/tmp} && ${fetch}`,
+    `echo \${HOME:+yes} && ${fetch}`, `echo \${HOME#/} \${HOME%/} && ${fetch}`, `cb log 1 "set up home"; ${fetch}`,
+    `git commit -m "Set Home"; ${fetch}`, `set -e; ls src/*.ts; ${fetch}`, `git log HEAD@{1}..HEAD; ${fetch}`,
+    `cat src/{a,b}.ts; ${fetch}`, `curl -d '{"a":1,"b":2}' x; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729, the PR 132 re-read: brace groups side by side spell the name with no letter beside a brace, and an ANSI-C or
+// locale quote ($'...', $"...") leaves no dollar sign in the word bash builds, its escapes decoded
+test('guard: side-by-side brace groups and ANSI-C or locale quotes drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const blocked = [
+    'declare {HO,X}{ME,Y}=x', 'export {H,}{O,}{M,}{E,}=x', 'read -r {HO,X}{ME,Y} <<< x', 'cat src/{a,b}{1,2}.ts', // the accepted cost
+    String.raw`declare HOM$'E'=x`, 'declare HOM$"E"=x', String.raw`export $'\x48'OME=x`, String.raw`export $'\x48OME=x'`,
+    String.raw`export $'\110OME'=x`, String.raw`declare $'HOME'=x`, String.raw`declare $'\U00000048OME'=x`,
+    // an earlier $' that opens no quote must not pair with the real one
+    String.raw`echo 'a$' ; declare HOM$'E'=x`, String.raw`echo 'a$' ; export $'\x48'OME=x`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`grep -n 'end$' src/a.ts; ${fetch}`, String.raw`printf $'a\tb\n'; ${fetch}`, `echo "cost: $" ; ${fetch}`,
+    `echo \${A}\${B}; ${fetch}`, `echo '[{"a":1},{"b":2}]'; ${fetch}`, String.raw`printf '\UFFFFFFFF'; ${fetch}`, String.raw`echo $'\UFFFFFFFF'; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
+// #4729: bash drops a backslash before an ordinary letter, so g\it is git (and g\h is gh, a\z is az) to every rule that
+// reads those commands; a Windows path to git.exe stays git, and a quoted 'g\it' keeps its backslash
+test('guard: a backslash inside the git, gh or az name does not hide the command (#4729)', () => {
+  const judged = (command: string, role: string, protectedBranches: string[] = []) =>
+    evaluate({ tool: 'shell', command, role, protectedBranches }).allow;
+  for (const role of ROLES) {
+    for (const c of [String.raw`g\it push origin main`, String.raw`g\i\t push origin HEAD:main`, String.raw`gi\t push -f origin feat/x`,
+      String.raw`/usr/bin/g\it push origin main`, String.raw`sudo g\it push origin main`, String.raw`g\it p origin main`,
+      String.raw`bash -c 'g\it push origin main'`, String.raw`g\it -c alias.p=push p origin feat/x`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+    assert.equal(judged(String.raw`g\it push origin develop`, role, ['develop']), false, `${role} protected branch`);
+    for (const c of [String.raw`"C:\Program Files\Git\cmd\git.exe" status`, String.raw`ls C:\repos\g\it`, String.raw`g\it status`]) {
+      assert.equal(judged(c, role), true, `${role} must pass: ${c}`);
+    }
+  }
+  for (const role of ROLES.filter((r) => r !== 'lead')) {
+    for (const c of [String.raw`g\h pr merge 5`, String.raw`a\z repos pr update --id 1 --status completed`]) {
+      assert.equal(judged(c, role), false, `${role} must block: ${c}`);
+    }
+  }
+  for (const role of READ_ONLY_ROLES) assert.equal(judged(String.raw`g\it commit -m x`, role), false, `${role} commit`);
+});
+
 // A fail-closed hook has one way left to fail open: running past its timeout. Each case below is a path that reads more
 // than its own word (most took seconds to minutes before #4002's fix rounds); the rules it reaches are now linear in the
 // command's length, or bounded per word (the kill scan's 64-word window; at most 16 git/gh/az commands per segment).
@@ -928,6 +1032,14 @@ test('long commands stay fast', () => {
     ['seat vars, 200 KB of CB_ROLE mentions', asBuilder(kb200('echo CB_ROLE '))],
     // PR 111 r3-2: nested $HOME/ setting values read the command for HOME once per text, not once per value
     ['git settings, 200 KB of nested $HOME/ values', asBuilder('git ' + kb200(`-c core.fsmonitor='git -c core.sshCommand="$HOME/k" status' `) + 'status')],
+    // #4729: the PowerShell setter test reads each segment once; the quote-stripped copy is made once per text
+    ['git settings, 200 KB of setter words beside a $HOME/ value', asBuilder(kb200('sv ni set ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    // PR 132 review: the brace and wildcard tests read each word and statement once
+    ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],

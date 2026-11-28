@@ -482,6 +482,15 @@ function runnerArg(raw, w, name, piped) {
 // timeout lets the command through. No hand-typed command comes near it; the block tells the agent to split it.
 const MAX_COMMANDS_PER_SEGMENT = 16;
 
+// A word's command name in a scan for names: cmdName of the raw word, which reads a backslash as a path separator, or,
+// when that is none of them, of the unquoted word: bash drops a backslash before an ordinary letter, so g\it is git (#4729)
+function scannedName(raw, names) {
+  const name = cmdName(raw);
+  if (names.has(name) || !raw.includes('\\')) return name;
+  const escaped = cmdName(unquote(raw));
+  return names.has(escaped) ? escaped : name;
+}
+
 // Calls fn(w, i) for every word i whose command name (cmdName of the raw word: C:\...\git.exe, GIT.EXE, !git) is in
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
@@ -491,7 +500,7 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
   const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
-    return { start: m.index, end: m.index + m[0].length, raw, name: raw.map(cmdName) };
+    return { start: m.index, end: m.index + m[0].length, raw, name: raw.map((x) => scannedName(x, names)) };
   });
   // piped[k]: segment k's output goes on, through | or |& (not ||), to a stage a shell or iex runs.
   // into[k]: what is piped into segment k reaches one: ANY word of k names one (so env bash, command bash, sudo -u x bash,
@@ -833,6 +842,55 @@ function runsValues(w, i, j) {
 // (HOME+=, read -r HOME, printf -v HOME, for HOME in, Set-Variable -Name HOME, $env:HOME); case-sensitive and not a
 // path segment, so /home/ubuntu and "home page" keep the exemption, and $home/ is no exemption)
 const HOME_NAMED = /(?<![$\w{/\\.])(?:HOME|USERPROFILE)\b(?![/\\.])/;
+// (#4729: a name is the same name quoted, escaped, continued or in braces (HO""ME, \HOME, HO`ME, {HOME,x}), so a copy of
+// the text without those is read too. Reads are written $HOME first, with a default or a trim too (${HOME:-/tmp}): they
+// set nothing. PowerShell reads a variable's name in any case, from any part of the command, and matches * ? [ against
+// it, so these count too, outside message text: a brace expansion inside a word (H{O,}ME); a setter anywhere with home
+// anywhere; home or a wildcard on the variable: or env: drive; a wildcard after a setter or Get-Variable in its
+// statement; and, with a setter anywhere, a quoted wildcard name ($n='hom*'). Blocking too much is the accepted cost)
+// (#4729, PR 132 re-read: $'...' and $"..." leave no dollar sign in the word bash builds. The dollar goes with the quote,
+// and in a text with a $' its numeric escapes are decoded anywhere, with no pairing of quotes, so an earlier $' that
+// opens nothing cannot hide the real one. Decoding too much only adds a block)
+const ANSI_NUMBER = /\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|U([\da-fA-F]{1,8})|([0-7]{1,3}))/g;
+const ansiChar = (all, x, u, long, oct) => {
+  const n = parseInt(x ?? u ?? long ?? oct, oct === undefined ? 16 : 8);
+  return n <= 0x10ffff ? String.fromCodePoint(n) : all;
+};
+const plainQuotes = (t) => (t.includes("$'") ? t.replace(ANSI_NUMBER, ansiChar) : t).replace(/\$(?=["'])/g, '');
+const unquotedText = (t) => plainQuotes(t.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '')
+  .replace(/\$\{(HOME|USERPROFILE)(?:\}|(?=:?[-+]|[#%]))/g, '$$$1 ').replace(/[\\`]\r?\n/g, '')).replace(/["'`\\^]/g, '');
+const bareText = (t) => unquotedText(t).replace(/[{},]/g, ' ');
+// a word bash or zsh may expand into the name: braces with a list or a range, touching a letter or another brace group
+// ({HO,X}{ME,Y}); each word is read once
+const braceWord = (word) => {
+  if (!word.includes('{')) return false;
+  const w = word.replace(/\$\{[^{}]*\}/g, '$');
+  return w.includes('{') && w.includes('}') && (w.includes(',') || w.includes('..')) && /[\w}]\{|\}[\w{]/.test(w);
+};
+const SETTERS = 'set-variable|new-variable|remove-variable|set-item|new-item|setenvironmentvariable|set|sv|nv|rv|si|ni';
+const PS_SETTER = new RegExp(String.raw`(?<![\w-])(?:${SETTERS})(?![\w-])`, 'i');
+const PS_REACH = new RegExp(String.raw`(?<![\w-])(?:${SETTERS}|get-variable|gv)(?![\w-])`, 'i');
+const ANY_CASE_HOME = /(?<![\w$])(?:home|userprofile)\b(?![/\\.])/i;
+const DRIVE_HOME = /\b(?:variable|global|script|local|private|env):\/?(?:home|userprofile)\b(?![/.])/i;
+const DRIVE_WILD = /\b(?:variable|env):\/?[\w-]*[*?[]/i;
+const QUOTED_WILD = /(["'])(?=[\w\]]{0,32}[*?[])[\w*?[\]]{1,32}\1/;
+// a statement keeps its pipeline (gv hom* | sv); a quoted ; ends none. Each is read once from its first setter: linear
+const NAME_STATEMENT = new RegExp(String.raw`(?:${QUOTED}|\\.|[^;&\n"'\\])+`, 'g');
+const wildAfterSetter = (statement) => {
+  const t = bareText(statement);
+  const m = PS_REACH.exec(t);
+  return !!m && /[*?[]/.test(t.slice(m.index + m[0].length).replace(/\$\?/g, ''));
+};
+function namesHome(text) {
+  if (HOME_NAMED.test(text)) return true;
+  const bare = bareText(text);
+  if (HOME_NAMED.test(bare) || DRIVE_HOME.test(bare)) return true;
+  const code = joinLines(stripMessages(text));
+  const loose = bareText(code);
+  if (unquotedText(code).split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
+  if (PS_SETTER.test(loose) && (ANY_CASE_HOME.test(loose) || QUOTED_WILD.test(code))) return true;
+  return (code.match(NAME_STATEMENT) ?? []).some(wildAfterSetter);
+}
 // (the command is read only when a value has such a path start, once per text: nested values stay linear, r3-2)
 const homeNamed = new Map();
 function filledValue(value, text) {
@@ -842,7 +900,7 @@ function filledValue(value, text) {
   const key = String(text ?? '');
   if (!homeNamed.has(key)) {
     if (homeNamed.size >= 256) homeNamed.clear();
-    homeNamed.set(key, HOME_NAMED.test(key));
+    homeNamed.set(key, namesHome(key));
   }
   return homeNamed.get(key);
 }
