@@ -1746,10 +1746,12 @@ const verdict = (command: string) => evaluate({ tool: 'shell', command, role: 'b
 const refused = (list: string[]) => { for (const c of list) assert.match(verdict(c).reason ?? '', /fresh environment/, c); };
 const letThrough = (list: string[]) => { for (const c of list) assert.deepEqual(verdict(c), { allow: true }, c); };
 test('#4789: after text that throws the quote count off, fish --command= is read to its end', () => {
-  const off = "echo $'a\\'b'; ";
-  refused(["fish --command='ssh localhost uptime; true'", 'fish --command="at now; true"', "fish --command='herdr pane run w1:p2 codex && true'",
-    "fish --command='env sudo codex | cat'"].map((c) => off + c));
-  letThrough([off + "fish --command='ls -la; true'"]);
+  // every prefix: the old walk missed these after the heredoc and the backslash-quote ones only
+  for (const off of thrownOff) {
+    refused(["fish --command='ssh localhost uptime; true'", 'fish --command="at now; true"', "fish --command='herdr pane run w1:p2 codex && true'",
+      "fish --command='env sudo codex | cat'"].map((c) => off + c));
+    letThrough([off + "fish --command='ls -la; true'"]);
+  }
 });
 
 test('#4789: find -exec, -execdir, -ok and -okdir start a command of their own', () => {
