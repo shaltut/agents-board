@@ -141,10 +141,28 @@ test('user rules: a hard link to the source is the same file too', (t) => {
 });
 
 test('user rules: a squad seat may check but not write: these are the owner\'s files', (t) => {
-  const w = home(t, ['.codex']), seat: NodeJS.ProcessEnv = { ['CB_' + 'ROLE']: 'builder' };
-  assert.throws(() => syncUserRules({ home: w.dir, env: seat }), /squad seat.*own terminal/s);
-  assert.ok(!existsSync(w.at.codex));
-  assert.equal(states(syncUserRules({ home: w.dir, env: seat, check: true })).codex, 'differs');
+  // either of the two names makes a pane a seat (#4772)
+  for (const [name, value] of [['CB_' + 'ROLE', 'builder'], ['CB_' + 'AGENT', 'codex']] as const) {
+    const w = home(t, ['.codex']), seat: NodeJS.ProcessEnv = { [name]: value };
+    assert.throws(() => syncUserRules({ home: w.dir, env: seat }), /squad seat.*own terminal/s, name);
+    assert.ok(!existsSync(w.at.codex), name);
+    assert.equal(states(syncUserRules({ home: w.dir, env: seat, check: true })).codex, 'differs', name);
+  }
+  const w = home(t, ['.codex']); // set but blank is not a seat
+  assert.equal(states(syncUserRules({ home: w.dir, env: { ['CB_' + 'ROLE']: ' ', ['CB_' + 'AGENT']: '' } })).codex, 'written');
+});
+
+test('user rules: a rules file that is a link to nothing is refused, and its target is not made (#4772)', (t) => {
+  const w = home(t), target = join(w.dir, 'elsewhere.md');
+  try { symlinkSync(target, w.at.agy, 'file'); } catch { return t.skip('this machine does not allow file links'); }
+  for (const check of [false, true]) assert.throws(() => syncUserRules({ home: w.dir, env: {}, check }), /link.*nothing was changed/s);
+  assert.ok(!existsSync(target), 'the write did not follow the link');
+  assert.ok(!existsSync(w.at.codex) && !existsSync(w.at.opencode), 'the agents before it were not written either');
+});
+
+test('user rules: an agent named twice is handled once (#4772)', (t) => {
+  const w = home(t, ['.codex']);
+  assert.deepEqual(syncUserRules({ home: w.dir, env: {}, agents: ['codex', 'codex'] }).map((r) => `${r.agent} ${r.state}`), ['codex written']);
 });
 
 test('the script: repo --check passes here; an unknown word or flag is refused and nothing runs', () => {
