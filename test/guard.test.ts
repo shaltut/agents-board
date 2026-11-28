@@ -203,21 +203,21 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
-// #4622 (PR 77 round 6, m1): after a filled word, a word that has a space of its own and only plain variables
-// ("$A log", "$C d") is one argument that names no git command: it no longer counts as a filled subcommand
-test('#4622: a quoted phrase after a variable is no git subcommand; every word that could be one still blocks', () => {
-  passes('builder', ['echo "$A b" "$C d" opencode.json', 'caffeinate "$A log" "$A log" opencode.json',
-    'printf "%s" "${A} b" "$C d" opencode.json', 'echo "$USER said" "$A hello there" opencode.json', 'echo %A% "%C% d" opencode.json']);
+// #4622 (PR 77 round 6, m1): a quoted phrase ("$A log", "$C d") names no git command. It is let through only where the
+// whole command is one plain echo or printf line: an allow list, so nothing can run or pass on what the line prints
+test('#4622: only a lone echo or printf line may hold a quoted phrase after a variable', () => {
+  passes('builder', ['echo "$A b" "$C d" opencode.json', "  echo '$A b' \"$C d\" opencode.json",
+    'printf "%s" "${A} b" "$C d" opencode.json', 'printf "%s\n" "$A b" "$C d" opencode.json',
+    'echo "$USER said" "$A hello there" opencode.json', 'echo %A% "%C% d" opencode.json']);
+  const line = 'echo "$A b" "$C d" opencode.json';
   blocksByRole('builder', [
-    // no space of its own: the variable can complete a command name
-    'echo $A x$B opencode.json', 'caffeinate $GIT "pu$X" opencode.json', 'caffeinate $GIT co$X -- opencode.json',
-    // ${X:-y}, $( ) and backticks can supply the whole word, spaces in their source or not
-    'caffeinate $GIT ${X:-checkout} -- opencode.json', 'caffeinate $GIT "${X:-checkout}" -- opencode.json',
-    'caffeinate $GIT "$(echo checkout) x" -- opencode.json',
-    // a phrase that names a writing command is still judged as a command line of its own, piped to a shell or not
-    'caffeinate $GIT "$X checkout" -- opencode.json', 'echo $G "$X checkout" -- opencode.json | sh',
-    // a launcher reads its words again, so there the phrase is split
-    'eval $GIT "pu$Y now" opencode.json', 'ssh host $GIT "$X now" opencode.json', 'xargs $GIT "$X now" opencode.json',
+    // any other command word, or a word before the echo
+    'caffeinate "$A log" "$A log" opencode.json', `nice ${line}`, `VAR=1 ${line}`,
+    // anything beside the line: a pipe, another command, a second line, a group
+    `${line} | cat`, `${line}; true`, `${line} && true`, `true || ${line}`, `${line} &`, `${line}\ntrue`, `(${line})`, `{ ${line}; }`,
+    // anything in it that is not plain text or a plain variable
+    'echo "$(true) b" "$C d" opencode.json', 'echo "`true` b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
+    'echo $A x$B opencode.json',
     // m2, kept: two whole variables may be git and a writing command
     'python3 tools/check.py $A $B opencode.json']);
 });
@@ -1328,6 +1328,7 @@ test('long commands stay fast', () => {
     ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['#4622, a 200 KB echo line that a pipe disqualifies, as a builder', asBuilder('echo ' + kb200('"a b" ') + '$X opencode.json | cat')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
