@@ -18,6 +18,8 @@ const ro = new URL(TEST_URL); ro.searchParams.set('default_transaction_read_only
 function cb(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, ['cli/cb.ts', ...args], { encoding: 'utf8', timeout: 60_000,
     env: { ...process.env, CB_DATABASE_URL: ro.href, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', CB_MACHINE: 'testbox', CB_AGENT: '',
+      // #4735: cb faults reads this log, and the control's failing write lands in it: never this machine's real one
+      CB_FAULTS_HOME: join(tmpdir(), `cb-faults-ro-${process.pid}`),
       CLAUDE_CODE_MESSAGING_SOCKET: '', CB_GH_CACHE: join(tmpdir(), `cb-gh-ro-${process.pid}.json`), ...env } });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
@@ -28,7 +30,7 @@ const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['min
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
   ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],
-  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json']];
+  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json']];
 // no job exists to read: these stop at "no job #1", after the select that would have written
 const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1']);
 
