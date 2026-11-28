@@ -1,6 +1,6 @@
-// The board operations cb names (#3222): each is the cb.* function of the same name, called with named arguments
-// through cli/board.ts. Default deny: a name that is not here is not called. This is cb's list, not the web's
-// (server/rpc.ts RPC_FUNCTIONS); the worker API will serve from it. setof: the function returns rows, not one value.
+// The board operations cb, its relay and its hooks name (#3222): each is the cb.* function of the same name, called with
+// named arguments through cli/board.ts. Default deny: a name that is not here is not called. This is the workers' list,
+// not the web's (server/rpc.ts RPC_FUNCTIONS); the worker API will serve from it. setof: the function returns rows, not one value.
 // No _name is ever listed. test/ops-list.test.ts keeps it equal to what cb calls and to db/schema.sql.
 export type Op = { setof?: true };
 
@@ -17,6 +17,9 @@ export const OPS: Record<string, Op> = Object.fromEntries([
     sessions_overview squad_get squad_options squad_set stage_fail stage_pass stage_set start_words task_add
     task_block task_done task_find task_finish_line task_move task_notes_total task_project task_status task_tag
     task_unblock task_update tell user_add user_known user_password user_set_role withdraw
+    ask_delivered broadcast_seen inbox_ping job_add job_cancel job_get job_hold job_log_url job_move job_retry
+    jobs_ended jobs_list refusal_targets relay_hold resume_for_pane schema_check seat_code seat_model stage_words_for
+    usage_report usage_summary work_still_open
   `),
   ...list(rows, `
     answers_pending ask_parent ask_relay bug_filed held_parts_of huddle_lines huddle_member_names huddle_row mine

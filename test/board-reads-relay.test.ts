@@ -59,7 +59,8 @@ test('resume_for_pane is cb.resume of the pane\'s name, and null for a pane boun
 
 test('job_log_url is the address the runner announced, null for an unknown runner', async () => {
   const sql = await board();
-  await sql`select cb.runner_hello('box', 'http://100.64.0.1:4748/', '[]'::jsonb)`;
+  const runner = postgres(TEST_URL, { onnotice: () => {}, max: 1, connection: { application_name: 'cb-runner' } }); clients.push(runner);
+  await runner`select cb.runner_hello('box', 'http://100.64.0.1:4748/', '[]'::jsonb)`;
   assert.equal(await call('job_log_url', { runner: 'box' }, sql), 'http://100.64.0.1:4748/');
   assert.equal(await call('job_log_url', { runner: 'nobody' }, sql), null);
 });

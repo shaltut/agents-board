@@ -7430,3 +7430,54 @@ create function cb.question_state(id bigint) returns table(status text, assigned
   select q.status, q.assigned_to, u.display from cb.questions q left join cb.users u on u.name = q.assigned_to
    where q.id = question_state.id
 $$;
+
+-- ---------------------------------------------------------------- the relay, the hooks, jobs, update, stage words (#3222 S1b)
+-- What the relay, the SessionStart hook, cb job log, cb update and cb mine used to say in their own SQL (cli/board.ts).
+drop function if exists cb.inbox_ping cascade;
+drop function if exists cb.refusal_targets cascade;
+drop function if exists cb.resume_for_pane cascade;
+drop function if exists cb.job_log_url cascade;
+drop function if exists cb.stage_words_for cascade;
+drop function if exists cb.schema_check cascade;
+
+-- The relay's read: the inbox and, in the same transaction, its ping on cb_bind, built here from the pane it reads. The
+-- notice goes out after any cb_bind notice the read itself sent, and arrives after every change committed before the
+-- read: the relay keeps the binding it read once it hears its ping (cli/relay.ts bindNotice).
+create function cb.inbox_ping(machine text, pane text, after_event bigint default 0, session text default null, n bigint default 0)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare i jsonb := cb.inbox(machine, pane, after_event, session);
+begin
+  perform pg_notify('cb_bind', 'ping:' || trim(machine) || ':' || trim(pane) || '#' || n);
+  return i;
+end $$;
+
+-- A relay that cannot start (#4429): the name and project bound in its pane, and who hears it. Null: the pane has no row.
+create function cb.refusal_targets(machine text, pane text) returns jsonb language sql stable as $$
+  select jsonb_build_object('actor', s.actor, 'project', s.project,
+                            'to', case when s.project is not null then to_jsonb(cb.triagers(s.project)) end)
+    from cb.sessions s where s.machine = lower(trim($1)) and s.pane = trim($2)
+$$;
+
+-- cb resume for whoever the pane is bound as, for the SessionStart hook. Null: not bound to a project.
+create function cb.resume_for_pane(machine text, pane text) returns jsonb language sql stable as $$
+  select cb.resume(s.actor) from cb.sessions s where s.machine = $1 and s.pane = $2 and s.project is not null
+$$;
+
+create function cb.job_log_url(runner text) returns text language sql stable as $$
+  select r.log_url from cb.runners r where r.name = $1
+$$;
+
+-- The stage words of a list of cards in one read (#4512): for each [project, stage] pair, in order, cb._stage_words while
+-- that project's pipeline is on, else null.
+create function cb.stage_words_for(pairs jsonb) returns jsonb language sql stable as $$
+  select coalesce(jsonb_agg(case when cb._pipeline(x.pair ->> 0) then cb._stage_words(x.pair ->> 1) end order by x.i), '[]'::jsonb)
+    from jsonb_array_elements($1) with ordinality as x(pair, i)
+$$;
+
+-- cb update's question before it installs: does the board's database have the schema `need`, and which one does it run.
+-- plpgsql: cb.schema_applied is created by db/setup.ts after this file (as in cb.schema_covers).
+create function cb.schema_check(need text) returns jsonb language plpgsql stable as $$
+begin
+  return jsonb_build_object('covers', cb.schema_covers(need), 'current', cb.schema_applied() ->> 'current');
+end $$;
