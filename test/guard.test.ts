@@ -1760,6 +1760,17 @@ test('#4789: find -exec, -execdir, -ok and -okdir start a command of their own',
     'timeout 5 find /tmp -type f "-exec" sudo codex {} +', 'busybox sh -c su']); // busybox was read already: pinned
   letThrough(['find . -name "*.ts" -exec grep -l sudo {} +', 'find . -exec sh -c "ls -la" \\;', 'find . -name sudo', 'echo -exec sudo codex',
     'grep -rn -e -exec sudo.md', 'busybox sh -c "ls -la"', 'busybox ls -la']);
+  // a second action after {}: the walk splits at braces, and its second reading at the ; of the end mark too. After text
+  // that throws the quote count off only that reading is left
+  const chains = ['find . -exec grep x {} \\; -exec sudo codex \\;', 'find . -exec ls {} + -exec sudo codex +', 'find . -exec grep x {} ";" -exec sh -c su ";"',
+    "find . -exec grep x {} ';' -exec sudo codex ';'", 'find . -name x -exec ls {} \\; -name y -exec eval sudo codex \\;'];
+  // find ends at a real separator: what follows is not one of its actions
+  const ended = ['find . -exec grep x {} \\; -exec ls -la {} \\;', 'find . -exec ls {} \\; ; grep -e -exec sudo.md', 'find . -name x | grep -e -exec sudo.md',
+    'find . -name x; grep -e -exec sudo.md'];
+  for (const off of ['', ...thrownOff]) {
+    refused(chains.map((c) => off + c));
+    letThrough(ended.map((c) => off + c));
+  }
 });
 
 test('#4789: Windows PowerShell runs its bare words as the command', () => {
