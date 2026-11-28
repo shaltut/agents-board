@@ -715,6 +715,9 @@ denied by the role permission files. Card #3746.
   another tool with a `push` command (`$DOCKER push <image>`) is refused the same way: write that tool's name.
 - In a seat, a command and its first argument both filled in (`$G $SUB`, also `$CC $CFLAGS`) are refused whatever they
   hold: write the command's name (#4815).
+- A filled command word followed by a word that is no git command (`$G p origin main`, xargs' `{}`) and then a protected
+  branch is refused, like the same line with `git`: an alias set earlier can make that word a push (#4826). A word that
+  is a script or a path is not such a word (`"$PYTHON" tool.py origin main` runs).
 - While the list is set, a wildcard destination (`refs/heads/*:refs/heads/*`, `develop*`) is blocked too: it can write
   a protected branch. Push one branch by name.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
