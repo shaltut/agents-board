@@ -34,7 +34,7 @@ const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['min
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
   ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],
-  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json']];
+  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json'], ['models']];
 // no job exists to read: these stop at "no job #1", after the select that would have written
 const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1']);
 
