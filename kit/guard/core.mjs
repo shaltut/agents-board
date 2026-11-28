@@ -1881,7 +1881,8 @@ function rgEnds(args, k) {
   const before = args[k - 1];
   if (!LITERAL_WORD.test(before) || /[<>]$/.test(args[k - 2] ?? '')) return false;
   const x = shellValue(before);
-  return !x.startsWith('-') || x.includes('=') || RG_SWITCH.test(x);
+  // Windows PowerShell drops an empty argument, so after -e "" the -- is -e's value
+  return x !== '' && (!x.startsWith('-') || x.includes('=') || RG_SWITCH.test(x));
 }
 // find's actions that run the words after them as a command
 const FIND_EXEC = /^-(?:exec|execdir|ok|okdir)$/;
