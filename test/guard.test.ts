@@ -1918,6 +1918,10 @@ test('#4825: no spelling of a shell\'s options keeps a string from being read as
 
 test('#4825: the string is held to it however it reaches the shell', () => {
   for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `x=${unplaced4825}; bash -c "$x"`]) refused4825(command);
+  // a heredoc fed to a shell is that shell's text; one fed to another program is not
+  const body = '>$(case a in a) echo log;; esac) sudo codex';
+  for (const shell of ['bash', 'bash -s -- x', 'sh -eu', 'BASH.EXE', 'ssh box']) refused4825(`${shell} <<'EOF'\n${body}\nEOF`);
+  assert.equal(judged4803("python3 - <<'EOF'\ns = \"x -> y'\"\nEOF"), 'allow');
   const script = (text: string) => ({ readScript: (p: string) => (p.endsWith('run.sh') ? text : null) });
   assert.equal(judged4803('./run.sh now', 'builder', script(`bash -o pipefail -c -- ${unplaced4825}\n`)), 'role');
   // a script's #! line names its own interpreter, and hands no string to a shell
