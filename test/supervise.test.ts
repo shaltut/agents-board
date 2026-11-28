@@ -144,6 +144,28 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
 });
 
+test('#4806: with no stages the supervisor restores a down holder and closes a dropped seat, and starts nothing for a card', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 4, model: 'sonnet', machine: 'macbook' } } })}, 'ahmed')`;
+  await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
+  await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+  await card(sql); // nobody holds it
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 }); // a seat the squad names: stays open
+  await session(sql, 'sv-B2@macbook', 'builder', { live: false });
+  await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
+  await session(sql, 'sv-B3@macbook', 'builder', { startedMin: 21 }); // dropped from the squad: closed
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p7'); h.live.set('sv-b3-macbook', 'w1:p8');
+  const out = await tick(deps(sup, h.run));
+  assert.ok(out.some((l) => l.endsWith('restored sv-B2@macbook')), out.join('
+'));
+  assert.ok(out.includes('closed sv-B3@macbook'), out.join('
+'));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('
+'));
+  assert.equal((await events(sql, 'start')).length, 0);
+});
+
 // #3770: the squad file's builder count was 4 and is 2 now, so B3 and B4 are seats it no longer generates
 test('seats the squad file dropped: the idle one closes while work waits, the busy one is said once and kept', async () => {
   const { sql, sup } = await setup();
@@ -871,9 +893,10 @@ test('#4787: a dry run reads panes, says what it would say and writes nothing', 
   assert.equal((await events(sql, 'quota')).length, 0);
 });
 
-// every project with a squad is checked: claude-board itself has no stages, and its stopped reviewers are why #4787 exists
+// every project with a squad is checked, supervised or not
 for (const [name, off] of [
-  ['a squad with no stages', (sql: any) => sql`select cb.project_pipeline('sv', false, 'ahmed')`],
+  ['a squad with no stages and supervise off', async (sql: any) => { await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+    await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`; }],
   ['a squad with supervise off', (sql: any) => sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`],
 ] as const) {
   test(`#4787: ${name} has its stopped seat told; nothing is started, restored or closed`, async () => {
