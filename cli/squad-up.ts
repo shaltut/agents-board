@@ -244,8 +244,10 @@ function cleanLine(line: string): string {
     if (!/[A-Za-z0-9]/.test(core)) { push('…'); continue; }
     if (open) {
       if (LINKING.has(core.toLowerCase())) { push(cleanToken(lead, core, trail)); continue; }
-      open = false;
-      push(OUTCOME.test(core) ? cleanToken(lead, core, trail) : '…');
+      const outcome = OUTCOME.test(core);
+      // #4679: a scheme or another secret word cut here (Authorization: Bearer x) is not the value: the next one is
+      open = !outcome && (secretWord(core) || /^basic$/i.test(core));
+      push(outcome ? cleanToken(lead, core, trail) : '…');
       continue;
     }
     push(cleanToken(lead, core, trail));

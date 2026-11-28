@@ -68,6 +68,25 @@ test('cb help <topic> and cb help <command> print the detailed page; -h on a com
   assert.match(cb(['help', 'project']).out, /cb iam orch@<machine> <slug>/);
 });
 
+// #4755: in a herdr pane with no CB_ACTOR, help looked the pane's binding up first, so it failed with the board down
+test('cb help never needs the board: a herdr pane with no CB_ACTOR and a closed port still prints the manual', () => {
+  const down = { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_refused', CB_ACTOR: '', HERDR_PANE_ID: P };
+  for (const args of [['help'], ['help', 'jobs'], []]) {
+    const r = cb(args, down);
+    assert.equal(r.code, 0, `cb ${args.join(' ')}: ${r.err}`);
+    assert.match(r.out, /cb /);
+  }
+  const unknown = cb(['help', 'queue'], down);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /no help for "queue"/);
+  assert.doesNotMatch(unknown.err, /Run: cb help help/);
+});
+
+test('a refused board: one punctuation mark before the command to run', () => {
+  const r = cb(['mine'], { CB_DATABASE_URL: 'postgres://cb@127.0.0.1:1/claude_board_test_refused' });
+  assert.match(r.err, /Is Postgres running there\? Run: cb help mine$/);
+});
+
 test('cb help <unknown> exits 1 and lists the topics and commands', () => {
   const r = cb(['help', 'queue']);
   assert.equal(r.code, 1);
