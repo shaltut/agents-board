@@ -37,6 +37,16 @@ function setupTestDb() {
 }
 
 /** Applies setup to the test DB (once per process) and wipes all cb tables. */
+/** #3772: a connection of another database on the same Postgres that carries one of our application names, as another
+ *  test run's relay would. It runs nothing but "select": the maintenance database is only somewhere else to be. */
+export async function stranger(name: string) {
+  const url = new URL(TEST_URL);
+  url.pathname = '/postgres';
+  const sql = postgres(url.toString(), { max: 1, onnotice: () => {}, connection: { application_name: name } });
+  const [{ pid }] = await sql`select pg_backend_pid() as pid`;
+  return { pid: pid as number, end: () => sql.end() };
+}
+
 export async function freshDb() {
   if (!ready) {
     setupTestDb();
