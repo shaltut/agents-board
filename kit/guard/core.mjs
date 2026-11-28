@@ -54,83 +54,92 @@ const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED
 
 // #4768, #4770: a body is dropped only where the shell reads a heredoc. Seats run bash and PowerShell and the guard is
 // told neither, so the reader holds a list of what may stand before a marker, all of which both shells read alike: words,
-// ; & | > ( ), plain '...' and "..." strings, $( ), $name, ${name}, and comments. PowerShell has no heredoc (a << in its
-// code runs nothing), so what has to be ruled out is a quote or a comment that only one of them sees. Anything else
-// (a backtick, a backslash, <, a smart quote, $'..', @'..', another heredoc, case, whose ) closes nothing) makes the
+// ; & | > ( ), plain '...' and "..." strings, $( ), $name, and simple ${name} forms. PowerShell has no heredoc (a << in
+// its code runs nothing), so what has to be ruled out is text that moves a quote in one of them only. Anything else (a
+// backtick, a backslash, <, a smart quote, $'..', $[ ], @'..', another heredoc, case, whose ) closes nothing) makes the
 // reader unsure for good: from there nothing is dropped, so the text is judged as commands.
-// read(to) leaves at() === to when `to` is not inside a comment or a '...' word; open holds the " and ( not yet closed.
-const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}-]/;
-const COMMENT_START = /[ \t\n;&|(]/;
+// Comments are never skipped: whether a # starts one differs between the shells and between places in one shell (1# in
+// PowerShell, $(( )), [[ =~ ]], a[ ] in bash). A # may stand only when the rest of its line holds nothing that changes
+// what is read, so that both readings come to the same thing (PLAIN_TAIL).
+// PowerShell also skips the syntax check inside a $( ) that is part of a command's name (x=$( ... ), ./"$( ... )"), so
+// there a << stops nothing. No body is dropped while inside a $( or a " that is glued to the word before it.
+// read(to) leaves at() === to when `to` is not inside a '...' word; open holds the " and ( not yet closed, as g and x
+// where they are glued to the word before them, and unchecked counts those two.
+const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}#-]/;
+const WORD_START = /[ \t\n;&|(]/;
 const PS_QUOTE = /[\u2018-\u201f]/; // PowerShell reads these as ' and "
 const PLAIN_SQ = /\x27[^\x27\u2018-\u201f]*\x27/y;
-const PLAIN_PARAM = /\$\{[^\x22\x27\x60{}\\\u2018-\u201f]*\}/y;
-const ESCAPED_BY_BASH = /[\x22\\\x60$]/; // what a \ changes inside "..."
+// ${name}, ${#name}, ${name:0:7}, ${name:-plain words}: nothing inside that could open a quote, a substitution or a
+// second line
+const PLAIN_PARAM = /\$\{[#!]?\w+(?::?[-=?+][\w ./:-]*|(?::\d+){1,2})?\}/y;
+const PLAIN_TAIL = /[^\x22\x27\x60\\$()<\u2018-\u201f\r\n]*(?=\r?\n|$)/y; // the rest of a line after a #
+// after a \ inside "...": printable ASCII that bash leaves as it is (not " $ \ `, and no line end to join)
+const PLAIN_ESCAPED = /(?![\x22\x24\x5c\x60])[\x20-\x7e]/y;
+const inQuotes = (top) => top === '"' || top === 'g';
 const CASE_AT = /case[ \t\r\n]/y;
 const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
 function bashReader(text) {
   let i = 0;
+  let plainTo = 0; // the line already checked for a #, so many of them on one line are checked once
   const r = {
     open: [],
     low: 0, // the fewest open since the caller last set it
+    unchecked: 0,
     unsure: false,
     at: () => i,
     skip(to) { i = to; },
     read(to) {
       const { open } = r;
-      const close = () => { open.pop(); r.low = Math.min(r.low, open.length); };
+      const push = (e) => { open.push(e); if (e === 'g' || e === 'x') r.unchecked++; };
+      const close = () => { const e = open.pop(); if (e === 'g' || e === 'x') r.unchecked--; r.low = Math.min(r.low, open.length); };
       const lost = () => { r.unsure = true; };
+      const startsWord = () => i === 0 || WORD_START.test(text[i - 1]);
       while (i < to && !r.unsure) {
-        const c = text[i], quoted = open[open.length - 1] === '"';
+        const c = text[i], quoted = inQuotes(open.at(-1));
         if (c === '$') {
           const d = text[i + 1];
-          if (d === '(') { open.push('('); i += 2; continue; }
+          if (d === '(') {
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+          }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
             if (PLAIN_PARAM.test(text)) i = PLAIN_PARAM.lastIndex; else lost();
             continue;
           }
-          if (d === "'" && !quoted) lost();
+          if (d === '[' || (d === "'" && !quoted)) lost();
           i += d === '$' ? 2 : 1;
           continue;
         }
+        // Git Bash drops every carriage return (so one can join $ to (), PowerShell ends a line at it
+        if (c === '\r' && text[i + 1] !== '\n') lost();
         if (quoted) {
           if (c === '"') close();
           else if (c === '`' || PS_QUOTE.test(c)) lost();
-          else if (c === '\\') { // PowerShell does not escape with \: only a \ that changes nothing in either may stand
-            if (ESCAPED_BY_BASH.test(text[i + 1] ?? '')) lost();
-            i++;
+          else if (c === '\\') { // PowerShell does not escape with \: the next character is read again on its own
+            PLAIN_ESCAPED.lastIndex = i + 1;
+            if (!PLAIN_ESCAPED.test(text)) lost();
           }
           i++;
           continue;
         }
         if (c === '"' || c === "'") {
           if (text[i - 1] === '@') { lost(); continue; } // a PowerShell here-string
-          if (c === '"') { open.push(c); i++; continue; }
+          if (c === '"') { push(startsWord() ? c : 'g'); i++; continue; }
           PLAIN_SQ.lastIndex = i;
           if (PLAIN_SQ.test(text)) i = PLAIN_SQ.lastIndex;
           else if (text.indexOf("'", i + 1) < 0) i = text.length + 1;
           else lost();
           continue;
         }
-        if (c === '#') {
-          if (i === 0 || COMMENT_START.test(text[i - 1])) {
-            const nl = text.indexOf('\n', i);
-            const end = nl < 0 ? text.length : nl;
-            const cr = text.indexOf('\r', i); // a lone CR ends a comment in PowerShell, not in bash
-            if (cr >= 0 && cr < end - 1) lost();
-            i = end;
-            continue;
-          }
-          if (!/[A-Za-z0-9_]/.test(text[i - 1])) lost(); // after ) , = a shell may or may not start a comment here
-          i++;
-          continue;
+        if (c === '#' && i >= plainTo) {
+          PLAIN_TAIL.lastIndex = i;
+          if (PLAIN_TAIL.test(text)) plainTo = PLAIN_TAIL.lastIndex; else lost();
         }
-        if (c === '(') open.push(c);
+        if (c === '(') push(c);
         else if (c === ')') { if (open.length) close(); else lost(); }
-        else if (c === '\r') { if (text[i + 1] !== '\n') lost(); }
-        else if (!PLAIN_CODE.test(c)) lost();
+        else if (c !== '\r' && !PLAIN_CODE.test(c)) lost();
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
-        else if (c === 'c' && (i === 0 || COMMENT_START.test(text[i - 1]))) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
+        else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
       }
     },
@@ -164,7 +173,7 @@ function replaceHeredocs(text, fn) {
   // whether bash reads the heredoc found at `at` on the line ending at nl, with its body ending where the guard's does
   const isHeredoc = (at, nl, f) => {
     bash.read(at);
-    if (bash.unsure || bash.at() !== at || bash.open.at(-1) === '"') return false;
+    if (bash.unsure || bash.at() !== at || bash.unchecked || inQuotes(bash.open.at(-1))) return false;
     // <<'EOF'x: bash's delimiter is EOFx, so its body ends somewhere else
     DELIMITER_END.lastIndex = at + f.header;
     if (!DELIMITER_END.test(text)) { bash.unsure = true; return false; }

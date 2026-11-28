@@ -271,7 +271,7 @@ const heredocText = [
   `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # note\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `mkdir -p out && [ -f *.md ] && { echo $HOME $?; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # done\ngit reset --hard\nEOF`,
-  `echo "\${HOME}" \${#x} \${y:-z} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
+  `echo "\${HOME}" \${#x} \${y:-z} \${sha:0:7} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`,`cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
 ];
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
   for (const [name, make] of hiddenByHeredoc) {
