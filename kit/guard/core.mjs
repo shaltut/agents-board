@@ -1721,6 +1721,31 @@ const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, p
 const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-commandwithargs'.startsWith(`-${f}`))(x.replace(/^(?:--?|\/)/, '').toLowerCase());
 // -Verbose and -Debug, however far abbreviated
 const PS_SWITCH = (f) => /^-(?:vb|db)$/i.test(f) || ['-verbose', '-debug'].some((s) => f.length > 1 && s.startsWith(f.toLowerCase()));
+// #4789: where Windows PowerShell's bare command starts, past its options; args.length when it has none (-File runs a
+// script, -Command is read above). An option that takes a value takes the next word, unless it holds it after a colon
+const PS_VALUED = ['executionpolicy', 'windowstyle', 'version', 'outputformat', 'inputformat', 'configurationname', 'psconsolefile', 'encodedcommand', 'encodedarguments'];
+function psBare(args) {
+  for (let k = 0; k < args.length; k++) {
+    const x = shellValue(args[k]);
+    if (!/^(?:--?|\/)./.test(x)) return k;
+    const flag = x.replace(/^(?:--?|\/)/, '').toLowerCase();
+    if (PS_COMMAND(x) || 'file'.startsWith(flag)) break;
+    if (['ep', 'of', 'if', 'ec'].includes(flag) || PS_VALUED.some((s) => s.startsWith(flag))) k++;
+  }
+  return args.length;
+}
+// #4789: whether a -- after this word ends rg's options. After an option that may take a value (-e --) it is that value,
+// so only a switch that takes none, an option holding its value (=), or a plain word counts; a word the shell fills in
+// ($, a backtick) or a redirect before it leaves it unknown
+const RG_SWITCH = /^(?:-[nNiFwxsSlcoHIUPpqva.uz0L]+|--(?:line-number|no-line-number|ignore-case|fixed-strings|word-regexp|line-regexp|case-sensitive|smart-case|files-with-matches|count|only-matching|hidden|no-ignore|multiline|pcre2|no-heading|json|files|quiet))$/;
+function rgEnds(before) {
+  if (before === undefined) return true;
+  if (/[<>$`]/.test(before)) return false;
+  const x = shellValue(before);
+  return !x.startsWith('-') || x.includes('=') || RG_SWITCH.test(x);
+}
+// find's actions that run the words after them as a command
+const FIND_EXEC = /^-(?:exec|execdir|ok|okdir)$/;
 // cut: the second reading split this command inside a quote, so a shell's command string may be every word that is left
 function codeStrings(name, args, cut) {
   const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
@@ -1750,13 +1775,20 @@ function codeStrings(name, args, cut) {
   }
   if (name === 'pwsh' || name === 'powershell') {
     const k = args.findIndex((x) => PS_COMMAND(shellValue(x)));
-    return k < 0 ? [] : rest(k + 1);
+    const after = k < 0 ? [] : rest(k + 1);
+    // #4789: Windows PowerShell runs its first bare word, with all after it, as the command (pwsh reads a file there)
+    return name === 'powershell' ? [...after, ...rest(psBare(args))] : after;
   }
   if (name === 'rg') {
-    return args.flatMap((x, k) => {
-      const m = /^--pre(?:=(.*))?$/.exec(shellValue(x));
-      return m ? [m[1] ?? shellValue(args[k + 1] ?? '')] : [];
-    });
+    const found = [];
+    for (let k = 0; k < args.length; k++) {
+      const x = shellValue(args[k]);
+      // #4789: nothing after the end of the options is one; a cut reading cannot tell where that is, so it reads on
+      if (x === '--' && !cut && rgEnds(args[k - 1])) break;
+      const m = /^--pre(?:=(.*))?$/.exec(x);
+      if (m) found.push(m[1] ?? shellValue(args[k + 1] ?? ''));
+    }
+    return found;
   }
   if (!SCRIPT_SHELLS.has(name)) return [];
   const word = (k) => (cut ? rest(k) : k < args.length ? [shellValue(args[k])] : []);
@@ -1765,7 +1797,8 @@ function codeStrings(name, args, cut) {
     const x = shellValue(args[k]);
     if (x === '--' || x === '-') return runs ? word(k + 1) : [];
     const fish = name === 'fish' ? /^--command(?:=([\s\S]*))?$/.exec(x) : null;
-    if (fish?.[1] !== undefined) return [fish[1]];
+    // #4789: cut inside the string, its other words are the rest of it
+    if (fish?.[1] !== undefined) return cut ? [[fish[1], ...args.slice(k + 1).map(shellValue)].join(' ')] : [fish[1]];
     if (fish) runs = true;
     if (!/^[-+]./.test(x)) return runs ? word(k) : []; // the first operand: the command after -c, else a script file
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(x)) runs = true;
@@ -1852,9 +1885,10 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       walked.add(key);
       return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
     };
-    let cmd = true;
+    let cmd = true, finds = false;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
+      if (finds && FIND_EXEC.test(u[i])) { cmd = true; continue; } // #4789: what follows is a command of its own
       if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
         const why = follow(u[i]);
         if (why) return why;
@@ -1891,6 +1925,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
       if (name === 'timeout') { while (w[i + 1]?.startsWith('-')) { if (TIMEOUT_OPT_ARG.test(u[++i])) i++; } i++; continue; }
       const why = freshLaunch(name, u.slice(i + 1, i + 41), hosts, role, vars);
       if (why) return FRESH_ENV(why);
+      if (name === 'find') finds = true;
       // its arguments end at the next ( ) { } or backtick, where another command word may start: each word is read once
       let end = i + 1;
       while (end < w.length && !/^[(){}`]$/.test(w[end])) end++;
