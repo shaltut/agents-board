@@ -1917,7 +1917,8 @@ test('#4825: no spelling of a shell\'s options keeps a string from being read as
 });
 
 test('#4825: the string is held to it however it reaches the shell', () => {
-  for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `x=${unplaced4825}; bash -c "$x"`]) refused4825(command);
+  for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `echo ${unplaced4825} | tee log | sudo -u x bash -x`,
+    `cat > >(bash -c ${unplaced4825})`, `bash 2>&1 -c ${unplaced4825}`]) refused4825(command);
   // a heredoc fed to a shell is that shell's text; one fed to another program is not
   const body = '>$(case a in a) echo log;; esac) sudo codex';
   for (const shell of ['bash', 'bash -s -- x', 'sh -eu', 'BASH.EXE', 'ssh box']) refused4825(`${shell} <<'EOF'\n${body}\nEOF`);
@@ -1930,9 +1931,14 @@ test('#4825: the string is held to it however it reaches the shell', () => {
 
 test('#4825: a quoted arrow where no shell is named, or a message about one, is only text', () => {
   for (const command of ['echo "step 1 -> don\'t stop"', 'grep -rn "->\'" src', 'ls build.sh && echo "a -> don\'t"', 'npm run lint && echo "ok -> it\'s done"',
-    'git commit -m "bash: a -> don\'t"', 'cb log 1 "eval -> it\'s fixed"', 'bash build.sh && echo done > out.txt', 'bash -c "ls > out.txt"']) {
+    'git commit -m "bash: a -> don\'t"', 'cb log 1 "eval -> it\'s fixed"', 'bash build.sh && echo done > out.txt', 'bash -c "ls > out.txt"',
+    // only the pipeline or command that holds the string: a shell named in another one is none of its business
+    'bash build.sh; echo "a -> don\'t"', 'bash build.sh && echo "a -> don\'t"', 'echo "a -> don\'t" || bash fix.sh', 'echo "a -> don\'t"\nbash fix.sh']) {
     assert.equal(judged4803(command), 'allow', command);
   }
+  // as in git's own scripts: a substitution with its own quotes inside a message, in a script that uses eval elsewhere
+  const text = 'eval "$setup"\necho "a symbolic link -> \'$(cat "$1")\'"\n';
+  assert.equal(judged4803('./run.sh now', 'builder', { readScript: (p: string) => (p.endsWith('run.sh') ? text : null) }), 'allow');
 });
 
 test('#4803: a name with case beside a dot is no case statement', () => {
