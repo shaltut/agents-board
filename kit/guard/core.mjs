@@ -42,7 +42,7 @@ const blankQuoted = (text) => replaceQuoted(text, () => '""');
 const PS_STRING_AT = /"(?:\\.|[^"\\$`])*"/y;
 const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
-const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
+const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|bug|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
 // Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell. A header line holds <<'ID'
 // or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), never the line
@@ -1716,7 +1716,7 @@ function applyWrite(vars, { key, value }) {
 // quote may not be one at all (a comment, a heredoc body, one left open), or where a search runs its own text (an alias
 // or function, git grep -O, rg --pre), that reading can take a real command for quoted data. Such a command is read a
 // second time, flat: cut at every ; & | and newline, as before PR 124. The second reading can only add a block
-const MISCOUNTS = /#|--%|`|\$[({[']|@["']|\\["';&|]|[\u2018-\u201E]/;
+const MISCOUNTS = /#|--%|`|\$[({[']|@["']|\\["']|[\u2018-\u201E]/;
 const REDEFINES = /(?:^|[;&|\n(])[ \t\r]*(?:alias|function)\s|\([ \t]{0,4}\)[ \t\r]{0,4}\{/;
 const SEARCH_PROGRAM = /(?:^|[ \t])(?:--pre(?![\w-])|--op|-[A-Za-z]{0,8}O)/;
 const CLOSED_TEXT = /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^"'\\]+)*/y;

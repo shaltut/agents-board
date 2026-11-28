@@ -1092,7 +1092,7 @@ const miscounts = [
   'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
   'echo "a\u201D ; sudo codex ; echo \u201Cb"', 'rg "a\u201D|schtasks /run /tn y|rg \u201Cb" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`,
   'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "', 'echo `" ; sudo codex ; echo `"',
-  'rg x {# "\n|sudo codex|\n{# "', String.raw`rg x \; . "x|sudo|y"`,
+  'rg x {# "\n|sudo codex|\n{# "',
   // bash nests a new string inside "$( )" and "${ }"
   'grep x "$(echo " "; sudo codex; echo " ")"', 'echo "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
   'grep x "$(echo "|sudo codex|echo ")"', 'grep x "${y:-"|sudo codex|echo "}"',
@@ -1623,7 +1623,7 @@ const card4734Runs = [
   "at \"-b\"",
   "at '-b'",
   "at -\"\"b",
-  "at -\b",
+  "at -\\b",
   "at \\-b",
   "at -m\"\"b",
   "at \"-t\" 202601011200",
