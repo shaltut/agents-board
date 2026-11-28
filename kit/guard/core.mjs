@@ -56,9 +56,11 @@ const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED
 // when `to` is not inside an escape, a comment or a single-quoted word; open holds the " ( and ` not yet closed. What it
 // cannot follow (a heredoc nobody skipped, a case, whose ) closes nothing) makes it unsure for good: from there nothing
 // is dropped, so its text is judged as commands.
-const WORD_BREAK = /[\s;&|()<>]/;
+const WORD_BREAK = /[ \t\n;&|()<>]/; // bash's own: no CR, no Unicode space
 const ANSI_BODY = /(?:\\[\s\S]|[^\x27\\])*/y;
 const CASE_AT = /case[ \t]/y;
+const PLAIN_PARAM = /\$\{[^\x22\x27\x60{}\\]*\}/y; // ${x}, ${#x}, ${x:-y}: no quote or brace inside to follow
+const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
 function bashReader(text) {
   let i = 0;
   const r = {
@@ -73,17 +75,34 @@ function bashReader(text) {
       while (i < to && !r.unsure) {
         const c = text[i], top = open[open.length - 1];
         if (c === '\\') { i += 2; continue; }
-        if (c === '$' && text[i + 1] === '(') { open.push('('); i += 2; continue; }
+        if (c === '$') {
+          const d = text[i + 1];
+          if (d === '$') { i += 2; continue; } // $$ is one word: a quote after it is a plain one
+          if (d === '(') { open.push('('); i += 2; continue; }
+          if (d === '{') {
+            PLAIN_PARAM.lastIndex = i;
+            if (!PLAIN_PARAM.test(text)) { r.unsure = true; break; }
+            i = PLAIN_PARAM.lastIndex;
+            continue;
+          }
+          if (d === "'" && top !== '"') { // $'...': \' does not close it
+            ANSI_BODY.lastIndex = i + 2;
+            ANSI_BODY.test(text);
+            i = ANSI_BODY.lastIndex + 1;
+            continue;
+          }
+        }
         if (c === '`') { if (top === '`') close(); else open.push('`'); i++; continue; }
         if (top === '"') { if (c === '"') close(); i++; continue; }
         const wordStart = i === 0 || WORD_BREAK.test(text[i - 1]);
         if (c === "'") {
-          let end;
-          if (text[i - 1] === '$') { ANSI_BODY.lastIndex = i + 1; ANSI_BODY.exec(text); end = ANSI_BODY.lastIndex; } else end = text.indexOf("'", i + 1);
-          i = end < 0 || end >= text.length ? text.length + 1 : end + 1;
+          const end = text.indexOf("'", i + 1);
+          i = end < 0 ? text.length + 1 : end + 1;
           continue;
         }
         if (c === '#' && wordStart) {
+          // after a ) or a continued line, whether this # starts a word depends on what came before
+          if (text[i - 1] === ')' || (text[i - 1] === '\n' && text[i - 2] === '\\')) { r.unsure = true; break; }
           const nl = text.indexOf('\n', i);
           i = nl < 0 ? text.length : nl;
           continue;
@@ -129,6 +148,9 @@ function replaceHeredocs(text, fn) {
   const isHeredoc = (at, nl, f) => {
     bash.read(at);
     if (bash.unsure || bash.at() !== at || bash.open.at(-1) === '"') return false;
+    // <<'EOF'x: bash's delimiter is EOFx, so its body ends somewhere else
+    DELIMITER_END.lastIndex = at + f.header;
+    if (!DELIMITER_END.test(text)) { bash.unsure = true; return false; }
     // the rest of the header line must end as it began: a quote left open or a trailing \ puts commands where the body seemed to be
     const depth = bash.open.length;
     bash.low = depth;

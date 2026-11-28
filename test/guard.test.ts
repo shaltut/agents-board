@@ -223,6 +223,13 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['EOF ) ends it in a substitution', (c) => `git commit -m "$(cat <<'EOF'\ntext\nEOF )"\n${c}\nEOF`],
   ['after an indented end line bash does not take', (c) => `cat > a <<'EOF'\n  EOF\necho "\nEOF\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
   ['after an unquoted heredoc with a quote in it', (c) => `cat <<X\n"\nX\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
+  ['a delimiter that goes on after its quote', (c) => `cat > a <<'EOF'x\ntext\nEOFx\n${c}\nEOF`],
+  ['after $$ before a quote', (c) => `echo $$'a\\' >/dev/null; echo '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after an escaped $ before a quote', (c) => `echo \\$'a\\' >/dev/null; echo '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after quotes inside ${ }', (c) => `echo "\${x:-"a\ncat > a <<'EOF'\n"}" >/dev/null\n${c}\nEOF`],
+  ['after a # that follows a substitution', (c) => `echo $(echo a)# '\n' >/dev/null; echo "\ncat > a <<'EOF'\n" >/dev/null\n${c}\nEOF`],
+  ['after a # that follows a CR', (c) => `echo a\r# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after a # on a continued line', (c) => `echo a\\\n# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
 ];
 const heredocText = [
   `cat > notes.txt <<'EOF'\ngit reset --hard\nEOF`, `cd /tmp && cat >> notes.txt <<-"EOF"\n\tgit reset --hard\n\tEOF`,
@@ -233,6 +240,7 @@ const heredocText = [
   `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `echo "$(date)" \`date\` $'it\\'s' \\" \ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # don't\ngit reset --hard\nEOF`,
+  `echo "\${HOME}" \${#x} \${y:-z} $$ $# a#b\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
 ];
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
   for (const [name, make] of hiddenByHeredoc) {
