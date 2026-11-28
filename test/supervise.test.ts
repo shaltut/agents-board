@@ -690,3 +690,55 @@ test('a launch whose prompt lists repo folders: the lead is told the command is 
   // the full command, repo folders included, is in the PC log
   assert.ok(out.some((l) => l.includes('herdr --machine macbook agent prompt rq-q1-macbook "cb iam rq-Q1@macbook rq --role qa') && l.includes('Repos: api /Users/me/Work/rq/api, web /Users/me/Work/rq/web')), out.join('\n'));
 });
+
+// ---------------- #4559 slice 3 (Q3018): disable winds the seats down, enable restores the holders
+test('a disabled project: its idle holder is closed and keeps its card; enable restores it, even after a recent restore', async () => {
+  const { sql, sup } = await setup();
+  const B1 = 'sv-B1@macbook';
+  await session(sql, B1, 'builder', { startedMin: 30 });
+  const id = await card(sql, { assignee: B1, status: 'in_progress' });
+  await sql`update cb.events set at = now() - interval '30 minutes' where actor = ${B1}`;
+  // restored 5 minutes ago: without the enable, a seat down again now would be left for a person
+  await sql`select set_config('application_name', 'cb-supervisor/test', false)`;
+  await sup`select cb.supervise_log('sv', 'restore', ${B1}, 'builder')`;
+  await sql`update cb.events set at = now() - interval '5 minutes' where actor = 'supervisor' and data ->> 'what' = 'restore'`;
+  const held = async () => (await sup`select cb.supervise_mark(${B1}, true) as ok`)[0].ok;
+  assert.equal(await held(), false, 'an enabled project: a holder is never closed');
+
+  await sql`select cb.project_state('sv', 'disabled', 'ahmed')`;
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  assert.deepEqual((await tick(deps(sup, h.run))).filter((l) => /clos/.test(l)), [], 'just disabled: it has 10 minutes');
+  await sql`update cb.projects set state_at = now() - interval '11 minutes' where slug = 'sv'`;
+  await sql`update cb.events set at = now() - interval '30 minutes' where actor = ${B1}`;
+  const out = await tick(deps(sup, h.run));
+  assert.ok(has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+  assert.ok(out.includes(`closed ${B1}`), out.join('\n'));
+  assert.equal((await sql`select assignee from cb.tasks where id = ${id}`)[0].assignee, B1, 'the card stays its');
+  assert.deepEqual((await events(sql, 'close')).map((e: any) => e.data.note), ['project disabled']);
+  assert.ok(!h.calls.some((c) => c.args[0] === 'agent' && c.args[1] === 'start'), 'nothing starts in a disabled project');
+
+  await sql`select cb.project_state('sv', 'enabled', 'ahmed')`;
+  await sql`update cb.sessions set last_seen = now() - interval '10 minutes' where actor = ${B1}`;
+  const back = fakeHerdr();
+  const again = await tick(deps(sup, back.run));
+  assert.ok(again.some((l) => l.endsWith(`restored ${B1}`)), again.join('\n'));
+});
+
+test('a project enabled again between the plan and the close keeps its holder', async () => {
+  const { sql, sup } = await setup();
+  const B1 = 'sv-B1@macbook';
+  await session(sql, B1, 'builder', { startedMin: 30 });
+  await card(sql, { assignee: B1, status: 'in_progress' });
+  await sql`select cb.project_state('sv', 'disabled', 'ahmed')`;
+  await sql`update cb.projects set state_at = now() - interval '11 minutes' where slug = 'sv'`;
+  await sql`update cb.events set at = now() - interval '30 minutes' where actor = ${B1}`;
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p9');
+  // Ahmed enables it while the close is asking herdr about the pane
+  let enabled: Promise<unknown> | undefined;
+  const run: Runner = (m, a, t) => { if (a[0] === 'agent' && a[1] === 'get') enabled ??= sql`select cb.project_state('sv', 'enabled', 'ahmed')`.execute(); return h.run(m, a, t); };
+  const out = await tick(deps(sup, run));
+  await enabled;
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
+});
