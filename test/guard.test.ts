@@ -1884,10 +1884,20 @@ test('#4803: a redirect target is read to its end however it nests, and one that
     assert.equal(judged4803(`${r} bash`, 'builder', { stdin: true }), 'role', `stdin: ${r}`);
   }
   // what the guard cannot place is refused, with no role too: the command behind it cannot be found
-  for (const command of ['>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(case $x in a) echo f;; esac) sudo codex', '>$(echo # )\n) sudo codex']) {
+  for (const command of ['>$(echo x sudo codex', '>"$(echo x" sudo codex', '>$(case $x in a) echo f;; esac) sudo codex', '>$(echo # )\n) sudo codex', '>$(echo log;# )\n) sudo codex']) {
     assert.notEqual(judged4803(command), 'allow', command);
   }
+  // a shell script a seat runs is held to the same; another language's file is not shell text, so its quotes mean nothing here
+  const ran = (path: string, text: string) => judged4803(`./${path} now`, 'builder', { readScript: (p: string) => (p.endsWith(path) ? text : null) });
+  const oddQuotes = "// it's here\nif (a > b) x = '<p>'\n";
+  assert.notEqual(ran('run.sh', '>$(echo x sudo codex\n'), 'allow');
+  for (const [path, text] of [['page.mjs', oddQuotes], ['page.py', oddQuotes], ['tool', `#!/usr/bin/env node\n${oddQuotes}`]]) assert.equal(ran(path, text), 'allow', path);
   assert.notEqual(judged4803('>$(echo x git push --force origin main', null), 'allow');
+  // what bash's count cannot follow is not read again with PowerShell's, which could take the command into the target;
+  // and a string handed to a shell is that shell's text
+  for (const command of ['>$(true \\"; case a in a) :;; esac) sudo codex \\")', ...['bash -c', 'sh -ec', 'eval'].map((shell) => `${shell} '>$(case a in a) echo log;; esac) sudo codex'`)]) {
+    assert.notEqual(judged4803(command), 'allow', command);
+  }
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
     'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
@@ -1895,6 +1905,8 @@ test('#4803: a redirect target is read to its end however it nests, and one that
 
 test('#4803: a heredoc header before the command word hides nothing', () => {
   for (const r of ['<<x', "<<'x'", '<<-x', '<<"x"', '<<x 2>&1', '2>&1 <<x', '<<y <<x']) threeWays4803(r, '\nx');
+  // the delimiter is any shell word
+  for (const [r, end] of [['<<!', '!'], ['<<E"O"F', 'EOF'], ['<<$x', '$x'], ["<<a'b c'", 'ab c']]) threeWays4803(r, `\n${end}`);
   assert.equal(judged4803('<<x git push origin main\nx'), 'dangerous');
   assert.equal(judged4803('<<x gh pr merge 1\nx'), 'role');
   for (const command of ["python - <<'EOF' arg\nprint(1)\nEOF", '<<x cat\nhello\nx']) assert.equal(judged4803(command), 'allow', command);
