@@ -397,8 +397,22 @@ Then tell the sessions: `dc exec board cb broadcast "The board was restored to <
 
 ## Users
 
-Day to day, on the board: Users (key 7). Add a member, copy their link or set a password, put them on projects, make
-an admin, remove someone. Everyone changes their own password at the top of the page (admins: under their name).
+Day to day, on the board: Users (key 7). Add a member, copy their link (shown once) or set a password, put them on
+projects, make an admin, remove someone. Everyone changes their own password at the top of the page (admins: under
+their name).
+
+**Sign-ins are stored as hashes (#4868).** The first setup with that change turns each user's old plain value into a
+hashed sign-in and empties `cb.users.token`: existing links and signed-in browsers keep working. Backups taken before
+it still hold the old values, which work until replaced (**New link**, or **Sign out everywhere** for an admin).
+
+**Rolling the board back past that change** leaves the older code with an empty column: everyone is signed out and an
+admin cannot sign in. After the rollback, give every user a fresh value, then send members new links:
+
+```bash
+dc exec db psql -U cb -d claude_board -c "update cb.users set token = gen_random_uuid()::text where token is null"
+```
+
+Deploying the change again turns those values into hashes the same way.
 
 From the VPS shell, when the board itself can't be used (no admin can sign in):
 
