@@ -135,3 +135,41 @@ test('F3: a card line (cb show, cb brief) names the seat in plain words, never t
   assert.match(first, /\{guard\} \[for a Codex seat\]/, r.stderr);
   assert.doesNotMatch(first, /for:codex/);
 });
+
+// #4679 (PR 100 N1): approval is no seat's claim, so a mark set before it must still hold at build
+test('a for: label set at design holds through approval into build, and comes off when the build is passed', async () => {
+  const sql = await db();
+  await pipeline(sql);
+  const id = await staged(sql, 'designed first', 'design', ['for:codex', 'guard']);
+  const labels = async () => (await sql`select labels from cb.tasks where id = ${id}`)[0].labels.sort();
+  await sql`select cb._stage_move(${id}, 'approval', null, 'designed')`;
+  assert.deepEqual(await labels(), ['for:codex', 'guard'], 'into approval: kept');
+  await sql`select cb._stage_move(${id}, 'build', null, 'approved')`;
+  assert.deepEqual(await labels(), ['for:codex', 'guard'], 'out of approval: kept');
+  assert.equal(await claim(sql, 'C1@pc'), null, 'the claude builder skips it');
+  await sql`select cb._stage_move(${id}, 'review', null, 'built')`;
+  assert.deepEqual(await labels(), ['guard']);
+});
+
+// #4679 (PR 100 N3): "start one" is no help when the squad has no seat of that agent
+test('the digest says when the squad has no seat of the agent a card waits for', async () => {
+  const sql = await db();
+  const squad = (agent?: string) => ({ machines: { box: { herdr: null, repo: '/r', board: '/b' } },
+    roles: { lead: { count: 1, model: 'opus', machine: 'box' }, builder: { count: 2, model: 'sonnet', machine: 'box', ...(agent ? { seats: { 2: { agent, model: 'gpt-6.1-sol' } } } : {}) } } });
+  const digest = async () => ((await sql`select cb.digest('demo') as d`)[0].d as string[]).join('\n');
+  await add(sql, 'kept in next', ['for:codex']);
+  assert.doesNotMatch(await digest(), /squad has no/, 'no squad: nothing to say');
+  await sql`select cb.squad_set('demo', ${sql.json(squad())}, 'ahmed')`;
+  assert.match(await digest(), /is waiting for a Codex seat, and the squad has none: add one to the squad, or cb edit \d+ --assignee <session>/);
+  await sql`select cb.squad_set('demo', ${sql.json(squad('codex'))}, 'ahmed')`;
+  assert.match(await digest(), /is waiting for a Codex seat: start one/);
+  assert.doesNotMatch(await digest(), /squad has/);
+  // a staged card's line says the same
+  await sql`delete from cb.tasks`;
+  await pipeline(sql);
+  await sql`delete from cb.sessions where agent = 'codex'`;
+  await staged(sql, 'staged', 'build', ['for:codex']);
+  assert.match(await digest(), /waiting for a Codex seat: none live can take it/);
+  await sql`select cb.squad_set('demo', ${sql.json(squad())}, 'ahmed')`;
+  assert.match(await digest(), /waiting for a Codex seat: the squad has none/);
+});
