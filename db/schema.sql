@@ -5126,6 +5126,7 @@ drop function if exists cb._repo cascade;
 drop function if exists cb._check_repos cascade;
 drop function if exists cb._repo_list cascade;
 drop function if exists cb._check_model cascade;
+drop function if exists cb._models_used cascade;
 drop function if exists cb._check_seat cascade;
 drop function if exists cb._agents_main cascade;
 alter table cb.projects add column if not exists squad jsonb;
@@ -5179,12 +5180,49 @@ begin
   return array(select jsonb_array_elements_text(j));
 end $$;
 
+-- The model names already used for each agent, across every saved squad: the settings page's suggestions, and what
+-- makes a name that is two of them joined detectable on save (#4717). Per agent: {"claude": ["opus", ...], ...}.
+create function cb._models_used() returns jsonb language sql stable as $$
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
+  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
+  specs as (
+    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
+    union all
+    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
+      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
+  ),
+  pairs as (
+    select s.agent, s.model from specs s where s.model is not null
+    union
+    select f->>'agent', f->>'model' from specs s
+      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
+     where f->>'agent' is not null and f->>'model' is not null
+  )
+  select coalesce((select jsonb_object_agg(z.agent, z.models) from
+                   (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}')
+$$;
+
 -- A model for an agent (#4002), refused naming the field (label) and the shape to give. Claude takes its four names;
 -- codex and agy a model name, never a Claude one (the slip when only the agent was changed); opencode provider/model.
 -- A null model is refused like a wrong one (it would pass not in and !~ silently); a null agent is claude.
-create function cb._check_model(agent text, model text, label text) returns void language plpgsql immutable as $$
+-- A value that is two known names joined with no separator (the settings picker's slip, #4717) is refused too: it still
+-- fits the shape, but it is not one model. stable: it reads the names already used.
+create function cb._check_model(agent text, model text, label text) returns void language plpgsql stable as $$
 #variable_conflict use_variable
+declare
+  known text[]; a text; b text;
 begin
+  if model is not null then
+    known := array(select jsonb_array_elements_text(coalesce(cb._models_used()->coalesce(agent, 'claude'), '[]'::jsonb)));
+    foreach a in array known loop
+      if a <> model and length(model) > length(a) and left(model, length(a)) = a then
+        b := substring(model from length(a) + 1);
+        if b = any(known) then
+          raise exception '% model "%" is two model names joined (% and %): pick one', label, model, a, b;
+        end if;
+      end if;
+    end loop;
+  end if;
   case coalesce(agent, 'claude')
     when 'claude' then
       if model is null or model not in ('opus', 'sonnet', 'haiku', 'fable') then
@@ -5216,7 +5254,7 @@ create function cb._agents_main() returns text[] language sql immutable as $$ se
 -- inherits (for a role: claude and the role's default model). Returns what is saved: the agent only when it differs from
 -- the inherited one (so claude, the default, is never written), the model only when given, the fallback only when it
 -- lists some, as {agent, model} pairs.
-create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql immutable as $$
+create function cb._check_seat(spec jsonb, ag text, mo text, label text) returns jsonb language plpgsql stable as $$
 #variable_conflict use_variable
 declare a text := ag; m text := mo; fb jsonb := '[]'; cnt int; x record; k text; pair text; pairs text[] := '{}';
 begin
@@ -5566,21 +5604,7 @@ end $$;
 -- paths must match, the model names already used in any squad (per agent, for suggestions) and the machines already
 -- used in any squad (to add one to another project).
 create function cb.squad_options() returns jsonb language sql stable as $$
-  with sq as (select pr.squad from cb.projects pr where pr.squad is not null),
-  r as (select rl.value as v from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'roles') = 'object' then sq.squad->'roles' else '{}' end) rl),
-  specs as (
-    select coalesce(r.v->>'agent', 'claude') as agent, r.v->>'model' as model, r.v as v from r
-    union all
-    select coalesce(se.value->>'agent', r.v->>'agent', 'claude'), se.value->>'model', se.value
-      from r cross join lateral jsonb_each(case when jsonb_typeof(r.v->'seats') = 'object' then r.v->'seats' else '{}' end) se
-  ),
-  pairs as (
-    select s.agent, s.model from specs s where s.model is not null
-    union
-    select f->>'agent', f->>'model' from specs s
-      cross join lateral jsonb_array_elements(case when jsonb_typeof(s.v->'fallback') = 'array' then s.v->'fallback' else '[]' end) f
-     where f->>'agent' is not null and f->>'model' is not null
-  )
+  with sq as (select pr.squad from cb.projects pr where pr.squad is not null)
   select jsonb_build_object(
     'roles', to_jsonb(array['lead', 'architect', 'owner', 'builder', 'reviewer', 'qa', 'investigator']),
     'repo_bound_roles', to_jsonb(array['builder', 'reviewer']),
@@ -5595,8 +5619,7 @@ create function cb.squad_options() returns jsonb language sql stable as $$
                                    'codex_model', '^[a-z0-9][a-z0-9._-]{0,63}$',
                                    'opencode_model', '^[a-z0-9][a-z0-9._-]{0,31}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$',
                                    'agy_model', '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
-    'models_used', coalesce((select jsonb_object_agg(z.agent, z.models) from
-                     (select p.agent, jsonb_agg(distinct p.model order by p.model) as models from pairs p group by p.agent) z), '{}'),
+    'models_used', cb._models_used(),
     'machines_used', coalesce((select jsonb_agg(distinct jsonb_build_object('key', m.key) || m.value)
                                  from sq cross join lateral jsonb_each(case when jsonb_typeof(sq.squad->'machines') = 'object' then sq.squad->'machines' else '{}' end) m), '[]'))
 $$;
