@@ -40,7 +40,9 @@ const has = (lines: string[], re: RegExp) => assert.ok(lines.some((l) => re.test
 
 test('two clean databases of one release differ in nothing', async () => {
   const r = await run();
-  assert.deepEqual(r.lines.filter((l) => /^LOOK: (added|changed|missing) /.test(l)), []);
+  // nor does a stock cluster show anything listed whatever the reference holds: on cut-over day each line must mean
+  // something. A new board's admin has no password yet, which is its own row's line
+  assert.deepEqual(r.lines.filter((l) => l.startsWith('LOOK: ') && !/admins? ha(s|ve) no password/.test(l)), []);
 });
 
 test('the audit cannot write', async () => {
