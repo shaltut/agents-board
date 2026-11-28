@@ -90,6 +90,9 @@ function bashReader(text) {
     low: 0, // the fewest open since the caller last set it
     unchecked: 0,
     unsure: false,
+    // #4834: 1 where a command may start, as read: after a ; & | ( or line break that no quote holds. One byte a
+    // character: a Set grew faster than the text on a long run of ;
+    starts: new Uint8Array(text.length + 1).fill(1, 0, 1),
     at: () => i,
     skip(to) { i = to; },
     read(to) {
@@ -103,7 +106,7 @@ function bashReader(text) {
         if (c === '$') {
           const d = text[i + 1];
           if (d === '(') {
-            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; r.starts[i] = 1; continue;
           }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
@@ -146,6 +149,7 @@ function bashReader(text) {
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
         else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
+        if (c === ';' || c === '&' || c === '|' || c === '(' || c === '\n') r.starts[i] = 1;
       }
     },
   };
@@ -217,7 +221,7 @@ function replaceHeredocs(text, fn, docs = []) { // docs: filled with the heredoc
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
     out += text.slice(pos, s);
-    const kept = fn(text.slice(s, found.end), line, found.id);
+    const kept = fn(text.slice(s, found.end), line, found.id, (o) => bash.starts[s + o] === 1);
     const base = out.length - s;
     docs.push({ at: base + found.at, header: found.header, nl: base + nl, end: out.length + kept.length, lost: bash.unsure });
     out += kept;
@@ -292,15 +296,42 @@ const TEXT_WRITER = /^[ \t]*(?:cb[ \t]|cat[ \t]*>>?[ \t]*\S|git[ \t]+commit\b.*-
 const SUBST_CAT = /\$\([ \t]*cat[ \t]*$/;
 const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[^;&|\n]*"$`);
 
-// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<.
-function writesText(line) {
+// #4824: the & of an fd duplication (2>&1, >&2, >&-) ends no command, in any shell. Only cb and git commit get this
+// reading: their stdin is text wherever their output goes. A cat's body is its output, which such a redirect can send on
+// (cat >&1 | bash, cat > f >&2 |& bash). &> stays a split: sh reads it as & and then >
+const FD_DUP = /(?<=>)&(?=(?:\d+|-)(?:[ \t<>]|$))/g;
+const MESSAGE_READER = /^[ \t]*(?:cb[ \t]|git[ \t]+commit\b.*-F[ \t]+-)/;
+
+// #4834: a cat's body is its output: text only when that goes to a file. A device may be the pipe itself (/dev/stdout,
+// /proc/self/fd/1), and a command piped on may hand the body to a shell, whatever the target is called ($OUT)
+const CAT = /^[ \t]*cat(?![\w-])/;
+const DEVICE_TARGET = />>?[ \t]*\/+(?:\.\/+)*(?:dev|proc)\/+(?!null(?![\w./-]))/;
+const PIPED_ON = /^[^;&|]*\|(?!\|)/;
+
+// the command segment holding the << at `at`, and where in the line it starts
+function heredocSegment(line, at) {
+  const before = line.slice(0, at);
+  const from = Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1;
+  const after = line.slice(at).search(/[;&|]/);
+  return { from, text: before.slice(from) + (after < 0 ? line.slice(at) : line.slice(at, at + after)) };
+}
+
+// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<, which must start
+// where the shell starts a command (startsAt, #4834): the words after a quoted ; are part of some other command
+function writesText(line, startsAt) {
   if (line.split('<<').length !== 2) return false; // two heredocs on one line: strip neither
   const at = line.indexOf('<<');
   const before = line.slice(0, at);
-  if (SUBST_CAT.test(before)) return MESSAGE_ARG.test(before.replace(SUBST_CAT, '')); // "$(cat <<'EOF' in a message arg
-  const seg = before.slice(Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1);
-  const after = line.slice(at).search(/[;&|]/);
-  return TEXT_WRITER.test(seg + (after < 0 ? line.slice(at) : line.slice(at, at + after)));
+  if (SUBST_CAT.test(before)) { // "$(cat <<'EOF' in a message arg
+    const m = MESSAGE_ARG.exec(before.replace(SUBST_CAT, ''));
+    return m !== null && startsAt(m.index + (/^[;&|(]/.test(m[0]) ? 1 : 0));
+  }
+  const plain = line.replace(FD_DUP, '_');
+  const writes = (re, { from, text }) => re.test(text) && startsAt(from);
+  if (writes(MESSAGE_READER, heredocSegment(plain, at))) return true;
+  const seg = heredocSegment(line, at);
+  if (!writes(TEXT_WRITER, seg)) return false;
+  return !CAT.test(seg.text) || !(DEVICE_TARGET.test(seg.text.replace(/["'\\]/g, '')) || PIPED_ON.test(plain.slice(at)));
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
@@ -319,8 +350,8 @@ export function stripMessages(cmd, inner = false) {
 }
 function stripMessagesOnce(cmd, inner) {
   const docs = [];
-  const drops = (all, line) => writesText(line) && !(inner && substitutes(all, true));
-  const text = replaceHeredocs(cmd, (all, line, id) => (drops(all, line) ? `${line}\n${id}` : all), docs);
+  const drops = (all, line, startsAt) => writesText(line, startsAt) && !(inner && substitutes(all, true));
+  const text = replaceHeredocs(cmd, (all, line, id, startsAt) => (drops(all, line, startsAt) ? `${line}\n${id}` : all), docs);
   return stripMessageArgs(text, docs, inner);
 }
 
@@ -3510,24 +3541,69 @@ function wordEnd(text, i, powershell) {
   }
   return open.length ? -1 : Math.min(i, text.length);
 }
-// a string handed to a shell, as the text just before its quote shows: the shell (or its .exe), any unquoted words, the
-// option holding c and any options after it; or eval. The c option splits at its first c, so a long one is read once
-const SHELL_STRING = /(?<![\w-])(?:(?:ba|da|z|k)?sh(?:\.[eE][xX][eE])?["']?(?:[ \t]+[^\s"';&|<>()]+)*?[ \t]+-[abd-zA-Z0-9_]*c\w*(?:[ \t]+-[^\s"';&|<>()]*)*|eval(?:[ \t]+--)?)[ \t]+$/;
-const SHELL_STRING_REACH = 300; // how far back the shell's name is looked for
-// as bash counts quotes: each redirect goes with its whole target. A quoted piece that is no target is read the same way
-// inside, a few deep: a command string's own redirects go too. At a target that does not end the reading stops and, for
-// shell text (this command's, or a string handed to a shell), says so (lost.found). A target that does not close under
-// bash's count is read with PowerShell's, switching at most once, so it stays linear
+// #4825: a string can reach a shell after any options, by <<< or down a pipe, so no option is read: a quoted target
+// that cannot be placed refuses where its command, or a later one in its pipeline, names a shell (POSIX_SHELLS, ssh or
+// eval; in any case)
+const SHELL_NAMED = new RegExp(`(?<![\\w.-])(?:${[...POSIX_SHELLS, 'ssh', 'eval'].join('|')})(?:\\.exe)?(?![\\w.-])`, 'i');
+// as written, and with quotes and backslashes taken out, so a split name is seen and a Windows path still is
+const namesShell = (text) => SHELL_NAMED.test(text) || SHELL_NAMED.test(text.replace(/["'\\]/g, ''));
+const NAME_OVERLAP = 64; // a name split over quotes is looked for this far back
+// follows the commands of a pipeline through the unquoted text, to tell when a string lost inside one reaches a shell
+// (lost.handed). Each character is looked at once, plus the overlap at each call
+function pipelines(text, lost) {
+  let from = 0, checked = 0, lostEnd = 0, named = false, held = false;
+  // names are read only while a lost string waits for a shell, so a text that loses nothing costs nothing. The look back
+  // for a split name stops at the last lost string: its own words are never read
+  const look = (to) => {
+    if (!held || to <= checked) return;
+    if (!named) named = namesShell(text.slice(Math.max(from, lostEnd, checked - NAME_OVERLAP), to));
+    checked = to;
+    if (named) lost.handed = true;
+  };
+  return {
+    look,
+    gap(start, end) {
+      if (end <= start) return;
+      const piece = text.slice(start, end);
+      if (!/[;&\n|]/.test(piece)) return;
+      for (const s of piece.matchAll(/\|\||&&|\|&|[;&\n|]/g)) {
+        look(start + s.index);
+        named = false;
+        if (s[0] !== '|' && s[0] !== '|&') held = false;
+        from = checked = start + s.index + s[0].length;
+      }
+    },
+    // a string with a lost target, from start to end: what is before it is read now, its own words name no shell
+    hold(start, end) {
+      held = true;
+      lost.quoted = true;
+      look(start);
+      checked = lostEnd = Math.max(checked, end);
+    },
+  };
+}
+// as bash counts quotes: each redirect goes with its whole target. A quoted piece, or a target that holds a command or a
+// here-string, is read the same way inside, a few deep. At a target that does not end the reading stops and says so
+// (lost.found); lost.quoted: that happened further inside; lost.handed: there, and a shell gets that string. A target that
+// does not close under bash's count is read with PowerShell's, switching at most once, so it stays linear
 function shellUnredirected(text, left, depth = 0, lost = {}) {
-  const next = new RegExp(SHELL_NEXT, 'g');
-  let out = '', done = 0, powershell = false;
+  const next = new RegExp(SHELL_NEXT, 'g'), pipe = pipelines(text, lost);
+  let out = '', done = 0, powershell = false, plain = 0;
+  const within = (piece) => {
+    const inside = {};
+    const bare = shellUnredirected(piece, left, depth + 1, inside);
+    if (inside.handed) lost.handed = true;
+    return { bare, lost: Boolean(inside.found || inside.quoted) };
+  };
   for (let m = next.exec(text); m; m = next.exec(text)) {
     const [match, quoted] = m;
     let swap = match, end = next.lastIndex;
+    pipe.gap(plain, m.index);
     if (quoted !== undefined) {
       if (depth < 3 && /[<>]/.test(quoted)) {
-        const handed = SHELL_STRING.test(text.slice(Math.max(0, m.index - SHELL_STRING_REACH), m.index));
-        swap = quoted[0] + shellUnredirected(quoted.slice(1, -1), left, depth + 1, handed ? lost : {}) + quoted[0];
+        const inner = within(quoted.slice(1, -1));
+        swap = quoted[0] + inner.bare + quoted[0];
+        if (inner.lost) pipe.hold(m.index, end);
       }
     } else if (!match.startsWith('\\')) {
       let to = wordEnd(text, end, powershell);
@@ -3536,14 +3612,25 @@ function shellUnredirected(text, left, depth = 0, lost = {}) {
         lost.found = true;
         break;
       }
-      if (to > end) { swap = left(text.slice(m.index, to), m.index, text); end = to; }
+      if (to > end) {
+        const word = text.slice(end, to);
+        if (depth < 3 && /[<>]/.test(word)) {
+          const inner = within(word); // a here-string is the command's input; a >( ) target runs its own commands
+          if (inner.lost) { if (match.includes('<<<')) pipe.hold(m.index, to); else lost.quoted = true; }
+        }
+        swap = left(text.slice(m.index, to), m.index, text);
+        end = to;
+      }
     }
+    plain = end;
     if (swap !== match || end !== next.lastIndex) {
       out += text.slice(done, m.index) + swap;
       done = end;
       next.lastIndex = end;
     }
   }
+  pipe.gap(plain, text.length);
+  pipe.look(text.length);
   return done === 0 ? text : out + text.slice(done);
 }
 // bash takes a heredoc header before the command word too (<<x cmd), and reads the same with it at the line's end
@@ -3554,13 +3641,14 @@ function headersLast(line) {
   const after = line.slice(line.indexOf(headers[0])).replace(HEREDOC_ANY, ' ');
   return /^[ \t]*[^ \t;&|<>()#]/.test(after) ? `${line.replace(HEREDOC_ANY, ' ')} ${headers.join(' ')}` : line;
 }
-// a redirect of this shell's whose target does not end: the command behind it cannot be found. Heredoc bodies are another
-// program's text, and comments are none
+// a redirect whose target does not end: the command behind it cannot be found. A heredoc body counts only where its
+// command line names a shell, and comments never do
 function unplacedRedirect(text) {
   if (!/[<>]/.test(text)) return false;
   const lost = {};
-  shellUnredirected(blankComments(replaceHeredocs(stripMessages(text), (_all, line, id) => `${line}\n${id}`)), () => ' ', 0, lost);
-  return lost.found === true;
+  const own = blankComments(replaceHeredocs(stripMessages(text), (all, line, id) => (namesShell(line) ? all : `${line}\n${id}`)));
+  shellUnredirected(own, () => ' ', 0, lost);
+  return lost.found === true || lost.handed === true;
 }
 // a shell's script by its #! line, or with none by its name: .sh and the like, or no extension at all
 const shellScript = (path, text) => (text.startsWith('#!') ? /^#![^\n]*[/ \t](?:ba|da|z|k)?sh(?=\s|$)/.test(text) : /(?:\.(?:sh|bash|zsh|ksh)|(?:^|[\\/])[^\\/.]+)$/i.test(path));

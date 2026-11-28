@@ -505,7 +505,7 @@ async function run(): Promise<unknown> {
       await callFn('user_add', { name: args[1], display: args[2] ?? null, actor, ...(o.admin ? { role: 'admin' } : {}) });
       const [u] = await sql`select name, display, role from cb.users where name = ${args[1].trim().toLowerCase()}`;
       return { out: u.role === 'admin' ? `added ${u.name} (${u.display}) as admin: set a password (cb user password ${u.name}) and they sign in on the login page`
-        : `added ${u.name} (${u.display}): Ahmed copies their link from the Users page`, json: u };
+        : `added ${u.name} (${u.display}): Ahmed makes their link on the Users page (New link)`, json: u };
     }
     case 'users': {
       const rows = await sql`select u.name, u.display, u.role,

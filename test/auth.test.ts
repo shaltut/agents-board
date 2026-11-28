@@ -108,22 +108,20 @@ test('a second admin gets the whole board but acts under their own name, never a
   assert.equal((await sql`select answered_by from cb.questions where id = ${id}`)[0].answered_by, 'cai');
   // admin powers: the Users page's calls (dashboard_only) work for any admin
   assert.equal((await web('/api/rpc/user_add', { cookie: c, body: { name: 'ana', display: 'Ana' } })).status, 200);
-  // an admin's token (the cookie) never leaves the server: not on the Users page, not even to another admin
+  // no sign-in value is on the Users page, an admin's or a member's, not even for another admin (#4868: hashes only)
   const people = (await (await web('/api/people', { cookie: c })).json()).people;
-  for (const p of people.filter((x: any) => x.role === 'admin')) assert.equal(p.token, null, p.name);
-  assert.ok(people.find((x: any) => x.name === 'ana').token, 'a member\'s link is still shown, to send');
+  for (const p of people) assert.ok(!('token' in p), p.name);
+  assert.equal(people.find((x: any) => x.name === 'ana').has_link, true, 'it says a member has a link');
 });
 
 test('admins sign in by password only: a link never signs in an admin', async () => {
   const sql = await db();
   await owner(sql);
-  const [{ token }] = await sql`select token from cb.users where name = 'ahmed'`;
-  const r = await web(`/?u=${token}`);
+  const r = await web(`/?u=${await adminCookie()}`);
   assert.equal(r.status, 401);
   assert.match(await r.text(), /admins sign in with their password/);
   assert.equal(cookieOf(r), undefined);
-  await sql`select cb.user_add('cai', 'Cai')`;
-  const [{ token: t2 }] = await sql`select token from cb.users where name = 'cai'`;
+  const [{ t2 }] = await sql`select cb.user_add('cai', 'Cai') as t2`;
   assert.ok(cookieOf(await web(`/?u=${t2}`)), 'a member\'s link still signs in');
 });
 
@@ -219,8 +217,7 @@ test('anyone signed in changes their own password; the current one is required',
   assert.equal((await login('cai', 'cai-pass-1')).status, 401);
   assert.equal((await login('cai', 'new-pass-22')).status, 200);
   // a member with only a link (no password yet) sets a first one without a current password
-  await sql`select cb.user_add('ana', 'Ana')`;
-  const [{ token }] = await sql`select token from cb.users where name = 'ana'`;
+  const [{ token }] = await sql`select cb.user_add('ana', 'Ana') as token`;
   assert.equal((await web('/api/password', { cookie: token, body: { password: 'ana-pass-1' } })).status, 200);
   assert.equal((await login('ana', 'ana-pass-1')).status, 200);
   const cross = await web('/api/password', { cookie: c, body: { current: 'new-pass-22', password: 'x-pass-333' }, headers: { origin: 'https://evil.example' } });
@@ -334,12 +331,11 @@ test("Telegram pairing is the owner's alone: another admin cannot re-pair the bo
 test('a role change issues a new token: an old member link never becomes an admin credential', async () => {
   const sql = await db();
   await owner(sql);
-  await sql`select cb.user_add('ana', 'Ana')`;
-  const [{ token }] = await sql`select token from cb.users where name = 'ana'`;
+  const [{ token }] = await sql`select cb.user_add('ana', 'Ana') as token`;
   await sql.begin(async (tx: any) => { await tx`set local application_name = 'cb-web'`; await tx`select cb.user_set_role('ana', 'admin')`; });
   assert.deepEqual(await whoami(token), { role: 'anonymous' });
-  await sql`select cb.user_add('ben', 'Ben')`;
-  const [{ token: k }] = await sql`select token from cb.users where name = 'ben'`;
+  const [{ k }] = await sql`select cb.user_add('ben', 'Ben') as k`;
+  assert.equal((await whoami(k)).role, 'guest', 'signed in before the promotion');
   await sql`select cb.user_add('ben', 'Ben', role => 'admin')`; // promotion by adding again
   assert.deepEqual(await whoami(k), { role: 'anonymous' });
 });
@@ -363,8 +359,7 @@ test("an admin changing their password signs out every other browser; a member's
   assert.ok(fresh && fresh !== old, 'this browser gets a new cookie');
   assert.deepEqual(await whoami(old), { role: 'anonymous' });
   assert.equal((await whoami(fresh!)).role, 'admin');
-  await sql`select cb.user_add('ana', 'Ana')`;
-  const [{ token }] = await sql`select token from cb.users where name = 'ana'`;
+  const [{ token }] = await sql`select cb.user_add('ana', 'Ana') as token`;
   assert.equal((await web('/api/password', { cookie: token, body: { password: 'ana-pass-1' } })).status, 200);
   assert.ok(cookieOf(await web(`/?u=${token}`)), 'her link still signs her in');
 });

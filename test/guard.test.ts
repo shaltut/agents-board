@@ -286,6 +286,66 @@ test('#4768, #4770: a command bash runs is never dropped as heredoc text; real h
   for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
 });
 
+// #4824: a commit message fed to git commit -F - is text wherever the output redirect stands on its line. The & of a
+// redirect (2>&1, >&2, &>) is no command separator
+test('#4824: a heredoc message to git commit stays text beside a redirect; what a shell runs does not', () => {
+  const message = 'fix: keep the row\n\nThe loader now does not read `tripKind` from the row, and unset values stay.\n\nCo-Authored-By: A Seat <seat@example.invalid>';
+  const heredoc = (head: string, body = message, tail = '') => `cd /tmp/w && git add -A && ${head}\n${body}\nEOF\n${tail}`;
+  const refused = (command: string) => {
+    const v = evaluate({ tool: 'shell', command, role: 'builder' });
+    return v.allow ? null : `${JSON.stringify(command.split('\n')[0])}: ${v.reason?.slice(0, 60)}`;
+  };
+  assert.deepEqual([
+    "git commit -q -F - <<'EOF' > /tmp/c.log 2>&1", "git commit -q -F - > /tmp/c.log 2>&1 <<'EOF'", "git commit -q -F - 2>&1 <<'EOF'",
+    "git commit -q -F - >&2 <<'EOF'", "git commit -q -F - 2>&- <<'EOF'", "cb log 1 - 2>&1 <<'EOF'",
+  ].map((head) => refused(heredoc(head, message, 'echo $?; git rev-parse HEAD'))).filter(Boolean), []);
+  // a real separator, or a shell that reads the body, keeps the body judged
+  for (const head of [
+    "git commit -q -F - 2>&1 | bash <<'EOF'", "git commit -q -F - &bash <<'EOF'", "git commit -q -F - >&2 & bash <<'EOF'",
+    "git commit -q -F - 2>&1 && bash <<'EOF'", "git commit -q -F - 2>&1; sh <<'EOF'", "cat >&1 <<'EOF' | bash",
+    "cat 2>&1 <<'EOF' | bash", "bash 2>&1 <<'EOF'", "git commit -q -F - 2>&1 <<EOF", "cat > notes >&2 <<'EOF' |& bash",
+    "git commit -q -F - 2>&1&bash <<'EOF'", "git commit -q -F - &> bash <<'EOF'",
+  ]) {
+    assert.equal(evaluate({ tool: 'shell', command: heredoc(head, head.endsWith('<<EOF') ? '$(unset CB_ROLE)' : 'unset CB_ROLE'), role: 'builder' }).allow, false, `must block: ${head}`);
+  }
+});
+
+// #4834: a heredoc body is text only when the words before its marker are a command of their own (a ; or & inside quotes
+// starts none) and a cat sends it to a file, not on to a shell
+test('#4834: a heredoc body a shell runs is judged; a body written to a file or fed to a message command stays text', () => {
+  const allow = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' }).allow;
+  const run = (head: string, end = '') => `${head}\nunset CB_ROLE\nEOF${end}`;
+  assert.deepEqual([
+    run(`bash -c "bash; cb x" <<'EOF'`),
+    run(`bash -c 'bash; cb x' <<'EOF'`),
+    run(`bash -c "bash\ncb x" <<'EOF'`),
+    run(`bash -c "bash & git commit -F - " <<'EOF'`),
+    run(`bash -c 'eval "$0";cb log 1 ' "$(cat <<'EOF'`, '\n)"'),
+    run("cat > /dev/stdout <<'EOF' | bash"),
+    run(`cat > "/dev/fd/1" <<'EOF' | sh`),
+    run("cat >> //proc//self/fd/1 <<'EOF' | bash"),
+    run("cat > notes -n > /dev/stdout <<'EOF'"),
+    run("cat > $OUT <<'EOF' | bash"),
+    run("cat <<'EOF' > $OUT |& bash"),
+    run("{ cat > /dev/stdout <<'EOF'", '\n} | bash'),
+  ].filter(allow), []);
+  const text = (head: string, end = '') => `${head}\nThe loader does not read the row; unset values stay, and CB_ROLE is only named.\nEOF${end}`;
+  assert.deepEqual([
+    text("cd /tmp/w && git add -A && git commit -q -F - <<'EOF'"),
+    text(`echo "a; b" && cat > notes.md <<'EOF'`),
+    text(`echo 'x; y' ; cb log 1 - <<'EOF'`),
+    text(`echo "line one\nline two"\ncat > notes.md <<'EOF'`),
+    text("cat > a.txt <<'EOF'\nfirst\nEOF\ncb log 1 - <<'EOF'"),
+    text("cat > /home/u/dev/notes.md <<'EOF'"),
+    text("cat > /dev/null <<'EOF'"),
+    text(`cat > "$S/notes.md" <<'EOF'`),
+    text("cat > notes.md <<'EOF' || echo no"),
+    text("cat > notes.md <<'EOF' && git add notes.md"),
+    text(`git commit -m "$(cat <<'EOF'`, '\n)"'),
+    text(`git add -A && git commit -m "$(cat <<'EOF'`, '\n)"'),
+  ].filter((c) => !allow(c)), []);
+});
+
 // #4774: message text is dropped only where a shell runs the message command. In each of these the command, or the
 // quote that seems to open its message, stands in a comment or a quoted word, and the shell runs the line between
 const hiddenByMessage: [string, (c: string) => string][] = [
@@ -1492,6 +1552,8 @@ test('long commands stay fast', () => {
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, (again: number) => unknown][] = [
+    // #4834: the heredoc reader marks each place a command may start; a run of ; gives one per character
+    ['#4834, 600 KB of ; on a heredoc line, as a builder', asBuilder(';'.repeat(600000) + " cat > f <<'EOF'\nx\nEOF")],
     // #4823: the stdin-fed walk
     ['#4823, 200 KB of quoted stages piped into sh', asBuilder(kb200("echo 'a sudo' | ") + 'sh')],
     ['#4823, 14,000 different quoted words in one stage piped into sh', asBuilder(Array.from({ length: 14000 }, (_, i) => `'at ${i}'`).join(' ') + ' | sh')],
@@ -2164,6 +2226,58 @@ test('#4803: a redirect target is read to its end however it nests, and one that
   }
 });
 
+// #4825: the refusal does not read the shell's options: a quoted target the guard cannot place refuses wherever the
+// command names a shell
+const unplaced4825 = "'>$(case a in a) echo log;; esac) sudo codex'";
+const refused4825 = (command: string, extra: Record<string, unknown> = {}) => {
+  for (const role of ['builder', null]) assert.notEqual(judged4803(command, role, extra), 'allow', `${role}: ${command.slice(0, 200)}`);
+};
+test('#4825: no spelling of a shell\'s options keeps a string from being read as shell text', () => {
+  for (const shell of ['bash -c -O extglob', 'bash -c -o pipefail --', "bash --rcfile 'rc' -c", "bash -O 'extglob' -c", 'bash -O "extglob" -c', `bash ${'-o pipefail '.repeat(40)}-c`,
+    'Bash.exe -c', 'BASH.EXE -c', 'SH -c', "'/usr/bin/bash' -c", 'bash -c \\\n', 'ba""sh -c', 'ssh box', 'EVAL']) refused4825(`${shell} ${unplaced4825}`);
+});
+
+// PR 187 lead review: every shell the guard knows by name counts, and a held string's own words name none
+test('#4825: every shell the guard knows counts, however it is named', () => {
+  for (const shell of ['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'yash', 'fish', 'csh', 'tcsh', 'MKSH.EXE', '/usr/bin/yash', 'busybox ash']) {
+    for (const command of [`${shell} -c ${unplaced4825}`, `echo ${unplaced4825} | ${shell}`, `${shell} <<< ${unplaced4825}`, `${shell} <<'EOF'\n>$(case a in a) echo log;; esac) sudo codex\nEOF`]) refused4825(command);
+  }
+});
+
+test('#4825: the words of the string itself name no shell, up to its last one', () => {
+  const ends = (words: string) => `'>$(case a in a) echo log;; esac) ${words}'`;
+  for (const command of [`printf '%s' ${ends('see the sh docs')} | cat`, `echo ${ends('ask bash')} | cat`, `echo ${ends('eval')} ${ends('run ssh')} | tee log`]) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+  // a shell named right after it, or between two such strings, still counts
+  for (const command of [`echo ${ends('x')} | sh`, `echo ${ends('x')}|ash`, `echo ${ends('x')} | tee ${ends('y')} | mksh`]) refused4825(command);
+});
+
+test('#4825: the string is held to it however it reaches the shell', () => {
+  for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `echo ${unplaced4825} | tee log | sudo -u x bash -x`,
+    `cat > >(bash -c ${unplaced4825})`, `bash 2>&1 -c ${unplaced4825}`]) refused4825(command);
+  // a heredoc fed to a shell is that shell's text; one fed to another program is not
+  const body = '>$(case a in a) echo log;; esac) sudo codex';
+  for (const shell of ['bash', 'bash -s -- x', 'sh -eu', 'BASH.EXE', 'ssh box']) refused4825(`${shell} <<'EOF'\n${body}\nEOF`);
+  assert.equal(judged4803("python3 - <<'EOF'\ns = \"x -> y'\"\nEOF"), 'allow');
+  const script = (text: string) => ({ readScript: (p: string) => (p.endsWith('run.sh') ? text : null) });
+  assert.equal(judged4803('./run.sh now', 'builder', script(`bash -o pipefail -c -- ${unplaced4825}\n`)), 'role');
+  // a script's #! line names its own interpreter, and hands no string to a shell
+  assert.equal(judged4803('./run.sh now', 'builder', script('#!/bin/bash\necho "step 1 -> don\'t stop"\n')), 'allow');
+});
+
+test('#4825: a quoted arrow where no shell is named, or a message about one, is only text', () => {
+  for (const command of ['echo "step 1 -> don\'t stop"', 'grep -rn "->\'" src', 'ls build.sh && echo "a -> don\'t"', 'npm run lint && echo "ok -> it\'s done"',
+    'git commit -m "bash: a -> don\'t"', 'cb log 1 "eval -> it\'s fixed"', 'bash build.sh && echo done > out.txt', 'bash -c "ls > out.txt"',
+    // only the pipeline or command that holds the string: a shell named in another one is none of its business
+    'bash build.sh; echo "a -> don\'t"', 'bash build.sh && echo "a -> don\'t"', 'echo "a -> don\'t" || bash fix.sh', 'echo "a -> don\'t"\nbash fix.sh']) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+  // as in git's own scripts: a substitution with its own quotes inside a message, in a script that uses eval elsewhere
+  const text = 'eval "$setup"\necho "a symbolic link -> \'$(cat "$1")\'"\n';
+  assert.equal(judged4803('./run.sh now', 'builder', { readScript: (p: string) => (p.endsWith('run.sh') ? text : null) }), 'allow');
+});
+
 test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
@@ -2248,7 +2362,8 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
     ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
     ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
     ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
-    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
+    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")],
+    ['shell names before unplaced strings', 'echo ' + kb200("bash '>$(case' ")], ['unplaced strings with no shell', 'echo ' + kb200("'>$(case' ")], ['split shell names', 'echo ' + kb200('ba""sh \'>$(case\' ')], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
     withinBudget(name, (again) => judged4803(command + ' '.repeat(again)), budget);
   }
 });
