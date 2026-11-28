@@ -878,7 +878,7 @@ ${body}`, json: pg };
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>
-      const bare = /^\d+$/.test(args[0] ?? '');
+      const bare = /^#?\d+$/.test(args[0] ?? '');
       return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
