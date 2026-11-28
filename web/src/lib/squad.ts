@@ -209,6 +209,7 @@ export function patchSeat(sq: Squad, role: Role, key: string, patch: SeatSpec, d
   if (!spec) return next
   const roleAgent = spec.agent ?? 'claude'
   const seat: SeatSpec = { ...spec.seats?.[key] }
+  if (seat.agent === roleAgent) delete seat.agent // the role moved to the seat's agent since: it is the role's now (as squad_set stores it)
   if ('agent' in patch) {
     delete seat.effort
     const agent = patch.agent || roleAgent

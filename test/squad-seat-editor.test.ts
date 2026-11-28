@@ -80,3 +80,11 @@ test('every document the seat editor makes saves as made', async () => {
   assert.deepEqual(seats(sq), { '3': { agent: 'codex', model: 'gpt-6.1-sol', effort: 'ultra' } });
   assert.match(diffSquads(squad(), sq).join('\n'), /single-seat settings changed/);
 });
+
+test('a seat whose agent became the role\'s agent can take the role\'s model again', () => {
+  // the seat was set to codex while the role ran claude; the role moved to codex afterwards
+  const sq = squad();
+  sq.roles.builder = { count: 2, agent: 'codex', model: 'gpt-6.1-sol', machine: 'pc', seats: { '1': { agent: 'codex', model: 'gpt-7', effort: 'low' } } };
+  assert.deepEqual(seats(edit(sq, '1', { model: '' })), { '1': { effort: 'low' } }, 'not an empty model, which could not be saved');
+  assert.deepEqual(seats(edit(sq, '1', { effort: 'ultra' })), { '1': { model: 'gpt-7', effort: 'ultra' } }, 'the agent is the role\'s: not kept, as squad_set stores it');
+});
