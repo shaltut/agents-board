@@ -310,6 +310,42 @@ test('#4824: a heredoc message to git commit stays text beside a redirect; what 
   }
 });
 
+// #4834: a heredoc body is text only when the words before its marker are a command of their own (a ; or & inside quotes
+// starts none) and a cat sends it to a file, not on to a shell
+test('#4834: a heredoc body a shell runs is judged; a body written to a file or fed to a message command stays text', () => {
+  const allow = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' }).allow;
+  const run = (head: string, end = '') => `${head}\nunset CB_ROLE\nEOF${end}`;
+  assert.deepEqual([
+    run(`bash -c "bash; cb x" <<'EOF'`),
+    run(`bash -c 'bash; cb x' <<'EOF'`),
+    run(`bash -c "bash\ncb x" <<'EOF'`),
+    run(`bash -c "bash & git commit -F - " <<'EOF'`),
+    run(`bash -c 'eval "$0";cb log 1 ' "$(cat <<'EOF'`, '\n)"'),
+    run("cat > /dev/stdout <<'EOF' | bash"),
+    run(`cat > "/dev/fd/1" <<'EOF' | sh`),
+    run("cat >> //proc//self/fd/1 <<'EOF' | bash"),
+    run("cat > notes -n > /dev/stdout <<'EOF'"),
+    run("cat > $OUT <<'EOF' | bash"),
+    run("cat <<'EOF' > $OUT |& bash"),
+    run("{ cat > /dev/stdout <<'EOF'", '\n} | bash'),
+  ].filter(allow), []);
+  const text = (head: string, end = '') => `${head}\nThe loader does not read the row; unset values stay, and CB_ROLE is only named.\nEOF${end}`;
+  assert.deepEqual([
+    text("cd /tmp/w && git add -A && git commit -q -F - <<'EOF'"),
+    text(`echo "a; b" && cat > notes.md <<'EOF'`),
+    text(`echo 'x; y' ; cb log 1 - <<'EOF'`),
+    text(`echo "line one\nline two"\ncat > notes.md <<'EOF'`),
+    text("cat > a.txt <<'EOF'\nfirst\nEOF\ncb log 1 - <<'EOF'"),
+    text("cat > /home/u/dev/notes.md <<'EOF'"),
+    text("cat > /dev/null <<'EOF'"),
+    text(`cat > "$S/notes.md" <<'EOF'`),
+    text("cat > notes.md <<'EOF' || echo no"),
+    text("cat > notes.md <<'EOF' && git add notes.md"),
+    text(`git commit -m "$(cat <<'EOF'`, '\n)"'),
+    text(`git add -A && git commit -m "$(cat <<'EOF'`, '\n)"'),
+  ].filter((c) => !allow(c)), []);
+});
+
 // #4774: message text is dropped only where a shell runs the message command. In each of these the command, or the
 // quote that seems to open its message, stands in a comment or a quoted word, and the shell runs the line between
 const hiddenByMessage: [string, (c: string) => string][] = [
@@ -1516,6 +1552,8 @@ test('long commands stay fast', () => {
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, (again: number) => unknown][] = [
+    // #4834: the heredoc reader marks each place a command may start; a run of ; gives one per character
+    ['#4834, 600 KB of ; on a heredoc line, as a builder', asBuilder(';'.repeat(600000) + " cat > f <<'EOF'\nx\nEOF")],
     // #4823: the stdin-fed walk
     ['#4823, 200 KB of quoted stages piped into sh', asBuilder(kb200("echo 'a sudo' | ") + 'sh')],
     ['#4823, 14,000 different quoted words in one stage piped into sh', asBuilder(Array.from({ length: 14000 }, (_, i) => `'at ${i}'`).join(' ') + ' | sh')],
