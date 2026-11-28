@@ -2091,10 +2091,30 @@ test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
   for (const command of ['echo hi > "$(date +%F).log"', 'ls > $(mktemp -d)/out', "# note: > it's fine\nls", 'rg "a > \'b" src', 'grep "->" src', 'Get-Date > "C:\\logs\\"',
-    'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
-  // #4836: a PowerShell target with a backtick escape is refused by the #4815 filled-program push rule. A false block,
-  // tracked on that card: this row pins what the guard does until it is fixed
-  assert.equal(judged4803('Get-Date > "$name`.txt"'), 'role');
+    'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
+});
+
+// #4836: PowerShell writes `. to end a variable's name before a dot. In a redirect target that backtick was read as a
+// substitution, which cut the file name into two filled words: "a command and its first argument". Only that shape passes
+test('#4836: a PowerShell redirect target with a backtick-escaped dot is a file name, not a command', () => {
+  const allowed = ['Get-Date > "$name`.txt"', 'Get-Date >> "$name`.log"', 'Get-Date 2>"$env:TEMP`.err"', 'Get-Date > "C:\\logs\\$name`.2026.txt"',
+    'Get-Date > "out/run-$id`.txt" ; Get-Date'];
+  for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
+});
+
+test('#4836: every other filled pair stays refused', () => {
+  const refused = [
+    // the same word where it is no redirect target, also after a > that is only text
+    'echo "$name`.txt"', 'echo ">" "$name`.txt"', "echo 'a > ' \"$name`.txt\"",
+    // not the shape: blanks, another escape, two backticks, a substitution, a second variable, more after the quote
+    'Get-Date > "$name`.txt $x"', 'Get-Date > "$name`n.txt"', 'Get-Date > "$G`. p`"', 'Get-Date > "$a`.$(x)"', 'Get-Date > "$a`.$b"',
+    'Get-Date > "$name`.txt"$x`.y',
+    // a pair beside an exempt target
+    '$G $S > "$name`.txt"', 'Get-Date > "$name`.txt" ; $G "$a$b" origin feat/x',
+    // what a rule that read the line for push signals let through (the lead's reviews, which ruled it out)
+    '$G $(git remote | head -1) feat:main', '$G alias.p=$P p -f origin feat', '$G: $(echo origin feat)',
+    '$G `git remote | head -1` feat:main', '$G $(git config x.y) origin feat'];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
 });
 
 test('#4803: a heredoc header before the command word hides nothing', () => {
