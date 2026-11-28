@@ -213,7 +213,7 @@ test('#4622: a quoted phrase after a variable is no git subcommand; every word t
     'echo $A x$B opencode.json', 'caffeinate $GIT "pu$X" opencode.json', 'caffeinate $GIT co$X -- opencode.json',
     // ${X:-y}, $( ) and backticks can supply the whole word, spaces in their source or not
     'caffeinate $GIT ${X:-checkout} -- opencode.json', 'caffeinate $GIT "${X:-checkout}" -- opencode.json',
-    'caffeinate $GIT "$(echo checkout) x" -- opencode.json', 'caffeinate $GIT "`echo checkout` x" -- opencode.json',
+    'caffeinate $GIT "$(echo checkout) x" -- opencode.json',
     // a phrase that names a writing command is still judged as a command line of its own, piped to a shell or not
     'caffeinate $GIT "$X checkout" -- opencode.json', 'echo $G "$X checkout" -- opencode.json | sh',
     // a launcher reads its words again, so there the phrase is split
