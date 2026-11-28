@@ -568,14 +568,20 @@ test('cb iam --agent and $CB_AGENT store agent; default claude omits agent param
 });
 
 // #4738: cb edit -s printed "updated" and changed nothing
-test('cb edit refuses a status and changes nothing: cb move does that', async () => {
+test('cb edit refuses a flag it does not use, by name, and changes nothing', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'demo', title => 'before')`;
   const [{ id, status }] = await sql`select id, status from cb.tasks`;
-  for (const flag of [['-s', 'review'], ['--status=review']]) {
-    const r = cb(['edit', String(id), '--title', 'after', ...flag]);
-    assert.equal(r.code, 1, r.out);
-    assert.match(r.err, new RegExp(`cb edit does not change status, nothing was changed\. Run: cb move ${id} review`));
-  }
+  const edit = (...flags: string[]) => {
+    const r = cb(['edit', String(id), '--title', 'after', ...flags]);
+    assert.equal(r.code, 1, `${flags.join(' ')}: ${r.out}`);
+    return r.err;
+  };
+  for (const flag of [['-s', 'review'], ['--status=review']])
+    assert.ok(edit(...flag).includes(`cb edit does not take --status: nothing was changed. For a status run: cb move ${id} review`), flag.join(' '));
+  assert.match(edit('--tag', 'x', '--why', 'y'), /cb edit does not take --tag, --why: nothing was changed\. Run: cb help edit/);
   assert.deepEqual({ ...(await sql`select title, status from cb.tasks`)[0] }, { title: 'before', status });
+  // every flag it does use still passes
+  const ok = cb(['edit', String(id), '--title', 'after', '-b', 'b', '-p', 'P1', '--assignee', 'W2@mac', '-l', 'a', '--link', 'k=v', '--pr', 'u', '--commit', 'c', '--branch', 'd', '--type', 'bug', '--as', 'W1@mac', '--json']);
+  assert.equal(ok.code, 0, ok.err);
 });

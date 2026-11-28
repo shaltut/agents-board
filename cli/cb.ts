@@ -48,6 +48,8 @@ const OPTIONS = {
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
 
+const EDIT_FLAGS = new Set(['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic', 'labels', 'repo', 'link', 'pr', 'commit', 'branch', 'as', 'json']);
+
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
 const TEXT = '\u0001';
 const isFlag = (a: string) => /^--[a-z][a-z-]*(=.*)?$/.test(a) || /^-[a-zA-Z]$/.test(a);
@@ -763,8 +765,9 @@ async function run(): Promise<unknown> {
     }
     case 'edit': {
       need(1, 'edit <id> --title/--body/--priority/--assignee/--project/--type/--epic   e.g. cb edit 42 --priority P1');
-      // #4738: status has its own rules (cb.task_move); dropping the flag printed "updated" for nothing
-      if (o.status !== undefined) throw new Error(`cb edit does not change status, nothing was changed. Run: cb move ${args[0]!.replace('#', '')} ${o.status} (to finish a card: cb done)`);
+      // #4738: a flag edit does not read was dropped and "updated" printed. Status has its own rules: cb move
+      const extra = Object.keys(o).filter((k) => !EDIT_FLAGS.has(k));
+      if (extra.length) throw new Error(`cb edit does not take ${extra.map((k) => `--${k}`).join(', ')}: nothing was changed. ${o.status !== undefined ? `For a status run: cb move ${args[0]!.replace('#', '')} ${o.status} (to finish a card: cb done)` : 'Run: cb help edit'}`);
       await guard(args[0]);
       const fields: Record<string, unknown> = {};
       for (const k of ['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic'] as const) if (o[k] !== undefined) fields[k] = o[k];
