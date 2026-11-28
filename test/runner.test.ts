@@ -30,6 +30,7 @@ after(async () => {
   for (const k of kids) killTree(k.pid);
   for (const p of pids) try { process.kill(p, 'SIGKILL'); } catch {}
   await Promise.all(clients.map((c) => c.end()));
+  await worker?.close();
   rmSync(TMP, { recursive: true, force: true, maxRetries: 5 }); // the repos, slot clones, homes
 });
 
@@ -56,7 +57,7 @@ const MAIN = commit('main', {
   'ok.mjs': "console.log('ok');\n",
   'fail.mjs': "console.log('failing'); process.exitCode = 3;\n",
   'slow.mjs': "console.log('pid ' + process.pid); setTimeout(() => {}, 60000);\n",
-  'env.mjs': "const n = ['CB_DATABASE_URL', 'DATABASE_URL', 'RUNNER_MARKER'].filter((k) => process.env[k]); console.log('CB=' + (n.join(',') || 'none'));\n",
+  'env.mjs': "const n = ['CB_DATABASE_URL', 'DATABASE_URL', 'CB_BOARD_URL', 'CB_KEY_DIR', 'RUNNER_MARKER'].filter((k) => process.env[k]); console.log('CB=' + (n.join(',') || 'none'));\n",
   // 3 MB, no newline; masking lengthens each address, so only a cut applied last keeps the summary short
   'big.mjs': "process.stdout.write('a@b.co '.repeat(450000)); process.exitCode = 1;\n",
   'lock.txt': 'v1\n',
@@ -109,11 +110,27 @@ writeFileSync(CFG, JSON.stringify({
   projects: { demo: project(ORIGIN, recipes), lost: project(join(TMP, 'missing.git'), { ok: recipes.ok }) },
 }));
 
+// #4918: with CB_TEST_RUNNER_MODE=api (test/runner-api.test.ts) every test here runs with the runner on its key over
+// the worker API, and no database address in its environment
+const API = process.env.CB_TEST_RUNNER_MODE === 'api';
+const apiOnly = { skip: !API && 'test/runner-api.test.ts runs it' };
+const worker = API ? await (await import('./api-board.ts')).apiBoardFor() : null;
+const onKey: Record<string, Record<string, string | undefined>> = {}, issued: Record<string, string> = {};
+/** A runner key for the runner called `runner`, and the environment of a process that holds it, as `as`. */
+async function giveKey(as: string, runner = as) {
+  const [row] = await sql`select cb.key_issue(${`box-${as}`}, 'runner', ${runner}) as key`;
+  onKey[as] = worker!.env(row!.key, join(TMP, `keys-${as}`));
+  issued[as] = String(row!.key).split('_')[1]!; // its id, which is not secret
+  return String(row!.key);
+}
+if (worker) for (const name of [NAME, 'pc-nopeers']) await giveKey(name);
+
 type Runner = { child: ChildProcess; out: string; exited: Promise<number | null> };
-function startRunner(config = CFG, home = HOME): Runner {
+function startRunner(config = CFG, home = HOME, as = NAME): Runner {
+  assert.ok(!worker || onKey[as], `no runner key for ${as}`);
   const child = spawn(process.execPath, ['cli/runner.ts'], {
     // without NoDefaultCurrentDirectoryInExePath, as in a plain terminal (an agent's shell may set it): the runner sets it
-    env: { ...process.env, NoDefaultCurrentDirectoryInExePath: undefined, CB_RUNNER_CONFIG: config, CB_RUNNER_HOME: home, CB_DATABASE_URL: TEST_URL, RUNNER_MARKER: '1' },
+    env: { ...process.env, NoDefaultCurrentDirectoryInExePath: undefined, CB_RUNNER_CONFIG: config, CB_RUNNER_HOME: home, CB_DATABASE_URL: TEST_URL, RUNNER_MARKER: '1', ...onKey[as] },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   kids.push(child);
@@ -356,13 +373,66 @@ test('the log server answers peers only', async () => {
   const port2 = await freePort();
   const cfg2 = join(TMP, 'runner-nopeers.json');
   writeFileSync(cfg2, JSON.stringify({ name: 'pc-nopeers', slots: 1, log: { host: '127.0.0.1', port: port2, peers: [] }, projects: { demo: project(ORIGIN, { idle: recipes.ok }) } }));
-  const other = startRunner(cfg2, join(TMP, 'home2'));
+  const other = startRunner(cfg2, join(TMP, 'home2'), 'pc-nopeers');
   await up(other);
   const denied = await fetch(`http://127.0.0.1:${port2}/jobs/${id}/log`);
   assert.equal(denied.status, 403);
   assert.match(await denied.text(), /this machine may not read job logs/);
   killTree(other.child.pid);
   await other.exited;
+});
+
+test('API mode: the runner is on its key, with no database connection of its own', apiOnly, async () => {
+  assert.match(runner.out, /on the worker API/);
+  assert.equal((await sql`select count(*)::int as n from pg_stat_activity where application_name like 'cb-runner/%'`)[0]!.n, 0);
+});
+
+test('API mode: a claim whose reply is lost is ended, and the queue goes on', apiOnly, async () => {
+  worker!.loseReply((fn, job) => fn === 'job_claim' && job !== null);
+  const id = await add('ok');
+  await until('the claim to fail', () => (/claim failed/.test(runner.out) ? true : undefined), 40_000);
+  await poke(); // the next claim loop reconciles first (a beat would too, within 30 s)
+  const j = await ended(id, 45_000);
+  assert.deepEqual([j.state, j.summary], ['error', 'error: the runner lost the board connection while claiming it']);
+  assert.equal((await ended(await add('ok'))).state, 'passed');
+});
+
+test('API mode: a notice missed while the stream was down is claimed as soon as it reconnects', apiOnly, async () => {
+  // the 30 s beat looks for work too: start just after one, so only the reconnect can claim the job in time
+  const beats = () => worker!.seen.filter((fn) => fn === 'runner_beat').length;
+  const had = beats();
+  await until('a beat', () => (beats() > had ? true : undefined), 40_000);
+  await sleep(1000);
+  worker!.cutStreams();
+  await sleep(500);
+  const id = await add('ok'); // its notice reaches no stream
+  await sleep(1000);
+  assert.equal((await get(id)).state, 'queued', 'nothing told the runner');
+  worker!.restoreStreams();
+  assert.equal((await ended(id, 15_000)).state, 'passed');
+});
+
+test('API mode: a revoked key replaced in place needs no restart: calls and the stream come back', apiOnly, async () => {
+  worker!.cutStreams();
+  await sql`select cb.key_revoke(${issued[NAME]!})`;
+  worker!.restoreStreams();
+  await until('the stream to be refused', () => (/refused the notice stream/.test(runner.out) ? true : undefined), 40_000);
+  assert.equal(worker!.liveStreams(), 0);
+  await giveKey(NAME); // the same key file: the runner reads it for every request
+  await until('the stream to be open again', () => (worker!.liveStreams() === 1 ? true : undefined), 45_000);
+  assert.equal((await ended(await add('ok'), 15_000)).state, 'passed');
+  assert.equal(runner.child.exitCode, null);
+});
+
+test('API mode: another runner\'s key stops the runner and says what to do, without the key', apiOnly, async () => {
+  const secret = (await giveKey('wrong', 'pc-other')).split('_').slice(2).join('_'); // base64url: it may hold a _
+  assert.equal(secret.length, 43);
+  const cfg3 = join(TMP, 'runner-wrong-key.json');
+  writeFileSync(cfg3, JSON.stringify({ name: NAME, slots: 1, log: { host: '127.0.0.1', port: await freePort(), peers: [] }, projects: { demo: project(ORIGIN, { idle: recipes.ok }) } }));
+  const wrong = startRunner(cfg3, join(TMP, 'home3'), 'wrong');
+  assert.equal(await wrong.exited, 1, wrong.out);
+  assert.match(wrong.out, /runner key is runner pc-other's, and this runner is pc-test: install .*cb key install runner/);
+  assert.ok(!wrong.out.includes(secret), 'the key is never printed');
 });
 
 test('a second runner refuses to start', async () => {

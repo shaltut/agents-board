@@ -9,6 +9,7 @@ const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
 const { closeWorker, failure, wire, workerApp } = await import('../server/worker.ts');
 const { setRelease } = await import('../server/release.ts');
+const { OPS } = await import('../server/ops.ts');
 
 const clients: any[] = [];
 after(() => Promise.all([...clients.map((c) => c.end()), closeWorker(), serverSql.end()]));
@@ -81,9 +82,7 @@ test('what is not listed does not exist: 42883, whatever the key', async () => {
   for (const fn of ['nope', 'type_to', 'user_add', 'user_password', 'user_show', 'user_set_role', 'key_issue', 'key_revoke', 'key_check',
     'keys_list', '_actor_ok', 'set_actor', 'answer', 'send_back', 'seen', 'mem_confirm', 'runner_set', 'project_state', 'github_mute',
     'github_watch_add', 'github_watch_remove', 'role_text_set', 'lease_take', 'lease_renew', 'lease_release',
-    // the runner's own, until the slice that moves it lists them for its key
-    'job_claim', 'job_finish', 'runner_beat', 'runner_hello', 'runner_reconcile_held', 'runner_settings', 'jobs_cancelled',
-    'constructor', '__proto__']) {
+    'runner_reconcile', 'constructor', '__proto__']) {
     const res = await call(key, fn, { actor: 'W1@boxa' });
     const body = await res.json() as any;
     assert.deepEqual([res.status, body.ok, body.code], [404, false, '42883'], `${fn}: ${JSON.stringify(body)}`);
@@ -158,6 +157,48 @@ test('a key calls only what its kind is for', async () => {
   }
   assert.equal((await (await app.request('/w/v1/hello', { headers: bearer(runner) })).json() as any).runner, 'runner-a');
   assert.equal((await sql`select count(*)::int as n from cb.tasks`)[0].n, 0);
+});
+
+// #4918: the runner's own calls, each bound to the runner its key names
+test('a runner key runs its own runner and no other; a machine key cannot act as a runner', async () => {
+  const { sql } = await board();
+  const [mine, theirs, seat] = [await issue(sql, 'boxa', 'runner', 'runner-a'), await issue(sql, 'boxb', 'runner', 'runner-b'), await issue(sql)];
+  const recipes = [{ project: 'demo', recipe: 'test', params: {}, db: false }];
+  const hello = { log_url: 'http://127.0.0.1:1', recipes, slots: 2, db_lanes: 1, setting_refused: null };
+  assert.equal(await result(await call(mine, 'runner_hello', hello)), 0, 'the runner is the key\'s when none is named');
+  assert.equal(await result(await call(theirs, 'runner_hello', { ...hello, runner: 'runner-b' })), 0);
+  await result(await call(mine, 'runner_beat', {}));
+  assert.equal((await result(await call(mine, 'runner_settings', { name: 'runner-a' }))).slots_set, null);
+
+  // a job each runner could take: the job goes to the one that claims it, and only its runner ends it
+  const queued = (await sql`select cb.job_add('demo', 'test', 'abcdef1234', ${sql.json({})}, null, 'ahmed') as r`)[0]!.r.id;
+  const job = await result(await call(mine, 'job_claim', { allow_db: true }));
+  assert.deepEqual([Number(job.id), job.runner, job.state], [Number(queued), 'runner-a', 'running']);
+  const end = { id: job.id, state: 'passed', exit_code: 0, summary: 'synthetic' };
+  assert.equal(await result(await call(theirs, 'job_finish', end)), false, 'another runner\'s job is not theirs to end');
+  assert.deepEqual(await result(await call(mine, 'jobs_cancelled', { ids: [job.id] })), []);
+
+  // naming another runner is refused, on every write; nothing is changed
+  for (const [fn, args] of [['runner_hello', hello], ['runner_beat', {}], ['job_claim', { allow_db: true }], ['job_finish', end], ['runner_reconcile_held', { held: [] }]] as const) {
+    const res = await call(theirs, fn, { ...args, runner: 'runner-a' });
+    assert.equal(res.status, 403, `${fn}: ${await res.text()}`);
+  }
+  for (const [fn, args] of [['job_claim', { runner: 'runner-a', allow_db: true }], ['job_finish', { ...end, runner: 'runner-a' }], ['runner_hello', { ...hello, runner: 'runner-a' }]] as const) {
+    assert.equal((await call(seat, fn, args)).status, 403, `a machine key: ${fn}`);
+  }
+  assert.equal(await result(await call(mine, 'runner_reconcile_held', { held: [job.id] })), 0, 'the job is still held');
+  assert.equal(await result(await call(mine, 'job_finish', end)), true);
+  const [event] = await sql`select client from cb.events where client = ${idOf(mine)} limit 1`;
+  assert.equal(event?.client, idOf(mine));
+});
+
+test('whatever a runner key may write names its runner, so the board can hold it to the key\'s', async () => {
+  const { sql } = await board();
+  const theirs = Object.entries(OPS).filter(([, op]) => op.kinds.includes('runner')).map(([fn]) => fn);
+  assert.ok(theirs.length >= 7);
+  const unbound = await sql`select distinct p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'cb' and p.provolatile = 'v' and p.proname in ${sql(theirs)} and not coalesce('runner' = any(p.proargnames), false)`;
+  assert.deepEqual(unbound.map((r: any) => r.proname), []);
 });
 
 test('keys: issued and revoked from the dashboard only, stored hashed, two live ones per machine and kind', async () => {

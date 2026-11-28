@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import { connect, machine } from '../server/db.ts';
 import { freeLane, loadConfig, type RunnerConfig } from './recipes.ts';
 import { boardHello, boardStackGap, type Board } from './runner-board.ts';
-import { call } from './board.ts';
+import { apiBoard, call } from './board.ts';
+import { chooseTransport, type Transport } from './transport.ts';
 import { logTail } from './summary.ts';
 import { finish, reap, runJob, stackGate } from './runner-job.ts';
 import { isNetworkError, survive } from './survive.ts';
@@ -76,10 +77,26 @@ for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => { reap(STATE
 
 // the version covers all of the runner's own code
 const VERSION = createHash('sha1')
-  .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts', 'runner-board.ts', 'board.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
+  .update([import.meta.filename, ...['runner-job.ts', 'recipes.ts', 'summary.ts', 'runner-board.ts', 'board.ts', 'transport.ts'].map((f) => join(import.meta.dirname, f))].map((f) => readFileSync(f, 'utf8')).join('\0'))
   .digest('hex').slice(0, 7);
-const sql = connect(undefined, { app: `cb-runner/${VERSION}`, max: 4 });
-const board: Board = (fn, args) => call(fn, args, sql); // every read and write; sql itself only listens (until S4)
+// #3222 S4: a board address with this machine's runner key (cli/transport.ts) puts the runner on the worker API, and
+// then it opens no database connection; else it connects to the database as before. The job env never gets either.
+let via: Transport;
+try { via = chooseTransport('runner'); } catch (e: any) {
+  console.error(e?.message ?? e);
+  process.exit(1);
+}
+const sql = via.mode === 'db' ? connect(undefined, { app: `cb-runner/${VERSION}`, max: 4 }) : null;
+const api = via.mode === 'api' ? apiBoard({ url: via.url, keyFile: via.keyFile, code: VERSION }) : null;
+const board: Board = (fn, args) => call(fn, args, api ?? sql); // every read and write
+if (api) {
+  // the board holds every call to the key's runner: say so now, not as a refusal of every claim
+  const who = await api.hello();
+  if (who.kind !== 'runner' || who.runner !== NAME) {
+    console.error(`this machine's runner key is ${who.kind === 'runner' ? `runner ${who.runner}'s` : `a ${who.kind} key`}, and this runner is ${NAME}: install the key the owner issued for it (cb key install runner)`);
+    process.exit(1);
+  }
+}
 // #4527: Ahmed's slot setting on the board wins over runner.json's, read once here: a higher one takes this restart (a new
 // slot's first job clones it fresh); a lower one cb.job_claim applies at once. The counts run go back in runner_hello
 // (cli/runner-board.ts: a setting runner.json cannot take, or a board older than this runner, keeps runner.json's).
@@ -163,10 +180,27 @@ async function cancels() {
 }
 
 const tick = () => { cancels(); claim(); };
-await sql.listen('cb_jobs', tick, tick); // onlisten: also on every reconnect, when notices may have been missed
+// Both tick on every notice, and again each time they (re)connect, when notices may have been missed. A stream the
+// board refuses (the key revoked) is tried again: the key file is read for every request, so a new key needs no restart.
+const follow = (listening: () => void) => {
+  api!.events(['cb_jobs'], () => { listening(); tick(); }, { refused: (e) => {
+    say(`the board refused the notice stream (${e.message}): trying again in 30 s`);
+    setTimeout(() => follow(listening), 30_000);
+  } });
+};
+if (sql) await sql.listen('cb_jobs', tick, tick);
+else {
+  // Never waited for: a proxy may fail or buffer /w/v1/events while every call works, and the runner then still beats
+  // and looks for work every 30 s. The client retries without a word, so say it here.
+  let opened = false;
+  follow(() => { opened = true; });
+  setTimeout(() => {
+    if (!opened) say('the board\'s notice stream has not opened in 10 s: looking for work every 30 s, and still trying it. If this stays, check that the proxy passes /w/v1/events unbuffered');
+  }, 10_000);
+}
 setInterval(() => {
   board('runner_beat', { runner: NAME }).catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
   tick();
 }, 30_000);
-say(`runner ${NAME} up (cb-runner/${VERSION}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, test stacks ${stackGap} s apart, logs on http://${cfg.log.host}:${cfg.log.port}`);
+say(`runner ${NAME} up (cb-runner/${VERSION}${api ? ', on the worker API' : ''}), ${cfg.slots} slots and ${cfg.dbLanes} DB lane(s)${fromBoard ? ' (the board\'s setting)' : ''}, test stacks ${stackGap} s apart, logs on http://${cfg.log.host}:${cfg.log.port}`);
 survival.ready();
