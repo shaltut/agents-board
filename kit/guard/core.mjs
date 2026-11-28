@@ -1360,7 +1360,8 @@ function ghRuns(w, i, j) {
 // input redirect (< .env) is a read; the bootstrap copy of a template (cp .env.example .env) and --exclude=.env pass.
 // Quote pairs inside a word (.e""nv) count. kit/permissions/<role>.json denies the same files to Read (a closed list:
 // it can only name files). Linear: every name starts at a path boundary, so a long word is read once.
-const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{;|&>$` + '`' + String.raw`])`;
+// } closes a braced variable written against the name, ${TMPDIR}cb-seat-x (#4903)
+const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{};|&>$` + '`' + String.raw`])`;
 const SECRET_END = String.raw`(?=[\s"';&|)<>*?[{},:` + '`' + String.raw`]|$)`;
 const SOURCE_EXT = String.raw`(?:md|mdx|ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|txt|html|css)`;
 // #4882: the relay's bridge file (cli/bridge.ts) holds the token its local socket runs any SQL for, and the seat's
@@ -1373,7 +1374,10 @@ const ENDING_STAR = String.raw`\*(?![\w.*?[\]-])`;
 const SEAT_NAME = String.raw`cb-seat${NAME_REST}(?:\.json|${ENDING_STAR})`;
 const OTHER_RELAY_FILE = String.raw`\.(?:lo?g?|pi?d?|he?l?d?|re?f?u?s?e?d?)`;
 const BRIDGE_NAME = String.raw`cb-relay${NAME_REST}(?:\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})|(?<!cb-relay-\\)\*\.bridge`;
-const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|` + SEAT_NAME + '|' + BRIDGE_NAME + ')' + SECRET_END, 'i');
+// a glob that starts before either name is spelled out (cb*, cb-*, cb-r*): what stands before it must be able to start
+// cb-relay or cb-seat, so cbor* and cb-job-7* are other files (PR 203 second review)
+const SHORT_NAME = String.raw`cb(?:-(?:r(?:e(?:la?)?)?|s(?:ea?)?)?)?(?=[*?[])${NAME_REST}(?:\.json|\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})`;
+const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|` + SEAT_NAME + '|' + BRIDGE_NAME + '|' + SHORT_NAME + ')' + SECRET_END, 'i');
 const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
   'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
   'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',

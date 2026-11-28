@@ -819,6 +819,11 @@ const secretReads = [
   'tail -n 50 /tmp/cb-relay*', String.raw`Get-Content $env:TEMP\cb-relay* -Tail 20`, String.raw`type %TEMP%\cb-relay*`, 'tail /tmp/cb-relay*.bridge',
   'cat /tmp/cb-relay*.br*', 'cat /tmp/cb-seat*', String.raw`type %TEMP%\cb-seat*`, 'cat /tmp/cb-seat*.json', 'cat /tmp/cb-seat-????????????.json',
   'cat /tmp/cb-seat*.claude.json', 'cat /tmp/cb-seat*.js*',
+  // PR 203 second review: a glob that stops before the name is spelled out reaches both token files
+  'cat /tmp/cb-*', 'cat /tmp/cb*', 'cat /tmp/cb-r*', 'cat /tmp/cb-rel*', String.raw`type %TEMP%\cb*`, 'head -n 5 /tmp/cb-s*', 'cat /tmp/cb*.json',
+  'cat /tmp/cb-*.bridge', 'cat /tmp/cb-rel?y*',
+  // #4903: the braced temp variable, the usual macOS spelling, with no slash after it
+  'cat ${TMPDIR}cb-seat-ab12.claude.json', 'cat "${TMPDIR}cb-relay-ab12cd34ef56.bridge"', 'cat ${TMPDIR}cb-relay*', 'tail ${TMPDIR}cb*',
 ];
 const secretUses = [
   // #4882: the relay's other files stay readable, and so does the code that names the bridge file
@@ -828,6 +833,9 @@ const secretUses = [
   // PR 203 review: a glob over the other files stays readable, a cut-short extension too; so do the markers squad up reads
   'cat /tmp/cb-relay-*.lo*', 'tail /tmp/cb-relay*.log', 'cat /tmp/cb-relay*.pid', 'cat /tmp/cb-relay-*.he*', 'grep -n "cb-relay" cli/relay.ts',
   'grep -rn "cb-seat-ready" cli', 'grep -rn "cb-seat-refused" cli/agents', 'ls /tmp/cb-seat*',
+  // names that cannot reach a token file, globs that end in another file's extension, and a look at the folder
+  'cat /tmp/cbor*', 'cat /tmp/cb-job-7*', 'tail /tmp/cb-*.log', 'cat /tmp/cb-r*.log', 'cat /tmp/cb*.pid', 'cat /tmp/cb-*.lo*', 'ls /tmp/cb-*', 'rm /tmp/cb*',
+  String.raw`grep -n "cb\.next" db/schema.sql`, 'cat ${TMPDIR}cb-relay-ab12cd34ef56.log',
   // an escaped star in a search for the rule itself is no glob
   String.raw`grep -c "cb-relay-\*.bridge" kit/permissions/builder.json`,
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
