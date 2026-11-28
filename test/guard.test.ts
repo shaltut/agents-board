@@ -1548,8 +1548,9 @@ test('long commands stay fast', () => {
     ['#4815, 200 KB of launcher then filled words, as a builder', asBuilder(kb200('timeout $a x '))],
     ['#4815, 200 KB of filled words before a config subcommand, as a builder', asBuilder(kb200('$a config '))],
     ['#4815, 200 KB of assignments then filled pairs, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $b '))],
-    ['#4836, 200 KB of labels before substitutions in one segment, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('x: $(y) '))],
-    ['#4836, 200 KB of unclosed substitutions after a filled word, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $( '))],
+    // one filled pair, then one segment of brackets that never close, or of nested git substitutions: the pair reads it once
+    ['#4836, a filled pair before 200 KB of open brackets, as a builder', asBuilder('"$a$b" "$c$d" ' + kb200('w ( '))],
+    ['#4836, a filled pair before 200 KB of nested git substitutions, as a builder', asBuilder('"$a$b" "$c$d" ' + kb200('$( git '))],
     ['#4826, 200 KB of filled words before unknown words and main, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a p ') + ' main')],
     ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
     ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
