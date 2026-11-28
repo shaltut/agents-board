@@ -4,7 +4,7 @@
 
 import { call } from './board.ts';
 
-const UNITS: Record<string, string> ={ m: 'minutes', h: 'hours', d: 'days', w: 'weeks' };
+const UNITS: Record<string, string> = { m: 'minutes', h: 'hours', d: 'days', w: 'weeks' };
 
 /** --since 24h | 30m | 7d | 2w → a Postgres interval. */
 export function sinceInterval(s: string | undefined): string {

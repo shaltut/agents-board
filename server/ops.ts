@@ -1,6 +1,7 @@
 // The board operations cb, its relay and its hooks name (#3222): each is the cb.* function of the same name, called with
 // named arguments through cli/board.ts. Default deny: a name that is not here is not called. This is the workers' list,
-// not the web's (server/rpc.ts RPC_FUNCTIONS); the worker API will serve from it. setof: the function returns rows, not one value.
+// not the web's (server/rpc.ts RPC_FUNCTIONS); the worker API will serve from it. setof: the function returns rows,
+// not one value.
 // No _name is ever listed. test/ops-list.test.ts keeps it equal to what cb calls and to db/schema.sql.
 export type Op = { setof?: true };
 
