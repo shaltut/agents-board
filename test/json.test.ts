@@ -2,6 +2,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import postgres from 'postgres';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,8 +68,8 @@ test('--json: broadcast, huddle open, asks add and page set give objects, not a 
   const bc = j(['broadcast', 'deploy at noon', '--project', 'demo'], as);
   const [cast] = await sql`select id from cb.events where kind = 'broadcast'`;
   assert.deepEqual(bc, { id: Number(cast.id), project: 'demo' });
-  assert.deepEqual({ ...j(['broadcast', 'hello'], as), id: 0 }, { id: 0, project: null });
-  assert.match(cb(['broadcast', 'text'], as).out, /^broadcast #\d+ sent to every session$/);
+  assert.deepEqual({ ...j(['broadcast', 'hello', '--all'], as), id: 0 }, { id: 0, project: null });
+  assert.match(cb(['broadcast', 'text', '--all'], as).out, /^broadcast #\d+ sent to every session$/);
   // huddle open / say / close
   assert.deepEqual(j(['huddle', 'open', 'Date parsing', 'W3@macbook', '-t', '1'], as), { id: 1, members: ['W3@macbook'], task: 1 });
   const say = j(['huddle', 'say', '1', 'partial dates?'], as);
@@ -132,4 +133,38 @@ test('cb help says exactly what --json gives: OUTPUT, the flag, cb help json, cb
   assert.match(page, /^  add +\{id, project, status, stage\}/m);
   assert.match(page, /^  mine +task rows, each with stage_words \(null when not staged\) and open: true .* or false\n +\(closed or moved off you in the last 24h\)$/m);
   assert.match(help('mine')!, /--json gives the task rows, each with stage_words \(.*\) and open: true \(yours to work on\) or false/);
+});
+
+// #4740: Ahmed: a broadcast must say on purpose whether it goes to one project or to every session
+test('cb broadcast needs one scope, --project <p> or --all, in the CLI and in SQL (#4740)', async () => {
+  const sql = await db();
+  await sql`select cb.task_add(project => 'demo', title => 'Dates')`;
+  await sql`select cb.iam('mac', 'w1:p3', 'W2@macbook', 'demo')`;
+  const as = { CB_ACTOR: 'W2@macbook' };
+  const count = async () => Number((await sql`select count(*) as n from cb.events where kind = 'broadcast'`)[0].n);
+  for (const scope of [[], ['--project', 'demo', '--all'], ['--project', '']]) {
+    const r = cb(['broadcast', 'freeze', ...scope], as);
+    assert.equal(r.code, 1, `${scope.join(' ')}: ${r.out}`);
+    assert.match(r.err, /one scope: cb broadcast "<message>" --project <p> .* or --all/, scope.join(' '));
+  }
+  await assert.rejects(sql`select cb.broadcast('freeze', null, 'orch')`, /one scope/);
+  await assert.rejects(sql`select cb.broadcast('freeze', 'demo', 'orch', true)`, /one scope/);
+  assert.equal(await count(), 0, 'a refused broadcast is not recorded');
+  assert.match(cb(['broadcast', 'to all', '--all'], as).out, /^broadcast #\d+ sent to every session$/);
+  assert.match(cb(['broadcast', 'to demo', '--project', 'demo'], as).out, /^broadcast #\d+ sent to every demo session$/);
+  // the line a session reads names the scope
+  const brief = cb(['brief', 'demo'], as).out;
+  assert.match(brief, /W2@macbook to everyone: to all/);
+  assert.match(brief, /W2@macbook to demo: to demo/);
+});
+
+// the goal notices are broadcasts made in SQL: a goal over every project still reaches every session
+test('a goal with no project is still announced to every session (#4740)', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const web = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'cb-web' } }); clients.push(web);
+  await web`select cb.goal_create(title => 'Everywhere', actor => 'ahmed')`;
+  const [cast] = await sql`select project, summary from cb.events where kind = 'broadcast'`;
+  assert.equal(cast.project, null);
+  assert.match(cast.summary, /Everywhere/);
 });
