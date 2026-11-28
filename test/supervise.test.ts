@@ -40,7 +40,7 @@ const session = (sql: any, actor: string, role: string, o: { live?: boolean; sta
   sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent, model)
       values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}),
               ${o.agent ?? 'claude'}, ${o.model ?? null})`;
-const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what}`) as any[];
+const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what} order by id`) as any[];
 
 // ---- a fake herdr: nothing real is started; `live` holds the herdr names it reports ----
 type Call = { m: string | null; args: string[] };
