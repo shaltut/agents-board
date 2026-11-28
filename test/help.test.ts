@@ -195,6 +195,22 @@ test('errors say what to run instead', async () => {
   assert.match(cb(['frobnicate']).err, /unknown command "frobnicate"\. Commands: start, iam,.* Run: cb start/);
 });
 
+// #4725: the commands sessions keep guessing are answered with the real one, before the long list
+test('a guessed command gets a did-you-mean hint before the command list', async () => {
+  await db();
+  const guesses: Record<string, RegExp> = {
+    inbox: /cb pending/, whoami: /cb start.*cb iam/, list: /cb brief.*cb mine/, status: /cb brief.*cb mine/, find: /cb search/,
+    q: /cb ask.*cb pending/, question: /cb ask.*cb pending/, claim: /cb next/, projects: /cb start/, card: /cb show/,
+  };
+  for (const [guess, want] of Object.entries(guesses)) {
+    const r = cb([guess]);
+    assert.equal(r.code, 1, guess);
+    const hint = new RegExp(`^cb: unknown command "${guess}"\\. Did you mean: ([^?]+)\\? Commands: start, iam,`).exec(r.err)?.[1];
+    assert.match(hint ?? '', want, `${guess}: ${r.err}`);
+  }
+  for (const none of ['frobnicate', 'constructor', 'toString']) assert.doesNotMatch(cb([none]).err, /Did you mean/, none);
+});
+
 test('cb ask --free posts, and reminds that a choice needs options', async () => {
   const sql = await db();
   await sql`select cb.task_add(project => 'iris', title => 'x')`;

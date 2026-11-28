@@ -691,6 +691,17 @@ export function help(name?: string): string | null {
 export const unknownHelp = (name: string) =>
   `no help for "${name}". Topics: ${TOPIC_NAMES.join(', ')}. Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb help <one of them>`;
 
+// #4725: words sessions guess that are no command (from the fault log), and what to run instead
+const GUESSES: Record<string, string> = {
+  inbox: 'cb pending (answers waiting for you)', whoami: 'cb start (who you are, what to do), cb iam (set your name)',
+  list: 'cb brief (the project), cb mine (your cards)', status: 'cb brief (the project), cb mine (your cards)',
+  find: 'cb search', q: 'cb ask (ask Ahmed), cb pending (answers)', question: 'cb ask (ask Ahmed), cb pending (answers)',
+  claim: 'cb next', projects: 'cb start (an unbound pane gets the project list)', card: 'cb show <id>',
+};
+
+export const unknownCommand = (name: string) =>
+  `unknown command "${name}".${Object.hasOwn(GUESSES, name) ? ` Did you mean: ${GUESSES[name]}?` : ''} Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb start (what to do next) or cb help (the manual)`;
+
 // #4450: a whole command word after "cb ", so "check with cb before ..." (no command) no longer counts as naming one
 const NAMED = new RegExp(`\\bcb (?:${Object.keys(COMMANDS).join('|')})\\b`);
 /** True when an error message names a cb command to run (every error must end with one). */
