@@ -1376,7 +1376,8 @@ test('long commands stay fast', () => {
     ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
     ["#4802, 200 KB of $' starts with no end, then a fence path", asBuilder(kb200("$'\\' ") + 'opencode.json')],
     ['#4802, 200 KB of case words inside $( ), then a fence path', asBuilder('echo $(' + kb200('case ') + ') opencode.json')],
-    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$(') + '" opencode.json')],
+    // spaced for the same reason: this pins slashOutside
+    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$( ') + '" opencode.json')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
