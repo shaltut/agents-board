@@ -1264,9 +1264,31 @@ const ASSIGN_WORD = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s"'\\])+/g;
 // statement of an earlier one is not walked again.
 const NAME_ASSIGNERS = new RegExp(NAME_ASSIGNER.source, 'gi');
 const STATEMENT = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^;&|\n"'\\])*/y;
-// #4707 review M5: declare -n r=$x makes r stand for a name the guard cannot read. In command position only (a quoted
-// search for it is text); every repeat is bounded, so it stays linear
-const HIDDEN_NAMEREF = /(?:^|[;&|\n({]|(?<![\w-])(?:then|do|else)[ \t])[ \t]*(?:declare|typeset|local)[ \t]+(?:[-+]\w{1,8}[ \t]+){0,8}?-[A-Za-z]{0,8}n[A-Za-z]{0,8}[ \t]+(?:[-+]\w{1,8}[ \t]+){0,8}[A-Za-z_]\w*=["']?[^\s;&|"'$`]*[$`]/;
+// #4707 review M5: declare -n r=$x makes r stand for a name the guard cannot read. Every operand of a declare, typeset
+// or local with -n is judged, one with no value too (a later assignment picks its target). In command position only (a
+// quoted search for it is text); each statement is walked once, so it stays linear
+const NAMEREF_HEAD = /(?:^|[;&|\n({]|(?<![\w-])(?:then|do|else|command|builtin)[ \t])[ \t]*(?:declare|typeset|local)(?![\w-])/g;
+const QUOTED_OR_ESCAPED = /"(?:\\.|[^"\\])*"|'[^']*'|\\./g;
+// does the shell expand something in this word: a $ or a backtick outside single quotes and not escaped
+const expands = (word) => /[$`]/.test(word.replace(QUOTED_OR_ESCAPED, (s) => s[0] === '"' ? s : ''));
+function hiddenNameref(raw) {
+  let end = 0;
+  for (const m of raw.matchAll(NAMEREF_HEAD)) {
+    if (m.index < end) continue;
+    const from = m.index + m[0].length;
+    STATEMENT.lastIndex = from;
+    STATEMENT.exec(raw);
+    end = Math.max(STATEMENT.lastIndex, from);
+    let nameref = false;
+    for (const word of raw.slice(from, end).match(ASSIGN_WORD) ?? []) {
+      const plain = unquote(word);
+      if (plain.startsWith('#')) break;
+      if (/^[-+]/.test(plain)) nameref ||= /^-\w*n/.test(plain);
+      else if (nameref && !/^\d*[<>]/.test(plain) && (/^[A-Za-z_]\w*$/.test(plain) || expands(word))) return true;
+    }
+  }
+  return false;
+}
 function assignsThrough(raw) {
   let end = 0;
   for (const m of raw.matchAll(NAME_ASSIGNERS)) {
@@ -1304,6 +1326,7 @@ function envChangesSeat(seg) {
     let splits = 0;
     for (let j = i + 1; j < w.length; j++) {
       const x = w[j];
+      if (/^-[0v]*i[0iv]*S/.test(x)) return true; // env -iS: cleared, in the same word as the split
       let split = null;
       if (x === '-S' || x === '--split-string') split = w[++j] ?? '';
       else if (x.startsWith('--split-string=')) split = x.slice(15);
@@ -1360,7 +1383,7 @@ function seatVarChangeOne(command) {
   const raw = stripMessages(String(command ?? ''));
   const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
   if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
-  if (NAME_ASSIGNER.test(raw) && (HIDDEN_NAMEREF.test(raw) || assignsThrough(raw))) return SEAT_VARS_CHANGE;
+  if (NAME_ASSIGNER.test(raw) && (hiddenNameref(raw) || assignsThrough(raw))) return SEAT_VARS_CHANGE;
   for (const seg of t.match(SEGMENTS) ?? []) {
     const r = SEAT_VAR_REMOVER.exec(seg);
     if (r && SEAT_VAR_NAMED.test(seg.slice(r.index))) return SEAT_VARS_CHANGE;
@@ -1440,9 +1463,13 @@ const sshHost = (word) => {
 };
 // ssh -o Key=value: HostName replaces the destination, and ProxyCommand may tunnel back to this machine's sshd
 const sshOptionLocal = (option, hosts) => {
-  const m = /^\s*([A-Za-z]+)(?:\s*=\s*|\s+)([\s\S]*)$/.exec(option);
+  // OpenSSH drops quotes wherever they stand in an option; a host name is its value's first word
+  const m = /^\s*([A-Za-z]+)(?:\s*=\s*|\s+)([\s\S]*)$/.exec(option.replace(/["']/g, ''));
   const key = m?.[1].toLowerCase();
-  if (key === 'hostname') return m[2] !== '%h' && (/[$`]/.test(m[2]) || localHost(sshHost(m[2]), hosts));
+  if (key === 'hostname') {
+    const host = m[2].trim().split(/\s+/)[0];
+    return host !== '%h' && (/[$`]/.test(host) || localHost(sshHost(host), hosts));
+  }
   if (key !== 'proxycommand') return false;
   return m[2].split(/[\s;&|'"]+/).some((w) => w && !/^(?:-|\d+$)/.test(w) && localHost(sshHost(w).replace(/^([^:]*):\d+$/, '$1'), hosts));
 };
@@ -1516,7 +1543,12 @@ function freshLaunch(name, a, hosts, role, vars) {
   }
   return null;
 }
-const TIMEOUT_OPT_ARG = /^(?:-s|-k|--signal|--kill-after)$/;
+// a short option that takes a value may close a run of flags that take none (-vs 9, -0n 1, -vS 'cmd')
+const TIMEOUT_OPT_ARG = /^(?:-[fpv]*[sk]|--signal|--kill-after)$/;
+// for xargs alone: elsewhere the second letter can be the first one's value (stdbuf -oL)
+const XARGS_OPT_ARG = /^-[0oprtx]*[adEIJLnPs]$/;
+const ENV_SPLIT = /^(?:-[0iv]*S|--split-string(?:=|$))/;
+const ENV_OPT_ARG = /^(?:-[0iv]*[uC]|--unset|--chdir)$/;
 const FRESH_OPT_ARG = new Set(['-a', '--arg-file', '-d', '--delimiter', '--process-slot-var', '-I', '-J', '-L', '-n', '-P', '-s', '-E', '--eof', '--replace', '--max-args', '--max-procs', '--max-lines', '--max-chars']);
 const SHELL_COMMENT = /"(?:\\.|[^"\\])*"|'[^']*'|\\.|(?:^|[ \t])#[^\n]*/gm;
 // comments as spaces, so every later position still holds
@@ -1617,7 +1649,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
         // Wrapper option values (xargs -a file sudo) are not command words.
         while (u[i + 1]?.startsWith('-')) {
           const opt = u[++i];
-          if (FRESH_OPT_ARG.has(opt)) i++;
+          if (FRESH_OPT_ARG.has(opt) || (name === 'xargs' && XARGS_OPT_ARG.test(opt))) i++;
         }
         continue;
       }
@@ -1625,14 +1657,15 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
         while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) {
           const option = u[++i];
           // env -S splits its value into the command and arguments that run
-          const split = /^(?:-S|--split-string)$/.test(option) ? u[++i] ?? '' : /^(?:-S|--split-string=)([\s\S]+)$/.exec(option)?.[1];
-          if (split !== undefined) {
+          const s = ENV_SPLIT.exec(option);
+          if (s) {
+            const split = option.slice(s[0].length) || (u[++i] ?? '');
             const why = freshEnvOne([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
             if (why) return why;
             cmd = false;
             break;
           }
-          if (/^(?:-u|-C|--unset|--chdir)$/.test(option)) i++;
+          if (ENV_OPT_ARG.test(option)) i++;
         }
         continue;
       }
@@ -1691,7 +1724,14 @@ function scriptCalls(command, base = '', deployHost, depth = 0) {
       else if (SCRIPT_LEAD.has(n)) i++;
       else if (n === 'env') {
         for (i++; w[i] && (w[i].startsWith('-') || ASSIGNMENT.test(w[i])); i++) {
-          if (/^(?:-u|-C|--unset|--chdir)$/.test(w[i])) i++; else prefix(w[i]);
+          const option = unquote(raw[i]), s = ENV_SPLIT.exec(option);
+          if (s) {
+            const split = option.slice(s[0].length) || unquote(raw[++i] ?? '');
+            out.push(...scriptCalls([split, ...raw.slice(i + 1)].join(' '), cwd, vps, depth + 1));
+            if (out.length > 32) throw new Error(TOO_MANY_SCRIPTS);
+            i = w.length;
+          } else if (ENV_OPT_ARG.test(w[i])) i++;
+          else prefix(w[i]);
         }
       } else if (n === 'timeout') { for (i++; w[i]?.startsWith('-'); i++) if (TIMEOUT_OPT_ARG.test(w[i])) i++; i++; }
       else if (/^\d*<(?!<)/.test(w[i] ?? '')) i += /^\d*<$/.test(w[i]) ? 2 : 1; // a redirect before the command

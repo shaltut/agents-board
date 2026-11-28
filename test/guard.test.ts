@@ -1226,6 +1226,9 @@ test('#4707 review: the new reads stay fast on long commands', () => {
     envs: 'node -e "spawn(' + ' env'.repeat(50000) + ' '.repeat(50000) + 'env}"',
     options: 'ssh ' + '-o A=b '.repeat(28000) + 'box uptime',
     splits: 'env -S '.repeat(25000),
+    joinedSplits: 'env -vS '.repeat(22000),
+    refs: 'declare -n a=b '.repeat(13000),
+    spacedHost: 'ssh -o "HostName=a' + ' '.repeat(100000) + 'b" box uptime',
   };
   for (const [name, command] of Object.entries(long)) {
     const from = process.hrtime.bigint();
@@ -1258,4 +1261,30 @@ test('#4707 review M4: scripts reached through -c, env, a leading or numbered re
 test('#4707 review M5: a nameref to a target the guard cannot read is blocked', () => {
   mustBlock(['x=CB_ROLE; declare -n r=$x; r=; codex', 'typeset -n r="$x"; r=', 'f() { local -n r=$1; r=; }; f CB_ROLE']);
   mustAllow(['declare -n r=PATH', 'declare -i n=$x', 'grep -rn "declare -n r=$x" kit']);
+});
+
+// the review of ed4b13a
+test('#4707 review 2 H1: ssh -o HostName with inner quotes or space around this machine\'s name, as OpenSSH reads it', () => {
+  mustBlock(['ssh -o \'HostName="localhost"\' foo codex', 'ssh -o \'HostName localhost \' foo codex', 'ssh -o "HostName=\'127.0.0.1\'" foo codex',
+    'ssh -o \'HostName=local""host\' foo codex', 'ssh -o \'"HostName" localhost\' foo codex', 'ssh -o "HostName=localhost # box" foo codex',
+    'ssh -o \'HostName=\t::1\t\' foo codex']);
+  mustAllow(['ssh -o \'HostName="remote.example"\' box uptime', 'ssh -o "HostName remote.example " box uptime']);
+});
+
+test('#4707 review 2 H2: a nameref command is judged on every operand, not only the first', () => {
+  mustBlock(['x=CB_ROLE; declare -n a=foo r=$x; r=; codex', 'local -n a=PATH b="$1"', 'typeset -g -n a=foo "r=$x"',
+    'declare -n a=\'$lit\' r="a\'$x\'"', 'declare -n $spec', 'declare -n r; r=$x; r=', 'command declare -n a=foo r=`id`', 'declare -gn a=foo r=${x}']);
+  mustAllow(['declare -n a=foo r=PATH', 'declare -n r=\'$literal\'', 'declare -n a=foo; b=$x', 'declare -n', 'declare -p -x',
+    'declare a=foo r=$x', 'declare +n r', 'grep -rn "declare -n a=foo r=$x" kit']);
+});
+
+test('#4707 review 2 H3: a combined short option still takes its value: env -vS, -vu, timeout -vs, xargs -0n', () => {
+  mustBlock(['env -vS \'sudo codex\'', 'env -iS \'codex\'', 'env -vS\'sudo codex\'', 'env -0vS "sudo codex"', 'env -vu FOO sudo codex',
+    'env -vC /tmp sudo codex', 'timeout -vs 9 5 sudo codex', 'timeout -fk 1 5 sudo codex', 'xargs -0n 1 sudo codex', 'xargs -rI {} sudo codex',
+    'stdbuf -oL sudo codex']);
+  mustAllow(['env -vS \'echo sudo\'', 'env -vu SHELL echo sudo', 'env -uSHELL echo sudo', 'timeout -vs 9 5 echo sudo', 'xargs -0n 1 echo sudo']);
+  const readScript = (p: string) => (p === 'bad.sh' ? 'sudo codex\n' : p === 'ok.sh' ? 'echo hi\n' : null);
+  const uses = (f: string) => [`env -S 'bash ${f}'`, `env -vS "bash ${f}"`, `env --split-string='bash ${f}'`, `timeout -vs 9 5 bash ${f}`, `env -vu FOO bash ${f}`];
+  mustBlock(uses('bad.sh'), 'builder', { readScript });
+  mustAllow(uses('ok.sh'), 'builder', { readScript });
 });
