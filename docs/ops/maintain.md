@@ -600,6 +600,13 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   a model its adapter refuses) is refused once per setting per supervisor run, logged, and the seat keeps running; a
   seat restarted once for a setting is not restarted again for it until it has been seen running it (no loop when a
   model name never reads as matching);
+- winds down a supervised squad whose project is disabled or archived (#4559, Q3018): it starts, restores and restarts
+  nothing there. Each seat of the squad (an earlier version's too) is closed once herdr shows it ready and it has been
+  quiet 10 minutes, counted from the disable at the earliest, with the cards it holds, which stay its own (Q3017); at
+  most 2 a tick, logged `close <seat> (project disabled)`. A running job of its own is waited for; a queued one waits
+  for Enable. Never the lead or a hand-started session, and a seat holding a card of an enabled project is kept. After
+  Enable, the seats that hold cards are restored as above, whatever was restored before the disable. A squad without
+  `"supervise": true` gets only the disable message;
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.

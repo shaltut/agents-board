@@ -30,11 +30,14 @@ export interface SquadPage {
   history: { id: number; at: string; actor: string; version: number | null; via: 'page' | 'cli' | null; squad: Squad }[]
   reminders: { open: number; on: number }
 }
+export interface ModelList { models: { id: string; efforts?: string[] }[]; at: string }
 export interface SquadOptions {
   roles: Role[]; agents: { agent: string; main: boolean }[]; claude_models: string[]; default_models: Record<string, string>
   limits: { count_min: number; count_max: number; macbook_seats: number; fallbacks: number; session_name: number }
   /** per agent, the effort levels a seat can be started with; an empty list: that agent takes none */
   efforts: Record<string, string[]>
+  /** per machine name, per agent: the models its CLI listed when it last sent them (cb models report) */
+  machine_models?: Record<string, Record<string, ModelList>>
   models_used: Record<string, string[]>; machines_used: ({ key: string } & MachineSpec)[]
 }
 export interface RoleTextPage {
@@ -195,6 +198,39 @@ export function patchRole(sq: Squad, role: Role, patch: Partial<RoleSpec>, defau
     else if (claude) spec.model = '' // a Claude name never fits another agent: the field asks for one
   }
   return next
+}
+
+/** The squad with one seat set differently (#4763). A model or effort given empty goes: the seat takes the role's. A new
+ *  agent drops the effort; back on the role's agent the model goes too, and on another agent the seat names its own ('' until
+ *  one is picked, which checkSquad flags). A seat with nothing of its own is not kept: squad_set refuses an empty one. */
+export function patchSeat(sq: Squad, role: Role, key: string, patch: SeatSpec, defaults: Record<string, string>): Squad {
+  const next = clone(sq)
+  const spec = next.roles[role]
+  if (!spec) return next
+  const roleAgent = spec.agent ?? 'claude'
+  const seat: SeatSpec = { ...spec.seats?.[key] }
+  if (seat.agent === roleAgent) delete seat.agent // the role moved to the seat's agent since: it is the role's now (as squad_set stores it)
+  if ('agent' in patch) {
+    delete seat.effort
+    const agent = patch.agent || roleAgent
+    if (agent === roleAgent) { delete seat.agent; delete seat.model }
+    else { seat.agent = agent; seat.model = agent === 'claude' ? defaults[role] ?? 'sonnet' : '' }
+  }
+  if ('model' in patch) { if (patch.model || seat.agent) seat.model = patch.model ?? ''; else delete seat.model }
+  if ('effort' in patch) { if (patch.effort) seat.effort = patch.effort; else delete seat.effort }
+  const all = { ...spec.seats }
+  if (Object.keys(seat).length) all[key] = seat; else delete all[key]
+  if (Object.keys(all).length) spec.seats = all; else delete spec.seats
+  return next
+}
+
+/** What a seat's empty choices say. model undefined: the seat is on another agent, so it must pick a model. */
+export function seatBlank(role: RoleSpec, seat: SeatSpec): { model: string | undefined; effort: string } {
+  const same = (seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude')
+  return {
+    model: same ? `Same as the role: ${modelLabel(role.model)}` : undefined,
+    effort: same && role.effort ? `Same as the role: ${role.effort} effort` : 'Default effort',
+  }
 }
 
 /** The squad with one area added or removed (with repos an area names its repo); removing the last turns owners off. */
@@ -388,6 +424,17 @@ function countWords(sq: Squad, role: Role): string {
   return plural(spec.count ?? 0, 'seat')
 }
 const fbWords = (fb?: Fallback[]) => (fb?.length ? fb.map((f) => setupLabel(f.agent, f.model, f.effort)).join('; ') : 'none')
+/** The list the chosen machine sent for an agent: under its name in the squad, else under its herdr label; null: none. */
+export function machineModels(opts: Pick<SquadOptions, 'machine_models'>, key: string, machine: MachineSpec | undefined, agent: string): ModelList | null {
+  const all = opts.machine_models ?? {}
+  return all[key]?.[agent] ?? (machine?.herdr ? all[machine.herdr.toLowerCase()]?.[agent] : undefined) ?? null
+}
+/** The efforts to offer: the listed model's own when its CLI names them, else the agent's. The saved one stays shown. */
+export function effortChoices(opts: Pick<SquadOptions, 'efforts'>, agent: string, list: ModelList | null, model: string, current?: string): string[] {
+  const all = opts.efforts[agent] ?? []
+  const own = list?.models.find((m) => m.id === model)?.efforts
+  return all.filter((e) => !own?.length || own.includes(e) || e === current)
+}
 /** A seat's effort: its own, else its role's when it runs the role's agent (as seatSpec, cli/squad-up.ts). */
 export const seatEffort = (role: { agent?: string; effort?: string }, seat: { agent?: string; effort?: string }) =>
   seat.effort ?? ((seat.agent ?? role.agent ?? 'claude') === (role.agent ?? 'claude') ? role.effort : undefined)

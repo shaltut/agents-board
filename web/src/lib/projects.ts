@@ -55,8 +55,7 @@ export interface Preview {
 }
 
 /** The confirm dialog: title, the sentence under it, one line per thing it touches, and the button. Every line is
- *  already true at this slice: the supervisor's closing of idle seats (slice 3) and the cancelling of waiting jobs on
- *  archive (slice 4) are left out until they ship. */
+ *  already true at this slice: the cancelling of waiting jobs on archive (slice 4) is left out until it ships. */
 export function confirmText(to: 'disabled' | 'archived', pv: Preview): { title: string; lead: string; lines: string[]; button: string } {
   const n = pv.name
   if (to === 'archived') {
@@ -73,6 +72,8 @@ export function confirmText(to: 'disabled' | 'archived', pv: Preview): { title: 
   }
   const lines = [
     pv.seats_live > 0 && `${plural(pv.seats_live, 'seat')} live: each gets a notice, stops at a safe point and writes where it stands.`,
+    // true only where the supervisor runs the squad, and the preview does not say whether it does: so the line does
+    pv.seats_live > 0 && 'Where the supervisor runs the squad, it closes each seat once idle 10 minutes; after Enable it restores the seats that hold cards.',
     pv.in_progress > 0 && `${plural(pv.in_progress, 'card')} in progress ${pv.in_progress === 1 ? 'keeps its holder' : 'keep their holders'}.`,
     (pv.jobs_waiting > 0 || pv.jobs_running > 0) && [
       pv.jobs_waiting > 0 && `${plural(pv.jobs_waiting, 'test run')} waiting ${pv.jobs_waiting === 1 ? 'stays' : 'stay'} waiting.`,
