@@ -1391,10 +1391,24 @@ function ghRuns(w, i, j) {
 // input redirect (< .env) is a read; the bootstrap copy of a template (cp .env.example .env) and --exclude=.env pass.
 // Quote pairs inside a word (.e""nv) count. kit/permissions/<role>.json denies the same files to Read (a closed list:
 // it can only name files). Linear: every name starts at a path boundary, so a long word is read once.
-const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{;|&>$` + '`' + String.raw`])`;
+// } closes a braced variable written against the name, ${TMPDIR}cb-seat-x (#4903)
+const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{};|&>$` + '`' + String.raw`])`;
 const SECRET_END = String.raw`(?=[\s"';&|)<>*?[{},:` + '`' + String.raw`]|$)`;
 const SOURCE_EXT = String.raw`(?:md|mdx|ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|txt|html|css)`;
-const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.-]*\.(?:claude|opencode)\.json)` + SECRET_END, 'i');
+// #4882: the relay's bridge file (cli/bridge.ts) holds the token its local socket runs any SQL for, and the seat's
+// endpoint files hold its messaging token or password. Each is named in full, by a glob in the name, or by a glob that
+// ends the word and so reaches it (cb-relay*, not cb-relay*.log or a cut-short .lo*); the bridge file also as *.bridge.
+// No hyphen is needed after the first words (PR 203 review). The name's characters hold none that can start another
+// name, so each is read once
+const NAME_REST = String.raw`[\w.*?[\]-]*`;
+const ENDING_STAR = String.raw`\*(?![\w.*?[\]-])`;
+const SEAT_NAME = String.raw`cb-seat${NAME_REST}(?:\.json|${ENDING_STAR})`;
+const OTHER_RELAY_FILE = String.raw`\.(?:lo?g?|pi?d?|he?l?d?|re?f?u?s?e?d?)`;
+const BRIDGE_NAME = String.raw`cb-relay${NAME_REST}(?:\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})|(?<!cb-relay-\\)\*\.bridge`;
+// a glob that starts before either name is spelled out (cb*, cb-*, cb-r*): what stands before it must be able to start
+// cb-relay or cb-seat, so cbor* and cb-job-7* are other files (PR 203 second review)
+const SHORT_NAME = String.raw`cb(?:-(?:r(?:e(?:la?)?)?|s(?:ea?)?)?)?(?=[*?[])${NAME_REST}(?:\.json|\.bridge|(?<!${OTHER_RELAY_FILE})${ENDING_STAR})`;
+const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|` + SEAT_NAME + '|' + BRIDGE_NAME + '|' + SHORT_NAME + ')' + SECRET_END, 'i');
 const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
   'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
   'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',
@@ -1405,7 +1419,7 @@ const SECRET_READER = new RegExp(String.raw`(?<![\w.$\\/-])(?:${SECRET_READERS.j
 const TEMPLATE_COPY = /^\s*(?:cp|copy|copy-item|cpi)\s+(?:-\S+\s+)*["']?[^\s"']+\.(?:example|sample|template|dist)["']?\s+["']?[^\s"']+["']?\s*$/i;
 const EXCLUDE = /--exclude(?:-dir)?=\S*/gi;
 const dequote = (t) => t.replace(/""|''/g, '');
-const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials or a seat token file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials, a seat token file or the relay\'s bridge file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
   return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
