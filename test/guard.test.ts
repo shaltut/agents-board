@@ -203,6 +203,25 @@ function passes(role: string, cmds: string[]) {
   for (const c of cmds) assert.deepEqual(shell(c, { CB_ROLE: role }), {}, `${role} must pass: ${c}`);
 }
 
+// #4622 (PR 77 round 6, m1): after a filled word, a word that has a space of its own and only plain variables
+// ("$A log", "$C d") is one argument that names no git command: it no longer counts as a filled subcommand
+test('#4622: a quoted phrase after a variable is no git subcommand; every word that could be one still blocks', () => {
+  passes('builder', ['echo "$A b" "$C d" opencode.json', 'caffeinate "$A log" "$A log" opencode.json',
+    'printf "%s" "${A} b" "$C d" opencode.json', 'echo "$USER said" "$A hello there" opencode.json', 'echo %A% "%C% d" opencode.json']);
+  blocksByRole('builder', [
+    // no space of its own: the variable can complete a command name
+    'echo $A x$B opencode.json', 'caffeinate $GIT "pu$X" opencode.json', 'caffeinate $GIT co$X -- opencode.json',
+    // ${X:-y}, $( ) and backticks can supply the whole word, spaces in their source or not
+    'caffeinate $GIT ${X:-checkout} -- opencode.json', 'caffeinate $GIT "${X:-checkout}" -- opencode.json',
+    'caffeinate $GIT "$(echo checkout) x" -- opencode.json', 'caffeinate $GIT "`echo checkout` x" -- opencode.json',
+    // a phrase that names a writing command is still judged as a command line of its own, piped to a shell or not
+    'caffeinate $GIT "$X checkout" -- opencode.json', 'echo $G "$X checkout" -- opencode.json | sh',
+    // a launcher reads its words again, so there the phrase is split
+    'eval $GIT "pu$Y now" opencode.json', 'ssh host $GIT "$X now" opencode.json', 'xargs $GIT "$X now" opencode.json',
+    // m2, kept: two whole variables may be git and a writing command
+    'python3 tools/check.py $A $B opencode.json']);
+});
+
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
 // .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
 const fenceWrites = [
