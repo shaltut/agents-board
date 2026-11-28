@@ -643,8 +643,10 @@ function scannedName(raw, names) {
 // names; returns its first non-null. Message text is ignored (stripMessages); a line continuation joins its lines (bash
 // \ and PowerShell `, #4002); a backtick substitution counts as $ (and its inner command stays a command); a quoted
 // command (bash -c "...", ssh host '...') is read as a command too when quoted says so. Throws past
-// MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block).
-function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
+// MAX_COMMANDS_PER_SEGMENT (evaluate turns that into a block). isHit(w, name, i) says whether word i is one: by its name,
+// unless the caller reads more words as the command (gitOrFilled, #4815).
+const byName = (names) => (_w, name, i) => names.has(name[i]);
+function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED, isHit = byName(names)) {
   const text = stripMessages(String(cmd ?? '')).replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(/`/g, ' $ ');
   const segs = [...text.matchAll(SEGMENT)].map((m) => {
     const raw = m[0].match(WORD) ?? [];
@@ -668,19 +670,20 @@ function scanCommands(cmd, names, fn, quoted = EVERY_QUOTED) {
   }
   for (const [k, { raw, name }] of segs.entries()) {
     const w = raw.map(unquote);
-    const hits = name.filter((n) => names.has(n)).length;
+    const found = w.map((_x, i) => isHit(w, name, i));
+    const hits = found.filter(Boolean).length;
     if (hits > MAX_COMMANDS_PER_SEGMENT) {
       throw new Error(`${hits} ${[...names].join('/')} commands in one command segment are more than the guard reads (${MAX_COMMANDS_PER_SEGMENT}): split the command`);
     }
     const isCommand = quoted(raw, w, name, piped[k]);
     for (let i = 0; i < w.length; i++) {
       if (/["']/.test(raw[i]) && /[\s;&|]/.test(w[i]) && isCommand(i)) {
-        const inner = scanCommands(w[i], names, fn, quoted);
+        const inner = scanCommands(w[i], names, fn, quoted, isHit);
         if (inner) return inner;
       }
     }
     for (let i = 0; i < w.length; i++) {
-      if (!names.has(name[i])) continue;
+      if (!found[i]) continue;
       const hit = fn(w, i);
       if (hit) return hit;
     }
@@ -694,6 +697,61 @@ function gitSub(w, i) {
   while (j < w.length && w[j].startsWith('-')) j += GIT_OPT_ARG.has(w[j]) ? 2 : 1;
   return j;
 }
+// #4815: a command word the shell fills in ($G, "$GIT", ${GIT:-git}, %GIT%, & $git) can be git, and the rules that stop
+// a push read only the word git. Such a word is read as git when what follows it can push: push; send-pack, http-push,
+// subtree or a config write of an alias; an alias set for the call (-c, --config-env, GIT_CONFIG_* before it); or a
+// subcommand that is filled in too. It must stand as the command, except that an alias set for the call, or push,
+// send-pack, http-push or subtree with words after it, count anywhere (echo $HOME push is no push). Only git's own
+// options may come between, as the file fence reads such a word (filledWrites); past MAX_FILLED_OPTS of them the
+// command is refused. The command position is looked for in the first FILLED_REACH words only, so a long command stays
+// linear; past them a filled word counts as the command (fail closed).
+// The subcommand's index, or -1: not read as git (the word git itself, quoted or with a path, is gitSub's)
+const FILLED_REACH = 64;
+const CONFIG_REACH = 8; // the words after config read for an alias key
+const PAST_PUSH = new Set(['push', 'send-pack', 'http-push', 'subtree']);
+const filledPart = (x) => isFilled(x) || /[$`%]/.test(x);
+// the program's name is what the shell fills in: not a path that ends in a literal name ($HOME/bin/tool); a default in
+// braces (${GIT:-/x/y}) says nothing about what the variable holds
+const filledName = (x) => isFilled(x) && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
+function filledOptions(w, i) {
+  let j = i + 1;
+  let aliased = false;
+  for (let n = 0; j < w.length && w[j].startsWith('-'); n++) {
+    const o = w[j];
+    if (!GIT_GLOBAL_OPTS.has(o.split('=')[0]) && !/^-C./.test(o)) return -1;
+    if (n === MAX_FILLED_OPTS) throw new Error(`more git options than the guard reads after ${w[i].slice(0, 40)}, a command the shell fills in: write the command's own name`);
+    const cfg = o === '-c' || o === '--config-env' ? (w[j + 1] ?? '') : o.startsWith('--config-env=') ? o.slice(13) : '';
+    if (ALIAS_KEY.test(cfg)) aliased = true;
+    j += GIT_OPT_ARG.has(o) ? 2 : 1;
+  }
+  return { j, aliased };
+}
+function filledGit(w, i) {
+  if (!filledName(w[i])) return -1;
+  const read = filledOptions(w, i);
+  if (read === -1) return -1;
+  const { j, aliased } = read;
+  const word = w[j];
+  if (word === undefined) return -1;
+  if (aliased) return j;
+  const atCommand = i >= FILLED_REACH || isCommandWord(w, i);
+  if (PAST_PUSH.has(word)) return atCommand || w.length > j + 1 ? j : -1;
+  if (!atCommand) return -1;
+  const acts = filledPart(word) || (word === 'config' && w.slice(j + 1, j + 1 + CONFIG_REACH).some((x) => ALIAS_KEY.test(x)))
+    || (i < FILLED_REACH && w.slice(0, i).some(configEnvAlias));
+  return acts ? j : -1;
+}
+// the filled word is the program the line runs: before it stand only assignments, shell words, launchers and their
+// options (an option's value, a count or a time too). Past FILLED_REACH words it counts as the program (fail closed)
+const beforeProgram = (x, k, w) => ASSIGNMENT.test(x) || SHELL_KEYWORD.has(x) || LAUNCHERS.has(cmdName(x)) || RUNS_REST_SHELL.has(cmdName(x))
+  || x.startsWith('-') || /^\/\/?[ck]$/i.test(x) || /^\d+(?:\.\d+)?[smhd]?$/.test(x) || (k > 0 && w[k - 1].startsWith('-'));
+const isProgram = (w, i) => i >= FILLED_REACH || /(?:^|=)\$$/.test(w[i - 1] ?? '') || w.slice(0, i).every(beforeProgram);
+// in a seat, a program and its first argument both filled in may be git push, and the guard can read neither
+const bothFilled = (word, first) => `${word.slice(0, 40)} ${first.slice(0, 40)}: the command and its first argument are both filled in by the shell, so the guard cannot tell it is not a git push: write the command's own name`;
+const gitOrFilled = (w, name, i) => GIT.has(name[i]) || filledGit(w, i) >= 0;
+// what the block adds for such a word, and the mark protectedPush puts on its branch so pushReason can add it
+const filledNote = (word) => ` (${word.slice(0, 40)} is filled in by the shell and read as git: write the command's own name)`;
+const FILLED_MARK = '\u0002';
 // a push's words (remote, then refspecs) and options, from the word after push
 function pushArgs(w, j) {
   const words = [], opts = [];
@@ -719,9 +777,7 @@ export function protectedPush(cmd, list) {
   if (!list.length) return null;
   const hit = (b) => list.some((e) => (e.includes('*') ? globRe(e).test(b) : e === b));
   const text = unbrace(cmd); // #4661: once, for both scans
-  return scanCommands(text, GIT, (w, i) => {
-    const j = gitSub(w, i);
-    if (w[j] !== 'push') return subtreePush(w, j, hit); // #4661 S1
+  const pushed = (w, j) => {
     const { words, del } = pushArgs(w, j);
     // the shell fills in a $ word: the branch is unknown here. The remote too: an unquoted $R can split into two words
     const filled = words.find((x) => x.includes('$'));
@@ -735,11 +791,28 @@ export function protectedPush(cmd, list) {
       if (hit(dst)) return dst;
     }
     return null;
-  }) ?? hiddenPushes(text, hit, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
+  };
+  return scanCommands(text, GIT, (w, i) => {
+    const filled = filledGit(w, i); // #4815
+    const j = filled < 0 ? gitSub(w, i) : filled;
+    if (filled < 0) return w[j] === 'push' ? pushed(w, j) : subtreePush(w, j, hit); // #4661 S1
+    let branch;
+    if (w[j] === 'push') branch = pushed(w, j);
+    else if (w[j] === 'subtree') branch = subtreePush(w, j, hit);
+    else if (filledPart(w[j])) { // the subcommand is filled in too: only a protected branch named later says it
+      const named = namesBranch(stopArgs(w.slice(j + 1)), hit);
+      branch = named && `${ALIAS_MARK}${w[j]}${ALIAS_MARK}${named}`;
+    } else branch = aliasPush(w, i, j, hit); // an alias set for the call
+    return branch ? `${FILLED_MARK}${w[i]}${FILLED_MARK}${branch}` : null;
+  }, EVERY_QUOTED, gitOrFilled) ?? hiddenPushes(text, hit, list); // #4661 S1: git $S / an alias naming the branch; B1: a setting's command
 }
 
 // The block reason for a protectedPush hit.
 function pushReason(branch) {
+  if (branch.startsWith(FILLED_MARK)) { // #4815
+    const [, word, inner] = branch.split(FILLED_MARK);
+    return pushReason(inner) + filledNote(word);
+  }
   if (branch.startsWith(ALIAS_MARK)) return aliasReason(branch); // #4661
   return branch.includes('$')
     ? `git push to a branch the shell fills in (${branch}) while branches are protected: name the branch literally, e.g. git push -u origin feat/my-card`
@@ -923,11 +996,28 @@ function aliasPush(w, i, j, hit) {
 // (r3-1: cmdName reads a command word without its quotes, so g""it and 'gi''t' are git too)
 const GIT_WORD = /g\W*i\W*t/i;
 function hiddenPushes(text, hit, list) {
-  if (!GIT_WORD.test(text)) return null;
+  if (!GIT_WORD.test(text) && !/[$%]/.test(text)) return null;
+  // #4826: a filled program, then a word that is no git command but could name one (an alias set by an earlier statement
+  // or in the environment, xargs' {}), then a protected branch: as the literal git rule (aliasPush). A script or a path
+  // is no such word, nor what follows a PowerShell assignment. The last branch named is read once per segment (linear)
+  const lastNamed = new WeakMap();
+  const unknownFilled = (w, i) => {
+    if (!filledName(w[i]) || w[i].endsWith('=')) return -1;
+    const read = filledOptions(w, i);
+    const word = read === -1 ? undefined : w[read.j];
+    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word.toLowerCase())) return -1;
+    if (!lastNamed.has(w)) lastNamed.set(w, w.findLastIndex((x) => namesBranch([x], hit) !== null));
+    return lastNamed.get(w) > read.j && isProgram(w, i) ? read.j : -1;
+  };
   return scanCommands(text, GIT, (w, i) => {
+    if (filledName(w[i])) {
+      const j = unknownFilled(w, i);
+      const named = j < 0 ? null : namesBranch(stopArgs(w.slice(j + 1)), hit);
+      return named && `${FILLED_MARK}${w[i]}${FILLED_MARK}${ALIAS_MARK}${w[j]}${ALIAS_MARK}${named}`;
+    }
     const j = gitSub(w, i);
     return aliasPush(w, i, j, hit) ?? valuesPush(w, i, j, list, text);
-  }, runnerArg);
+  }, runnerArg, (w, name, i) => GIT.has(name[i]) || unknownFilled(w, i) >= 0);
 }
 const RUNS_ENV = /^(GIT_EXTERNAL_DIFF|GIT_SSH|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_ASKPASS|SSH_ASKPASS|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PROXY_COMMAND|EDITOR|VISUAL|GIT_PAGER|PAGER)=(.*)$/is;
 const SWITCH = /^(?:true|false|yes|no|on|off|[01])?$/i;
@@ -2366,7 +2456,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
   const seatVars = seatVarChange(String(command ?? '')) ?? freshEnv(String(command ?? ''), hostList, role, deployHost);
   if (seatVars) return seatVars;
   if (typeof readScript === 'function') {
-    const pending = scriptCalls(command, '', deployHost), seen = new Set();
+    const pending = calledIn(String(command ?? ''), '', deployHost), seen = new Set();
     let bytes = 0;
     for (let i = 0; i < pending.length; i++) {
       if (i >= 32) return 'shell script traversal exceeds the guard limit (32 files): split the command';
@@ -2378,14 +2468,16 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
       const read = readings(text); // #4776: bash drops a script's carriage returns too
-      for (const t of read) {
+      for (const t of read.flatMap((r) => unredirected(r))) {
         const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
         if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
       }
+      // other languages quote their own way, so only a shell's script is held to this
+      if (shellScript(p, text) && read.some(unplacedRedirect)) return `running ${p.slice(0, 120)}: ${UNPLACED}`;
       // the scripts it runs, as read without them, so a CRLF script's calls count once; with a CR alone (PowerShell ends
       // a line there) as written too
       const named = /\r(?!\n)/.test(text) ? read : read.slice(-1);
-      for (const t of named) pending.push(...scriptCalls(t, cwd, vps));
+      for (const t of named) pending.push(...calledIn(t, cwd, vps));
     }
   }
   const secret = secretRead(String(command ?? ''));
@@ -2397,11 +2489,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
   const trust = squadTrustRun(command);
   if (trust) return trust;
   const readOnly = READ_ONLY_ROLES.includes(role);
-  const git = scanCommands(unbrace(command), GIT, (w, i) => {
-    const j = gitSub(w, i);
-    const hides = gitHides(w, i, j, role, command); // #4638: aliases, push and commit plumbing, a read-only role's git ci
-    if (hides) return hides;
-    if (w[j] !== 'push') return null;
+  const pushRules = (w, j) => {
     if (readOnly) return `git push: ${readsOnly(role)}`;
     const { words, opts, del } = pushArgs(w, j);
     if (opts.some((x) => FORCE_OPT.test(x)) || words.some((x) => x.startsWith('+'))) {
@@ -2412,7 +2500,15 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
     const head = words.slice(1).map((r) => destination(r, del)).find((d) => d === 'HEAD' || d === '@');
     if (head) return `git push to ${head} writes the current branch under its own name, maybe main: name the destination, e.g. git push origin HEAD:feat/my-card`;
     return null;
-  }, runnerArg);
+  };
+  const git = scanCommands(unbrace(command), GIT, (w, i) => {
+    const filled = filledGit(w, i); // #4815: a command the shell fills in, read as git
+    const j = filled < 0 ? gitSub(w, i) : filled;
+    if (filled >= 0 && filledPart(w[j] ?? '')) return isProgram(w, i) ? bothFilled(w[i], w[j]) : null;
+    const why = gitHides(w, i, j, role, command) // #4638: aliases, push and commit plumbing, a read-only role's git ci
+      ?? (w[j] === 'push' ? pushRules(w, j) : null);
+    return why && filled >= 0 ? why + filledNote(w[i]) : why;
+  }, runnerArg, gitOrFilled);
   if (git) return git;
   const branch = protectedPush(command, ['main', 'master']);
   if (branch) return pushReason(branch);
@@ -3057,6 +3153,141 @@ function judge(name, args, fed, depth, vars = new Map()) {
 // one runs. Text holding any is judged without them as well as as written, never instead: PowerShell ends a line at one
 function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\r', '')] : [text]; }
 
+// #4803: bash takes a redirect anywhere in a command. One before the command word was read as the command, and the & in
+// one (2>&1, &>log) cut the command in two. Text holding a redirect is judged without them too, never instead. << (a
+// heredoc) stays. Messages and heredoc data are dropped first: which text is data depends on the redirect (cat > notes
+// <<EOF writes its text away). Two readings, since neither is enough: one counts no quotes, so it holds after text that
+// throws the count off; one counts them as bash does, into quoted command strings, so a target glued from any pieces
+// ("my "log) is one word. A line continuation is also read joined
+// a file descriptor of any length: digits are tried from the start of their run only, so a long run is read once
+const REDIRECT_MARK = String.raw`(?:(?<!\d)\d+|\*|&|\{[A-Za-z_]\w*\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*`;
+// part of a target: a substitution (bounded, so the scan stays linear), an escape or a plain character (\x60: a backtick)
+const TARGET_PART = String.raw`\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|\x60[^\x60\n]{0,200}\x60|\\[\s\S]|[^\s"'\x60\\;&|<>(){}]`;
+// with no quote count, a quoted part is one where its closing quote ends the word, or a short one with no blank or separator
+const LOOSE_QUOTED = String.raw`"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|'[^'\s;&|()<>]{0,200}'|"[^"\\\s;&|()<>$\x60]{0,200}"`;
+const REDIRECT = new RegExp(`${REDIRECT_MARK}(?:${LOOSE_QUOTED}|${TARGET_PART})+`, 'g');
+const SHELL_NEXT = String.raw`('[^']*'|"(?:\\[\s\S]|[^"\\])*")|\\[\s\S]|${REDIRECT_MARK}`;
+const CASE_WORD = /(?<![\w.-])case(?![\w.-])/y; // case.txt and my.case are names
+// where the redirect target at i ends, read as one shell word: quotes, $( ), ${ }, <( ), >( ) and backticks nest. -1: it
+// does not close. -2: a substitution holds what this count cannot follow (case, a comment, a heredoc). powershell: the
+// backtick is the escape and a backslash is plain. One pass
+function wordEnd(text, i, powershell) {
+  const open = []; // what each open quote or bracket waits for
+  if ((text[i] === '<' || text[i] === '>') && text[i + 1] === '(') { open.push(')'); i += 2; }
+  for (; i < text.length; i++) {
+    const c = text[i], want = open[open.length - 1];
+    if (want === "'") { if (c === "'") open.pop(); continue; }
+    if (c === (powershell ? '`' : '\\')) { i++; continue; }
+    if (want === "$'") { if (c === "'") open.pop(); continue; }
+    if (c === '`' && !powershell) { if (want === '`') open.pop(); else open.push('`'); continue; }
+    if (c === '$') {
+      const next = text[i + 1];
+      if (next === '(') { open.push(')'); i++; } else if (next === '{') { open.push('}'); i++; } else if (next === "'" && want !== '"') { open.push("$'"); i++; }
+      continue;
+    }
+    if (c === '"') { if (want === '"') open.pop(); else open.push('"'); continue; }
+    if (want === '"') continue;
+    if (c === "'") { open.push("'"); continue; }
+    if (want === ')') {
+      CASE_WORD.lastIndex = i;
+      if ((c === '#' && /[\s;&|()]/.test(text[i - 1])) || (c === '<' && text[i + 1] === '<') || CASE_WORD.test(text)) return -2;
+      if (c === ')') open.pop(); else if (c === '(') open.push(')');
+      continue;
+    }
+    if (want === '}') { if (c === '}') open.pop(); else if (c === '{') open.push('}'); continue; }
+    if (want === '`') continue;
+    if (/[\s;&|<>()]/.test(c)) break;
+  }
+  return open.length ? -1 : Math.min(i, text.length);
+}
+// a string handed to a shell, as the text just before its quote shows: the shell (or its .exe), any unquoted words, the
+// option holding c and any options after it; or eval. The c option splits at its first c, so a long one is read once
+const SHELL_STRING = /(?<![\w-])(?:(?:ba|da|z|k)?sh(?:\.[eE][xX][eE])?["']?(?:[ \t]+[^\s"';&|<>()]+)*?[ \t]+-[abd-zA-Z0-9_]*c\w*(?:[ \t]+-[^\s"';&|<>()]*)*|eval(?:[ \t]+--)?)[ \t]+$/;
+const SHELL_STRING_REACH = 300; // how far back the shell's name is looked for
+// as bash counts quotes: each redirect goes with its whole target. A quoted piece that is no target is read the same way
+// inside, a few deep: a command string's own redirects go too. At a target that does not end the reading stops and, for
+// shell text (this command's, or a string handed to a shell), says so (lost.found). A target that does not close under
+// bash's count is read with PowerShell's, switching at most once, so it stays linear
+function shellUnredirected(text, left, depth = 0, lost = {}) {
+  const next = new RegExp(SHELL_NEXT, 'g');
+  let out = '', done = 0, powershell = false;
+  for (let m = next.exec(text); m; m = next.exec(text)) {
+    const [match, quoted] = m;
+    let swap = match, end = next.lastIndex;
+    if (quoted !== undefined) {
+      if (depth < 3 && /[<>]/.test(quoted)) {
+        const handed = SHELL_STRING.test(text.slice(Math.max(0, m.index - SHELL_STRING_REACH), m.index));
+        swap = quoted[0] + shellUnredirected(quoted.slice(1, -1), left, depth + 1, handed ? lost : {}) + quoted[0];
+      }
+    } else if (!match.startsWith('\\')) {
+      let to = wordEnd(text, end, powershell);
+      if (to === -1 && !powershell) { powershell = true; to = wordEnd(text, end, true); }
+      if (to < 0) {
+        lost.found = true;
+        break;
+      }
+      if (to > end) { swap = left(text.slice(m.index, to), m.index, text); end = to; }
+    }
+    if (swap !== match || end !== next.lastIndex) {
+      out += text.slice(done, m.index) + swap;
+      done = end;
+      next.lastIndex = end;
+    }
+  }
+  return done === 0 ? text : out + text.slice(done);
+}
+// bash takes a heredoc header before the command word too (<<x cmd), and reads the same with it at the line's end
+const HEREDOC_ANY = /(?<!<)<<(?!<)-?[ \t]*(?:'[^'\n]*'|"[^"\n]*"|\\.|[^\s"'\\;&|<>()])+/g;
+function headersLast(line) {
+  const headers = line.includes('<<') ? line.match(HEREDOC_ANY) : null;
+  if (!headers) return line;
+  const after = line.slice(line.indexOf(headers[0])).replace(HEREDOC_ANY, ' ');
+  return /^[ \t]*[^ \t;&|<>()#]/.test(after) ? `${line.replace(HEREDOC_ANY, ' ')} ${headers.join(' ')}` : line;
+}
+// a redirect of this shell's whose target does not end: the command behind it cannot be found. Heredoc bodies are another
+// program's text, and comments are none
+function unplacedRedirect(text) {
+  if (!/[<>]/.test(text)) return false;
+  const lost = {};
+  shellUnredirected(blankComments(replaceHeredocs(stripMessages(text), (_all, line, id) => `${line}\n${id}`)), () => ' ', 0, lost);
+  return lost.found === true;
+}
+// a shell's script by its #! line, or with none by its name: .sh and the like, or no extension at all
+const shellScript = (path, text) => (text.startsWith('#!') ? /^#![^\n]*[/ \t](?:ba|da|z|k)?sh(?=\s|$)/.test(text) : /(?:\.(?:sh|bash|zsh|ksh)|(?:^|[\\/])[^\\/.]+)$/i.test(path));
+const UNPLACED = 'the guard cannot find where a redirect\'s target ends, so it cannot see the command behind it: split the command, or give the target a plain name';
+// cat >file <<WORD at a line's start, with nothing after the header, hides nothing: left as written, so the usual huge
+// command, a file written from a heredoc, is judged once. Each test reads a bounded piece
+const catToFile = (redirect, at, text) => /^>>?[ \t]*[A-Za-z0-9_./-]+$/.test(redirect) && /(?:^|\n)[ \t]*cat[ \t]+$/.test(text.slice(Math.max(0, at - 40), at))
+  && /^[ \t]*<<-?[ \t]*(["']?)\w{1,40}\1[ \t]*(?:\n|$)/.test(text.slice(at + redirect.length, at + redirect.length + 80));
+function unredirected(text, left = (redirect, at, all) => (catToFile(redirect, at, all) ? redirect : ' ')) {
+  if (!/[<>]/.test(text)) return [text];
+  const kept = stripMessages(text), forms = new Set([text]);
+  for (const source of new Set([kept, joinLines(kept)])) {
+    const lost = {};
+    let counted = shellUnredirected(source, left, 0, lost);
+    if (lost.found) counted = shellUnredirected(blankComments(source), left); // a comment may be what did not end
+    for (const read of [source.replace(REDIRECT, left), counted]) {
+      const bare = read.split('\n').map(headersLast).join('\n');
+      if (bare !== source) forms.add(bare);
+    }
+  }
+  return [...forms];
+}
+// for the stdin-session rule only output redirects are left out: an input one is what gives the command its input
+const outputOnly = (redirect) => (/^(?:\d+|\*|&|\{\w+\})?>/.test(redirect) ? ' ' : redirect);
+// the scripts a text calls, read with and without its redirects; a call both readings show is listed once
+function calledIn(text, cwd, deployHost) {
+  const calls = scriptCalls(text, cwd, deployHost), [, ...bare] = unredirected(text);
+  if (bare.length === 0) return calls;
+  const key = (c) => `${c.cwd}\n${c.path}\n${c.deployHost}`, listed = new Set(calls.map(key));
+  for (const call of bare.flatMap((b) => scriptCalls(b, cwd, deployHost))) {
+    if (listed.has(key(call))) continue;
+    listed.add(key(call));
+    calls.push(call);
+  }
+  return calls;
+}
+
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
@@ -3071,7 +3302,8 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      for (const written of readings(command)) {
+      const spellings = readings(command).flatMap((r) => unredirected(r)); // #4776, #4803
+      for (const written of spellings) {
         // #4737: judged as written, then with split and built names read out (only when that changes something)
         const shown = revealed(written);
         for (const text of shown === written ? [written] : [written, shown]) {
@@ -3083,8 +3315,10 @@ export function evaluate(req) {
           if (byRole) return block('role', byRole);
         }
       }
+      if (readings(command).some(unplacedRedirect)) return block('input', UNPLACED);
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
-      const session = stdin === true && role ? readings(command).map((text) => stdinSession(text)).find(Boolean) : null;
+      const typed = stdin === true && role ? readings(command).flatMap((r) => unredirected(r, outputOnly)) : [];
+      const session = typed.map((text) => stdinSession(text)).find(Boolean) ?? null;
       return session ? block('role', SESSION(session)) : { allow: true };
     }
     // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool
