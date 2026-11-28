@@ -226,15 +226,27 @@ const TEXT_WRITER = /^[ \t]*(?:cb[ \t]|cat[ \t]*>>?[ \t]*\S|git[ \t]+commit\b.*-
 const SUBST_CAT = /\$\([ \t]*cat[ \t]*$/;
 const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[^;&|\n]*"$`);
 
+// #4824: the & of an fd duplication (2>&1, >&2, >&-) ends no command, in any shell. Only cb and git commit get this
+// reading: their stdin is text wherever their output goes. A cat's body is its output, which such a redirect can send on
+// (cat >&1 | bash, cat > f >&2 |& bash). &> stays a split: sh reads it as & and then >
+const FD_DUP = /(?<=>)&(?=(?:\d+|-)(?:[ \t<>]|$))/g;
+const MESSAGE_READER = /^[ \t]*(?:cb[ \t]|git[ \t]+commit\b.*-F[ \t]+-)/;
+
+// the command segment holding the << at `at`
+function heredocSegment(line, at) {
+  const before = line.slice(0, at);
+  const seg = before.slice(Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1);
+  const after = line.slice(at).search(/[;&|]/);
+  return seg + (after < 0 ? line.slice(at) : line.slice(at, at + after));
+}
+
 // Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<.
 function writesText(line) {
   if (line.split('<<').length !== 2) return false; // two heredocs on one line: strip neither
   const at = line.indexOf('<<');
   const before = line.slice(0, at);
   if (SUBST_CAT.test(before)) return MESSAGE_ARG.test(before.replace(SUBST_CAT, '')); // "$(cat <<'EOF' in a message arg
-  const seg = before.slice(Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1);
-  const after = line.slice(at).search(/[;&|]/);
-  return TEXT_WRITER.test(seg + (after < 0 ? line.slice(at) : line.slice(at, at + after)));
+  return TEXT_WRITER.test(heredocSegment(line, at)) || MESSAGE_READER.test(heredocSegment(line.replace(FD_DUP, '_'), at));
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
