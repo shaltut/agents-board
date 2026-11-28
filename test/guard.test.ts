@@ -6,7 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
+import { check, evaluate, foldUp, protectedPush, READ_ONLY_ROLES, ROLES, secretPath, stripMessages, uncommented } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
 import { runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
@@ -284,6 +284,145 @@ test('#4768, #4770: a command bash runs is never dropped as heredoc text; real h
   // the card's own repro: a role rule that reads the same stripped text
   assert.equal(evaluate({ tool: 'shell', command: "cat > notes.txt <<'EOF'\nEOF\nunset CB_ROLE\nEOF", role: 'builder' }).allow, false, 'the seat variable');
   for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
+});
+
+// #4774: message text is dropped only where a shell runs the message command. In each of these the command, or the
+// quote that seems to open its message, stands in a comment or a quoted word, and the shell runs the line between
+const hiddenByMessage: [string, (c: string) => string][] = [
+  ['cb log in a comment', (c) => `# cb log 1 "\n${c}\n# "`],
+  ['cb log in a comment, single quotes', (c) => `# cb log 1 '\n${c}\n# '`],
+  ['git commit in a comment', (c) => `# git commit -m "\n${c}\n# "`],
+  ['gh pr comment in a comment after a command', (c) => `echo ok # gh pr comment 1 --body "\n${c}\n# "`],
+  ['herdr prompt in a comment', (c) => `# herdr agent prompt x "\n${c}\n# "`],
+  ['cb log in a single-quoted word', (c) => `echo 'cb log 1 "' >/dev/null\n${c}\necho '"' >/dev/null`],
+  ['cb log in a double-quoted word', (c) => `echo "cb log 1 '" >/dev/null\n${c}\necho "'" >/dev/null`],
+  ['cb log in a quote opened lines before', (c) => `echo '\ncb log 1 "\n' >/dev/null\n${c}\necho '"' >/dev/null`],
+  ['the quote after a message command is in a comment', (c) => `cb log 1 text # "\n${c}\n# "`],
+  ['the quote after a commit is in a comment', (c) => `git commit --amend --no-edit # '\n${c}\n# '`],
+  ['a second quote of a message is in a comment', (c) => `cb log 1 "a" # "\n${c}\n# "`],
+  ['cb log in a comment after a substitution', (c) => `echo $(echo a)# cb log 1 "\n${c}\n# "`],
+  ['cb log in a comment after a heredoc', (c) => `cat > a <<'EOF'\ntext\nEOF\n# cb log 1 "\n${c}\n# "`],
+  // seats also run PowerShell: each of these runs the line there
+  ['cb log in a PowerShell block comment', (c) => `<# cb log 1 " #>\n${c}\n<# " #>`],
+  ['cb log in PowerShell smart quotes', (c) => `echo “ cb log 1 " ”\n${c}\necho “ " ”`],
+];
+const messageText = [
+  `cb log 1 "git reset --hard is blocked"`, `cd ~/work && cb log 1 "never git reset --hard here"`,
+  `cd C:\\w\\x; cb tell lead "git reset --hard"`, `# post the result\ncb log 1 "git reset --hard"`,
+  // a comment holding a quote, \ $ ( ) or < before a message is not read past (#4768 never skips comments): judged as written
+  `cb log 1 "a" && cb tell lead 'git reset --hard'`,
+  `out=$(cb log 1 "git reset --hard")`, `echo "$(cb log 1 'git reset --hard')"`,
+  `cat > a <<'EOF'\ndon't\nEOF\ncb log 1 "git reset --hard"`,
+  `python3 - <<'PY'\nprint("it's")\nPY\ncb log 1 "git reset --hard"`,
+  `git commit -m "$(cat <<'EOF'\nfix: it's done\nEOF\n)" && gh pr create --title "t" --body "git reset --hard"`,
+  `cb log 1 "he said \\"no\\" to git reset --hard"`,
+  `git add -A && git commit -m 'fix: no git reset --hard' -m 'git reset --hard again'`,
+  `cb log 1 "line one\ngit reset --hard\nline three"`, `cb log 1 "# not a comment" "git reset --hard"`,
+];
+// a quote glued to a word is a string too: between double quotes ' is plain text, so a $( ) inside the "message" runs
+const hiddenByGluedQuote: [string, (c: string) => string][] = [
+  ['a quote glued to a word', (c) => `echo a"cb log 1 '$(${c})'"`],
+  ['a quote right after an assignment', (c) => `x=";cb log 1 '$(${c})'"`],
+  // review R2 at 7154e40: the "message" ran from inside the glued quote to a quote lines later
+  ['a glued quote, closed lines later', (c) => `echo x"cb log 1 '" >/dev/null\n${c}\necho "'" >/dev/null`],
+  // a rule that reads a quoted word as a command of its own must not drop a $( ) there: it ran with the outer quotes
+  ['a substitution in a double-quoted word that reads like a message', (c) => `echo "cb log 1 '$(${c})'"`],
+  ['the same with backticks', (c) => `echo "cb log 1 '\`${c}\`'"`],
+  ['the same handed to bash -c', (c) => `bash -c "cb log 1 '$(${c})'"`],
+  ['a substitution in a double-quoted word that reads like a heredoc', (c) => `echo "cat > a <<'EOF'\n$(${c})\nEOF"`],
+];
+test('#4774: a message in a substitution in quotes is still text to every rule', () => {
+  for (const command of [`x="$(cb log 1 'never git push origin main')"`, `echo "$(cb log 1 'git push -f origin feat/x')"`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+test('#4774: a command a shell runs is never dropped as message text; real message text still is', () => {
+  const missed: string[] = []; // every miss, so one failing run names them all
+  const allows = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' }).allow;
+  // the same text with no message command or text writer in it
+  const noMessage = (s: string) => s.replace(/\bcb log\b|\bgit commit\b|\bherdr agent prompt\b|\bcat > a\b/g, 'echo');
+  for (const [name, make] of [...hiddenByMessage, ...hiddenByGluedQuote]) {
+    // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
+    if (!stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE')) missed.push(`${name}: the line does not reach the rules`);
+    if (!check(make('git reset --hard'))) missed.push(`${name}: a reset passes`);
+    if (allows(make('git push origin main'))) missed.push(`${name}: a builder may push to main`);
+    // the other rules read less inside quotes, with or without a message there: what they block without the message
+    // words, they must block with them
+    for (const c of ['git push -f origin feat/x', 'taskkill /IM node.exe', 'env -i git push origin feat/x']) {
+      if (allows(make(c)) && !allows(noMessage(make(c)))) missed.push(`${name}: the message words let "${c}" pass`);
+    }
+  }
+  assert.deepEqual(missed, []);
+  for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
+});
+
+// #4827: a quoted word deeper than the message command is not its text: it belongs to a command in a substitution
+// among its arguments (or beside it), which runs
+const nestedInArgs: [string, (c: string) => string][] = [
+  ['in a substitution among cb arguments', (c) => `cb log 1 $(${c})`],
+  ['after the message text', (c) => `cb log 1 "text" $(${c})`],
+  ['among commit arguments', (c) => `git commit --amend $(${c})`],
+  ['in a substitution inside a substitution', (c) => `cb log 1 $(echo $(${c}))`],
+  ['in parentheses after an input mark', (c) => `cb log 1 <(${c})`],
+  ['in backticks', (c) => `cb log 1 \`${c}\``],
+  ['in a second substitution, the message command in the first', (c) => `echo $(cb log 1 x) $(${c})`],
+];
+const quotedCmds = ["git push origin 'main'", "git push '-f' origin feat/x", "git reset '--hard'", "taskkill '/IM' node.exe"];
+test('#4827: a quoted word of a command in a substitution among message arguments is judged', () => {
+  const missed: string[] = [];
+  for (const [name, make] of nestedInArgs) {
+    for (const c of quotedCmds) {
+      if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
+    }
+  }
+  assert.deepEqual(missed, []);
+  // text at the message command's own depth is still text, after a substitution has closed too
+  for (const command of [`cb log 1 $(date +%s) "git reset --hard is blocked"`, `out=$(cb log 1 "git reset --hard")`,
+    `echo "$(cb log 1 'git reset --hard')"`, `cb log 1 "a" "git reset --hard" && cb tell lead 'git reset --hard'`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
+// #4777: a quote in a comment pairs with nothing. The rules that pair quotes paired it with one in a later comment and
+// lost the lines between. A shell runs the line between in each of these
+const hiddenByComment: [string, (c: string) => string][] = [
+  ['two comment lines, double quotes', (c) => `# "\n${c}\n# "`],
+  ['an apostrophe in a comment', (c) => `# it's fine\n${c}\n# '`],
+  ['a comment after a command', (c) => `true # don't\n${c}\n#'`],
+  ['a comment right after ;', (c) => `echo ok;# "\n${c}\n# "`],
+  ['CRLF lines', (c) => `# "\r\n${c}\r\n# "`],
+  ['a comment inside a substitution', (c) => `echo $(date # "\n)\n${c}\n# "`],
+  ['after a heredoc with an apostrophe', (c) => `cat > a <<'EOF'\ndon't\nEOF\n# '\n${c}\n# '`],
+  ['after a script heredoc with an apostrophe', (c) => `python3 - <<PY\nprint("don't")\nPY\n# '\n${c}\n# '`],
+  ['after an arithmetic shift', (c) => `echo $((1<<2))\n# "\n${c}\n# "`],
+  ['after a message with escaped quotes', (c) => `cb log 1 "a \\"b\\""\n# "\n${c}\n# "`],
+  ["after $'..' with an escaped quote", (c) => `echo $'it\\'s'\n# '\n${c}\n# '`],
+  ['PowerShell block comments', (c) => `<# " #>\n${c}\n<# " #>`],
+];
+const commentedRoleCmds: [string, string][] = [
+  ['builder', 'git push -f origin feat/x'], ['builder', 'git push'], ['builder', 'gh pr merge 1'], ['builder', 'git push origin main'],
+  ['reviewer', 'git commit -am x'], ['builder', 'unset CB_ROLE'], ['builder', 'export CB_ROLE=lead'], ['builder', 'git reset --hard'],
+];
+const commentText = [
+  `# don't force this\ngit push origin feat/x`, `git push origin feat/x # it's "done"`, `echo "# it's" && git status`,
+  `cb log 1 "# not a comment: don't unset CB_ROLE"`, `cat > a <<'EOF'\n# don't unset CB_ROLE\nEOF\ngit status`,
+  `echo \${#x} $# a#b # '\ngit status`,
+];
+test('#4777: a quote in a comment hides nothing from any rule', () => {
+  for (const [name, make] of hiddenByComment) {
+    for (const [role, c] of commentedRoleCmds) {
+      assert.equal(evaluate({ tool: 'shell', command: make(c), role }).allow, false, `${role} must block "${c}": ${name}`);
+    }
+  }
+  for (const command of commentText) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
+test('#4777: a script a seat runs is read without its comment quotes too', () => {
+  const script = `#!/bin/sh\n# don't\nunset CB_ROLE\n# '\n`;
+  const out = evaluate({ tool: 'shell', command: 'bash run.sh', role: 'builder', readScript: () => script });
+  assert.equal(out.allow, false);
 });
 
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
@@ -1278,6 +1417,22 @@ test('#4741: a command string stays judged after text that throws the quote coun
   }
 });
 
+// #4813: foldUp took over from this regex, which stays here as what it must give: the path fence reads its result
+test('#4813: the one-pass seg/../ fold gives what the regex gave', () => {
+  const was = (s: string) => s.replace(/(?<![^\\/\s"'=:(>])(?!\.\.?(?:[\\/]|$))[^\\/\s"';&|)>]+[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/g, '');
+  for (const s of ['~/.codex/x/../hooks.json', 'a/b/c/../../d', ';a/../b', ';a=b/../c', 'x(1)/../y', '$($(a/..', './../a', '../..', 'a/.../b', 'a//..//b', 'a\\..\\b', 'a/..', 'a/..x', '=../..', '(./..', '']) {
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+  // random short paths over the characters either reading treats apart; a fixed seed, so a failure repeats
+  const parts = ['a', 'b', '.', '..', '/', '/', '/..', '\\', ' ', '"', "'", '=', ':', '(', ')', '>', ';', '&', '|', '$', '\n'];
+  let seed = 4813;
+  const next = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  for (let i = 0; i < 60000; i++) {
+    const s = Array.from({ length: next(14) }, () => parts[next(parts.length)]).join('');
+    assert.equal(foldUp(s), was(s), JSON.stringify(s));
+  }
+});
+
 test('long commands stay fast', () => {
   const budget = machineBudget();
   const big = 'git add ' + 'src/feature/file-0000.ts '.repeat(8500); // about 200 KB
@@ -1392,8 +1547,31 @@ test('long commands stay fast', () => {
     // #4768: the shell reader walks the command once, however deep it nests
     ['#4768, 100,000 open parens then 8,000 empty heredocs, as a builder', asBuilder('( '.repeat(100000) + "\ncat > a <<'EOF'\nEOF".repeat(8000))],
     ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
+    ['#4774, 200 KB of message commands in comments', asBuilder('# cb log 1 "\n'.repeat(15000))],
+    ['#4774, 200 KB of message commands in one comment', asBuilder('# ' + 'cb log 1 '.repeat(22000) + '"x"')],
+    ['#4774, 200 KB of messages, one command each', asBuilder('cb log 1 "a b";'.repeat(13000))],
+    ['#4777, 200 KB of block comment openers with no end', () => uncommented('echo <#x '.repeat(22000) + '# "')],
+    ["#4777, 200 KB of $' with escaped ends", () => uncommented("echo $'\\' ".repeat(20000) + '# "')],
+    ['#4777, 200 KB of heredoc openers with no end line', () => uncommented('cat <<EOF # "\n'.repeat(14000))],
+    ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
     ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
+    // #4813: the seg/../ fold started a match after any ( and rescanned the run from each: 27 s, then ALLOW
+    ['#4813, 50,000 nested substitutions, then a path', asBuilder('$('.repeat(50000) + ';' + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, the same with nothing between', asBuilder('$('.repeat(50000) + ')'.repeat(50000) + ' ~/.claude/settings.json')],
+    ['#4813, a quoted run of substitution openers after a variable', asBuilder('"$X' + '$('.repeat(50000) + '" ~/.claude/settings.json')],
+    ['#4813, the fold on 200 KB of places a segment may start', () => foldUp('=(:'.repeat(70000) + '/..')],
+    ['#4813, the fold on 200 KB of segments, each followed by a name', () => foldUp('a/..x/'.repeat(34000))],
+    // #4802: the cut-substitution walk (cutsGitCall) and the clean-piece pattern. Nesting is spaced here; unspaced
+    // nesting was slow in fencePath's .. fold, which the #4813 cases above pin
+    ['#4802, 200 KB of closed $(a;) words, then a fence path', asBuilder(kb200('$(a;) ') + 'opencode.json')],
+    ['#4802, 200 KB of $(a; left open, then a fence path', asBuilder(kb200('$(a;') + ' opencode.json')],
+    ['#4802, 200 KB of nested closed substitutions, then a fence path', asBuilder('$( '.repeat(40000) + ';' + ' )'.repeat(40000) + ' opencode.json')],
+    ['#4802, 200 KB of a filled word and an option whose bare value never closes', asBuilder(kb200('$A -C $( ') + 'opencode.json')],
+    ['#4802, 200 KB of a filled word and a bare backtick value', asBuilder(kb200('$A -C ` ') + 'opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of $( starts, before a fence path', asBuilder('caffeinate $GIT "' + kb200('$( ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of ${a:- starts', asBuilder('caffeinate $GIT "' + kb200('${a:- ') + '" opencode.json')],
+    ['#4798, a filled word then a 200 KB quoted word of one open $( and plain $x words', asBuilder('caffeinate $GIT "$(' + kb200('$x y ') + '" opencode.json')],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
@@ -1938,6 +2116,29 @@ test('#4803: a name with case beside a dot is no case statement', () => {
     'Get-Date > "$name`.txt"', 'echo $((1 << 4)) > out']) assert.equal(judged4803(command), 'allow', command);
 });
 
+// #4836: PowerShell writes `. to end a variable's name before a dot. In a redirect target that backtick was read as a
+// substitution, which cut the file name into two filled words: "a command and its first argument". Only that shape passes
+test('#4836: a PowerShell redirect target with a backtick-escaped dot is a file name, not a command', () => {
+  const allowed = ['Get-Date > "$name`.txt"', 'Get-Date >> "$name`.log"', 'Get-Date 2>"$env:TEMP`.err"', 'Get-Date > "C:\\logs\\$name`.2026.txt"',
+    'Get-Date > "out/run-$id`.txt" ; Get-Date'];
+  for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
+});
+
+test('#4836: every other filled pair stays refused', () => {
+  const refused = [
+    // the same word where it is no redirect target, also after a > that is only text
+    'echo "$name`.txt"', 'echo ">" "$name`.txt"', "echo 'a > ' \"$name`.txt\"",
+    // not the shape: blanks, another escape, two backticks, a substitution, a second variable, more after the quote
+    'Get-Date > "$name`.txt $x"', 'Get-Date > "$name`n.txt"', 'Get-Date > "$G`. p`"', 'Get-Date > "$a`.$(x)"', 'Get-Date > "$a`.$b"',
+    'Get-Date > "$name`.txt"$x`.y',
+    // a pair beside an exempt target
+    '$G $S > "$name`.txt"', 'Get-Date > "$name`.txt" ; $G "$a$b" origin feat/x',
+    // what a rule that read the line for push signals let through (the lead's reviews, which ruled it out)
+    '$G $(git remote | head -1) feat:main', '$G alias.p=$P p -f origin feat', '$G: $(echo origin feat)',
+    '$G `git remote | head -1` feat:main', '$G $(git config x.y) origin feat'];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
+});
+
 test('#4803: a heredoc header before the command word hides nothing', () => {
   for (const r of ['<<x', "<<'x'", '<<-x', '<<"x"', '<<x 2>&1', '2>&1 <<x', '<<y <<x']) threeWays4803(r, '\nx');
   // the delimiter is any shell word
@@ -2112,6 +2313,27 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
 });
 
+test('#4828: a PowerShell variable that takes a git command\'s output is not the word git', () => {
+  const allowed = ['$x = git rev-parse main', '$x =git rev-parse main', '$tip = git rev-parse origin/main; git log --oneline $tip',
+    '$base = git merge-base HEAD main\ngit diff $base main', '$x, $y = git rev-parse main develop', '$a, $b, $c = git rev-parse HEAD main develop'];
+  for (const role of ['builder', 'reviewer', 'lead'] as const) {
+    for (const c of allowed) assert.equal(kindOf(c, role), 'allow', `${role}: ${c}`);
+  }
+  // a comparison of that variable is no git subcommand of a read-only role
+  assert.equal(kindOf('$h = git rev-parse HEAD; if ($h -eq "abc") { echo same }', 'reviewer'), 'allow');
+  // the git call after the = is still judged, and so is the variable used as the program
+  for (const c of ['$x = git push origin main', '$x =git push origin main', '$x =git push -f origin feat/my-card', '$r = git push origin HEAD',
+    '$p =gh pr merge 5']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.notEqual(kindOf('$x = git commit -m x', 'reviewer'), 'allow');
+  // a variable that does hold the name is still read out: quoted, a POSIX assignment, and used behind a launcher
+  for (const c of ["$g = 'git'; & $g push origin main", 'g=git; $g push origin main', 'g=git; caffeinate $g push origin main',
+    "$g='git'; caffeinate $g push origin main", '$g = git; & $g push origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+});
+
 test('#4826: a filled program with a word that is no git command and a protected branch is read as git', () => {
   // an alias set by an earlier statement or in the environment makes the unknown word a push
   const blocked = ['$G p origin main', '"$GIT" p origin master', '%GIT% p origin main', '& $g p origin main', 'cmd /c %GIT% p origin main',
@@ -2133,6 +2355,35 @@ test('#4826: a filled program with a word that is no git command and a protected
   for (const c of allowed) assert.equal(protectedPush(c, ['main', 'master']), null, c);
   // no read-only rule comes with it: a reviewer's filled program with an unknown word and no protected branch runs
   assert.equal(kindOf('$NODE report summary', 'reviewer'), 'allow');
+});
+
+test('#4833: git command names are case-sensitive, alias names are not: another case of one is an alias', () => {
+  // an alias named push (set by an earlier statement or in the environment) answers to PUSH
+  for (const c of ['git PUSH origin main', 'git Push origin main', 'git PUSH origin HEAD:master', 'timeout 5 git PUSH origin main',
+    'git -C /x PUSH origin main', '$G PUSH origin main', '& $g Push origin main', 'xargs git PUSH origin main', 'git SEND-PACK origin main',
+    'export GIT_CONFIG_PARAMETERS=x; git PUSH origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.ok(protectedPush('git PUSH origin develop', ['develop']), 'a configured branch, with or without a role');
+  // a read-only role runs git subcommands by their own names
+  for (const c of ['git COMMIT -m x', 'git Commit -m x']) assert.notEqual(kindOf(c, 'reviewer'), 'allow', c);
+  for (const c of ['git checkout main', 'git push origin feat/my-card', 'git status', 'git PUSH origin feat/my-card', 'echo "git PUSH origin main"']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
+});
+
+test('#4833: a redirect that takes no file word hides no branch after it', () => {
+  const shapes = ['git p origin 2>&1 B', '$G p origin 2>&1 B', 'git push origin 2>&1 B', '$G push origin 2>&1 B', 'git p origin >&2 B',
+    'git p origin 1>&- B', 'git p origin <&- B', 'git p origin *>&1 B', 'git p origin 3>&2 B', 'git subtree push --prefix x origin 2>&1 B',
+    'git $S origin 2>&1 B', 'git p origin > out.txt B', 'git p origin 2>$null B', 'git p origin &>log B', 'git p 2>&1 origin 2>&1 B'];
+  for (const s of shapes) {
+    assert.notEqual(kindOf(s.replace(/B$/, 'main')), 'allow', s);
+    assert.equal(evaluate({ tool: 'shell', command: s.replace(/B$/, 'develop'), protectedBranches: ['develop'] }).allow, false, `no role: ${s}`);
+  }
+  for (const c of ['git push origin feat/x 2>&1 | tee main', 'git lg 2>&1 | grep main', 'git status 2>&1 && echo main', 'git p origin feat/x > main',
+    'git checkout main 2>&1']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
 });
 
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a

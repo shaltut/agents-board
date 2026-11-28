@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -13,7 +13,8 @@ import type { Runner } from '../cli/squad-up.ts';
 delete process.env.CB_MCP_GATE_OK;
 
 const clients: any[] = [];
-after(() => Promise.all(clients.map((c) => c.end())));
+// closed after each test: this many tests, each with its own clients, pass the server's connection limit otherwise
+afterEach(() => Promise.all(clients.splice(0).map((c) => c.end())));
 const conn = (name: string, max = 10) => { const c = postgres(TEST_URL, { onnotice: () => {}, max, connection: { application_name: name } }); clients.push(c); return c; };
 
 const SQUAD = {
@@ -39,7 +40,7 @@ const session = (sql: any, actor: string, role: string, o: { live?: boolean; sta
   sql`insert into cb.sessions (machine, pane, actor, project, role, started_at, last_seen, agent, model)
       values ('macbook', ${actor}, ${actor}, 'sv', ${role}, now() - make_interval(mins => ${o.startedMin ?? 0}), now() - make_interval(mins => ${o.live === false ? 10 : 0}),
               ${o.agent ?? 'claude'}, ${o.model ?? null})`;
-const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what}`) as any[];
+const events = async (sql: any, what: string) => (await sql`select * from cb.events where actor = 'supervisor' and data ->> 'what' = ${what} order by id`) as any[];
 
 // ---- a fake herdr: nothing real is started; `live` holds the herdr names it reports ----
 type Call = { m: string | null; args: string[] };
@@ -67,7 +68,7 @@ function fakeHerdr(o: { down?: string[]; status?: string; start?: (c: Call) => a
 const has = (calls: Call[], ...a: string[]) => calls.some((c) => a.every((x, i) => c.args[i] === x));
 const memory = () => ({ failedAt: new Map<string, number>(), blockedTold: new Set<string>(), launched: new Set<string>(), runnerToldAt: 0, runnerStartedAt: 0,
   closeSkipAt: new Map<string, number>(), elsewhereToldAt: new Map<string, number>(), leavingTold: new Map<string, string>(), restartTried: new Map<string, string>(),
-  unreadTold: new Set<string>() });
+  unreadTold: new Set<string>(), sighted: new Map<string, string>() });
 // a fake clock: sleep moves it, so the close wait's 60 s pass at once
 const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}) => {
   let t = Date.now();
@@ -142,6 +143,25 @@ test('close sequence: an idle 21-minute squad session is sent /exit and its pane
   assert.ok(out.includes('closed sv-B1@macbook'), out.join('\n'));
   assert.equal((await events(sql, 'close')).length, 1);
   assert.notEqual((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null); // fenced until it lapses or the name binds again
+});
+
+test('#4806: with no stages the supervisor restores a down holder and closes a dropped seat, and starts nothing for a card', async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { count: 4, model: 'sonnet', machine: 'macbook' } } })}, 'ahmed')`;
+  await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
+  await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+  await card(sql); // nobody holds it
+  await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21 }); // a seat the squad names: stays open
+  await session(sql, 'sv-B2@macbook', 'builder', { live: false });
+  await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
+  await session(sql, 'sv-B3@macbook', 'builder', { startedMin: 21 }); // dropped from the squad: closed
+  const h = fakeHerdr();
+  h.live.set('sv-b1-macbook', 'w1:p7'); h.live.set('sv-b3-macbook', 'w1:p8');
+  const out = await tick(deps(sup, h.run));
+  assert.ok(out.some((l) => l.endsWith('restored sv-B2@macbook')), out.join(String.fromCharCode(10)));
+  assert.ok(out.includes('closed sv-B3@macbook'), out.join(String.fromCharCode(10)));
+  assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join(String.fromCharCode(10)));
+  assert.equal((await events(sql, 'start')).length, 0);
 });
 
 // #3770: the squad file's builder count was 4 and is 2 now, so B3 and B4 are seats it no longer generates
@@ -871,9 +891,236 @@ test('#4787: a dry run reads panes, says what it would say and writes nothing', 
   assert.equal((await events(sql, 'quota')).length, 0);
 });
 
+// ---------------- #4787 (Q3157): the switch to a backup, where Ahmed turned it on
+const HAIKU = { agent: 'claude', model: 'haiku' }, OPUS = { agent: 'claude', model: 'opus' };
+async function switchSetup(fallback: object[] = [HAIKU], on = true) {
+  const { sql, sup } = await stopSetup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, ...(fallback.length ? { fallback } : {}) } } })}, 'ahmed')`;
+  if (on) await sql`select cb.project_auto_backup('sv', true, 'ahmed')`;
+  // every pane but the lead's (w1:p1) shows the banner: the builder's first pane and each one a switch opens
+  const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? '> ' : BANNER, stderr: '' }) });
+  running(h);
+  return { sql, sup, h, d: deps(sup, h.run) };
+}
+const exits = (calls: Call[]) => calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'prompt' && c.args[3] === '/exit').map((c) => c.args[2]);
+const starts = (calls: Call[]) => calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'start');
+const prompts = (calls: Call[]) => calls.filter((c) => c.args[0] === 'agent' && c.args[1] === 'prompt' && c.args[3] !== '/exit').map((c) => c.args[3]!);
+// the seat the supervisor started binds, as its first prompt tells it to
+const binds = (sql: any, h: ReturnType<typeof fakeHerdr>, model: string) =>
+  sql`select cb.iam('macbook', ${h.live.get('sv-b1-macbook')!}, 'sv-B1@macbook', 'sv', 'builder', model => ${model})`;
+const holder = async (sql: any) => (await sql`select assignee from cb.tasks where status = 'in_progress'`)[0].assignee;
+const said = async (sql: any, re: RegExp) => (await tells(sql)).filter((t) => re.test(t.summary)).length;
+
+test('#4787: the second check that sees the stop switches the seat to its backup, which resumes its card', async () => {
+  const { sql, h, d } = await switchSetup();
+  await tick(d);
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0], 'one sighting closes nothing');
+  assert.equal(await said(sql, /next check.*switches it to haiku/), 1);
+  const out = await tick(d);
+  assert.deepEqual(exits(h.calls), ['sv-b1-macbook'], out.join('\n'));
+  assert.ok(has(h.calls, 'pane', 'close', 'w1:p9'), out.join('\n'));
+  const [start] = starts(h.calls);
+  assert.ok(start && start.args.join(' ').includes('--model haiku'), out.join('\n'));
+  assert.ok(prompts(h.calls).some((p) => p.startsWith('cb iam sv-B1@macbook sv --role builder --model haiku') && p.endsWith('then cb resume')), out.join('\n'));
+  assert.equal(await holder(sql), 'sv-B1@macbook', 'the card stays its');
+  assert.deepEqual((await events(sql, 'switch')).map((e: any) => [e.data.session, e.data.note]), [['sv-B1@macbook', 'sonnet to haiku']]);
+  assert.equal((await sql`select model from cb.seat_backups where actor = 'sv-B1@macbook'`)[0].model, 'haiku');
+  assert.equal(await said(sql, /switched sv-B1@macbook from sonnet to haiku/), 1);
+
+  // bound on the backup, holding nothing and quiet 6 minutes: not restarted back onto the seat's own model
+  await binds(sql, h, 'haiku');
+  await sql`update cb.tasks set assignee = null, status = 'done'`;
+  await sql`update cb.events set at = now() - interval '6 minutes' where actor = 'sv-B1@macbook'`;
+  await sql`update cb.sessions set started_at = now() - interval '6 minutes' where actor = 'sv-B1@macbook'`;
+  const quiet = fakeHerdr();
+  quiet.live.set('orch-macbook', 'w1:p1'); quiet.live.set('sv-b1-macbook', 'p1');
+  const later = await tick(deps(d.sql, quiet.run));
+  assert.deepEqual([exits(quiet.calls), starts(quiet.calls).length], [[], 0], later.join('\n'));
+});
+
+test('#4787: the switch off, or anything the seat does on the board between two checks, closes nothing', async () => {
+  const off = await switchSetup([HAIKU], false);
+  await tick(off.d); await tick(off.d); await tick(off.d);
+  assert.deepEqual([exits(off.h.calls), starts(off.h.calls).length], [[], 0]);
+  assert.equal(await said(off.sql, /Nothing was switched or closed/), 1);
+
+  const busy = await switchSetup();
+  await tick(busy.d);
+  await busy.sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`;
+  await tick(busy.d); // a first sighting again
+  assert.deepEqual(exits(busy.h.calls), []);
+});
+
+test('#4787: the switch on in a squad the supervisor does not run: told, never switched', async () => {
+  const { sql, sup, h } = await switchSetup();
+  const { version: _v, ...squad } = (await sql`select cb.squad_get('sv', true) as s`)[0].s;
+  await sql`select cb.squad_set('sv', ${sql.json({ ...squad, supervise: false })}, 'ahmed')`;
+  const d = deps(sup, h.run);
+  await tick(d); await tick(d);
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+  assert.equal(await said(sql, /Nothing was switched or closed/), 1);
+});
+
+// #4806 supervises a squad with no stages, but a switch still needs them (cb._switching), as the checkbox says
+test('#4787: a supervised squad with no stages: told, never offered or given a switch', async () => {
+  const { sql, sup, h } = await switchSetup();
+  await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+  const d = deps(sup, h.run);
+  const out = [...await tick(d), ...await tick(d)];
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0], out.join('\n'));
+  assert.deepEqual([await said(sql, /switches it to/), await said(sql, /Nothing was switched or closed/)], [0, 1]);
+  assert.ok(!out.some((l) => l.startsWith('skip closing')), out.join('\n'));
+});
+
+test("#4787: quota words that are not in the CLI's banner spot are told, never switched", async () => {
+  const { sql, sup } = await switchSetup();
+  // the seat's own last answer quotes the banner: a quota match, but not the CLI's limit message
+  const quoted = '● The adapter looks for this line:\n  ⎿ grep\n● Claude usage limit reached is what it matches.\n> ';
+  const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? '> ' : quoted, stderr: '' }) });
+  running(h);
+  const d = deps(sup, h.run);
+  await tick(d); await tick(d); await tick(d);
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+  assert.equal(await said(sql, /will not switch it.*Nothing was switched or closed/s), 1);
+  assert.deepEqual([(await events(sql, 'quota')).length, (await events(sql, 'switch')).length, (await events(sql, 'no_backup')).length], [1, 0, 0]);
+});
+
+// R1 on 1d020fc: the board's once-only note was also the second sighting, so any later banner switched at once
+// a builder whose screen the test changes between checks
+async function screenSetup() {
+  const { sql, sup } = await switchSetup();
+  const shown = { stdout: BANNER, status: 0 };
+  const h = fakeHerdr({ read: (pane) => (pane === 'w1:p1' ? { status: 0, stdout: '> ', stderr: '' } : { ...shown, stderr: '' }) });
+  running(h);
+  return { sql, sup, h, shown, d: deps(sup, h.run) };
+}
+const QUOTED = '● The adapter looks for this line:\n● Claude usage limit reached is what it matches.\n> ';
+
+for (const [name, between] of [['an ordinary screen', { stdout: 'all fine\n> ', status: 0 }], ['the words in its own output', { stdout: QUOTED, status: 0 }],
+  ['a screen herdr cannot read', { stdout: '', status: 1 }]] as const) {
+  test(`#4787: only two checks in a row at the banner spot switch; ${name} between them starts over`, async () => {
+    const { h, shown, d } = await screenSetup();
+    await tick(d);
+    Object.assign(shown, between);
+    await tick(d);
+    Object.assign(shown, { stdout: BANNER, status: 0 });
+    await tick(d);
+    assert.deepEqual(exits(h.calls), [], 'one banner after the break');
+    await tick(d);
+    assert.deepEqual(exits(h.calls), ['sv-b1-macbook'], 'two in a row');
+  });
+}
+
+test('#4787: a working check between two banners starts over; so does a new supervisor', async () => {
+  const { sup, h, d } = await screenSetup();
+  await tick(d);
+  const busy = fakeHerdr({ status: 'working' });
+  running(busy);
+  await tick(deps(sup, busy.run, { memory: d.memory }));
+  await tick(d);
+  assert.deepEqual(exits(h.calls), [], 'one banner after it worked');
+  await tick(deps(sup, h.run)); // restarted: it has seen nothing
+  assert.deepEqual(exits(h.calls), []);
+});
+
+test('#4787: an alert for quoted words counts for no sighting: the real banner must then be seen twice', async () => {
+  const { sql, h, shown, d } = await screenSetup();
+  shown.stdout = QUOTED;
+  await tick(d); await tick(d);
+  shown.stdout = BANNER;
+  await tick(d);
+  assert.deepEqual([exits(h.calls), (await events(sql, 'quota')).length], [[], 1], 'told once, and not switched on the first banner');
+  await tick(d);
+  assert.deepEqual(exits(h.calls), ['sv-b1-macbook']);
+});
+
+// R1 on 1d020fc: the backup was recorded from the squad as saved then, and the one planned before was started
+const OTHER = { ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, fallback: [OPUS] } } };
+for (const [name, at, closed] of [['before /exit', 'supervise_mark', 0], ['after /exit, before the record', 'cb.seat_switch', 1]] as const) {
+  test(`#4787: a squad saved during the close, ${name}: no backup is recorded and the removed one is not started`, async () => {
+    const { sql, sup, h, d } = await switchSetup();
+    await tick(d);
+    let saved = false;
+    const gated = (text: TemplateStringsArray, ...values: any[]) => {
+      if (saved || !text.join('?').includes(at)) return sup(text, ...values);
+      saved = true;
+      const save = () => sql`select cb.squad_set('sv', ${sql.json(OTHER)}, 'ahmed')`;
+      // the mark: saved right after it, before the re-check. The record: saved right before it
+      return at === 'supervise_mark' ? sup(text, ...values).then(async (rows: any) => { await save(); return rows; }) : save().then(() => sup(text, ...values));
+    };
+    const out = await tick(deps(gated, h.run, { memory: d.memory }));
+    assert.ok(saved, out.join('\n'));
+    assert.equal(exits(h.calls).length, closed, out.join('\n'));
+    assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0, out.join('\n'));
+    assert.ok(!starts(h.calls).some((c) => c.args.join(' ').includes('--model haiku')), out.join('\n'));
+  });
+}
+
+test('#4787: a seat that acts after the mark, right before /exit, is not closed', async () => {
+  const { sql, sup, h, d } = await switchSetup();
+  await tick(d);
+  let marked = false;
+  const gated = (text: TemplateStringsArray, ...values: any[]) => {
+    const query = sup(text, ...values);
+    if (marked || !text.join('?').includes('supervise_mark')) return query;
+    marked = true;
+    return query.then(async (rows: any) => { await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`; return rows; });
+  };
+  const out = await tick(deps(gated, h.run, { memory: d.memory }));
+  assert.ok(marked, out.join('\n'));
+  assert.deepEqual(exits(h.calls), [], out.join('\n'));
+  assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
+  assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
+});
+
+test('#4787: a stop on the backup goes to the next one; past the last the seat stays and the lead is told once', async () => {
+  const { sql, h, d } = await switchSetup([HAIKU, OPUS]);
+  await tick(d); await tick(d);
+  assert.equal(starts(h.calls).length, 1);
+  await binds(sql, h, 'haiku');
+  await tick(d); await tick(d);
+  assert.equal(starts(h.calls).length, 2);
+  assert.ok(starts(h.calls)[1]!.args.join(' ').includes('--model opus'));
+  await binds(sql, h, 'opus');
+  await tick(d); await tick(d); await tick(d);
+  assert.deepEqual([starts(h.calls).length, exits(h.calls).length], [2, 2]);
+  assert.equal((await events(sql, 'no_backup')).length, 1);
+  assert.equal(await said(sql, /no backup that can start/), 1);
+  assert.deepEqual((await events(sql, 'switch')).map((e: any) => e.data.note), ['sonnet to haiku', 'haiku to opus']);
+});
+
+test('#4787: no backups: the seat stays; a backup this machine cannot start is passed over; the lead is never switched', async () => {
+  const none = await switchSetup([]);
+  await tick(none.d); await tick(none.d); await tick(none.d);
+  assert.deepEqual(exits(none.h.calls), []);
+  assert.equal(await said(none.sql, /no backup that can start/), 1);
+
+  const skip = await switchSetup([{ agent: 'codex', model: 'gpt-5' }, HAIKU]); // codex: its MCP gate is unset here
+  await tick(skip.d); await tick(skip.d);
+  assert.ok(starts(skip.h.calls)[0]!.args.join(' ').includes('--model haiku'));
+  assert.equal((await skip.sql`select n from cb.seat_backups`)[0].n, 2);
+
+  const lead = await switchSetup();
+  const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? BANNER : '> ', stderr: '' }) });
+  running(h);
+  const ld = deps(lead.sup, h.run);
+  await tick(ld); await tick(ld);
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+});
+
+test('#4787: a dry run of the second check says the switch and does none of it', async () => {
+  const { sql, h, sup, d } = await switchSetup();
+  await tick(d);
+  const out = await tick(deps(sup, h.run, { dryRun: true, memory: d.memory }));
+  assert.ok(out.includes('would switch sv-B1@macbook (sonnet to haiku)'), out.join('\n'));
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+  assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
+});
+
 // every project with a squad is checked: claude-board itself has no stages, and its stopped reviewers are why #4787 exists
 for (const [name, off] of [
-  ['a squad with no stages', (sql: any) => sql`select cb.project_pipeline('sv', false, 'ahmed')`],
+  ['a squad with no stages and supervise off', async (sql: any) => { await sql`select cb.project_pipeline('sv', false, 'ahmed')`;
+    await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`; }],
   ['a squad with supervise off', (sql: any) => sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`],
 ] as const) {
   test(`#4787: ${name} has its stopped seat told; nothing is started, restored or closed`, async () => {
@@ -918,4 +1165,36 @@ test('#4787: a pane that cannot be read is said once, until it reads again', asy
   await tick(d);
   broken = true;
   assert.equal(said(await tick(d)), 1);
+});
+
+test('#4806: the supervisor says which projects it acts on, at its first tick and when the list changes', async () => {
+  const { sql, sup } = await setup(['sv', 'two']);
+  await sql`select cb.project_pipeline('two', false, 'ahmed')`;
+  const d = deps(sup, fakeHerdr().run);
+  const named = async () => (await tick(d)).filter((l) => l.startsWith('acts on'));
+  assert.deepEqual(await named(), ['acts on: sv, two']);
+  assert.deepEqual(await named(), [], 'said once');
+  await sql`select cb.project_state('two', 'disabled', 'ahmed')`;
+  assert.deepEqual(await named(), ['acts on: sv, two (winding down)']);
+  for (const p of ['sv', 'two']) await sql`select cb.squad_set(${p}, ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`;
+  assert.deepEqual(await named(), ['acts on: no project (no squad has supervise on)']);
+});
+
+// a pipeline lead reads it in the digest, which only pipeline projects get
+test('#4816: with no pipeline the lead is told once of a seat down again after a restore; in a pipeline only the digest says it', async () => {
+  for (const pipeline of [false, true]) {
+    const { sql, sup } = await setup();
+    await sql`select cb.project_pipeline('sv', ${pipeline}, 'ahmed')`;
+    await session(sql, 'orch@macbook', 'lead');
+    await session(sql, 'sv-B2@macbook', 'builder', { live: false });
+    await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' });
+    await sup`select cb.supervise_log('sv', 'restore', 'sv-B2@macbook', null)`;
+    const d = deps(sup, fakeHerdr().run);
+    await tick(d);
+    await tick(d);
+    assert.equal((await events(sql, 'down_again')).length, 1);
+    const told = await tells(sql);
+    assert.equal(told.length, pipeline ? 0 : 1, JSON.stringify(told));
+    if (!pipeline) assert.match(told[0].summary, /sv-B2@macbook is down again after a restore.*restore it by hand/s);
+  }
 });

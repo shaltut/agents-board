@@ -74,8 +74,8 @@ function ProjectSettings({ project }: { project: string }) {
   const problems = squad ? checkSquad(squad, project, opts) : []
   const at = (where: string) => problems.filter((p) => p.where === where).map((p) => p.text)
   const changes = dirty && draft ? diffSquads(data.squad, draft.squad) : []
-  const supervised = data.pipeline && !!squad?.supervise // as it will be once saved: the save bar's sentence
-  const supervisedNow = data.pipeline && data.supervise // as saved: what running seats do now
+  const supervised = !!squad?.supervise // as it will be once saved: the save bar's sentence
+  const supervisedNow = data.supervise // as saved: what running seats do now
   const reload = () => { setDraft(null); setSaveState(null); void qc.invalidateQueries({ queryKey: ['squad-page', project] }) }
 
   async function save() {
@@ -145,7 +145,7 @@ function ProjectSettings({ project }: { project: string }) {
                 {problems.length > 0 && <p className="mb-2 text-[13px] text-destructive">Fix {plural(problems.length, 'thing')} marked above before saving.</p>}
                 {saveState && saveState.kind !== 'stale' && <p className="mb-2 text-[13px] text-destructive" role="alert">{saveState.text}</p>}
                 <p className="mb-2 text-[13px] text-muted-foreground">
-                  {supervised ? 'Seats start and close on the next supervisor round; idle seats on an old agent, model or effort restart on the new one.'
+                  {supervised ? `${data.pipeline ? 'Seats start and close' : 'With no pipeline, seats the squad no longer names close'} on the next supervisor round; idle seats on an old agent, model or effort restart on the new one.`
                     : 'The supervisor is not acting on this project, so running seats keep their setting until they next start.'}
                 </p>
                 <div className="flex flex-wrap justify-end gap-2">
@@ -212,9 +212,22 @@ function Switches({ project, page, squad, edit }: { project: string; page: Squad
           <span className="text-sm">
             <span className="font-medium">Supervisor</span> <span className="rounded-full bg-lamp-soft px-2 py-0.5 text-xs text-lamp-ink">Only Ahmed changes this</span>
             <span className="block text-muted-foreground">
-              Starts seats for waiting cards, closes idle ones and restarts idle seats on an old setting. It acts only while the pipeline is on.
+              Restores down seats that hold cards and restarts idle seats on an old setting. With the pipeline on it also starts seats for waiting
+              cards and closes idle ones; with it off, it closes only idle seats the squad no longer names.
+              {' '}One supervisor serves every project, so starting it acts on: {page.acts_on?.map((a) => (a.winding_down ? `${a.project} (winding down)` : a.project)).join(', ') || 'no project yet'}.
               {squad && !!squad.supervise !== page.supervise && ' Changed here: press Save the squad above to keep it.'}
               {!squad && ' This project has no squad yet.'}
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-3 rounded-lg border bg-card p-3">
+          <input type="checkbox" className="mt-0.5 size-4" checked={page.auto_backup} disabled={busy}
+            onChange={(e) => run('project_auto_backup', { enabled: e.target.checked }, () => (e.target.checked ? 'Automatic backup on' : 'Automatic backup off'), 'The automatic backup switch did not change. Try again.')} />
+          <span className="text-sm">
+            <span className="font-medium">Automatic backup</span> <span className="rounded-full bg-lamp-soft px-2 py-0.5 text-xs text-lamp-ink">Only Ahmed changes this</span>
+            <span className="block text-muted-foreground">
+              A seat stopped by its model's quota, seen at two checks in a row, restarts on the next backup its squad names. This can send the project's code to that backup's provider.
+              It needs the pipeline and the supervisor on. The lead is never switched, and nothing switches a seat back. Turning this off ends every backup in use.
             </span>
           </span>
         </label>
