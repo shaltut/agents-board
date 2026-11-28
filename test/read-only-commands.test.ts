@@ -5,6 +5,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freshDb, TEST_URL } from './helpers.ts';
@@ -13,22 +14,27 @@ import { onlyReads } from '../cli/connect-retry.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
+const faults = join(tmpdir(), `cb-faults-ro-${process.pid}`);
+after(() => rmSync(faults, { recursive: true, force: true }));
 
 const ro = new URL(TEST_URL); ro.searchParams.set('default_transaction_read_only', 'on');
 function cb(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, ['cli/cb.ts', ...args], { encoding: 'utf8', timeout: 60_000,
     env: { ...process.env, CB_DATABASE_URL: ro.href, CB_ACTOR: 'W1@test', HERDR_PANE_ID: '', CB_MACHINE: 'testbox', CB_AGENT: '',
+      // #4735: cb faults reads this log, not this machine's real one. Setting it also turns fault writes on under test
+      // (they are off otherwise), so the control's failing write lands there too; after() removes the folder
+      CB_FAULTS_HOME: faults,
       CLAUDE_CODE_MESSAGING_SOCKET: '', CB_GH_CACHE: join(tmpdir(), `cb-gh-ro-${process.pid}.json`), ...env } });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
 
 // one form per mark: every command marked reads: true, and every subcommand of a list ('' bare, '#' a bare number)
 const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['mine'], ['resume'], ['tick', 'demo'], ['goals', 'demo'],
-  ['epics', 'demo'], ['pending', 'demo'], ['role', 'builder'], ['users'], ['huddles', 'demo'], ['jobs', 'demo'], ['show', '2'],
+  ['epics', 'demo'], ['pending', 'demo'], ['role', 'builder'], ['users'], ['huddles', 'demo'], ['jobs', 'demo'], ['jobs', 'demo', '--ended'], ['show', '2'],
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
   ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],
-  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json']];
+  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json']];
 // no job exists to read: these stop at "no job #1", after the select that would have written
 const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1']);
 

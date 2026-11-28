@@ -371,7 +371,7 @@ dc exec -T db pg_restore -U cb -d claude_board --no-owner --exit-on-error < /var
 dc up -d board                                          # re-applies the schema, starts polling
 ```
 
-Then tell the sessions: `dc exec board cb broadcast "The board was restored to <time>: re-register anything you did since."`
+Then tell the sessions: `dc exec board cb broadcast "The board was restored to <time>: re-register anything you did since." --all`
 
 ## Users
 

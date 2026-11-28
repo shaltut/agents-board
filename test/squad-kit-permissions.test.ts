@@ -187,15 +187,24 @@ test('every role denies reading secret files anywhere, and keeps .env.example re
   }
 });
 
-// #4345: the seat's own fence. Edit rules cover every built-in file-editing tool; Write is listed too in case a
-// release narrows that. ~ is the home folder; //**/ is any absolute path, so a repo's .claude/settings*.json in a
-// worktree beside the session's folder is covered too (review #5 I4: **/ alone is relative to the session's folder).
-// The real proof is the live check at release (a seat's Edit of ~/.claude/settings.json is refused).
+// #4345: the seat's own fence. Claude Code checks every built-in file-editing tool, Write included, against Edit rules.
+// #4731: a Write(path) rule never matches and only warns at each seat start ("use Edit(...)"), so no role file holds one.
+// A read-only role's bare "Write" deny is a tool name, not a path rule, and stays. ~ is the home folder; //**/ is any
+// absolute path, so a repo's .claude/settings*.json in a worktree beside the session's folder is covered too (review #5
+// I4: **/ alone is relative to the session's folder). The real proof is the live check at release (a seat's Edit or
+// Write of ~/.claude/settings.json is refused).
 const FENCE = ['~/.claude/settings*.json', '//**/.claude/settings*.json', '~/.claude-board/**'];
-test('every role denies editing the hook settings and ~/.claude-board (the guard, the runner config)', () => {
+test('every role fences the hook settings and ~/.claude-board (the guard, the runner config) with Edit rules', () => {
   for (const r of ROLES) {
     const { deny } = load(r).permissions;
-    for (const p of FENCE) for (const t of ['Edit', 'Write']) assert.ok(deny.includes(`${t}(${p})`), `${r}: ${t}(${p})`);
+    for (const p of FENCE) assert.ok(deny.includes(`Edit(${p})`), `${r}: Edit(${p})`);
+  }
+});
+
+test('no role file holds a Write( path rule, which Claude Code never matches', () => {
+  for (const r of ROLES) {
+    const { deny, allow } = load(r).permissions;
+    assert.deepEqual([...deny, ...allow].filter((d: string) => d.startsWith('Write(')), [], r);
   }
 });
 

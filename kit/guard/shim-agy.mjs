@@ -13,7 +13,7 @@
 // (#4392): cb squad up always sets both, and core applies no secret or fence rule to a null role.
 // agy reads and edits files natively, so core.evaluate never sees those paths: secretPath (core, #4347) is checked here on
 // every path arg, as given and as resolved (a link named notes.txt can lead to .env).
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -105,6 +105,43 @@ export function normSegment(seg, platform = process.platform) {
   return s;
 }
 
+// #4730: the roots of the workspace repo's registered linked worktrees (a builder works in one per card). Read from the
+// files git keeps, never by running git: <common dir>/worktrees/<name>/gitdir names the worktree's .git file, and that file
+// must point back at the same entry, so a stale or one-sided registration opens nothing. The main checkout is not added.
+// A workspace that is not a repo's top folder, or anything unreadable, adds no root.
+function worktreeRoots(root) {
+  const text = (f) => readFileSync(f, 'utf8').trim();
+  const gitDirOf = (dotGit) => {
+    const m = /^gitdir: (.+)$/.exec(text(dotGit));
+    return m ? resolve(dirname(dotGit), m[1]) : null;
+  };
+  const same = (a, b) => a !== null && b !== null && relative(a, b) === '';
+  try {
+    const dotGit = join(root, '.git');
+    let common = dotGit;
+    if (!statSync(dotGit).isDirectory()) { // the workspace is itself a linked worktree
+      const own = gitDirOf(dotGit);
+      common = resolve(own, text(join(own, 'commondir')));
+    }
+    const entries = join(common, 'worktrees');
+    return readdirSync(entries).flatMap((name) => {
+      try {
+        const entry = join(entries, name);
+        const link = resolve(entry, text(join(entry, 'gitdir')));
+        const back = gitDirOf(link);
+        if (basename(link) !== '.git' || !same(back && real(back), real(entry))) return [];
+        const wt = real(dirname(link));
+        return wt === null ? [] : [wt];
+      } catch { return []; }
+    });
+  } catch { return []; }
+}
+// abs below root, as a relative path; null when it is the root itself or outside it
+function below(root, abs) {
+  const rel = relative(root, abs);
+  return rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : rel;
+}
+
 // null when the access may go ahead, else the reason. Resolved against the seat's cwd; only PATH_ARGS names are read.
 // mode 'edit': denied inside .git, .agents, .gemini and kit/guard. mode 'read': .git stays readable, the rest follows the edit rule.
 export function checkPath(call, input, mode = 'edit', platform = process.platform) {
@@ -120,16 +157,20 @@ export function checkPath(call, input, mode = 'edit', platform = process.platfor
   const root = real(resolve(root0));
   if (root === null) return SHORT;
   const base = resolve(cwd ?? root0);
+  const roots = [root, ...worktreeRoots(root)];
   for (const k of given) {
     const v = args[k];
     if (typeof v !== 'string' || !v.trim()) return `the ${mode}'s target path (${k}) is not a non-empty string`;
     const abs = real(isAbsolute(v) ? resolve(v) : resolve(base, v));
     if (abs === null) return `${SHORT} (${k})`;
-    const rel = relative(root, abs);
-    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return `${verb} outside the workspace (${k})`;
-    const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
-    if (segs.some((s) => denySegs.includes(s))) return `${verb} inside ${denySegs.join(', ')} is not allowed (${k})`;
-    for (const pre of WRITE_DENY_PREFIXES) if (pre.every((s, i) => segs[i] === s)) return `${verb} inside ${pre.join('/')} is not allowed (${k})`;
+    const rels = roots.map((r) => below(r, abs)).filter((r) => r !== null);
+    if (rels.length === 0) return `${verb} outside the workspace and its git worktrees (${k})`;
+    // every root that holds the path judges it: a worktree nested in the workspace keeps its own kit/guard denied
+    for (const rel of rels) {
+      const segs = rel.split(sep).filter(Boolean).map((s) => normSegment(s, platform));
+      if (segs.some((s) => denySegs.includes(s))) return `${verb} inside ${denySegs.join(', ')} is not allowed (${k})`;
+      for (const pre of WRITE_DENY_PREFIXES) if (pre.every((s, i) => segs[i] === s)) return `${verb} inside ${pre.join('/')} is not allowed (${k})`;
+    }
   }
   return null;
 }

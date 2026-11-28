@@ -13,6 +13,34 @@ export const ROLES = Object.freeze(['lead', 'architect', 'owner', 'builder', 're
 export const READ_ONLY_ROLES = Object.freeze(['reviewer', 'qa', 'investigator']);
 
 const QUOTED = String.raw`"(?:\\.|[^"\\])*"|'[^']*'`;
+// #4742: text.replace(<a global QUOTED pattern>, fn) in linear time. A global replace tries a " with no close again from
+// every later one: 100,000 \" took 6 to 43 s, past a hook's timeout, and a hook that times out allows. Those later ones
+// need no try: each is the second half of a \ pair the failed read walked over, so a read from it stops at the same
+// place and closes nowhere either. `at` is the pattern, sticky; `body` reads what its double quotes may hold.
+const QUOTED_AT = new RegExp(QUOTED, 'y');
+const DQ_BODY = /(?:\\.|[^"\\])*/y;
+function replaceQuoted(text, fn, at = QUOTED_AT, body = DQ_BODY) {
+  const starts = /["'{]/g;
+  let out = '', done = 0, dead = 0;
+  for (let m; (m = starts.exec(text));) {
+    const i = m.index;
+    if (text[i] === '"' && i < dead) continue;
+    at.lastIndex = i;
+    const hit = at.exec(text);
+    if (hit) {
+      out += text.slice(done, i) + fn(...hit);
+      starts.lastIndex = done = i + hit[0].length;
+    } else if (text[i] === '"') {
+      body.lastIndex = i + 1;
+      body.exec(text);
+      dead = body.lastIndex;
+    }
+  }
+  return out + text.slice(done);
+}
+const blankQuoted = (text) => replaceQuoted(text, () => '""');
+const PS_STRING_AT = /"(?:\\.|[^"\\$`])*"/y;
+const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 // A message command plus its same-line args: quoted runs, escaped pairs or bare words (stops at ; & | newline).
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bcb[ \t]+bug\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
@@ -85,7 +113,7 @@ function stripMessagesOnce(cmd) {
   return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
     .replace(MESSAGE_CMD, (_all, head, args) =>
       // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
-      head + args.replace(new RegExp(QUOTED, 'g'), (q) =>
+      head + replaceQuoted(args, (q) =>
         ((/^herdr/.test(head) && /^["']!/.test(q)) || (/^"/.test(q) && /\$\(|`/.test(q)) ? q : '""')));
 }
 
@@ -701,8 +729,9 @@ function ghApiWrites(w, j) {
 // PR 111 review R1: a group bash and zsh expand ({main,}, {a,b}, {1..3}) is never unbraced: it becomes a word the shell
 // fills in ($BRACE_GROUP), so a push naming it blocks as a shell-filled branch, as git push origin $B does
 // (no brace: the text as it is, one cheap test instead of a pass over a long command)
-const unbrace = (t) => (!String(t ?? '').includes('{') ? String(t ?? '') : String(t ?? '').replace(new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'g'),
-  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner)));
+const BRACE_AT = new RegExp(String.raw`${QUOTED}|\{([^\s{}"']*)\}`, 'y');
+const unbrace = (t) => (!String(t ?? '').includes('{') ? String(t ?? '') : replaceQuoted(String(t ?? ''),
+  (m, inner) => (inner === undefined ? m : /,|\.\./.test(inner) ? '$BRACE_GROUP' : inner), BRACE_AT));
 // word i is the command: first in its segment, or after assignments, launchers (sudo git p) and $( (x=$(git p)); after
 // any launcher or a shell that runs the rest (timeout 30 git, sudo -u x gh, cmd /c git, B2)
 const RUNS_REST_SHELL = new Set(['cmd', 'pwsh', 'powershell']);
@@ -1231,7 +1260,7 @@ function installerRuns(s) {
 }
 const GUARD_INSTALL = { test: (s) => INSTALLER.test(s) && (GUARD_DIR.test(s) || hiddenInstaller(s)) && installerRuns(s) };
 // --check counts only as a word of the command itself: not inside quotes (--target "x --check") or a comment (# --check)
-const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(seg.replace(QUOTED_TEXT, '""').replace(/(?:^|[ \t])#.*$/s, ''));
+const CHECK_WORD = (seg) => /(?:^|[ \t])--check(?![\w-])/.test(blankQuoted(seg).replace(/(?:^|[ \t])#.*$/s, ''));
 // and an install that clears or sets the seat's variables (CB_ROLE= CB_AGENT= node install.mjs, env -u CB_ROLE) is
 // blocked even with --check: those variables are what make the installer itself refuse to run in a seat
 const SEAT_VARS = /CB_(?:ROLE|AGENT)(?![\w])/i;
@@ -1352,7 +1381,7 @@ function nameTakers(seg) {
 }
 function seatVarChangeOne(command) {
   const raw = stripMessages(String(command ?? ''));
-  const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
+  const t = SEAT_RUNS_CODE.test(raw) ? raw : blankQuoted(raw);
   if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
   if (NAME_ASSIGNER.test(raw) && ASSIGN_THROUGH.test(raw) && assignsThrough(raw)) return SEAT_VARS_CHANGE;
   for (const seg of t.match(SEGMENTS) ?? []) {
@@ -1415,40 +1444,39 @@ const HERDR_OPT_ARG = new Set(['--machine', '-m', '--session', '--remote', '--re
 const LEAD_HERDR = new Set(['agent prompt', 'pane send-keys']);
 const LEAD_SSH_HOST = /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$/;
 const OWN_HOST_VAR = /^\$\{?(?:HOSTNAME|HOST|COMPUTERNAME)\}?$/i;
-// #4734: "at" is also an English word and a variable name, so quoted text and script lines (if (at < 0), grep "a|at|b")
-// reach command position. It schedules only with a time: its first operand starts like one (a digit, now, noon, midnight,
-// teatime, today, tomorrow, next, a month or weekday, a + increment, a Windows \\host), or the guard cannot read it ($, a backtick), or -t gives it, or xargs
-// feeds it. -b is batch, which needs no time. A redirect whose target the segment split cut off (at 2>&1 now) hides what
-// follows, so it counts too; <= and >= are redirects to a file named =. An operand the shell turns into nothing ("") is
-// skipped, and one it may expand into a time (a brace list, a glob) counts. -l -r -d -c first only list or remove jobs.
-const AT_DAY = 'next|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|satur|sun)(?:day)?|sat';
-const AT_TIME = new RegExp(String.raw`^(?:\d|\+(?!=)|(?:now|noon|midnight|teatime|today|tomorrow|${AT_DAY})(?![a-z])|\\\\|.*[$\x60])`, 'i');
-const AT_REDIRECT = /^(?:\d*|&)(?:<<<|<<-?|<>|>>|>\||<|>)(.*)$/;
-const BRACES = /\{([^{}\s]*)\}/g; // one pass: a run stops at the next brace or blank
-const braceList = (text) => { for (const m of text.matchAll(BRACES)) if (/,|\.\./.test(m[1])) return true; return false; };
-const hasGlob = (word) => /[*?[]/.test(word.replace(new RegExp(QUOTED, 'g'), ''));
-// seg is the command's segment: WORD drops braces, so a brace list (at {,now}) is only seen there
-function atSchedules(a, seg) {
-  if (/^-[lrdc]$/.test(a[0] ?? '')) return false;
-  if (braceList(seg)) return true;
-  for (let i = 0; i < a.length; i++) {
-    const redirect = AT_REDIRECT.exec(a[i]);
-    if (redirect) {
-      if (!redirect[1] && ++i >= a.length) return true;
-      continue;
-    }
-    if (a[i].startsWith('-')) {
-      if (/^-[A-Za-z]*b/.test(a[i]) || /^-[mMvkV]*t/.test(a[i])) return true;
-      if (/^-[mMvkV]*[fqu]$/.test(a[i]) && hasGlob(a[++i] ?? '')) return true;
-      continue;
-    }
-    if (!a[i].replace(/["'\\\s]/g, '')) continue; // "", " " and "\ " leave the time to the next operand
-    const word = a[i].replace(/["']/g, '').trim(); // n""ow is now to the shell, and so is n\ow
-    return hasGlob(a[i]) || AT_TIME.test(word) || AT_TIME.test(word.replace(/\\/g, ''));
-  }
-  return false;
+// #4734: "at" is also an English word and a variable name, so a script line (if (at < 0)) reaches command position. It is
+// blocked, like every other scheduler word, unless what follows is one of a few shapes that cannot schedule. Working out
+// when at WOULD schedule was tried and failed three reviews: a shell has too many ways to write a flag or a time. The
+// shapes, judged on the text as written:
+//   - nothing after the word (at refuses to run without a time), unless the segment was cut at & (&> is a redirect)
+//   - the end of a search pattern's group: (before|at)\b
+//   - a comparison with a number, closed: at < 0)   (< only: after > or <= the number is at's time)
+//   - a script's assignment or equality: at = k, at === -1
+//   - listing or removing jobs: at -l, at -c 5, at -r 3, at -d 3; at -V or --version with nothing after
+// The words of the last two may hold nothing the shell rewrites (a quote, \, $, a backtick, a brace, a glob, a redirect)
+// and no further option, and their segment must not have been cut at & (&> is a redirect). Where a ) follows, bash takes
+// do or then straight after it, so only the end, a { or a script's throw, return, break or continue may come next.
+const AT_NOTHING = /^[ \t\r]*$/;
+const AT_GROUP_END = /^\)\\{1,2}[bBsSwWdD]/;
+const AT_COMPARE = /^[ \t]*<[ \t]*\d{1,19}[ \t]*\)/;
+const AT_SCRIPT = /^[ \t]+(?:={1,3}|!={1,2}|-[lcrd])(?=[ \t\r)]|$)/;
+const AT_VERSION = /^[ \t]+(?:-V|--version)[ \t\r]*$/;
+const AT_UNREAD = /["'\\$`{}<>*?[\]~]|(?:^|[^\w.])-[-A-Za-z]/;
+const AT_AFTER = /^[ \t\r]*(?:\{[ \t\r]*)?(?:$|(?:throw|return|break|continue)(?![\w-]))/;
+// tail: the segment's text after the word; cut: the segment ended at an &
+function atHarmless(tail, cut) {
+  if (AT_NOTHING.test(tail)) return !cut;
+  if (AT_GROUP_END.test(tail)) return true;
+  const compare = AT_COMPARE.exec(tail);
+  if (compare) return AT_AFTER.test(tail.slice(compare[0].length));
+  if (AT_VERSION.test(tail)) return !cut;
+  const shape = AT_SCRIPT.exec(tail);
+  if (!shape) return false;
+  const close = tail.indexOf(')', shape[0].length);
+  if (AT_UNREAD.test(tail.slice(shape[0].length, close < 0 ? tail.length : close))) return false;
+  return close < 0 ? !cut : AT_AFTER.test(tail.slice(close + 1));
 }
-function freshLaunch(name, a, hosts, role, seg = '') {
+function freshLaunch(name, a, hosts, role, atSafe = () => false) {
   const only = (ok) => a.length > 0 && a.every((x) => ok.test(x));
   if (OTHER_USER.has(name)) return only(/^(?:--version|-V|-h|--help|-l|--list|-k|-K)$/) ? null : name;
   if (name === 'ssh' || name === 'mosh') {
@@ -1463,7 +1491,7 @@ function freshLaunch(name, a, hosts, role, seg = '') {
   }
   if (name === 'wsl') return only(/^(?:-l|--list|-v|--verbose|--status|--version|--help|-q|--quiet|--shutdown|--update|--all|--running)$/) ? null : name;
   if (name === 'launchctl') return a.some((x) => /^(?:submit|load|bootstrap|start|kickstart|asuser)$/.test(x)) ? name : null;
-  if (name === 'at') return atSchedules(a, seg) ? name : null;
+  if (name === 'at') return atSafe() ? null : name;
   if (name === 'crontab') return a.some((x) => /^-[lr]$/.test(x)) ? null : name;
   if (name === 'systemd-run') return only(/^(?:--version|-h|--help)$/) ? null : name;
   if (name === 'batch') return name;
@@ -1577,7 +1605,9 @@ function codeStrings(name, args) {
 }
 function freshEnvOne(command, hosts, role, depth = 0) {
   const raw = stripMessages(String(command ?? ''));
-  for (const seg of blankSearchPatterns(raw).match(SEGMENTS) ?? []) {
+  const shell = blankSearchPatterns(raw);
+  for (const found of shell.matchAll(SEGMENTS)) {
+    const seg = found[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
     if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) continue;
     const w = seg.match(WORD) ?? [];
@@ -1588,7 +1618,9 @@ function freshEnvOne(command, hosts, role, depth = 0) {
       if (ASSIGNMENT.test(w[i]) || FRESH_WRAP.has(name)) continue;
       if (name === 'env') { while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) i++; continue; }
       if (name === 'timeout') { while (w[i + 1] && w[i + 1].startsWith('-')) i++; i++; continue; }
-      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, seg)
+      // asked once a segment at most: only its first command word is judged
+      const atSafe = () => atHarmless(seg.slice([...seg.matchAll(WORD)][i].index + w[i].length), shell[found.index + seg.length] === '&');
+      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, atSafe)
         ?? (name === 'at' && w.slice(0, i).some((x) => cmdName(x) === 'xargs') ? name : null);
       if (why) return FRESH_ENV(why);
       for (const code of codeStrings(name, w.slice(i + 1))) {
@@ -1701,9 +1733,8 @@ const RAW_HINT = /\.c[\w.\\"'*?[-]*|claude~\d|codex~\d|openco~\d|\.agents|gemini
 // (a scheme of two or more letters: C://Users/... is a drive, not a URL)
 const URL_WORD = /(?<![\w+.-])[a-z][a-z\d+.-]+:\/\/[^\s"';&|)>]*/gi;
 // a definition in command position: name() {, function name, alias [--] name=, hash -p, PowerShell Set-Alias / New-Alias / sal / nal
-const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
 // judged with quoted text blanked (round 2: grep -E "a|function b" opencode.json is a search, not a definition)
-const QUOTED_TEXT = /"(?:\\.|[^"\\])*"|'[^']*'/g;
+const DEFINES_FN = /(?:^|[;&|\n({])\s*(?:[\w.:-]+\s*\(\s*\)\s*[{(\n]|function\s+[\w.:-]+|alias\s+(?:-\S*\s+)*[\w.-]+=|hash\s+-p\s|(?:set-alias|new-alias|sal|nal)\s)/i;
 // #4587: a line continuation, joined as the shell joins it, before anything reads the command (the prefilter too: a
 // split open\<newline>code.json names no fence word). bash drops a backslash-newline with nothing between, so
 // .cla\<newline>ude is .claude: SHELL_ESCAPES's space would leave that split. Only an odd run of backslashes continues
@@ -1735,7 +1766,7 @@ function fenceWriteOne(command) {
   if (!fencePath(text)) return null;
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
-  if (DEFINES_FN.test(text.replace(QUOTED_TEXT, '""'))) return FENCE;
+  if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
@@ -2037,7 +2068,7 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
   // B2: a stdin copy (<&0, exec 3<&0; <&3, < /dev/stdin) goes before the split (its & would cut the segment): removing it
   // only takes a feed away, never adds one
   const text = cmd.replace(/\\\r?\n/g, ' ').replace(/`\r?\n/g, ' ').replace(STDIN_REDIR, ' ');
-  if (PS_READ.test(text.replace(/'[^']*'/g, "''").replace(/"(?:\\.|[^"\\$`])*"/g, '""'))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
+  if (PS_READ.test(replaceQuoted(text.replace(/'[^']*'/g, "''"), (q) => (q[0] === '"' ? '""' : q), PS_STRING_AT, PS_STRING_BODY))) return 'a PowerShell console read (Read-Host, [Console]::ReadLine, $input)';
   const segs = [...text.matchAll(SEGMENT)].map((m) => ({ start: m.index, end: m.index + m[0].length, s: m[0] }));
   const n = segs.length;
   const piped = new Uint8Array(n), joined = new Uint8Array(n), redir = new Uint8Array(n), loopFed = new Uint8Array(n);
@@ -2051,7 +2082,7 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
     piped[k] = joined[k] && (gap !== '&' || piped[k - 1]);
     // PR 104 review B2: <&0, <&3 (a copy of some descriptor, maybe the input: exec 3<&0) and < /dev/stdin read the seat's
     // own input, so they are no feed (fail closed on any <&N)
-    redir[k] = /</.test(segs[k].s.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '').replace(/<\(/g, '').replace(STDIN_REDIR, ''));
+    redir[k] = /</.test(replaceQuoted(segs[k].s, () => '').replace(/<\(/g, '').replace(STDIN_REDIR, ''));
     const w0 = lead(k);
     if (LOOP_START.has(w0)) stack.push(k);
     else if (w0 === 'done' && stack.length) { const j = stack.pop(); loopFed[j] = redir[k] || piped[j]; }

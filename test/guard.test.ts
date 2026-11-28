@@ -410,8 +410,8 @@ const freshEnvFine = [
   `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
   'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
 ];
-// #4734: "at" is an English word and a common variable name. It schedules only when a time follows it (or -t, a time the
-// guard cannot read, or xargs feeding it one): in a script a heredoc writes, or between the | of a search pattern, it does not
+// #4734: "at" is an English word and a common variable name, and a script a heredoc writes, or the | of a search pattern,
+// puts it where a command would be. It is blocked unless the words after it are a shape that cannot schedule
 const atFine = [
   `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
   String.raw`grep -n "fresh environment\|schtasks\|'at'\|cron" kit/guard/core.mjs`, 'grep -E "before|at|after" notes.md', 'grep -E "(at|on) the end" notes.md',
@@ -428,9 +428,25 @@ const atRuns = ['at now', 'at now+1min', 'at "now + 1 hour"', "at 'midnight'", '
   'at -mf job.sh now', 'at -t 202601011200', 'at -mt202601011200', 'at < job.sh now', 'at <job.sh now', "at now <<'EOF'\nls\nEOF", 'at "$WHEN"', 'at $(date +%H:%M)', 'at `cat t`',
   'at 2>&1 now', 'echo now | xargs at', String.raw`at \\host 10:00 cmd`, 'echo x | /usr/bin/at now', 'if true; then at now; fi', 'bash -c "echo x | at now"', 'at \\\n now',
   'at n""ow', "at 'mid'night", String.raw`at \now`, 'at tomorrow', 'at friday', 'at jul 4', 'at next week'];
+// PR 139 review round 3 (R1): quoted and escaped flags, and a brace list holding a quoted blank, got past the reading of
+// at's operands. The rule is now the other way round: at is blocked unless the words after it are one of a few shapes
+// that cannot schedule. These are the review's spellings, and others of the same kind found while rewriting
+const atShapes = ['at "-b"', "at '-b'", 'at -""b', String.raw`at -`, String.raw`at \-b`, 'at -m""b', 'at "-t" 202601011200', "at '-t' 202601011200",
+  'at "-m" now', String.raw`at \-m now`, 'at "-f" job.sh now', 'at -""f job.sh now', 'at {" ",now}',
+  // the segment split cuts at &, so what follows is not seen
+  'at &>/dev/null now', 'at &> f now', 'at = x &> f -t 202601011200', 'at -l &>f -t 202601011200', 'at = ";" -t 202601011200', 'at = x "-t" 202601011200',
+  // -V prints the version and carries on; only alone is it harmless
+  'at -V now',
+  // a number after > is an operand, and a ) the shell does not read closes nothing
+  'at < 0 now', 'at <= 0)', '(at >= 0)', String.raw`at < 0\) now`,
+  // a ) closes a subshell, and bash takes do or then straight after it: what follows must start no command
+  'until (at < 0) do at now; done', 'until (at =) do at now; done', 'until (at -l) do at now; done', 'if (at < 0) { at now }',
+  'until (at)do at now; done',
+  // as main: a word that is no known shape
+  'at the end now'];
 test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {
   for (const c of atFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of [...atRuns, ...atReview]) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
+  for (const c of [...atRuns, ...atReview, ...atShapes]) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
 });
 
 // #4736 (folded into #4734): the | of a quoted search pattern is not a pipe, so the word between two of them is not a
@@ -973,6 +989,7 @@ test('long commands stay fast', () => {
   const heredocHeaders600KB = "cat > a <<'EOF'\n".repeat(37500); // each header without its end line
   const asBuilder = (command: string) => () => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: ['development'] });
   const kb200 = (s: string) => s.repeat(Math.ceil(200000 / s.length));
+  const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, () => unknown][] = [
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
@@ -1029,6 +1046,11 @@ test('long commands stay fast', () => {
     ['search blanking, 200 KB of separators, as a builder', asBuilder('grep x ' + kb200(';'))],
     ['at, 200 KB of unclosed braces, as a builder', asBuilder('at ' + kb200('{,') )],
     ['at, 200 KB of brace words, as a builder', asBuilder(kb200('at {a}; '))],
+    // PR 139 review round 3: operands of escaped quotes took 13 to 33 s
+    ['at, 200 KB of escaped quotes, as a builder', asBuilder('at ' + escaped)],
+    ['at -f, 200 KB of escaped quotes, as a builder', asBuilder('at -f ' + escaped + ' now')],
+    ['at, 200 KB of assignments in one segment, as a builder', asBuilder(kb200('at = '))],
+    ['at, 200 KB of at words in one segment, as a builder', asBuilder(kb200('then at '))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
@@ -1072,6 +1094,15 @@ test('long commands stay fast', () => {
     ['#4669 I1, 200 KB of export with unclosed quotes and $x words, as a builder', asBuilder(kb200('export "$a $b= '))],
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
+    // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
+    ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
+    ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
+    ['#4742, escaped quotes after a brace', asBuilder('echo {a} ' + escaped)],
+    ['#4742, escaped quotes after a fence path', asBuilder('cat ~/.claude/settings.json ' + escaped)],
+    ['#4742, escaped quotes after a variable', asBuilder('echo $x ' + escaped)],
+    ['#4742, escaped quotes, one per line', asBuilder('echo ' + '\\"\n'.repeat(66000))],
+    ["#4742, escaped quotes with a quoted 'a' after each", asBuilder('echo ' + "\\\"'a'".repeat(40000))],
+    ['#4742, escaped quotes, as a seat with a stdin', () => evaluate({ tool: 'shell', command: 'echo ' + escaped, role: 'builder', stdin: true })],
   ];
   for (const [name, run] of cases) {
     const t = performance.now();
