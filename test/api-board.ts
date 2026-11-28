@@ -18,13 +18,14 @@ export async function apiBoardFor() {
   const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
   const inner = await port(server);
 
-  let lose: ((fn: string, result: unknown) => boolean) | null = null, cut = false;
+  let lose: ((fn: string, result: unknown) => boolean) | null = null, cut = false, bad = false;
   const streams = new Set<http.ServerResponse>(), live = new Set<http.ServerResponse>();
   const seen: string[] = []; // the function of each call, as it arrived
   const proxy = http.createServer((req, res) => {
     const fn = /^\/w\/v1\/call\/(\w+)$/.exec(req.url ?? '')?.[1];
     const stream = req.url!.startsWith('/w/v1/events');
     if (stream && cut) return void req.socket.destroy();
+    if (stream && bad) return void res.writeHead(502).end('bad gateway\n');
     if (fn) seen.push(fn);
     const forward = http.request({ host: '127.0.0.1', port: inner, path: req.url, method: req.method, headers: req.headers }, (back) => {
       if (fn && lose) {
@@ -62,7 +63,9 @@ export async function apiBoardFor() {
     loseReply: (which: (fn: string, result: unknown) => boolean) => { lose = which; },
     /** Ends every open stream and refuses new ones, until restoreStreams. */
     cutStreams: () => { cut = true; for (const s of streams) s.destroy(); },
-    restoreStreams: () => { cut = false; },
+    /** Answers every notice stream 502, as a proxy that cannot pass it does, until restoreStreams. Calls still work. */
+    failStreams: () => { bad = true; for (const s of streams) s.destroy(); },
+    restoreStreams: () => { cut = bad = false; },
     /** The environment of a worker process on this board, with `key` installed in dir. It names no database. */
     env(key: string, dir: string): Record<string, string | undefined> {
       installKey('runner', key, { CB_KEY_DIR: dir });
