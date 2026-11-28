@@ -1585,13 +1585,15 @@ begin
    order by coalesce(q.answered_at, (q.sent_back ->> 'at')::timestamptz), q.id;
 end $$;
 
--- Who an answer, or a send-back, goes to, as cb.inbox picks it: the seat now in the pane the question replies to, by
--- its name or by the pane's own (what a relay calls a pane with none), or the asker.
+-- Who an answer, or a send-back, goes to, exactly as cb.inbox picks it. It replies to a pane: the seat now in that
+-- pane, by its name or by the pane's own (what a relay calls a pane with none). It names no pane: the asker. The asker
+-- is no recipient of an answer routed to a pane: its mark would keep that answer from ever being pushed there.
 create function cb._answer_is_for(q cb.questions, who text) returns boolean language sql stable as $$
-  select coalesce(who = q.asked_by, false) or (coalesce(q.reply_to ->> 'pane', '') <> '' and (
-    coalesce(lower(who) = lower((q.reply_to ->> 'pane') || '@' || (q.reply_to ->> 'machine')), false)
-    or exists (select 1 from cb.sessions s
-                where s.machine = lower(q.reply_to ->> 'machine') and s.pane = q.reply_to ->> 'pane' and s.actor = who)))
+  select case when coalesce(q.reply_to ->> 'pane', '') = '' then coalesce(who = q.asked_by, false)
+    else coalesce(lower(who) = lower((q.reply_to ->> 'pane') || '@' || (q.reply_to ->> 'machine')), false)
+      or exists (select 1 from cb.sessions s
+                  where s.machine = lower(q.reply_to ->> 'machine') and s.pane = q.reply_to ->> 'pane' and s.actor = who)
+  end
 $$;
 
 -- Orchestrator: answer handed to the session. Idempotent. Unblocks the task.

@@ -125,7 +125,7 @@ test('a send-back is marked told only for who it goes to', async () => {
   const { sql, a } = await board();
   await sql`select cb.ask(project => 'demo', body => 'which one?', actor => 'W1@boxa')`;
   const [{ id }] = await sql`select max(id) as id from cb.questions`;
-  await sql`select cb.send_back(${String(id)}, 'clarify')`;
+  await sql`select cb.send_back(${String(id)}, 'simplify')`; // a reason that needs no note
   const told = async () => (await sql`select sent_back ->> 'delivered_to' as to from cb.questions where id = ${id}`)[0].to;
   const [code] = await outcome(await call(a, 'answer_delivered', mark(String(id), 'W2@boxa')));
   assert.equal(code, 400);
