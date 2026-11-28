@@ -91,7 +91,7 @@ test('relay pushes an answer into its session and marks it delivered', { timeout
   try {
     await new Promise((r) => setTimeout(r, 1500)); // relay is listening
     // every session runs one: it names its connections, and holds no more than its LISTEN and one for queries
-    const names = (await sql`select application_name as n from pg_stat_activity where application_name like 'cb-relay%' and pid <> pg_backend_pid()`).map((r: any) => r.n);
+    const names = (await sql`select application_name as n from pg_stat_activity where datname = current_database() and application_name like 'cb-relay%' and pid <> pg_backend_pid()`).map((r: any) => r.n);
     assert.ok(names.length >= 1 && names.length <= 2, `cb-relay connections: ${names.length}`);
     // named with its code's version: a rollout is checked with one query (2026-11-18: a monitor guessed wrong)
     for (const n of names) assert.match(n, /^cb-relay\/[0-9a-f]{7}$/);

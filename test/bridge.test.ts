@@ -89,7 +89,7 @@ test('cb in a session with a relay runs through it, and opens no connection of i
     const otherCb = await stranger('cb'); // #3772: another run's cb, on its own database
     let own = 0, done = false;
     const watch = (async () => { while (!done) {
-      const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where application_name = 'cb'`;
+      const [{ n }] = await sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and application_name = 'cb'`;
       own = Math.max(own, n); await wait(20);
     } })();
     const r = spawnSync('node', ['cli/cb.ts', 'add', 'demo', 'via the relay'], { encoding: 'utf8', env });
@@ -200,7 +200,7 @@ test('cb takes its name from the relay, and hears every change: its own cb iam, 
     assert.equal(await addedBy(), 'W10');
     // the relay's connections cut (Postgres restarted, a network change): a rename meanwhile is not missed
     otherRelay = await stranger('cb-relay/0000000'); // #3772: it is not this run's to cut
-    await sql`select pg_terminate_backend(pid) from pg_stat_activity where application_name like 'cb-relay%'`;
+    await sql`select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and application_name like 'cb-relay%'`;
     await sql`select cb.iam('testbox', ${pane}, 'W11', null)`;
     assert.equal(await addedBy(), 'W11', 'no notice could reach the relay: cb must not get the old name');
     await wait(1500);
