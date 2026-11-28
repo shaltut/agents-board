@@ -52,14 +52,20 @@ const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED
 // 4 s on 156 KB through a role seat's six scans). Same matches: end lines are indexed once per word, a line's << are
 // tried last to first (the regex's greedy [^\n]*), and ^ and $ keep the m flag's line ends (\n, \r, U+2028, U+2029).
 
-// #4768, #4770: what bash is inside at a place in the command. It reads forward only, once. read(to) leaves at() === to
-// when `to` is not inside an escape, a comment or a single-quoted word; open holds the " ( and ` not yet closed. What it
-// cannot follow (a heredoc nobody skipped, a case, whose ) closes nothing) makes it unsure for good: from there nothing
-// is dropped, so its text is judged as commands.
-const WORD_BREAK = /[ \t\n;&|()<>]/; // bash's own: no CR, no Unicode space
-const ANSI_BODY = /(?:\\[\s\S]|[^\x27\\])*/y;
-const CASE_AT = /case[ \t]/y;
-const PLAIN_PARAM = /\$\{[^\x22\x27\x60{}\\]*\}/y; // ${x}, ${#x}, ${x:-y}: no quote or brace inside to follow
+// #4768, #4770: a body is dropped only where the shell reads a heredoc. Seats run bash and PowerShell and the guard is
+// told neither, so the reader holds a list of what may stand before a marker, all of which both shells read alike: words,
+// ; & | > ( ), plain '...' and "..." strings, $( ), $name, ${name}, and comments. PowerShell has no heredoc (a << in its
+// code runs nothing), so what has to be ruled out is a quote or a comment that only one of them sees. Anything else
+// (a backtick, a backslash, <, a smart quote, $'..', @'..', another heredoc, case, whose ) closes nothing) makes the
+// reader unsure for good: from there nothing is dropped, so the text is judged as commands.
+// read(to) leaves at() === to when `to` is not inside a comment or a '...' word; open holds the " and ( not yet closed.
+const PLAIN_CODE = /[A-Za-z0-9_ \t\n./:=@%+,~;&|>*?!^[\]{}-]/;
+const COMMENT_START = /[ \t\n;&|(]/;
+const PS_QUOTE = /[\u2018-\u201f]/; // PowerShell reads these as ' and "
+const PLAIN_SQ = /\x27[^\x27\u2018-\u201f]*\x27/y;
+const PLAIN_PARAM = /\$\{[^\x22\x27\x60{}\\\u2018-\u201f]*\}/y;
+const ESCAPED_BY_BASH = /[\x22\\\x60$]/; // what a \ changes inside "..."
+const CASE_AT = /case[ \t\r\n]/y;
 const DELIMITER_END = /(?=[ \t\n;&|<>()]|\r\n)/y;
 function bashReader(text) {
   let i = 0;
@@ -72,49 +78,59 @@ function bashReader(text) {
     read(to) {
       const { open } = r;
       const close = () => { open.pop(); r.low = Math.min(r.low, open.length); };
+      const lost = () => { r.unsure = true; };
       while (i < to && !r.unsure) {
-        const c = text[i], top = open[open.length - 1];
-        if (c === '\\') { i += 2; continue; }
+        const c = text[i], quoted = open[open.length - 1] === '"';
         if (c === '$') {
           const d = text[i + 1];
-          if (d === '$') { i += 2; continue; } // $$ is one word: a quote after it is a plain one
           if (d === '(') { open.push('('); i += 2; continue; }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
-            if (!PLAIN_PARAM.test(text)) { r.unsure = true; break; }
-            i = PLAIN_PARAM.lastIndex;
+            if (PLAIN_PARAM.test(text)) i = PLAIN_PARAM.lastIndex; else lost();
             continue;
           }
-          if (d === "'" && top !== '"') { // $'...': \' does not close it
-            ANSI_BODY.lastIndex = i + 2;
-            ANSI_BODY.test(text);
-            i = ANSI_BODY.lastIndex + 1;
+          if (d === "'" && !quoted) lost();
+          i += d === '$' ? 2 : 1;
+          continue;
+        }
+        if (quoted) {
+          if (c === '"') close();
+          else if (c === '`' || PS_QUOTE.test(c)) lost();
+          else if (c === '\\') { // PowerShell does not escape with \: only a \ that changes nothing in either may stand
+            if (ESCAPED_BY_BASH.test(text[i + 1] ?? '')) lost();
+            i++;
+          }
+          i++;
+          continue;
+        }
+        if (c === '"' || c === "'") {
+          if (text[i - 1] === '@') { lost(); continue; } // a PowerShell here-string
+          if (c === '"') { open.push(c); i++; continue; }
+          PLAIN_SQ.lastIndex = i;
+          if (PLAIN_SQ.test(text)) i = PLAIN_SQ.lastIndex;
+          else if (text.indexOf("'", i + 1) < 0) i = text.length + 1;
+          else lost();
+          continue;
+        }
+        if (c === '#') {
+          if (i === 0 || COMMENT_START.test(text[i - 1])) {
+            const nl = text.indexOf('\n', i);
+            const end = nl < 0 ? text.length : nl;
+            const cr = text.indexOf('\r', i); // a lone CR ends a comment in PowerShell, not in bash
+            if (cr >= 0 && cr < end - 1) lost();
+            i = end;
             continue;
           }
-        }
-        if (c === '`') { if (top === '`') close(); else open.push('`'); i++; continue; }
-        if (top === '"') { if (c === '"') close(); i++; continue; }
-        const wordStart = i === 0 || WORD_BREAK.test(text[i - 1]);
-        if (c === "'") {
-          const end = text.indexOf("'", i + 1);
-          i = end < 0 ? text.length + 1 : end + 1;
+          if (!/[A-Za-z0-9_]/.test(text[i - 1])) lost(); // after ) , = a shell may or may not start a comment here
+          i++;
           continue;
         }
-        if (c === '#' && wordStart) {
-          // after a ) or a continued line, whether this # starts a word depends on what came before
-          if (text[i - 1] === ')' || (text[i - 1] === '\n' && text[i - 2] === '\\')) { r.unsure = true; break; }
-          const nl = text.indexOf('\n', i);
-          i = nl < 0 ? text.length : nl;
-          continue;
-        }
-        if (c === '<' && text[i + 1] === '<') {
-          if (text[i + 2] === '<') { i += 3; continue; } // a here-string
-          r.unsure = true;
-          break;
-        }
-        if (c === 'c' && wordStart) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) r.unsure = true; }
-        if (c === '"' || c === '(') open.push(c);
-        else if (c === ')' && top === '(') close();
+        if (c === '(') open.push(c);
+        else if (c === ')') { if (open.length) close(); else lost(); }
+        else if (c === '\r') { if (text[i + 1] !== '\n') lost(); }
+        else if (!PLAIN_CODE.test(c)) lost();
+        else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
+        else if (c === 'c' && (i === 0 || COMMENT_START.test(text[i - 1]))) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
       }
     },
