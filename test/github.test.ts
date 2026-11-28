@@ -849,9 +849,10 @@ test("what orch's terminal gets for one poll: the grouped message once, framed a
   await sql`select cb.iam('testbox', ${pane}, 'orch@shaltoot', 'iris')`;
   const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-gh-relay-test-` + process.pid : join(tmpdir(), `cb-gh-relay-${process.pid}.sock`);
   const inbox = fakeInbox(path, 'tok');
-  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore',
+  const start = () => spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore',
     env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' } });
-  const exited = new Promise((r) => relay.on('exit', r));
+  let relay = start();
+  let exited = new Promise((r) => relay.on('exit', r));
   try {
     await new Promise((r) => setTimeout(r, 1500)); // relay is listening
     const f = fakeGh({
@@ -859,11 +860,16 @@ test("what orch's terminal gets for one poll: the grouped message once, framed a
       [`repos/${R}/issues/comments`]: () => [comment(20, at(5), 'secret comment text')],
     });
     await poll(f, watch);
-    // a GitHub line waits up to 10 minutes for something important (#3221): end the window on the board's clock
+    // a GitHub line waits up to 10 minutes for something important (#3221): end the window by aging the hold on the
+    // board and starting the relay again (a running relay times its lines by its own clock)
     for (let i = 0; i < 50 && !(await sql`select 1 from cb.sessions where pane = ${pane} and hold_at is not null`).length; i++) await new Promise((r) => setTimeout(r, 100));
+    relay.kill();
+    await exited;
     await sql`update cb.sessions set hold_at = now() - interval '11 minutes' where pane = ${pane}`;
-    await sql`select pg_notify('cb', 'test')`;
-    for (let i = 0; i < 50 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
+    fs.rmSync(join(tmpdir(), `cb-relay-${key}.pid`), { force: true });
+    relay = start();
+    exited = new Promise((r) => relay.on('exit', r));
+    for (let i = 0; i < 80 && !inbox.got.length; i++) await new Promise((r) => setTimeout(r, 100));
     await new Promise((r) => setTimeout(r, 800)); // nothing more follows
     assert.equal(inbox.got.length, 1, JSON.stringify(inbox.got));
     const text: string = inbox.got[0].message.content;
