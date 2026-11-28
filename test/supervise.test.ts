@@ -75,8 +75,10 @@ const deps = (sup: any, run: Runner, o: Partial<Parameters<typeof tick>[0]> = {}
     sleep: async (ms: number) => { t += ms; }, clock: () => t, ...o };
 };
 /** The supervisor's connection with each of its board calls going through f (text: select cb.<name>(...)). */
-const gate = (sup: any, f: (text: string, send: () => Promise<any>) => PromiseLike<any>) =>
-  ({ unsafe: (text: string, values: any[]) => f(text, () => sup.unsafe(text, values)) });
+const gate = (sup: any, f: (text: string, send: () => Promise<any>, values: any[]) => PromiseLike<any>) =>
+  ({ unsafe: (text: string, values: any[]) => f(text, () => sup.unsafe(text, values), values) });
+/** the call that marks a seat closing (its second argument true), not the one that clears the mark */
+const marking = (text: string, values: any[]) => text.includes('supervise_mark') && values[1] === true;
 const tells = (sql: any, to = 'orch@macbook') => sql`select summary from cb.events where kind = 'message' and data ->> 'to' = ${to}` as Promise<any[]>;
 
 test('a waiting build card starts a builder', async () => {
@@ -221,13 +223,8 @@ test('closeOne delegates through Claude adapter and safely skips unregistered ag
     await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' });
     const h = fakeHerdr();
     h.live.set('sv-b1-macbook', 'w1:p9');
-    const hooked = new Proxy(sup, {
-      apply(t, self, args: any[]) {
-        const q = Reflect.apply(t, self, args);
-        if (!/supervise_mark\(.*, true\)/.test(String(args[0]?.join?.('?')))) return q;
-        return q.then(async (r: any) => { await sql`update cb.sessions set agent = 'codex' where actor = 'sv-B1@macbook'`; return r; });
-      },
-    });
+    const hooked = gate(sup, (text, send, values) => !marking(text, values) ? send()
+      : send().then(async (r: any) => { await sql`update cb.sessions set agent = 'codex' where actor = 'sv-B1@macbook'`; return r; }));
     const out = await tick(deps(hooked, h.run));
     assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
     assert.ok(!has(h.calls, 'pane', 'close'), out.join('\n'));
@@ -286,12 +283,11 @@ test('a working seat is never marked closing: the tick reads its herdr status', 
   await session(sql, 'sv-B1@macbook', 'builder', { startedMin: 21, agent: 'claude' }); // idle on the board long enough to be a close candidate
   const h = fakeHerdr({ status: 'working' });
   h.live.set('sv-b1-macbook', 'w1:p9');
-  const marks: string[] = [];
-  const spy = new Proxy(sup, {
-    apply(t, self, args: any[]) { marks.push(String(args[0]?.join?.('?'))); return Reflect.apply(t, self, args); },
-  });
+  const asked: { text: string; values: any[] }[] = [];
+  const spy = gate(sup, (text, send, values) => { asked.push({ text, values }); return send(); });
   const out = await tick(deps(spy, h.run));
-  assert.ok(!marks.some((q) => /supervise_mark\(.*, true\)/.test(q)), 'never marked closing');
+  assert.ok(asked.some((q) => q.text.includes('supervise_state')), 'the spy sees the calls of the tick');
+  assert.ok(!asked.some((q) => marking(q.text, q.values)), 'never marked closing');
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
   assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
 });
@@ -302,13 +298,8 @@ test('a claim between mark and re-check stops the close', async () => {
   const h = fakeHerdr();
   h.live.set('sv-b1-macbook', 'w1:p9');
   // a held card lands right after the mark committed, before the re-check
-  const hooked = new Proxy(sup, {
-    apply(t, self, args: any[]) {
-      const q = Reflect.apply(t, self, args);
-      if (!/supervise_mark\(.*, true\)/.test(String(args[0]?.join?.('?')))) return q;
-      return q.then(async (r: any) => { await card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' }); return r; });
-    },
-  });
+  const hooked = gate(sup, (text, send, values) => !marking(text, values) ? send()
+    : send().then(async (r: any) => { await card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' }); return r; }));
   const out = await tick(deps(hooked, h.run));
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
   assert.equal((await sql`select closing_at from cb.sessions where actor = 'sv-B1@macbook'`)[0].closing_at, null);
@@ -529,12 +520,10 @@ test('the hold re-check runs after herdr finds the pane, right before /exit', as
   let found = false;
   const run: Runner = (m, args) => { if (args[1] === 'get') found = true; return h.run(m, args); };
   // a card lands while herdr is asked for the pane: the next state read must see it
-  const hooked = new Proxy(sup, {
-    apply(t, self, args: any[]) {
-      if (!found || !/supervise_state/.test(String(args[0]?.join?.('?')))) return Reflect.apply(t, self, args);
-      found = false;
-      return card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' }).then(() => Reflect.apply(t, self, args));
-    },
+  const hooked = gate(sup, (text, send) => {
+    if (!found || !text.includes('supervise_state')) return send();
+    found = false;
+    return card(sql, { assignee: 'sv-B1@macbook', status: 'in_progress' }).then(() => send());
   });
   const out = await tick(deps(hooked, run));
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
@@ -622,12 +611,7 @@ test('a throw between the mark and /exit clears the mark', async () => {
   let found = false;
   const run: Runner = (m, args) => { if (args[1] === 'get') found = true; return h.run(m, args); };
   // the re-check after herdr found the pane fails (the board dropped the connection)
-  const hooked = new Proxy(sup, {
-    apply(t, self, args: any[]) {
-      if (found && /supervise_state/.test(String(args[0]?.join?.('?')))) return Promise.reject(new Error('connection lost'));
-      return Reflect.apply(t, self, args);
-    },
-  });
+  const hooked = gate(sup, (text, send) => (found && text.includes('supervise_state') ? Promise.reject(new Error('connection lost')) : send()));
   const out = await tick(deps(hooked, run));
   assert.ok(out.some((l) => /sv: tick failed: connection lost/.test(l)), out.join('\n'));
   assert.ok(!has(h.calls, 'agent', 'prompt', 'sv-b1-macbook', '/exit'), out.join('\n'));
