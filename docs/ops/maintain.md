@@ -490,6 +490,7 @@ a new volume and a restore, never just a new image tag.
 | The worker API answers 429 "too many failed sign-ins from this address" | something there keeps sending a revoked or mistyped key, so a newly installed one is not looked up | stop it (the log's 401 lines name the key id); it clears within a minute |
 | The worker API answers 413 to `cb ask` with pictures | over 16 MB for the request | fewer or smaller pictures |
 | `cb runner` exits: "this machine's runner key is ... and this runner is ..." | the installed key was issued for another runner name or kind | issue one for this runner's name and install it ([the runner on the worker API](#the-job-runner-on-the-worker-api-3222)) |
+| The runner's pane says "the board's notice stream has not opened"; jobs start up to 30 s late | the proxy fails or buffers `/w/v1/events` while calls work | let it pass that path unbuffered ([deploy.md](deploy.md)); no restart |
 | The runner's pane repeats "the board refused the notice stream" or "claim failed: the board refused this machine's key" | its key was revoked or mistyped | install a live one; no restart |
 | A worker's `cb` errors "function cb.x(...) does not exist" | the worker's code is older or newer than the VPS's schema | update the worker's checkout (Upgrade) |
 | No Telegram pushes | no token, or another server polls with it (409 in the logs) | `TELEGRAM_BOT_TOKEN` in `.env`; stop the other server |

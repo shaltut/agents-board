@@ -189,7 +189,15 @@ const follow = (listening: () => void) => {
   } });
 };
 if (sql) await sql.listen('cb_jobs', tick, tick);
-else await new Promise<void>(follow);
+else {
+  // Never waited for: a proxy may fail or buffer /w/v1/events while every call works, and the runner then still beats
+  // and looks for work every 30 s. The client retries without a word, so say it here.
+  let opened = false;
+  follow(() => { opened = true; });
+  setTimeout(() => {
+    if (!opened) say('the board\'s notice stream has not opened in 10 s: looking for work every 30 s, and still trying it. If this stays, check that the proxy passes /w/v1/events unbuffered');
+  }, 10_000);
+}
 setInterval(() => {
   board('runner_beat', { runner: NAME }).catch((e: any) => say(`beat failed: ${e?.message ?? e}`));
   tick();
