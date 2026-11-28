@@ -2127,6 +2127,7 @@ test('#4836: a filled pair that is not two plain variables and shows no push pas
     'echo "$name`.txt"',
     '$id: $(date)',
     '"$k=$v" "$other-file"',
+    'echo "$f $(git show HEAD:package.json | wc -l)"', // the substitution's own git words are no signal
   ];
   for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
 });
