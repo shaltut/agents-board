@@ -1,4 +1,6 @@
 // cb run / jobs / job: queue checks on the PC runner, read the queue and the logs. Logic lives here, cb.ts only dispatches.
+import { call } from './board.ts';
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const MAX_WAIT_MS = 30 * 60_000;
 type Result = { out: string; json: unknown; code: number };
@@ -50,7 +52,7 @@ const markedJson = (j: any) => ({ ...j, summary: j.summary == null ? j.summary :
 export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?: string; project?: string | null; repo?: string; params: Record<string, string[]>; wait: boolean; json?: boolean; actor: string; pollMs?: number }): Promise<Result> {
   if (!o.project) throw new Error('no project: say which (--project <slug>) or bind this session once (cb iam <name> <project>)');
   const known = async () => {
-    const [{ l }] = await sql`select cb.jobs_list(${o.project}) as l`;
+    const l = await call('jobs_list', { project: o.project }, sql);
     const m = recipeLines(l, o.project!);
     if (o.repo) return m.get(o.repo) || `none for ${o.repo}`;
     if (!m.size) return recipesNone(l, o.project!);
@@ -62,7 +64,7 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
   if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number');
   let added: any;
   try {
-    [{ r: added }] = await sql`select cb.job_add(${o.project}, ${o.recipe}, ${o.sha}, ${JSON.stringify(o.params)}::text::jsonb, ${card ?? null}::bigint, ${o.actor}, ${o.repo ?? null}) as r`;
+    added = await call('job_add', { project: o.project, recipe: o.recipe, sha: o.sha, params: o.params, task_id: card ?? null, actor: o.actor, repo: o.repo ?? null }, sql);
   } catch (e: any) {
     if (/^no recipe /.test(e?.message)) throw new Error(`no recipe ${o.recipe} for ${o.project}${o.repo ? ` (${o.repo})` : ''}. Recipes: ${await known()}`);
     throw e;
@@ -72,10 +74,10 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
     : added.held ? `; ${o.project}'s jobs are held: it starts when its lead or Ahmed releases them (cb job release ${o.project})` : ''}`;
   if (!o.wait) return { out: queued, json: added, code: 0 };
   if (!o.json) console.log(queued);
-  // cb.job_finish sends no pg_notify, so poll: LISTEN alone would miss the end
+  // cb.job_finish sends no notice, so poll: LISTEN alone would miss the end
   const until = Date.now() + MAX_WAIT_MS;
   for (;;) {
-    const [{ j }] = await sql`select cb.job_get(${added.id}::bigint) as j`;
+    const j = await call('job_get', { id: added.id }, sql);
     if (!j) throw new Error(`no job #${added.id}`);
     if (!['queued', 'running'].includes(j.state)) return { out: endLine(j), json: markedJson(j), code: j.state === 'passed' ? 0 : 1 };
     if (Date.now() > until) return { out: `still running: cb job ${added.id}`, json: j, code: 1 };
@@ -87,7 +89,7 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
 export async function endedCmd(sql: any, o: { project: string | null; requester?: string; card?: string }): Promise<Result> {
   const card = o.card?.replace(/^#/, '');
   if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number. Run: cb help jobs');
-  const [{ l }] = await sql`select cb.jobs_ended(${o.project}, ${o.requester ?? null}, ${card ?? null}::bigint) as l`;
+  const l = await call('jobs_ended', { project: o.project, requester: o.requester ?? null, task_id: card ?? null }, sql);
   const lines = l.jobs.map((j: any) => `#${j.id} ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}${j.task_id ? ` (card #${j.task_id})` : ''}, ended ${new Date(j.finished_at).toISOString().slice(0, 19)}Z`);
   const asked = [o.project, o.requester && `by ${o.requester}`, card && `card #${card}`].filter(Boolean).join(', ');
   if (!lines.length) lines.push(`no ended job${asked ? ` (${asked})` : ''}`);
@@ -99,7 +101,7 @@ export async function endedCmd(sql: any, o: { project: string | null; requester?
 }
 
 export async function jobsCmd(sql: any, project: string | null): Promise<Result> {
-  const [{ l }] = await sql`select cb.jobs_list(${project}) as l`;
+  const l = await call('jobs_list', { project }, sql);
   const lines = l.jobs.map((j: any) => `#${j.id} ${j.state} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}`);
   if (!lines.length) lines.push('no job queued or running');
   const projects = project ? [project] : [...new Set<string>(l.runners.flatMap((r: any) => r.recipes.map((x: any) => x.project)))];
@@ -118,22 +120,22 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
   // #4527: a project's lead (or Ahmed) holds and releases its project's waiting jobs
   if (sub === 'hold' || sub === 'release') {
     if (!id) throw new Error(usage);
-    await sql`select cb.job_hold(${id}, ${sub === 'hold'}, ${actor})`;
+    await call('job_hold', { project: id, held: sub === 'hold', actor }, sql);
     return { out: sub === 'hold' ? `${id}'s waiting jobs are held: running ones carry on (cb job release ${id})` : `${id}'s jobs start again`, json: { project: id, held: sub === 'hold' }, code: 0 };
   }
   id = id?.replace(/^#/, ''); // after hold and release, whose id is a project
   if (!/^\d+$/.test(id ?? '') || !['show', 'cancel', 'log', 'retry', 'move'].includes(sub ?? '')) throw new Error(usage);
-  if (sub === 'cancel') { await sql`select cb.job_cancel(${id!}::bigint, ${actor})`; return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
+  if (sub === 'cancel') { await call('job_cancel', { id, actor }, sql); return { out: `job #${id} cancelled`, json: { id: Number(id), state: 'cancelled' }, code: 0 }; }
   if (sub === 'retry') {
-    const [{ r }] = await sql`select cb.job_retry(${id!}::bigint, ${actor}) as r`;
+    const r = await call('job_retry', { id, actor }, sql);
     return { out: `job #${r.id} queued (${r.ahead} ahead), again for job #${id}`, json: r, code: 0 };
   }
   if (sub === 'move') {
     if (!['next', 'up', 'down', 'back'].includes(place ?? '')) throw new Error('usage: cb job move <id> next|up|down|back');
-    const [{ r }] = await sql`select cb.job_move(${id!}::bigint, ${place!}, ${actor}) as r`;
+    const r = await call('job_move', { id, place, actor }, sql);
     return { out: r.moved ? `job #${id} moved ${place}` : `job #${id} is already ${place === 'up' || place === 'next' ? 'first' : 'last'}`, json: r, code: 0 };
   }
-  const [{ j }] = await sql`select cb.job_get(${id!}::bigint) as j`;
+  const j = await call('job_get', { id }, sql);
   if (!j) throw new Error(`no job #${id}: cb jobs lists queued and running jobs, cb jobs --ended the ended ones`);
   if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: markedJson(j), code: 0 };
   return logCmd(sql, j, tail);
@@ -154,9 +156,9 @@ function logBase(raw: string): URL {
 async function logCmd(sql: any, j: any, tail?: string): Promise<Result> {
   if (!j.runner) throw new Error(`job #${j.id} has not started: no log yet`);
   if (tail !== undefined && !/^\d+$/.test(tail)) throw new Error('--tail takes a number of lines');
-  const [r] = await sql`select log_url from cb.runners where name = ${j.runner}`;
-  if (!r?.log_url) throw new Error(`the runner on ${j.runner} has no log address`);
-  const url = new URL(`/jobs/${j.id}/log`, logBase(r.log_url));
+  const logUrl = await call('job_log_url', { runner: j.runner }, sql);
+  if (!logUrl) throw new Error(`the runner on ${j.runner} has no log address`);
+  const url = new URL(`/jobs/${j.id}/log`, logBase(logUrl));
   if (tail) url.searchParams.set('tail', tail);
   const dead = () => new Error(`the runner on ${j.runner} is not answering`);
   let res: Response; let body: Buffer;

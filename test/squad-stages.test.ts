@@ -799,7 +799,7 @@ test('cb mine and cb start read the stage words of a whole list in one query, no
   const rows = [{ project: 'demo', stage: 'review' }, { project: 'demo', stage: 'build' }, { project: 'demo', stage: 'qa' },
     { project: 'demo', stage: 'review' }, { project: 'demo', stage: null }, { project: 'old', stage: 'build' }, { project: 'demo', stage: 'design' }];
   let n = 0;
-  const counted = (s: any, ...v: any[]) => { n++; return sql(s, ...v); };
+  const counted = { unsafe: (...a: [string, any[]]) => { n++; return sql.unsafe(...a); } };
   assert.deepEqual(await stageWordsFor(counted, rows),
     ['In review', 'Building', 'Checking on dev against the design', 'In review', null, null, 'Design']);
   assert.equal(n, 1);

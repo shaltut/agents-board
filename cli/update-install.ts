@@ -25,6 +25,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { compareManifest, type Manifest } from './release.ts';
 import { LOCKFILE, lockfileSha } from './release-archive.ts';
 import { boardBase, fetchRelease, needAddress } from './update.ts';
+import { call } from './board.ts';
 
 const win = process.platform === 'win32';
 const short = (s: string) => s.slice(0, 7);
@@ -266,13 +267,13 @@ function stage(L: Layout, m: Manifest, files: Map<string, Buffer>, env: NodeJS.P
   }
 }
 
-/** What the board's database says of a schema: covers, whether it has it (cb.schema_covers); null when it cannot say
+/** What the board's database says of a schema (cb.schema_check): covers, whether it has it; null when it cannot say
  *  (a board from before the gate); current, the schema it runs. */
 export type SchemaAnswer = { covers: boolean | null; current: string | null };
 /** Asks the database this cb uses (the board's) about the schema `need` (a sha256 of db/schema.sql). */
 export async function askSchema(sql: any, need: string): Promise<SchemaAnswer> {
   try {
-    const [r] = await sql`select cb.schema_covers(${need}) as covers, cb.schema_applied() ->> 'current' as current`;
+    const r = await call('schema_check', { need }, sql);
     return { covers: !!r.covers, current: r.current ?? null };
   } catch (e: any) {
     if (e?.code === '42883') return { covers: null, current: null }; // undefined_function: the board predates the gate

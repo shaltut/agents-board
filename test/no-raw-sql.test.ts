@@ -1,13 +1,17 @@
 // #3222 S1: cb reaches the board only through named functions (cli/board.ts), so the worker API can carry the same
-// calls. Pure: it reads source files. S1a covers cli/cb.ts, S1c the runner, triage and the supervisor; the other slices add theirs.
+// calls. Pure: it reads source files. S1a covers cli/cb.ts, S1b the relay, the hooks, jobs, usage, update and the stage
+// words, S1c the runner, triage and the supervisor; the other slices add their files.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const FILES = ['cli/cb.ts', 'cli/runner.ts', 'cli/runner-board.ts', 'cli/runner-job.ts', 'cli/triage.ts',
+const FILES = ['cli/cb.ts', 'cli/relay.ts', 'cli/relay-refusal.ts', 'cli/jobs.ts', 'cli/usage.ts', 'cli/update-install.ts',
+  'cli/stage-words.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs',
+  'cli/runner.ts', 'cli/runner-board.ts', 'cli/runner-job.ts', 'cli/triage.ts',
   'cli/supervise.ts', 'cli/supervise-plan.ts', 'cli/lease.ts', 'cli/lease-worker.ts'];
-// what a file may still do, until the slice that takes it away: the runner listens for new jobs until S4
-const STILL: Record<string, string[]> = { 'cli/runner.ts': ['LISTEN'] };
+// what a file may still do, until the slice that takes it away: the relay and the runner listen for notices until the
+// worker API streams them (#3222 S3, S4)
+const STILL: Record<string, string[]> = { 'cli/relay.ts': ['LISTEN'], 'cli/runner.ts': ['LISTEN'] };
 
 const BANNED: [string, RegExp][] = [
   ['tagged SQL', /\b(?:sql|tx|db|direct)\s*`/],

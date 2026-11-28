@@ -95,8 +95,8 @@ What NPM must do, and does by default (its `proxy.conf`): pass `Host`, set `X-Fo
 and POST is refused as cross-site. NPM on vps2 also adds a strict Content-Security-Policy to every site; the board
 loads nothing from other origins, so it is unaffected (tested).
 
-The worker API is under `/w/` on the same address and needs two more things of a proxy: pass a request body of 32 MB
-(plain nginx stops at 1 MB: `client_max_body_size 32m;`), and don't buffer `/w/v1/events` (the board asks for that with
+The worker API is under `/w/` on the same address and needs two more things of a proxy: pass a request body of 16 MB
+(plain nginx stops at 1 MB: `client_max_body_size 16m;`), and don't buffer `/w/v1/events` (the board asks for that with
 `X-Accel-Buffering: no`). No sign-in of the proxy's own may sit in front of `/w/`: a worker has only its key. Neither
 was checked against NPM on vps2.
 

@@ -1,11 +1,12 @@
-// The board operations cb names (#3222): each is the cb.* function of the same name, called with named arguments
-// through cli/board.ts. Default deny: a name that is not here is not called. This is cb's list, not the web's
-// (server/rpc.ts RPC_FUNCTIONS); the worker API (server/worker.ts) serves from it. setof: the function returns rows,
-// not one value. No _name is ever listed. test/ops-list.test.ts keeps it equal to what cb calls and to db/schema.sql.
+// The board operations cb, its relay and its hooks name (#3222): each is the cb.* function of the same name, called with
+// named arguments through cli/board.ts. Default deny: a name that is not here is not called. This is the workers' list,
+// not the web's (server/rpc.ts RPC_FUNCTIONS); the worker API (server/worker.ts) serves from it. setof: the function
+// returns rows, not one value. No _name is ever listed. test/ops-list.test.ts keeps it equal to what is called and to
+// db/schema.sql.
 /** The kinds of worker key (cb.worker_keys). */
 export type Kind = 'machine' | 'runner' | 'supervisor';
 /** kinds: whose keys may call it over the worker API; none: only a caller with its own database connection.
- *  bytes: pictures travel in it, so its request may be 32 MB, not 1. machineLabel: its machine argument says what a row
+ *  bytes: pictures travel in it, so its request may be 16 MB, not 1. machineLabel: its machine argument says what a row
  *  is about, not who is calling. */
 export type Op = { setof?: true; kinds: readonly Kind[]; bytes?: true; machineLabel?: true };
 
@@ -23,6 +24,9 @@ export const OPS: Record<string, Op> = Object.fromEntries([
     seat_effort session_project_of sessions_overview squad_get squad_options squad_set stage_fail stage_pass stage_set
     start_words task_add task_block task_done task_find task_finish_line task_move task_notes_total task_project
     task_status task_tag task_unblock task_update tell withdraw
+    broadcast_seen inbox_ping job_add job_cancel job_get job_hold job_log_url job_move job_retry jobs_ended jobs_list
+    refusal_targets relay_hold resume_for_pane schema_check seat_code seat_model stage_words_for usage_report
+    usage_summary work_still_open
   `),
   ...list({ bytes: true }, 'ask_post reask_post'),
   ...list({ machineLabel: true }, 'mem_add'),
@@ -40,7 +44,10 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   ...list(never, 'job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings'),
   ...list({ ...never, ...rows }, 'jobs_cancelled'),
   // the supervisor's: not served yet either. The slice that puts the supervisor on its own key gives them its kind;
-  // tell, which it also calls, is a seat's today and needs the supervisor's kind then too.
-  ...list(never, 'board_now jobs_list lease_release lease_renew lease_take seat_switch supervise_log supervise_mark supervise_state'),
+  // tell and jobs_list, which it also calls, are a seat's today and need the supervisor's kind then too.
+  ...list(never, 'board_now lease_release lease_renew lease_take seat_switch supervise_log supervise_mark supervise_state'),
   ...list({ ...never, ...rows }, 'sessions_live squad_history supervised_projects'),
+  // a write that names neither a machine nor an actor, so the worker API has nothing to bind to the key: not served until
+  // the slice that moves the relay (S3) gives it one
+  ...list(never, 'ask_delivered'),
 ]);

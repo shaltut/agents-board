@@ -14,9 +14,11 @@ const named = (src: string, caller: RegExp) => [...src.matchAll(caller)].flatMap
   return [...first.matchAll(/(?<![=!]== )'([a-z_]+)'/g)].map((x) => x[1]!);
 });
 
-// cb.ts calls call(); it hands the same call() to squad-up and squad-trust, which know it as callFn
+// these call call() by that name; cb.ts hands the same call() to squad-up and squad-trust, which know it as callFn
+const CALL_FILES = ['cli/cb.ts', 'cli/relay.ts', 'cli/relay-refusal.ts', 'cli/jobs.ts', 'cli/usage.ts', 'cli/update-install.ts',
+  'cli/stage-words.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs'];
 const CALLED = [...new Set([
-  ...named(read('cli/cb.ts'), /(?<![\w.])call\(/g),
+  ...CALL_FILES.flatMap((f) => named(read(f), /(?<![\w.])call\(/g)),
   ...named(read('cli/squad-up.ts'), /\bcallFn\(/g),
   ...named(read('cli/squad-trust.ts'), /\bcallFn\(/g),
   // the runner's three files name theirs through board(), which is call() on the runner's own connection
@@ -40,6 +42,15 @@ test('OPS names no helper of the schema, only functions it has, each read as it 
     assert.ok(!fn.startsWith('_'), `${fn}: a _name is the schema's own helper, never a board operation`);
     assert.equal(!!op.setof, returnsRows(fn), `${fn}: setof in server/ops.ts must say whether cb.${fn} returns rows`);
   }
+});
+
+// two branches can each add a name, and the object keeps only the later entry: a seat's operation would silently stop
+// being served
+test('no name is listed twice', () => {
+  const names = [...read('server/ops.ts').matchAll(/\.\.\.list\((?:\{[^}]*\}|\w+), (?:`([^`]*)`|'([^']*)')\)/g)]
+    .flatMap((m) => (m[1] ?? m[2])!.trim().split(/\s+/));
+  assert.deepEqual(names.filter((n, i) => names.indexOf(n) !== i), []);
+  assert.deepEqual([...new Set(names)].sort(), Object.keys(OPS).sort(), 'the check reads every list');
 });
 
 test('OPS holds nothing cb does not call', () => {

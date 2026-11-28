@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { connect, databaseUrl, machine } from '../server/db.ts';
 import { seatKey, seatLockHolder, serveBridge } from './bridge.ts';
+import { call } from './board.ts';
 import { backWhy, reaskHint } from './help.ts';
 import { getAdapter } from './agents/index.ts';
 import { HERDR_NAMED, herdrNameForPane, namelessDead, readRunningModel, watchdogStep, type Watch } from './relay-seat.ts';
@@ -133,7 +134,8 @@ const keepFresh = setInterval(touch, 2000); // from the start: setting up can ou
 // rollout is one query: select application_name, count(*) from pg_stat_activity group by 1
 const CODE = [SELF, join(HERE, 'bridge.ts'), join(HERE, '..', 'server', 'db.ts'),
   join(HERE, 'agents', 'index.ts'), join(HERE, 'agents', 'claude.ts'), join(HERE, 'relay-seat.ts'),
-  join(HERE, 'notice-hold.ts'), join(HERE, 'held-copy.ts')]; // review 98 L4; #3221: HOLD_MS lives there; #4630
+  join(HERE, 'notice-hold.ts'), join(HERE, 'held-copy.ts'), // review 98 L4; #3221: HOLD_MS lives there; #4630
+  join(HERE, 'board.ts'), join(HERE, '..', 'server', 'ops.ts'), join(HERE, '..', 'server', 'rpc.ts')]; // #3222: every board call
 const VERSION = createHash('sha1').update(CODE.map((f) => { try { return readFileSync(f); } catch { return ''; } }).join('\0')).digest('hex').slice(0, 7);
 const sql = connect(undefined, { app: `cb-relay/${VERSION}`, max: 1 }); // check() runs one at a time (busy); LISTEN has its own
 let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no history replay
@@ -141,7 +143,6 @@ let after = Number.MAX_SAFE_INTEGER; // first check: pending answers only, no hi
 // handed to cb.inbox, which resets the pane's row when it is not the row's session. null: the board keeps the row.
 const sessionNow = () => { try { return adapter.sessionId?.(seat) || null; } catch { return null; } };
 let lastSession: string | null | undefined; // the id the last inbox read was made with
-let inboxTakesSession = true; // false once a board older than #4379 (a 3-argument cb.inbox) refused the 4th
 let busy = false, again = false;
 
 // #4352: the commit this relay's code is (the real folder of its path: an installed version's, or a checkout's HEAD),
@@ -168,7 +169,7 @@ const codeNow = () => {
 async function sendCode() {
   if (Date.now() < codeDue) return;
   try {
-    const [{ ok }] = await sql`select cb.seat_code(${M}, ${PANE}, ${codeNow()}) as ok`;
+    const ok = await call('seat_code', { machine: M, pane: PANE, code_sha: codeNow() }, sql);
     if (ok) codeDue = Date.now() + 300_000; // no row yet: the next read tries again
   } catch (e: any) {
     // a board from before cb.seat_code: asked again in 5 minutes, so a board deployed after this relay started hears it
@@ -360,11 +361,10 @@ async function check() {
       // a dead agent gets no heartbeat and no delivery; the watchdog (below) decides when the relay leaves
       if (!(await agentAlive())) { if (!deadLogged) log('check: agent not alive; no heartbeat'); deadLogged = true; break; }
       deadLogged = false;
-      const gen = bindGen, ping = `ping:${ME}#${++pings}`, sid = sessionNow();
+      // the ping cb.inbox_ping sends is built on the board from the same pane and number
+      const gen = bindGen, n = ++pings, ping = `ping:${ME}#${n}`, sid = sessionNow();
       lastSession = sid;
-      const [{ i }] = sid && inboxTakesSession
-        ? await sql`select cb.inbox(${M}, ${PANE}, ${after}, ${sid}) as i, pg_notify('cb_bind', ${ping})`
-        : await sql`select cb.inbox(${M}, ${PANE}, ${after}) as i, pg_notify('cb_bind', ${ping})`;
+      const i = await call('inbox_ping', { machine: M, pane: PANE, after_event: after, session: sid, n }, sql);
       // 'project' in i: a board older than #3256 doesn't say it, so cb looks itself up
       if (gen === bindGen && i.actor && 'project' in i) waiting.set(ping, { actor: i.actor, project: i.project, gen });
       // #3221: a hold on the board that this read did not start from (a relay that restarted mid-hold reads with no
@@ -403,7 +403,8 @@ async function check() {
       // out only if the board still has it open for this session; everything else is delivered at once
       const settled = await offerSettled({ pending: pendingWork, offered: i.next_work ?? [], now: Date.now(), settleMs: SETTLE_MS,
         actor: i.actor ?? null, log,
-        stillOpen: async (ids) => ((await sql`select cb.work_still_open(${ids}::bigint[], ${i.actor}) as ids`)[0]!.ids as any[]).map(Number) });
+        // the numbers as a Postgres array literal: call() sends a JS array as jsonb
+        stillOpen: async (ids) => ((await call('work_still_open', { ids: `{${ids.join(',')}}`, actor: i.actor }, sql)) as any[]).map(Number) });
       i.next_work = settled.work;
       clearTimeout(settleTimer);
       if (settled.wait !== null) settleTimer = setTimeout(() => { check(); }, settled.wait + 100);
@@ -416,7 +417,7 @@ async function check() {
       if (step.action === 'hold') {
         if (!i.hold) {
           if (after === Number.MAX_SAFE_INTEGER) after = Number(i.last_event); // a first read has no card events to hold
-          await sql`select cb.relay_hold(${M}, ${PANE}, ${after})`;
+          await call('relay_hold', { machine: M, pane: PANE, from_event: after }, sql);
           log(`holding ${step.held} lines`);
         }
         heldFor = { actor: i.actor, project: i.project, sid, messages: i.messages, broadcasts: i.broadcasts, memory: i.memory ?? [], events: i.events, at: step.since };
@@ -442,23 +443,22 @@ async function check() {
       holdClock.seen.clear();
       // #3221 review I2: the hold ends first, on its own, right after the push (or with nothing left to push): a relay
       // that dies in the bookkeeping below must not leave a hold that makes the next one rewind and push it all again
-      if (i.hold) await sql`select cb.relay_hold(${M}, ${PANE}, ${null})`;
+      if (i.hold) await call('relay_hold', { machine: M, pane: PANE, from_event: null }, sql);
       if (push) {
-        for (const a of i.asks ?? []) await sql`select cb.ask_delivered(${String(a.id)}, ${a.upto}, ${i.actor}, ${a.reminder})`;
-        if (read.length) await sql`select cb.broadcast_seen(${M}, ${PANE}, ${Math.max(...read)})`;
+        for (const a of i.asks ?? []) await call('ask_delivered', { id: a.id, upto: a.upto, delivered_to: i.actor, reminder: a.reminder }, sql);
+        if (read.length) await call('broadcast_seen', { machine: M, pane: PANE, upto: Math.max(...read) }, sql);
         // the answer as pushed (#1346): one changed meanwhile stays answered and goes in the next push
-        for (const a of i.answers) await sql`select cb.answer_delivered(${String(a.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${null}, ${a.answered_at ?? null})`;
+        for (const a of i.answers) await call('answer_delivered', { id: a.id, delivered_to: i.actor ?? `${PANE}@${M}`, actor: 'relay', sent_back_at: null, answered_at: a.answered_at ?? null }, sql);
         // only the send-back pushed: one rewritten (or sent back again) since stays as it is
-        for (const s of i.sent_back ?? []) await sql`select cb.answer_delivered(${String(s.id)}, ${i.actor ?? `${PANE}@${M}`}, ${'relay'}, ${s.at})`;
+        for (const s of i.sent_back ?? []) await call('answer_delivered', { id: s.id, delivered_to: i.actor ?? `${PANE}@${M}`, actor: 'relay', sent_back_at: s.at }, sql);
         log(`pushed ${i.hold ? `(held ${step.held}) ` : ''}${i.asks?.length ?? 0} asks, ${i.bugs?.length ?? 0} bugs, ${i.huddles?.length ?? 0} huddle lines, ${i.messages.length} messages, ${i.answers.length} answers, ${i.sent_back?.length ?? 0} sent back, ${i.events.length} events, ${i.broadcasts.length} broadcasts, ${i.next_work.length} next, ${i.memory?.length ?? 0} memory`);
       }
       after = Number(i.last_event);
       await sendCode();
     } while (again);
   } catch (e: any) {
-    log(`check failed: ${e?.message}`); // board asleep or inbox busy: the next notify or poll retries
-    // undefined_function: a board without #4379's cb.inbox; ask it the old way from now on, at once
-    if (e?.code === '42883' && inboxTakesSession && /cb\.inbox/.test(String(e?.message))) { inboxTakesSession = false; soon(); }
+    // board asleep or inbox busy: the next notify or poll retries. 42883: the board has no such function yet
+    log(`check failed: ${e?.message}${e?.code === '42883' ? ' (the board is older than this code: deploy the board first)' : ''}`);
   } finally {
     busy = false;
   }
@@ -516,7 +516,7 @@ clearInterval(keepFresh); // the watchdog touches the lock from here on
 // #4786: the model the seat really runs, once a minute, once the agent has been seen up
 setInterval(() => {
   if (leaving || !watch.seenAlive) return;
-  readRunningModel({ adapter, pane: PANE, read: (args) => realRun(null, args, 10_000), save: (model) => sql`select cb.seat_model(${M}, ${PANE}, ${model})` })
+  readRunningModel({ adapter, pane: PANE, read: (args) => realRun(null, args, 10_000), save: (model) => call('seat_model', { machine: M, pane: PANE, model }, sql) })
     .catch((e: any) => log(`running model not saved: ${e?.message ?? e}`));
 }, 60_000);
 
