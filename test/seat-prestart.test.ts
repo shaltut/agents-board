@@ -465,6 +465,7 @@ function promptWorld(prompts: ('ok' | 'stall' | 'timeout')[], screen: (string | 
     calls.push(args);
     if (args[0] === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
     if (args[0] === 'agent' && args[1] === 'prompt') { const k = prompts[n++]; return k === 'stall' ? STALLED : k === 'timeout' ? TIMED_OUT : ok({}); }
+    if (args[0] === 'agent' && args[1] === 'get') return ok({ result: { agent: { agent_status: 'idle' } } });
     // null: the read fails (herdr exits non-zero)
     if (args[0] === 'pane' && args[1] === 'read') { const s = screen[reads++]; return s === null ? { status: 1, stdout: '', stderr: 'pane_not_found' } : { status: 0, stdout: s ?? '', stderr: '' }; }
     return ok({});
@@ -520,4 +521,83 @@ test('startOne (PR 117 B1, S1): a failed pane read or a herdr timeout never rese
   startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE);
   const read = w.calls.find((c) => c[0] === 'pane' && c[1] === 'read')!;
   assert.deepEqual(read.slice(3), ['--source', 'visible', '--format', 'text']);
+});
+
+// #4716: the first paste sat in a Codex input box, Enter not taken; the resend was appended to it and both went as one
+// message. A prompt that is on the screen gets Enter alone. The fake keeps an input box: a prompt is typed into it, its
+// first Enter is swallowed, send-keys enter submits whatever it holds.
+const TEXT_B1 = 'cb iam demo-B1@m demo --role builder, then cb next';
+function inputBoxWorld(o: { draw?: (box: string) => string; status?: string | null; sendKeys?: boolean; takes?: boolean } = {}) {
+  const calls: string[][] = [], submitted: string[] = [];
+  let box = '', prompted = 0;
+  const failed = { status: 1, stdout: '', stderr: '{"error":{"code":"herdr_failed"}}' };
+  const submit = () => { if (box) submitted.push(box); box = ''; };
+  const run: Runner = (_m, args) => {
+    calls.push(args);
+    const [a, b] = args;
+    if (a === 'tab') return ok({ result: { pane: { pane_id: 'w9:p2' } } });
+    if (a === 'agent' && b === 'prompt') { box += args[3]; if (prompted++ === 0) return STALLED; submit(); return ok({}); }
+    // null: herdr cannot say
+    if (a === 'agent' && b === 'get') return o.status === null ? failed : ok({ result: { agent: { agent_status: o.status ?? (submitted.length ? 'working' : 'idle') } } });
+    if (a === 'pane' && b === 'read') return { status: 0, stdout: (o.draw ?? ((s) => `› ${s}`))(box), stderr: '' };
+    if (a === 'agent' && b === 'send-keys') { if (o.sendKeys === false) return failed; if (o.takes !== false) submit(); return ok({}); }
+    if (a === 'agent' && b === 'wait') return submitted.length ? ok({}) : TIMED_OUT;
+    return ok({});
+  };
+  const of = (verb: string) => calls.filter((c) => c[0] === 'agent' && c[1] === verb);
+  return { calls, run, submitted, of };
+}
+
+test('startOne (#4716): a prompt left in the input box gets Enter alone: it is sent once, never twice joined', () => {
+  const w = inputBoxWorld();
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.deepEqual(w.submitted, [TEXT_B1]);
+  assert.equal(w.of('prompt').length, 1);
+  assert.deepEqual(w.of('send-keys'), [['agent', 'send-keys', 'demo-b1-m', 'enter']]);
+  assert.deepEqual(w.of('wait'), [['agent', 'wait', 'demo-b1-m', '--until', 'working', '--until', 'blocked', '--timeout', '20000']]);
+});
+
+test('startOne (#4716): the input box is found through borders, narrow wrapping, and when only its end shows', () => {
+  const draws: [string, (s: string) => string][] = [
+    ['a bordered box wrapped inside the first words', (s) => `╭──────────────╮\n${(s.match(/.{1,12}/g) ?? []).map((l, i) => `│ ${i ? ' ' : '>'} ${l.padEnd(12)} │`).join('\n')}\n╰──────────────╯`],
+    ['a bar gutter', (s) => (s.match(/.{1,16}/g) ?? []).map((l) => `  ┃  ${l}`).join('\n')],
+    ['only the end of the line', (s) => `› …${s.slice(-30)}`],
+  ];
+  for (const [what, draw] of draws) {
+    const w = inputBoxWorld({ draw });
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m', what);
+    assert.deepEqual(w.submitted, [TEXT_B1], what);
+    assert.equal(w.of('prompt').length, 1, what);
+  }
+});
+
+test('startOne (#4716): an agent already working gets nothing more, whatever the screen shows', () => {
+  const w = inputBoxWorld({ status: 'working', draw: () => 'thinking...' });
+  assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(w.of('prompt').length, 1);
+  assert.equal(w.of('send-keys').length, 0);
+});
+
+// Enter answers a dialog (folder trust, permissions): it goes only to an agent herdr shows waiting at its prompt
+test('startOne (#4716): no Enter unless herdr says idle or done; blocked gets nothing at all', () => {
+  for (const status of ['blocked', 'unknown', null]) {
+    const w = inputBoxWorld({ status });
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, UNCONFIRMED, String(status));
+    assert.equal(w.of('send-keys').length, 0, String(status));
+    assert.equal(w.of('prompt').length, 1, String(status));
+  }
+  const blocked = inputBoxWorld({ status: 'blocked', draw: () => 'Do you trust this folder?' });
+  assert.equal(startOne(launch('claude', '/w/x'), blocked.run, {}, noPause, GATE).line, UNCONFIRMED);
+  assert.equal(blocked.of('prompt').length, 1);
+  const done = inputBoxWorld({ status: 'done' });
+  assert.equal(startOne(launch('claude', '/w/x'), done.run, {}, noPause, GATE).line, 'started demo-B1@m');
+  assert.equal(done.of('send-keys').length, 1);
+});
+
+test('startOne (#4716): Enter that fails or starts nothing is unconfirmed, and the text is not sent again', () => {
+  for (const o of [{ sendKeys: false }, { takes: false }]) {
+    const w = inputBoxWorld(o);
+    assert.equal(startOne(launch('claude', '/w/x'), w.run, {}, noPause, GATE).line, UNCONFIRMED, JSON.stringify(o));
+    assert.equal(w.of('prompt').length, 1);
+  }
 });
