@@ -441,6 +441,97 @@ All in `deploy/.env` (mode 600). After changing one: `dc up -d` (recreates what 
   login stopped working.
 - **Nginx Proxy Manager:** its admin account and Let's Encrypt certificates are NPM's (it renews them itself).
 
+## Cut-over: workers off the database (#3222 S7)
+
+After this, no worker machine holds the database address or password: `cb`, the relays, the hooks, the runner and the
+supervisor reach the board through its API with a per-machine key. **Every step is the owner's.** Design: page 3222.
+
+**Before the day**
+
+- The release with all of #3222 is deployed, the usual [upgrade](#upgrade) way, with two orders that matter:
+  - **Let the new board container apply the schema.** Do not apply it ahead: the sign-in change (#4868, see
+    [Users](#users)) empties the column the old server signs people in by.
+  - **Stop the old `cb supervise` before you start the new one** (#4895). The old one holds a database lock the new one
+    does not look at, so both would run ([Supervisor](#supervisor)).
+- Every machine has its keys installed, and `cb key check` passes for each kind on each machine.
+- A fresh backup: `sudo /opt/claude-board/deploy/backup.sh`. Keep that file: it is the board as it was. It holds client
+  work, and until step 6 the sign-in values in older backups still matter.
+- Know that this cannot be undone from step 4 on, and that history from before the cut-over cannot be proven genuine.
+
+**1. Every worker is on the API.** With each machine's sessions running, this shows who is still on the database. Only
+the board's own connections may be left: `cb-web`, `cb-api/seat`, `cb-runner/api`, `cb-supervisor/api` and the server's
+own.
+
+```bash
+dc exec -T db psql -U cb -d claude_board -c "select application_name, client_addr, count(*) from pg_stat_activity where datname = 'claude_board' group by 1, 2 order by 1"
+```
+
+A name like `cb/<version>`, `cb-relay/<version>`, `cb-runner/<version>` or `cb-supervisor/<version>` from another
+address is a worker still connected: find it before you go on.
+
+**2. Take the database address off every worker.** The PC's `.env` `DATABASE_URL`, the Mac's `CB_DATABASE_URL` (its
+shell profile), and any other copy. Move the Telegram bot token off the PC. Delete the PC's old local cluster, the
+`.pgdata` folder **of the main checkout only**, and only after you have looked at what it is: a worktree's own `.pgdata`
+is its test cluster. Restart relays, the runner and the supervisor, then `cb key check` and step 1 again.
+
+**3. Close the database's port.** The cut-over commit removes the two `ports:` lines under `db:` in
+`deploy/compose.yml`; then `dc up -d db`. `docker port $(dc ps -q db)` must print nothing. Backups and `dc exec db psql`
+do not use the port.
+
+**4. New database password.** Type it at the prompt, so it lands in no shell history:
+
+```bash
+dc exec db psql -U cb -d claude_board -c '\password cb'
+```
+
+Put the same value in `CB_PG_PASSWORD` in `deploy/.env`, then `dc up -d`. `curl -s localhost:4747/healthz` is ok again.
+Use letters and digits only: the value goes into a database address.
+
+**5. Audit the database (ruling D4).** The password was a superuser's, and workers held it. `db/audit.ts` reads only. It
+compares every database with a clean cluster of the same image and release, lists what no board needs (extra roles,
+event triggers, other extensions, settings that run commands, `ALTER SYSTEM`, access without a password, functions that
+name `COPY ... PROGRAM`), and tells the board's own rows as counts and ids. It prints names of database objects, counts
+and ids, no values, so you may put the output on a card; read names in it as untrusted text.
+
+```bash
+cd /opt/claude-board/deploy
+REFPW=$(openssl rand -hex 24)                      # for the throwaway reference only
+REF="postgres://cb:$REFPW@cb-audit-ref:5432/claude_board"
+docker run -d --name cb-audit-ref --network claude-board_default -e POSTGRES_USER=cb -e POSTGRES_PASSWORD="$REFPW" \
+  -e POSTGRES_DB=claude_board "$(docker inspect --format '{{.Image}}' $(dc ps -q db))"
+until docker exec cb-audit-ref pg_isready -U cb -d claude_board; do sleep 2; done
+dc exec -T -e CB_DATABASE_URL="$REF" board node db/setup.ts      # the release's schema on the clean cluster
+dc exec -T -e CB_AUDIT_REFERENCE_URL="$REF" board node db/audit.ts | tee ~/cutover-audit.txt
+docker rm -f -v cb-audit-ref; unset REFPW REF
+```
+
+It ends `0 things to look at.` (exit 0) or lists lines starting `LOOK:` (exit 1); exit 2 means it did not finish, which
+is not a pass. A board upgraded many times can show leftovers of older releases, such as an extra column or index:
+explain each from the history (`git log -S '<name>' -- db/schema.sql`). Read the other lines too: send each message
+typed into seats as your own words, each rule or ruling under your authority, each squad's protected branches and each
+differing role text past your own memory of it.
+
+SQL cannot show a command that already ran through `COPY ... PROGRAM`, or files changed beside the catalogs, so look at
+the database container as well:
+
+```bash
+docker diff "$(dc ps -q db)"     # files changed outside the data volume: expect only /run, /var/run/postgresql, /tmp
+docker top "$(dc ps -q db)"      # processes: only postgres
+```
+
+**Anything you cannot explain: restore into a clean database.** Not a normal [restore](#restore): that brings back every
+function and trigger in the dump. Carry the **rows only** into a new cluster that this release has set up
+(`pg_dump --data-only --schema=cb`, loaded with `session_replication_role = replica`), then review the rows that grant
+power (users, sign-ins, squads, role texts, settings, memory) before the board starts on it. **This path has not been
+rehearsed:** do it on a scratch cluster first, with someone watching the live one stays untouched.
+
+**6. End every sign-in (ruling D5).** See the next part of this section.
+
+**7. New keys and a new bot token.** Revoke every worker key and issue new ones (`cb key install <kind>` on each
+machine, then `cb key check`), and rotate the Telegram bot token ([Secrets](#secrets)).
+
+**Rolling back.** Steps 2 and 3 can be undone with the new password. Steps 4 to 7 are not meant to be undone.
+
 ## Disk and housekeeping
 
 ```bash
