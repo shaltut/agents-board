@@ -32,8 +32,9 @@ const STATES = new Set<string>(['idle', 'working', 'blocked', 'done']);
 // "Your workspace is out of credits.", and the model switch notice "Automatically switched to <model> due to usage limits."
 const QUOTA = /You[’']ve hit your usage limit[^\n]*|Your workspace is out of credits[^\n]*|You hit your spend cap[^\n]*/i;
 const RATE = /exceeded retry limit, last status: 429|Automatically switched to [^\n]* due to usage limits/i;
-// #4787: the limit message as the CLI prints it, at the start of its line, alone or behind its error mark
-const BANNER = /^[ \t]*(?:■[ \t]*)?(?:You[’']ve hit your usage limit|Your workspace is out of credits|You hit your spend cap)/i;
+// #4787: the limit message as the CLI prints it: behind its error mark, or at the first column (indented with no mark
+// is a wrapped line of the agent's own answer)
+const BANNER = /^(?:[ \t]*■[ \t]*)?(?:You[’']ve hit your usage limit|Your workspace is out of credits|You hit your spend cap)/i;
 const RETRY_IN = /try again in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\b\s*,?\s*(?:and\s+)?)+)/i;
 const UNIT_SEC: Record<string, number> = { d: 86400, h: 3600, m: 60 };
 /** #4002: Codex opens its skill ($) or mention (@) popup while the last word starts with one, and the Enter that submits

@@ -21,10 +21,13 @@ const CASES = [
       `Claude usage limit reached. Your limit will reset at 5pm.\n● Done: the fixture above is what the CLI prints.\n${BOX}`,
       `Claude usage limit reached\n> carry on\n● Carrying on.\n${BOX}`,
       `You've hit your limit · resets 3am\nline 1\nline 2\nline 3\nline 4\n${BOX}`,
+      // a wrapped line of the agent's own answer is indented and has no mark of its own
+      `● The line the adapter reads is\n  Claude usage limit reached.\n${BOX}`,
     ] },
   { adapter: codexAdapter,
     banners: ["■ You’ve hit your usage limit. Upgrade to Pro, or\ntry again in 2 hours 5 minutes.\n› Ask Codex to do something\n  100% context left"],
-    not: ["• The error reads: You've hit your usage limit.\n› Ask Codex to do something", "■ Your workspace is out of credits.\n• Added credits, carrying on.\n› "] },
+    not: ["• The error reads: You've hit your usage limit.\n› Ask Codex to do something", "■ Your workspace is out of credits.\n• Added credits, carrying on.\n› ",
+      "• The line the adapter reads is\n  You've hit your usage limit.\n› "] },
   { adapter: agyAdapter,
     banners: [
       '  You have exhausted your quota on this model.\n  > ',
