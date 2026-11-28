@@ -33,9 +33,11 @@ function refusal(status: number, mine: boolean, body: any): Error {
     return error('CB_KEY_REFUSED', 'the board refused this machine\'s key (401): run cb key check; if it was revoked, ask the owner for a new one');
   }
   if (status >= 400 && status < 500 && said) {
-    // a SQLSTATE: the error the database would have thrown, which the 42883 fallbacks and the runner read
-    const database = typeof body.code === 'string' && /^[0-9A-Z]{5}$/.test(body.code);
-    return Object.assign(error(String(body.code), said), database ? { name: 'PostgresError', detail: body.detail, hint: body.hint } : {});
+    // a SQLSTATE: the error the database would have thrown, which the 42883 fallbacks and the runner read. The server's
+    // own refusals (another machine's actor, too big) carry no code
+    const code = typeof body.code === 'string' ? body.code : 'CB_REFUSED';
+    const database = /^[0-9A-Z]{5}$/.test(code);
+    return Object.assign(error(code, said), database ? { name: 'PostgresError', detail: body.detail, hint: body.hint } : {});
   }
   if (said) return error('CB_NO_ANSWER', `the board failed (${status}: ${said})`);
   return error('CB_NO_ANSWER', `no answer from the board (${status}): if this repeats, check CB_BOARD_URL`);
