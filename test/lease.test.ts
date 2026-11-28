@@ -241,7 +241,8 @@ function heldStart(renewal: ReturnType<typeof keepAliveApart>, ms: number) {
     if (calls.length === 1) hold(ms);
     return { status: 0, stdout: JSON.stringify({ result: { pane_id: 'p1' } }), stderr: '' } as ReturnType<Runner>;
   };
-  return { calls, r: startOne(LAUNCH, fenced(herdr, () => renewal), {}, () => {}) };
+  const run = fenced(herdr, () => renewal); // as one tick's
+  return { calls, run, herdr, r: startOne(LAUNCH, run, {}, () => {}) };
 }
 /** sends the query now, so that the database acts on it while this thread is held */
 async function meanwhile(sql: any, text: string) {
@@ -279,12 +280,17 @@ test('a board that stops answering while a seat start holds the thread: no herdr
     await writesAfter(sql, 0);
     // the row held locked: the thread's renewals get no answer
     const locked = await meanwhile(sql, `do $$ begin perform 1 from cb.leases for update; perform pg_sleep(6); end $$`);
-    const { calls, r } = heldStart(renewal, 4000);
+    const { calls, run, herdr, r } = heldStart(renewal, 4000);
     assert.deepEqual(calls, ['tab create'], r.line);
     assert.equal(r.ok, false);
     await locked.done;
     for (let i = 0; i < 200 && !renewal.sure(); i++) await new Promise((res) => setTimeout(res, 50));
-    assert.equal(renewal.sure(), true, 'renewed again: calls are made again');
+    assert.equal(renewal.sure(), true, 'renewed again');
+    // R2: the tick that was refused stays stopped; only the next one calls herdr again
+    assert.throws(() => run(null, ['agent', 'list']), /supervisor lease cannot be counted on/);
+    assert.deepEqual(calls, ['tab create']);
+    fenced(herdr, () => renewal)(null, ['agent', 'list']);
+    assert.deepEqual(calls, ['tab create', 'agent list']);
   } finally {
     await renewal.stop();
     await unlog();
