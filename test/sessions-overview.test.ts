@@ -7,14 +7,15 @@ import { freshDb } from './helpers.ts';
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
 
+// names that sort the same in every collation: the job clusters do not all share one
 async function setup() {
   const sql = await freshDb(); clients.push(sql);
   await sql`select cb.ensure_project('demo'), cb.ensure_project('other')`;
   await sql`insert into cb.sessions (machine, pane, actor, project, role, last_seen) values
     ('pc', 'p1', 'W2@pc', 'demo', 'builder', now()), ('pc', 'p2', 'W1@pc', 'demo', 'builder', now() - interval '1 hour'),
-    ('pc', 'p3', 'orch@pc', 'demo', 'lead', now()), ('pc', 'p4', 'X1@pc', 'other', null, now())`;
-  await sql`select cb.task_add(project => 'demo', title => 'doing', status => 'in_progress', assignee => 'W1@pc', actor => 'orch@pc')`;
-  await sql`select cb.task_add(project => 'demo', title => 'queued', status => 'next', assignee => 'W2@pc', actor => 'orch@pc')`;
+    ('pc', 'p3', 'Z0@pc', 'demo', 'lead', now()), ('pc', 'p4', 'X1@pc', 'other', null, now())`;
+  await sql`select cb.task_add(project => 'demo', title => 'doing', status => 'in_progress', assignee => 'W1@pc', actor => 'Z0@pc')`;
+  await sql`select cb.task_add(project => 'demo', title => 'queued', status => 'next', assignee => 'W2@pc', actor => 'Z0@pc')`;
   await sql`select cb.log('demo', 'a note', null, '{}', 'Gone@pc')`; // an actor known only by its events
   return sql;
 }
@@ -50,6 +51,6 @@ test('sessions_overview gives the same rows in the same order as without its fen
     }
     const [{ o }] = await one`select cb.sessions_overview('demo') as o`;
     assert.deepEqual((o as any[]).map((x) => [x.actor, x.live]),
-      [['W2@pc', true], ['orch@pc', true], ['Gone@pc', false], ['W1@pc', false]]);
+      [['W2@pc', true], ['Z0@pc', true], ['Gone@pc', false], ['W1@pc', false]]);
   } finally { one.release(); }
 });

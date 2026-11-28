@@ -321,6 +321,7 @@ drop function if exists cb.seat_model cascade;
 drop function if exists cb._running_model cascade;
 drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
+drop function if exists cb._person cascade;
 drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
@@ -1727,6 +1728,11 @@ begin
   return trim(actor);
 end $$;
 
+-- A person, not a session: the owner, or a signed-in user acting under their own name.
+create function cb._person(a text) returns boolean language sql stable as $$
+  select a = 'ahmed' or exists (select 1 from cb.users u where u.name = a)
+$$;
+
 -- What the relay pushes into a session: answers addressed to its pane, and changes other people
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
 -- session: the agent session the relay serves (#4379; Claude: its session id), or null when its agent names none.
@@ -1772,7 +1778,8 @@ begin
                  else jsonb_build_object('from', greatest(hf, coalesce((select e.id from cb.events e where e.at <= now() - interval '24 hours'
                                                                          order by e.at desc limit 1), 0)),
                                          'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
-    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
+    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary,
+                                                             'urgent', cb._person(e.actor)) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
                                -- 24 h, as messages and huddles: a reused pane id keeps the old row's broadcast_seen (#4343)
@@ -1782,13 +1789,18 @@ begin
     -- notice (#3221): a routine board message the relay may hold (a digest, a stall or ping nudge); null for every
     -- other message, and for a digest that carries a new P0 or a supervisor problem (data.urgent)
     -- urgent (#3221): never held: marked so (a part freed off me, GitHub lines by Ahmed's login), or about a P0 card (a
-    -- nudge's card, a job's card in data.task), its priority as it is now
+    -- nudge's card, a job's card in data.task), its priority as it is now; (Q3128: a session's line may now wait the
+    -- relay's settle window) a person's line (cb._person), or a direct question: a session's message with a ? that ends
+    -- a sentence (a ? inside a URL is followed by text and does not count)
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
                                                               'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true',
                                                               'notice', case when e.data ->> 'urgent' = 'true' then null
                                                                              when e.data ? 'digest' then 'digest'
                                                                              when e.data ? 'nudge' then 'nudge' end,
                                                               'urgent', coalesce(e.data ->> 'urgent' = 'true', false)
+                                                                        or cb._person(e.actor)
+                                                                        or (e.actor not in ('board', 'github', 'runner', 'supervisor')
+                                                                            and e.summary ~ '[?]($|[[:space:]]|[)"''])')
                                                                         or exists (select 1 from cb.tasks t where t.priority = 'P0'
                                                                                       and t.id = coalesce(e.task_id, case when e.data ->> 'task' ~ '^[0-9]{1,18}$'
                                                                                                                          then (e.data ->> 'task')::bigint end))) order by e.id)
@@ -1803,7 +1815,8 @@ begin
                                   and q.asked_by <> me and e.id > seen and e.at > now() - interval '24 hours'), '[]'),
     -- new unassigned bugs filed in my project, if I triage it (cb.triagers: its lead, else everyone bound)
     'bugs', coalesce((select jsonb_agg(jsonb_build_object('event_id', e.id, 'id', t.id, 'project', t.project, 'title', t.title,
-                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor) order by e.id)
+                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor,
+                                                          'urgent', cb._person(e.actor)) order by e.id)
                         from cb.events e join cb.tasks t on t.id = e.task_id
                        where e.kind = 'task_created' and t.type = 'bug' and t.assignee is null and t.status not in ('done', 'cancelled')
                          and t.project = proj and e.actor <> me and e.id > seen and e.at > now() - interval '24 hours'
@@ -1833,8 +1846,13 @@ begin
                             where q.status = 'sent_back' and q.sent_back ->> 'delivered_at' is null
                               and ((lower(q.reply_to ->> 'machine') = m and q.reply_to ->> 'pane' = pane)
                                    or (coalesce(q.reply_to ->> 'pane', '') = '' and q.asked_by = me))), '[]'),
+    -- urgent (Q3128): never held for the settle window: a P0 card, a person's line, or my card cancelled, blocked or
+    -- taken off me (#3221 review M1: stop what you are doing)
     'events', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'task_id', e.task_id, 'kind', e.kind, 'summary', e.summary,
-                                                            'actor', e.actor, 'title', t.title, 'status', t.status) order by e.id)
+                                                            'actor', e.actor, 'title', t.title, 'status', t.status,
+                                                            'urgent', coalesce(t.priority = 'P0' or cb._person(e.actor)
+                                                                               or e.data ->> 'to' in ('cancelled', 'blocked')
+                                                                               or e.data -> 'assignee' ->> 'from' = me, false)) order by e.id)
                           from cb.events e join cb.tasks t on t.id = e.task_id
                          where me is not null and e.id > after_event and e.actor <> me
                            and e.kind in ('task_created', 'moved', 'updated', 'done', 'note')
@@ -1860,7 +1878,7 @@ begin
     'memory', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'action', e.data ->> 'action', 'actor', e.actor, 'memory', x.id,
                                                             'kind', x.kind, 'title', x.title,
                                                             'why', case when e.data ? 'why_flagged' then null else e.data ->> 'why' end,
-                                                            'why_hidden', e.data ? 'why_flagged',
+                                                            'why_hidden', e.data ? 'why_flagged', 'urgent', cb._person(e.actor),
                                                             'replaces', x.source ->> 'supersedes', 'by', n.id, 'by_title', n.title) order by e.id)
                           from cb.events e join cb.memories x on x.id = (e.data ->> 'memory')::bigint
                           left join cb.memories n on n.id = x.superseded_by
