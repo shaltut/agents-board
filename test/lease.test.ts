@@ -1,0 +1,164 @@
+// #3222 slice S5 (#4895): one supervisor anywhere, by a lease row on the board in place of a session advisory lock, so the
+// same rule holds over an API. cb.leases, cb.lease_take/renew/release; cli/lease.ts renews it on its own timer.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import postgres from 'postgres';
+import { freshDb, TEST_URL } from './helpers.ts';
+import { connect } from '../server/db.ts';
+import { keepAlive, supervisorLease, SURE_MS } from '../cli/lease.ts';
+
+const clients: any[] = [];
+after(() => Promise.all(clients.map((c) => c.end())));
+const conn = (name: string) => { const c = postgres(TEST_URL, { max: 1, onnotice: () => {}, connection: { application_name: name } }); clients.push(c); return c; };
+async function setup() {
+  const sql = await freshDb(); clients.push(sql);
+  return { sql, sup: conn('cb-supervisor/test') };
+}
+const row = async (sql: any) => (await sql`select holder, token, expires_at, extract(epoch from expires_at - now())::int as left_s from cb.leases where name = 'supervisor'`)[0];
+const expire = (sql: any) => sql`update cb.leases set expires_at = now() - interval '1 second'`;
+const take = async (sup: any, holder: string) => (await sup`select cb.lease_take('supervisor', ${holder}) as r`)[0].r;
+const renew = async (sup: any, token: string) => (await sup`select cb.lease_renew('supervisor', ${token}) as ok`)[0].ok;
+const client = () => connect(TEST_URL, { app: 'cb-supervisor/test', max: 1 });
+const lease = (holder: string, clock?: () => number) => supervisorLease({ connect: client, holder, clock });
+const until = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 25)); assert.ok(done(), 'it never happened'); };
+
+test('a lease is taken for 180 s; another is refused with who holds it and for how long, until it runs out', async () => {
+  const { sql, sup } = await setup();
+  const a = await take(sup, 'pc pid 1');
+  assert.match(a.token, /^[0-9a-f-]{36}$/);
+  const held = await row(sql);
+  assert.ok(held.left_s > 170 && held.left_s <= 180, String(held.left_s));
+  const b = await take(sup, 'mac pid 2');
+  assert.deepEqual([b.token, b.holder], [undefined, 'pc pid 1']);
+  assert.ok(b.left_s > 170 && b.left_s <= 180, String(b.left_s));
+  await expire(sql);
+  const c = await take(sup, 'mac pid 2');
+  assert.ok(c.token && c.token !== a.token, 'takeover after expiry');
+  assert.equal(await renew(sup, a.token), false, 'the old holder renews nothing');
+  assert.equal(await renew(sup, c.token), true);
+});
+
+test('renew keeps its own lease, also one that ran out and nobody took; release ends only its own', async () => {
+  const { sql, sup } = await setup();
+  const a = await take(sup, 'pc pid 1');
+  await expire(sql);
+  assert.equal(await renew(sup, a.token), true, 'a PC that slept still holds it: nobody else took it');
+  assert.ok((await row(sql)).left_s > 170);
+  const other = '00000000-0000-0000-0000-000000000000';
+  assert.equal((await sup`select cb.lease_release('supervisor', ${other}) as ok`)[0].ok, false);
+  assert.equal((await sup`select cb.lease_release('supervisor', ${a.token}) as ok`)[0].ok, true);
+  assert.equal(await row(sql), undefined);
+});
+
+test('the same holder takes it again: a take whose answer was lost does not refuse the one that asked', async () => {
+  const { sup } = await setup();
+  const a = await take(sup, 'pc pid 1');
+  const again = await take(sup, 'pc pid 1');
+  assert.ok(again.token && again.token !== a.token);
+});
+
+test('only the supervisor takes, renews or releases a lease', async () => {
+  await setup();
+  const seat = conn('cb-test/session');
+  const t = '00000000-0000-0000-0000-000000000000';
+  await assert.rejects(seat`select cb.lease_take('supervisor', 'x')`, /only the supervisor/);
+  await assert.rejects(seat`select cb.lease_renew('supervisor', ${t})`, /only the supervisor/);
+  await assert.rejects(seat`select cb.lease_release('supervisor', ${t})`, /only the supervisor/);
+});
+
+test('the Runners page says the supervisor runs while its lease has not run out', async () => {
+  const { sql, sup } = await setup();
+  const up = async () => (await sql`select cb._supervisor_up() as up`)[0].up;
+  assert.equal(await up(), false);
+  await take(sup, 'pc pid 1');
+  assert.equal(await up(), true);
+  await expire(sql);
+  assert.equal(await up(), false);
+});
+
+function supervise(...flags: string[]) {
+  const home = mkdtempSync(join(tmpdir(), 'cb-lease-'));
+  const r = spawnSync('node', ['cli/supervise.ts', ...flags], {
+    encoding: 'utf8', timeout: 60_000,
+    env: { ...process.env, CB_DATABASE_URL: TEST_URL, CB_RUNNER_CONFIG: join(home, 'none.json'), CB_SUPERVISOR_HOME: home },
+  });
+  return { code: r.status, out: r.stdout + r.stderr };
+}
+
+test('a second supervisor is refused and leaves the lease alone; a dry run previews beside it', async () => {
+  const { sql, sup } = await setup(); // empty board: nothing a stray tick could act on
+  const a = await take(sup, 'pc pid 1');
+  const second = supervise('--once');
+  assert.equal(second.code, 1, second.out);
+  assert.match(second.out, /another supervisor is running: pc pid 1 holds the lease/);
+  const dry = supervise('--dry-run');
+  assert.equal(dry.code, 0, dry.out);
+  assert.equal((await row(sql)).token, a.token);
+});
+
+test('a dry run takes no lease; --once takes it and gives it back', async () => {
+  const { sql } = await setup();
+  const dry = supervise('--dry-run');
+  assert.equal(dry.code, 0, dry.out);
+  assert.equal(await row(sql), undefined);
+  assert.equal((await sql`select count(*)::int as n from cb.leases`)[0].n, 0);
+  await sql`create table if not exists public.lease_seen (holder text)`;
+  await sql`truncate public.lease_seen`;
+  await sql.unsafe(`create or replace function public.lease_note() returns trigger language plpgsql as
+    $$ begin insert into public.lease_seen values (new.holder); return new; end $$;
+    create trigger lease_note after insert on cb.leases for each row execute function public.lease_note()`);
+  try {
+    const once = supervise('--once');
+    assert.equal(once.code, 0, once.out);
+    assert.equal((await sql`select count(*)::int as n from public.lease_seen`)[0].n, 1, 'it took the lease');
+    assert.equal(await row(sql), undefined, 'and released it at exit: the next start need not wait');
+  } finally {
+    await sql.unsafe('drop trigger if exists lease_note on cb.leases; drop function if exists public.lease_note(); drop table if exists public.lease_seen');
+  }
+});
+
+test('a renewal the board refuses aborts the tick and then exits', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  const did: string[] = [];
+  try {
+    assert.equal(await mine.keep(), null);
+    const stop = keepAlive(mine, { every: 25, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
+    await sql`update cb.leases set holder = 'mac pid 2', token = gen_random_uuid()`; // another took it
+    await until(() => did.length >= 2);
+    await new Promise((r) => setTimeout(r, 100));
+    stop();
+    assert.equal(did.length, 2, 'once');
+    assert.equal(did[0], 'abort', 'the tick first');
+    assert.match(did[1]!, /no longer this supervisor's/);
+  } finally { await mine.release(); }
+});
+
+test('a board that does not answer is no refusal: the tick is aborted only once the lease cannot be counted on', async () => {
+  await setup();
+  let now = 1_000_000, broken = false;
+  const flaky = () => {
+    const real = client();
+    return new Proxy(real, { apply: (t, self, args: any[]) => (broken ? Promise.reject(new Error('connection refused')) : Reflect.apply(t as any, self, args)) });
+  };
+  const mine = supervisorLease({ connect: flaky, holder: 'pc pid 1', clock: () => now });
+  const did: string[] = [], said: string[] = [];
+  try {
+    assert.equal(await mine.keep(), null);
+    broken = true;
+    const stop = keepAlive(mine, { every: 25, abort: () => did.push('abort'), lost: () => did.push('lost'), say: (l) => said.push(l) });
+    await until(() => said.length >= 2);
+    assert.deepEqual(did, [], 'renewed a moment ago: still sure of it');
+    now += SURE_MS;
+    await until(() => did.includes('abort'));
+    assert.ok(!did.includes('lost'), 'it does not exit');
+    broken = false;
+    await until(() => mine.sure());
+    stop();
+    assert.match(said[0]!, /not renewed/);
+  } finally { broken = false; await mine.release(); }
+});
