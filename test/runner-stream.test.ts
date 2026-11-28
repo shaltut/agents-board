@@ -43,7 +43,7 @@ test('a notice stream that never opens: the runner says so, beats and runs the q
   // an origin that is not there: a claimed job ends at its fetch, with nothing left running
   writeFileSync(config, JSON.stringify({
     name: NAME, slots: 1, log: { host: '127.0.0.1', port: await freePort(), peers: [] },
-    projects: { demo: { git: join(tmp, 'missing.git'), base: join(tmp, 'r'), lockfile: 'lock.txt', install: ['node', '-e', ''], installTimeout: 60, recipes: { ok: { steps: [['node', '-e', '']], timeout: 60 } } } },
+    projects: { demo: { git: join(tmp, 'missing.git'), base: join(tmp, 'r'), lockfile: 'lock.txt', install: ['node', '-v'], installTimeout: 60, recipes: { ok: { steps: [['node', '-v']], timeout: 60 } } } },
   }));
   worker.failStreams();
   // by its full path: the update tests of another run read this machine's process list
