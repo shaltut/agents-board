@@ -1419,7 +1419,7 @@ const readsDown = (seg) => ALWAYS_DOWN.test(seg) || (DOWN_WITH_R.test(seg) && R_
 // inside the board folder it reaches the keys when it starts here (. or *), or is a search that names no folder
 const HERE = /(?:^|\s)(?:\.[\\/]*|(?:\.[\\/])?\*)(?=\s|$)/;
 const RG_HERE = /(?<![\w.$\\/-])rg(?:\s+-\S+)*\s+(?:"[^"]*"|'[^']*'|[^\s"'-]\S*)\s*$/i;
-const SECRET_NAME = new RegExp(SECRET_LEAD + '(?:' + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.-]*\.(?:claude|opencode)\.json)` + SECRET_END + '|' + KEY_DIR_NAME + ')', 'i');
+const SECRET_NAME = new RegExp(SECRET_LEAD + String.raw`(?:\.env(?!\.(?:example|sample|template|dist)(?![\w.-]))(?![\w.-]*\.${SOURCE_EXT}(?![\w.-]))(?:\.[\w.-]*)?|[\w.-]+\.(?:pem|key|p12|pfx|jks|keystore|tfvars)|id_(?:rsa|ed25519|ecdsa|dsa)|\.pgpass|\.netrc|\.git-credentials|\.npmrc|\.pypirc|\.htpasswd|\.credentials\.json|\.aws[\\/]+credentials|\.kube[\\/]+config|\.docker[\\/]+config\.json|service-account[\w.-]*\.json|cb-seat-[\w.-]*\.(?:claude|opencode)\.json)` + SECRET_END, 'i');
 const SECRET_READERS = ['cat', 'tac', 'type', 'get-content', 'gc', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'grep', 'egrep',
   'fgrep', 'rg', 'ag', 'ack', 'findstr', 'select-string', 'sls', 'awk', 'gawk', 'sed', 'cut', 'sort', 'uniq', 'paste', 'strings',
   'xxd', 'od', 'hexdump', 'base64', 'diff', 'cp', 'copy', 'copy-item', 'cpi', 'scp', 'rsync', 'curl', 'wget', 'nc', 'tar', 'zip',
@@ -1463,7 +1463,8 @@ function keyRead(segments) {
   for (const seg of segments) {
     if (MOVES.test(seg)) {
       where = KEY_DIR.test(seg) ? 'keys' : BOARD_MOVE.test(seg) ? 'board' : where === 'board' && KEYS_STEP.test(seg) ? 'keys' : null;
-      continue;
+      // a substitution in the move's own words runs first, and may read
+      if (!/\$\(|`/.test(seg)) continue;
     }
     if (!SECRET_READER.test(seg)) continue;
     if (where === 'keys' || KEY_DIR.test(seg) || (BOARD_DIR.test(seg) && readsDown(seg))) return true;
@@ -1473,20 +1474,23 @@ function keyRead(segments) {
 }
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
-  return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
+  return typeof path === 'string' && path !== '' && (SECRET_NAME.test(` ${path}`) || KEY_DIR.test(` ${path}`));
 }
 // Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first). A
 // backtick substitution inside a message runs before the message goes anywhere (review I1), so with one the message
 // text is judged too. #4589: the joined text is judged as well as the raw lines (rawAndJoined, as for the fence, #4587):
 // cat \<newline>.env split the reader from the name, and .e\<newline>nv hid the name from the cheap test.
 // (called through, not built here: rawAndJoined is defined further down)
-function secretRead(raw) { return rawAndJoined(secretReadOne)(raw); }
-function secretReadOne(command) {
-  const board = /\.claude-board/i.test(dequote(command));
-  if (!board && !SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
+function secretRead(raw) { return rawAndJoined(workerKeyOne)(raw) ?? rawAndJoined(secretReadOne)(raw); }
+// #3222 S6, with the same message stripping; both cuts, never one instead of the other
+function workerKeyOne(command) {
+  if (!/\.claude-board|CB_KEY_DIR/i.test(dequote(command))) return null;
   const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
-  // both cuts, never one instead of the other
-  if ((board || /CB_KEY_DIR/i.test(text)) && (keyRead(text.match(SEGMENTS) ?? []) || keyRead(quotedSegments(text)))) return WORKER_KEY;
+  return keyRead(text.match(SEGMENTS) ?? []) || keyRead(quotedSegments(text)) ? WORKER_KEY : null;
+}
+function secretReadOne(command) {
+  if (!SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
+  const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
   for (const seg of text.match(SEGMENTS) ?? []) {
     if (TEMPLATE_COPY.test(seg)) continue;
     if (SECRET_NAME.test(seg) && SECRET_READER.test(seg)) return SECRET;

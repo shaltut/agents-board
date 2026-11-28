@@ -910,6 +910,8 @@ const keyReads = [
   'cd ~/.claude-board/keys && cat *', String.raw`Set-Location ~\.claude-board\keys; Get-Content *`, 'cd ~/.claude-board && cat keys/*', 'pushd ~/.claude-board/keys; head *',
   'cd "$HOME/.claude-board" && grep -r x .', 'cd ~/.claude-board; cat */machine*', 'cd ~/.claude-board && cd keys && cat *', 'cd .claude-board && cat keys/*',
   'cd ~/.claude-board && rg cbk1', 'cd ~/.claude-board && cp -r . /tmp/x', 'cd ~/.claude-board && grep -r x *', 'grep -r x "$HOME"/.claude-board', 'grep -r x C:/home/u/.claude-board',
+  // a move whose own words run a read
+  'cd "$(cat ~/.claude-board/keys/m*)"', 'cd `head -1 ~/.claude-board/keys/*`',
   // the folder the test override names
   'cat $CB_KEY_DIR/*', 'cat "${CB_KEY_DIR}"/machine*', String.raw`Get-Content $env:CB_KEY_DIR\*`, String.raw`type %CB_KEY_DIR%\*`,
 ];
