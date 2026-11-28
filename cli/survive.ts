@@ -4,7 +4,8 @@
 // uncaught error still ends the process, as Node would, so a real bug is never hidden.
 const NET = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'ENOTFOUND',
   'EAI_AGAIN', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED', 'CONNECT_TIMEOUT',
-  '57P01', '57P02', '57P03']); // postgres: admin shutdown, crash shutdown, cannot connect now (a board restart)
+  '57P01', '57P02', '57P03', // postgres: admin shutdown, crash shutdown, cannot connect now (a board restart)
+  'CB_NOT_RUN', 'CB_NO_ANSWER']); // the worker API: a call it did not take, and an answer that never arrived
 
 export function isNetworkError(e: unknown): boolean {
   if (!e || typeof e !== 'object') return false;
