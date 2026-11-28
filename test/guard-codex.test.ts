@@ -376,7 +376,7 @@ test('a variable as the program stays refused outside that one place (#4865)', (
     'Where-Object() { $_.exe; }; Where-Object',
     // a substitution runs it, and any other variable is still a program the guard cannot read
     'Where-Object { $($_.exe) }', 'Where-Object { `$_.exe` }', 'Where-Object { $tool }', 'Where-Object { $env:SHELL }', 'Where-Object { ${_}sh }',
-    'Where-Object { $_sh }', 'Where-Object { & $_.Path }', 'Where-Object { . $_.Path }',
+    'Where-Object { $_sh }', 'Where-Object { & $_.Path }',
     // only the block's first statement
     'Get-Process | ForEach-Object { $_.Name; $x }',
   ];

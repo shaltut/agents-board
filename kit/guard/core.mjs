@@ -2950,6 +2950,13 @@ export function stdinSession(command) {
   return sessionIn(cmd, false, 0, vars);
 }
 
+// #4865: a PowerShell filter block starts with the pipeline's own item ($_.role -eq 'x', $PSItem.Name): a value, not a
+// program. Spared only as the first word right after Where-Object { or ForEach-Object { (? and % too), on one line: bash
+// reads that { as one more argument of the same command, so nothing there runs in either shell. A ; or a new line after
+// the { ends bash's command, a ( or backtick before the word may run it, and name() is a function: all stay refused
+const PS_FILTERS = new Set(['where-object', 'foreach-object', '?', '%']);
+const PS_ITEM = /^\$(?:_|PSItem)(?:\.\w+)*$/i;
+
 function sessionIn(cmd, fed, depth, vars = new Map()) {
   if (depth > SESSION_DEPTH) return 'a command nested deeper than the guard reads';
   // B2: a stdin copy (<&0, exec 3<&0; <&3, < /dev/stdin) goes before the split (its & would cut the segment): removing it
@@ -2993,6 +3000,8 @@ function sessionIn(cmd, fed, depth, vars = new Map()) {
       if (at.subst) return 'a command named by a substitution ($(...) or `...` as the command word)';
       if (at.i < 0) continue;
       let name = cmdName(p.raw[at.i]), args = dropRedirects(p.w.slice(at.i + 1));
+      if (at.i === 0 && p === pieces[k][0] && PS_ITEM.test(p.w[0]) && k > 0 && text.slice(segs[k - 1].end, segs[k].start) === '{'
+        && segs[k].s.trimStart().startsWith(p.raw[0]) && !/[()`]/.test(segs[k - 1].s) && PS_FILTERS.has(cmdName(lead(k - 1)))) continue;
       if (/[$`]/.test(p.w[at.i])) {
         // B1: $X read through a literal assignment in the command; any other variable or expansion is unreadable
         const v = VAR_WORD.exec(p.w[at.i]), val = v && vars.get(v[1] ?? v[2]);
