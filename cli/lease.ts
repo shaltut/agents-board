@@ -20,7 +20,7 @@ export type Lease = {
 
 export function supervisorLease(o: { connect: () => any; holder: string; clock?: () => number }): Lease {
   const clock = o.clock ?? Date.now;
-  let sql = o.connect(), token: string | null = null, sureFrom = -Infinity;
+  let sql = o.connect(), token: string | null = null, sureFrom = -Infinity, givenBack = false;
   const ask = async (query: (s: any) => PromiseLike<any>) => {
     try { return (await withDeadline(Promise.resolve(query(sql)), ANSWER_MS, 'the supervisor lease'))[0]; }
     catch (e) { // #4261: a query that hangs means a connection that may never error: drop it, ask on a fresh one
@@ -30,6 +30,7 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
   };
   return {
     async keep() {
+      if (givenBack) throw new Error('the supervisor lease was given back: this supervisor is stopping');
       const asked = clock(); // from before the question: the board's 180 s starts no earlier
       if (token) {
         if (!(await ask((s) => s`select cb.lease_renew('supervisor', ${token}) as ok`)).ok) return "the supervisor lease is no longer this supervisor's: another took it";
@@ -44,8 +45,9 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
     holds: () => token !== null,
     sure: () => clock() - sureFrom < SURE_MS,
     async release() { // at exit: the next start need not wait the lease out. A board that is away: it runs out by itself
-      if (token) await ask((s) => s`select cb.lease_release('supervisor', ${token}) as ok`).catch(() => {});
-      token = null;
+      const mine = token;
+      givenBack = true; token = null; // at once: neither the timer nor the loop asks for it while it goes
+      if (mine) await ask((s) => s`select cb.lease_release('supervisor', ${mine}) as ok`).catch(() => {});
       await sql.end({ timeout: 5 }).catch(() => {});
     },
   };

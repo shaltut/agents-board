@@ -521,8 +521,10 @@ if (import.meta.main) {
   const memory: Memory = { failedAt: new Map(), blockedTold: new Set(), launched: new Set(), runnerToldAt: 0, runnerStartedAt: 0,
     closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), unreadTold: new Set(), sighted: new Map() };
   // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
-  if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) process.once(sig, () => { lease.release().finally(() => process.exit(0)); });
   let current: AbortController | undefined; // the running tick's
+  if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
+    process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); lease.release().finally(() => process.exit(0)); });
+  }
   if (lease) keepAlive(lease, { abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')),
     lost: (why) => { say(why); process.exit(1); }, say });
   let code = 0;
