@@ -424,6 +424,16 @@ test('prRef: an Azure DevOps link is never looked up on GitHub, even with GITHUB
     assert.deepEqual(prRef('https://github.com/acme/app/pull/9', 'zed'), { repo: 'acme/app', n: '9' });
     assert.deepEqual(prRef('#15', 'zed'), { repo: 'o/r', n: '15' });
     assert.deepEqual(prRef('15/', 'zed'), { repo: 'o/r', n: '15' });
+    // #3778: Azure DevOps links as a browser shows them: a trailing slash, a %20 project name, a tab's query
+    for (const link of ['https://dev.azure.com/o/p/_git/r/pullrequest/7/', 'https://dev.azure.com/o/my%20project/_git/r/pullrequest/7',
+      'https://dev.azure.com/o/p/_git/r/pullrequest/7?_a=files']) assert.equal(prRef(link, 'zed'), null, link);
+    // only a link that is GitHub's from its start: not another site's path, a longer host name or a number with a tail
+    for (const link of ['https://evil.example/github.com/o/r/pull/9', 'https://notgithub.com/o/r/pull/9', 'https://evil.example/?u=https://github.com/o/r/pull/9',
+      'https://github.com.evil.example/o/r/pull/9', 'https://github.com/o/r/pull/9abc']) assert.equal(prRef(link, 'zed'), null, link);
+    for (const link of ['https://github.com/acme/app/pull/9/files', 'https://github.com/acme/app/pull/9#issuecomment-1', 'https://github.com/acme/app/pull/9?w=1',
+      'http://www.github.com/acme/app/pull/9', 'github.com/acme/app/pull/9', ' https://github.com/acme/app/pull/9 ']) assert.deepEqual(prRef(link, 'zed'), { repo: 'acme/app', n: '9' }, link);
+    // spaces round a bare number are not part of it
+    for (const link of ['  15 ', ' #15\n']) assert.deepEqual(prRef(link, 'zed'), { repo: 'o/r', n: '15' }, JSON.stringify(link));
   } finally {
     if (had === undefined) delete process.env.GITHUB_REPO_ZED; else process.env.GITHUB_REPO_ZED = had;
   }
