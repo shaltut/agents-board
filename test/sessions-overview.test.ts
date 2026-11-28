@@ -24,9 +24,11 @@ test('sessions_overview builds each session once', async () => {
   for (const project of [null, 'demo']) {
     const { rows, calls } = await sql.begin(async (tx) => {
       await tx`set local track_functions = 'all'`;
+      // the view also holds this connection's not yet flushed calls from earlier transactions: count the difference
+      const count = async () => (await tx`select coalesce(sum(calls), 0)::int as n from pg_stat_xact_user_functions where schemaname = 'cb' and funcname = '_is_lead'`)[0].n;
+      const before = await count();
       const [{ o }] = await tx`select cb.sessions_overview(${project}) as o`;
-      const [f] = await tx`select calls::int as calls from pg_stat_xact_user_functions where schemaname = 'cb' and funcname = '_is_lead'`;
-      return { rows: (o as any[]).length, calls: f.calls };
+      return { rows: (o as any[]).length, calls: (await count()) - before };
     });
     assert.ok(rows >= 4, `${rows} rows`);
     assert.equal(calls, rows, `project ${project}: cb._is_lead runs once per row`);
