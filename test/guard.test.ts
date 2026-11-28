@@ -2279,6 +2279,35 @@ test('#4826: a filled program with a word that is no git command and a protected
   assert.equal(kindOf('$NODE report summary', 'reviewer'), 'allow');
 });
 
+test('#4833: git command names are case-sensitive, alias names are not: another case of one is an alias', () => {
+  // an alias named push (set by an earlier statement or in the environment) answers to PUSH
+  for (const c of ['git PUSH origin main', 'git Push origin main', 'git PUSH origin HEAD:master', 'timeout 5 git PUSH origin main',
+    'git -C /x PUSH origin main', '$G PUSH origin main', '& $g Push origin main', 'xargs git PUSH origin main', 'git SEND-PACK origin main',
+    'export GIT_CONFIG_PARAMETERS=x; git PUSH origin main']) {
+    assert.notEqual(kindOf(c), 'allow', c);
+  }
+  assert.ok(protectedPush('git PUSH origin develop', ['develop']), 'a configured branch, with or without a role');
+  // a read-only role runs git subcommands by their own names
+  for (const c of ['git COMMIT -m x', 'git Commit -m x']) assert.notEqual(kindOf(c, 'reviewer'), 'allow', c);
+  for (const c of ['git checkout main', 'git push origin feat/my-card', 'git status', 'git PUSH origin feat/my-card', 'echo "git PUSH origin main"']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
+});
+
+test('#4833: a redirect that takes no file word hides no branch after it', () => {
+  const shapes = ['git p origin 2>&1 B', '$G p origin 2>&1 B', 'git push origin 2>&1 B', '$G push origin 2>&1 B', 'git p origin >&2 B',
+    'git p origin 1>&- B', 'git p origin <&- B', 'git p origin *>&1 B', 'git p origin 3>&2 B', 'git subtree push --prefix x origin 2>&1 B',
+    'git $S origin 2>&1 B', 'git p origin > out.txt B', 'git p origin 2>$null B', 'git p origin &>log B', 'git p 2>&1 origin 2>&1 B'];
+  for (const s of shapes) {
+    assert.notEqual(kindOf(s.replace(/B$/, 'main')), 'allow', s);
+    assert.equal(evaluate({ tool: 'shell', command: s.replace(/B$/, 'develop'), protectedBranches: ['develop'] }).allow, false, `no role: ${s}`);
+  }
+  for (const c of ['git push origin feat/x 2>&1 | tee main', 'git lg 2>&1 | grep main', 'git status 2>&1 && echo main', 'git p origin feat/x > main',
+    'git checkout main 2>&1']) {
+    assert.equal(kindOf(c), 'allow', c);
+  }
+});
+
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
 // seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
 test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
