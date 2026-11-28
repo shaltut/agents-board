@@ -256,7 +256,7 @@ test('cb start exits 0 when the board is down, and does not start Postgres', () 
 test('cb help json names every command that takes --json, and the shapes that are not the plain ones', () => {
   const page = help('json')!;
   for (const c of Object.keys(COMMANDS).filter((c) => !['help', 'runner', 'supervise'].includes(c)))
-    assert.match(page, new RegExp(`(?<![\w-])${c}(?![\w-])`), `cb help json does not say what cb ${c} --json prints`);
+    assert.match(page, new RegExp(`(?<![\\w-])${c}(?![\\w-])`), `cb help json does not say what cb ${c} --json prints`);
   for (const s of ['squad trust', 'job retry', 'job move', 'job hold|release', 'update --check', 'update --rollback'])
     assert.ok(page.includes(s), s);
   assert.match(page, /\{claimed: null, skipped\}/);
