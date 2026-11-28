@@ -219,7 +219,10 @@ test('#4622: only a lone echo or printf line may hold a quoted phrase after a va
     'echo "$(true) b" "$C d" opencode.json', 'echo "${A:-b} c" "$C d" opencode.json',
     'echo $A x$B opencode.json',
     // m2, kept: two whole variables may be git and a writing command
-    'python3 tools/check.py $A $B opencode.json']);
+    'python3 tools/check.py $A $B opencode.json',
+    // PR 172 review (R2), as written there: what echo prints is parsed again by sh; ssh behind another word reads its
+    // words again
+    'G=$(which git); X=eckout; echo $G "ch$X --" opencode.json | sh', 'caffeinate ssh host $GIT "$X now" opencode.json']);
 });
 // #4768, #4770: the guard drops a heredoc body only where bash reads one. In each of these bash 5.2 runs the line the
 // guard dropped as file text (checked in a shell with a harmless echo in its place)
