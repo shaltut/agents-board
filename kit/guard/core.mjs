@@ -3046,28 +3046,48 @@ function judge(name, args, fed, depth, vars = new Map()) {
 function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\r', '')] : [text]; }
 
 // #4803: bash takes a redirect anywhere in a command. One before the command word was read as the command, and the & in
-// one (2>&1, &>log) cut the command in two. Text holding a redirect is judged without them too, never instead. Read with
-// no regard to quotes, so a command string inside one is covered; a quoted target counts only where its closing quote
-// ends the word. << (a heredoc) stays. A substitution as the target is bounded, so the scan stays linear. Messages and
-// heredoc data are dropped first: which text is data depends on the redirect (cat > notes <<EOF writes its text away)
-const REDIRECT = /(?:\d{1,3}|\*|&|\{[A-Za-z_]\w{0,40}\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*(?:\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|`[^`\n]{0,200}`|"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|\\.|[^\s"'`\\;&|<>(){}])+/g;
+// one (2>&1, &>log) cut the command in two. Text holding a redirect is judged without them too, never instead. << (a
+// heredoc) stays. Messages and heredoc data are dropped first: which text is data depends on the redirect (cat > notes
+// <<EOF writes its text away). Two readings, since neither is enough: one counts no quotes, so it holds after text that
+// throws the count off; one counts them as bash does, into quoted command strings, so a target glued from any pieces
+// ("my "log) is one word. A line continuation is also read joined
+const REDIRECT_MARK = String.raw`(?:\d{1,3}|\*|&|\{[A-Za-z_]\w{0,40}\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*`;
+// part of a target: a substitution (bounded, so the scan stays linear), an escape or a plain character (\x60: a backtick)
+const TARGET_PART = String.raw`\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|\x60[^\x60\n]{0,200}\x60|\\[\s\S]|[^\s"'\x60\\;&|<>(){}]`;
+// with no quote count, a quoted part is one where its closing quote ends the word, or a short one with no blank or separator
+const LOOSE_QUOTED = String.raw`"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|'[^'\s;&|()<>]{0,200}'|"[^"\\\s;&|()<>$\x60]{0,200}"`;
+const REDIRECT = new RegExp(`${REDIRECT_MARK}(?:${LOOSE_QUOTED}|${TARGET_PART})+`, 'g');
+const SHELL_REDIRECT = new RegExp(String.raw`('[^']*'|"(?:\\[\s\S]|[^"\\])*")|\\[\s\S]|${REDIRECT_MARK}(?:'[^']*'|"(?:\\[\s\S]|[^"\\])*"|${TARGET_PART})+`, 'g');
+// a quoted piece that is no target is read the same way inside, a few deep: a command string's own redirects go too
+const shellUnredirected = (text, left, depth = 0) => text.replace(SHELL_REDIRECT, (match, quoted, at, all) => {
+  if (quoted === undefined) return match.startsWith('\\') ? match : left(match, at, all);
+  return depth < 3 ? quoted[0] + shellUnredirected(quoted.slice(1, -1), left, depth + 1) + quoted[0] : quoted;
+});
 // cat >file <<WORD at a line's start, with nothing after the header, hides nothing: left as written, so the usual huge
 // command, a file written from a heredoc, is judged once. Each test reads a bounded piece
 const catToFile = (redirect, at, text) => /^>>?[ \t]*[A-Za-z0-9_./-]+$/.test(redirect) && /(?:^|\n)[ \t]*cat[ \t]+$/.test(text.slice(Math.max(0, at - 40), at))
   && /^[ \t]*<<-?[ \t]*(["']?)\w{1,40}\1[ \t]*(?:\n|$)/.test(text.slice(at + redirect.length, at + redirect.length + 80));
 function unredirected(text, left = (redirect, at, all) => (catToFile(redirect, at, all) ? redirect : ' ')) {
   if (!/[<>]/.test(text)) return [text];
-  const kept = stripMessages(text), bare = kept.replace(REDIRECT, left);
-  return bare === kept ? [text] : [text, bare];
+  const kept = stripMessages(text), forms = new Set([text]);
+  for (const source of new Set([kept, joinLines(kept)])) {
+    for (const bare of [source.replace(REDIRECT, left), shellUnredirected(source, left)]) if (bare !== source) forms.add(bare);
+  }
+  return [...forms];
 }
 // for the stdin-session rule only output redirects are left out: an input one is what gives the command its input
 const outputOnly = (redirect) => (/^(?:\d+|\*|&|\{\w+\})?>/.test(redirect) ? ' ' : redirect);
 // the scripts a text calls, read with and without its redirects; a call both readings show is listed once
 function calledIn(text, cwd, deployHost) {
-  const calls = scriptCalls(text, cwd, deployHost), [, bare] = unredirected(text);
-  if (bare === undefined) return calls;
+  const calls = scriptCalls(text, cwd, deployHost), [, ...bare] = unredirected(text);
+  if (bare.length === 0) return calls;
   const key = (c) => `${c.cwd}\n${c.path}\n${c.deployHost}`, listed = new Set(calls.map(key));
-  return [...calls, ...scriptCalls(bare, cwd, deployHost).filter((c) => !listed.has(key(c)))];
+  for (const call of bare.flatMap((b) => scriptCalls(b, cwd, deployHost))) {
+    if (listed.has(key(call))) continue;
+    listed.add(key(call));
+    calls.push(call);
+  }
+  return calls;
 }
 
 export function evaluate(req) {
