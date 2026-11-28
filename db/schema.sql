@@ -7012,9 +7012,6 @@ begin
   end if;
   if p <> '' then select s.actor, s.project into ba, bp from cb.sessions s where s.machine = m and s.pane = p; end if;
   existed := exists (select 1 from cb.session_usage u where u.session_id = sid);
-  if exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
-    raise exception 'usage_report: session % is recorded from another machine', sid;
-  end if;
   insert into cb.session_usage as u (session_id, machine, pane, actor, project, model, input_tokens, output_tokens,
                                      cache_read_tokens, cache_write_tokens, cost_usd)
   values (sid, m, p, ba, bp, mo, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
@@ -7028,7 +7025,8 @@ begin
         cache_write_tokens = greatest(u.cache_write_tokens, excluded.cache_write_tokens),
         cost_usd = coalesce(excluded.cost_usd, u.cost_usd),
         updated_at = now()
-    where (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+    where u.machine = excluded.machine -- judged on the row it waited for, if another report was still committing it
+      and (u.actor, u.project, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
            u.cache_write_tokens, u.cost_usd)
           is distinct from
           (coalesce(u.actor, excluded.actor), coalesce(u.project, excluded.project),
@@ -7036,6 +7034,10 @@ begin
            greatest(u.output_tokens, excluded.output_tokens), greatest(u.cache_read_tokens, excluded.cache_read_tokens),
            greatest(u.cache_write_tokens, excluded.cache_write_tokens), coalesce(excluded.cost_usd, u.cost_usd));
   get diagnostics n = row_count;
+  -- asked after the write, which saw every row it could collide with: a row left alone because it is another machine's
+  if n = 0 and exists (select 1 from cb.session_usage u where u.session_id = sid and u.machine <> m) then
+    raise exception 'usage_report: session % is recorded from another machine', sid;
+  end if;
   return case when not existed then 'new' when n = 0 then 'same' else 'updated' end;
 end $$;
 
