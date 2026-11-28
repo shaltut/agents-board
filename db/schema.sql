@@ -1857,12 +1857,17 @@ begin
     'last_event', (select coalesce(max(e.id), 0) from cb.events e));
 end $$;
 
--- A message to every session (project null) or to one project's sessions. Relays push it; cb brief lists 24h.
-create function cb.broadcast(message text, project text default null, actor text default null) returns bigint language plpgsql as $$
+-- A message to one project's sessions, or (everyone, project null) to every session. Relays push it; cb brief lists
+-- 24h. #4740 (Ahmed): the sender says which on purpose, so a forgotten project never reaches every session.
+create function cb.broadcast(message text, project text default null, actor text default null, everyone boolean default false)
+returns bigint language plpgsql as $$
 #variable_conflict use_variable
 declare a text := cb.set_actor(actor); p text := cb.read_project(project); new_id bigint;
 begin
   if coalesce(trim(message), '') = '' then raise exception 'message is required'; end if;
+  if (p is null) is distinct from coalesce(everyone, false) then
+    raise exception 'say one scope: cb broadcast "<message>" --project <p> (that project''s sessions) or --all (every session)';
+  end if;
   insert into cb.events (actor, project, kind, summary) values (a, p, 'broadcast', trim(message))
   returning cb.events.id into new_id;
   return new_id;
@@ -3320,7 +3325,7 @@ begin
    where t.id in (select cb.norm_id(x) from jsonb_array_elements_text(coalesce(skip, '[]')) x) and cb._goal_match(g.rules, g.project, t);
   n := cb._goal_pull(g, false);
   perform cb._goal_event(g, 'create', 'G' || g.id || ' set: ' || g.title, a);
-  perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' card' else ' cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a);
+  perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' card' else ' cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a, g.project is null);
   return g.id;
 end $$;
 
@@ -3363,7 +3368,7 @@ begin
     perform cb._goal_pull(g, true);
     select count(*) into n from cb.goal_tasks gt join cb.tasks t on t.id = gt.task_id
      where gt.goal_id = g.id and gt.state = 'in' and t.status not in ('done', 'cancelled');
-    perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' open card' else ' open cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a);
+    perform cb.broadcast('Goal G' || g.id || ' is active: ' || g.title || ' (' || n || case when n = 1 then ' open card' else ' open cards' end || '). Its cards come right after P0; cb goals lists it.', g.project, a, g.project is null);
   end if;
 end $$;
 

@@ -132,7 +132,7 @@ About 20 minutes of downtime for the sessions; they keep working and log "board 
 3 first (an empty board on the VPS is fine; it is replaced here). The dump carries client work to the VPS: Ahmed's
 call, made when he asked for the move.
 
-1. **Warn the sessions** (PC): `cb broadcast "The board moves to the VPS now: cb is unreachable for about 20 minutes. Keep working; register what you did after."`
+1. **Warn the sessions** (PC): `cb broadcast "The board moves to the VPS now: cb is unreachable for about 20 minutes. Keep working; register what you did after." --all`
 2. **Stop the PC's board server** (Ahmed's terminal, Ctrl+C). Nothing polls Telegram or GitHub now.
 3. **Copy the board, frozen** (PC, Git Bash, in the repo): `bash deploy/copy-to-vps.sh --final`. It refuses while the
    PC board still answers on :4747; makes the PC's database read-only and closes its connections (no session can write after the dump; Postgres keeps running),
@@ -163,7 +163,7 @@ call, made when he asked for the move.
 9. **Workers:** step 7. On the PC, don't start the old board again; if someone does, it serves pages but does not poll
    (the poller lock), and it shows the old, frozen database unless its `.env` points at the VPS.
 10. **Check:** sign in at the public URL as ahmed; Today shows the open questions; answer one and see the session get
-    it; `cb start` on the Mac; a member's link signs them in; `cb broadcast "The board is on the VPS. Restart your relay: cb relay --restart"`.
+    it; `cb start` on the Mac; a member's link signs them in; `cb broadcast "The board is on the VPS. Restart your relay: cb relay --restart" --all`.
 
 **Going back** (if the VPS fails during the move): stop the VPS board (`docker compose stop board`), start the PC's
 Postgres and board again (`pnpm start` in `C:\work\claude-board`), restore `.env`, point the `board` DNS record back at
