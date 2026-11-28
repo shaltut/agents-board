@@ -200,7 +200,8 @@ async function quotaStops(d: Deps, state: State, herdr: { status: Record<string,
       const want = wantList(state.project, state.squad).find((w) => w.name === s.actor);
       // the seat that may be switched: the switch applies, and the words stand where the CLI prints its own limit message
       // (a seat whose own output quotes them is only told of)
-      const applies = state.supervised && !!state.auto_backup && !isLead, banner = a.atQuotaBanner(tail);
+      // a switch needs stages, as cb._switching does: a squad #4806 supervises without them is only told
+      const applies = state.supervised && state.pipeline !== false && !!state.auto_backup && !isLead, banner = a.atQuotaBanner(tail);
       const seat = applies && banner ? want : undefined;
       if (banner) d.memory.sighted.set(s.actor, pane);
       const next = seat ? nextBackup(state.project, state.squad, seat, s, startProblem) : null;
