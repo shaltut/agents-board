@@ -253,6 +253,9 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  // PR 161 review (R2): PowerShell refuses a << only where it starts a token. Glued to a word it is part of that word
+  ...['cat > a', 'cat', 'cb log 1 -b -', 'cb log 1 0', 'git commit -F -', 'cat =', 'cat > a -'].map((head): [string, (c: string) => string] =>
+    [`a marker glued to the word before it: ${head}`, (c) => `${head}<<'EOF'\n${c}\nEOF`]),
   // PowerShell does not check the syntax inside a $( ) that is part of a command's name, so there a << stops nothing
   // (PowerShell 5.1's parser: no error, and the next line is a command)
   ['in a PowerShell command name, a $( glued to a word', (c) => `x=$(cat > a <<'EOF'\n)\n${c}\nEOF`],
