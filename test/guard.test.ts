@@ -1905,6 +1905,32 @@ test('#4803: a redirect target is read to its end however it nests, and one that
   }
 });
 
+// #4825: the refusal does not read the shell's options: a quoted target the guard cannot place refuses wherever the
+// command names a shell
+const unplaced4825 = "'>$(case a in a) echo log;; esac) sudo codex'";
+const refused4825 = (command: string, extra: Record<string, unknown> = {}) => {
+  for (const role of ['builder', null]) assert.notEqual(judged4803(command, role, extra), 'allow', `${role}: ${command.slice(0, 200)}`);
+};
+test('#4825: no spelling of a shell\'s options keeps a string from being read as shell text', () => {
+  for (const shell of ['bash -c -O extglob', 'bash -c -o pipefail --', "bash --rcfile 'rc' -c", "bash -O 'extglob' -c", 'bash -O "extglob" -c', `bash ${'-o pipefail '.repeat(40)}-c`,
+    'Bash.exe -c', 'BASH.EXE -c', 'SH -c', "'/usr/bin/bash' -c", 'bash -c \\\n', 'ba""sh -c', 'ssh box', 'EVAL']) refused4825(`${shell} ${unplaced4825}`);
+});
+
+test('#4825: the string is held to it however it reaches the shell', () => {
+  for (const command of [`bash <<<${unplaced4825}`, `echo ${unplaced4825} | bash`, `printf '%s' ${unplaced4825} | sh -s`, `x=${unplaced4825}; bash -c "$x"`]) refused4825(command);
+  const script = (text: string) => ({ readScript: (p: string) => (p.endsWith('run.sh') ? text : null) });
+  assert.equal(judged4803('./run.sh now', 'builder', script(`bash -o pipefail -c -- ${unplaced4825}\n`)), 'role');
+  // a script's #! line names its own interpreter, and hands no string to a shell
+  assert.equal(judged4803('./run.sh now', 'builder', script('#!/bin/bash\necho "step 1 -> don\'t stop"\n')), 'allow');
+});
+
+test('#4825: a quoted arrow where no shell is named, or a message about one, is only text', () => {
+  for (const command of ['echo "step 1 -> don\'t stop"', 'grep -rn "->\'" src', 'ls build.sh && echo "a -> don\'t"', 'npm run lint && echo "ok -> it\'s done"',
+    'git commit -m "bash: a -> don\'t"', 'cb log 1 "eval -> it\'s fixed"', 'bash build.sh && echo done > out.txt', 'bash -c "ls > out.txt"']) {
+    assert.equal(judged4803(command), 'allow', command);
+  }
+});
+
 test('#4803: a name with case beside a dot is no case statement', () => {
   for (const command of ['>$(cat case.txt) ls', 'echo hi > "$(basename my.case)"']) assert.equal(judged4803(command), 'allow', command);
   // ordinary targets pass, and so does text that is no redirect: in quotes, in a comment, or PowerShell's own quoting
@@ -1966,7 +1992,8 @@ test('#4803: long runs of redirect marks are read in linear time', () => {
     ['bare marks', 'echo ' + kb200('<>&')], ['glued targets', 'echo ' + kb200(`>'a'"b"c `)], ['quoted marks', 'echo ' + kb200(`"a>b" `)],
     ['escaped quotes after an open one', 'echo >x "' + kb200('\\"')], ['split targets', 'echo ' + kb200('>\\\n')], ['nested quotes', 'echo >x ' + kb200(`"'>a'" `)],
     ['nested substitutions', 'echo >' + kb200('$(')], ['closed substitutions', 'echo ' + kb200('>$(a $(b)) ')], ['long names', 'echo ' + kb200('{' + 'a'.repeat(3000))],
-    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
+    ['heredoc headers on one line', 'echo ' + kb200('<<a ')], ['many options before a quote', 'echo ' + kb200('sh ' + '-c '.repeat(95) + "'>' ")], ['a long flag before a quote', 'echo ' + kb200('sh -' + 'c'.repeat(290) + " '>' ")],
+    ['shell names before unplaced strings', 'echo ' + kb200("bash '>$(case' ")], ['unplaced strings with no shell', 'echo ' + kb200("'>$(case' ")], ['split shell names', 'echo ' + kb200('ba""sh \'>$(case\' ')], ['heredoc lines', kb200('<<a b\na\n')], ['digit runs', 'echo ' + kb200('1'.repeat(3000) + ' ')]]) {
     const t = performance.now();
     judged4803(command);
     const ms = performance.now() - t;
