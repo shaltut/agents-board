@@ -941,6 +941,18 @@ test('#4787: the switch on in a squad the supervisor does not run: told, never s
   assert.equal(await said(sql, /Nothing was switched or closed/), 1);
 });
 
+test("#4787: quota words that are not in the CLI's banner spot are told, never switched", async () => {
+  const { sql, sup } = await switchSetup();
+  // the seat's own last answer quotes the banner: a quota match, but not the CLI's limit message
+  const quoted = '● The adapter looks for this line:\n  ⎿ grep\n● Claude usage limit reached is what it matches.\n> ';
+  const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? '> ' : quoted, stderr: '' }) });
+  running(h);
+  await tick(deps(sup, h.run)); await tick(deps(sup, h.run)); await tick(deps(sup, h.run));
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+  assert.equal(await said(sql, /will not switch it.*Nothing was switched or closed/s), 1);
+  assert.deepEqual([(await events(sql, 'quota')).length, (await events(sql, 'switch')).length, (await events(sql, 'no_backup')).length], [1, 0, 0]);
+});
+
 test('#4787: a seat that acts after the mark, right before /exit, is not closed', async () => {
   const { sql, sup, h } = await switchSetup();
   await tick(deps(sup, h.run));
