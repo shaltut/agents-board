@@ -3,7 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
-import { freshDb, onProject, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
+import { freshDb, TEST_URL } from './helpers.ts'; // sets CB_DATABASE_URL before the server's db client loads
 
 const { app } = await import('../server/main.ts');
 const { sql: serverSql } = await import('../server/db.ts');
@@ -17,7 +17,7 @@ async function board() {
   const sql = await freshDb();
   const session = postgres(TEST_URL, { onnotice: () => {}, max: 1, connection: { application_name: 'cb' } });
   clients.push(sql, session);
-  await onProject(sql, 'cai', 'demo');
+  await sql`select cb.ensure_project('demo')`;
   return { sql, session };
 }
 const issue = async (sql: any, machine = 'boxa', kind = 'machine', runner: string | null = null): Promise<string> =>
