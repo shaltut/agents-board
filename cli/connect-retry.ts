@@ -11,7 +11,8 @@ import { COMMANDS } from './help.ts';
 
 // The connection never opened, whatever the syscall: refused, DNS, postgres.js's own connect timer (it is cancelled at
 // the first ReadyForQuery, before postgres.js executes the query that opened the connection).
-const BEFORE_CONNECT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'CONNECT_TIMEOUT']);
+// CB_NOT_RUN: the worker API's 429, or its own 503 saying the call never ran (cli/board.ts).
+const BEFORE_CONNECT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'CONNECT_TIMEOUT', 'CB_NOT_RUN']);
 // These also happen on an open socket (after a write), so only when Node says they came from connect() itself.
 // Through the relay bridge an older relay forwards no syscall: then they are not retried.
 const ON_CONNECT = new Set(['ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN']);
@@ -110,6 +111,7 @@ export function withConnectRetry(db: any, o: RetryOpts = {}): any {
   // a fresh query each attempt: a postgres.js query is lazy and runs once
   const wrapped: any = (strings: any, ...values: any[]) => isTemplate(strings) ? attempt(() => db(strings, ...values)) : db(strings, ...values);
   wrapped.unsafe = (...a: any[]) => attempt(() => db.unsafe(...a));
+  if (db.api) wrapped.api = (...a: any[]) => attempt(() => db.api(...a));
   wrapped.begin = (...a: any[]) => {
     const body = a.pop(); let started = false;
     return attempt(() => db.begin(...a, (tx: any) => { started = true; return body(tx); }), () => !started);
