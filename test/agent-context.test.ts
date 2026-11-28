@@ -4,7 +4,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,7 +38,7 @@ test('AGENTS.md in this repo is the one made from CLAUDE.md', () => {
 });
 
 test('agentsMdFrom: a note that says what to edit, then CLAUDE.md as it is, with unix line ends and no byte order mark', () => {
-  const out = agentsMdFrom('﻿# T\r\n\r\ntext $& $1\r\n');
+  const out = agentsMdFrom('\uFEFF# T\r\n\r\ntext $& $1\r\n');
   assert.match(out.split('\n')[0]!, /^<!-- .*CLAUDE\.md.*node cli\/agent-context\.ts repo.*-->$/);
   assert.ok(out.endsWith('-->\n\n# T\n\ntext $& $1\n'), out);
 });
@@ -133,6 +133,13 @@ test('user rules: a file that is a link to the source is left alone, so the sour
   assert.equal(read(w.at.source), RULES);
 });
 
+test('user rules: a hard link to the source is the same file too', (t) => {
+  const w = home(t, ['.codex']);
+  linkSync(w.at.source, w.at.codex);
+  assert.equal(states(syncUserRules({ home: w.dir, env: {} })).codex, 'linked');
+  assert.equal(read(w.at.source), RULES);
+});
+
 test('user rules: a squad seat may check but not write: these are the owner\'s files', (t) => {
   const w = home(t, ['.codex']), seat: NodeJS.ProcessEnv = { ['CB_' + 'ROLE']: 'builder' };
   assert.throws(() => syncUserRules({ home: w.dir, env: seat }), /squad seat.*own terminal/s);
@@ -144,7 +151,7 @@ test('the script: repo --check passes here; an unknown word or flag is refused a
   const run = (...args: string[]) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
   const ok = run('repo', '--check');
   assert.equal(ok.status, 0, ok.stderr);
-  for (const args of [[], ['users'], ['user', '--dry-run'], ['repo', '--agents', 'codex'], ['repo', 'extra']]) {
+  for (const args of [[], ['users'], ['user', '--dry-run'], ['user', '--agents', ','], ['repo', '--agents', 'codex'], ['repo', 'extra']]) {
     const r = run(...args);
     assert.equal(r.status, 1, args.join(' '));
     assert.match(r.stderr, /node cli\/agent-context\.ts (repo|user)/, args.join(' '));
