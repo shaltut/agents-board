@@ -596,8 +596,12 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
   the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
   under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
-- restarts a squad seat running another agent or model than the squad file now names for it (#4332, Q2970: the
-  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them) once it is
+- restarts a squad seat running another agent, model or effort than the squad file now names for it (#4332, Q2970: the
+  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them; the effort
+  is the `cb iam --effort` of its first prompt, `default` for none, #4766. The effort is not read from the running
+  agent, so one changed inside a session is not seen; a seat that said none is not judged, so a seat started before
+  this keeps running. Every machine's board checkout must know `--effort` before a squad starts seats there: an older
+  `cb` refuses the flag and the seat does not bind) once it is
   idle as above and quiet 5 minutes: it closes it as above, then starts it under the same name on the new setting, at
   most 2 a tick, each taking one of the 3 starts (waiting work starts first). Busy, it waits until idle. Never the lead,
   a hand-started name or a leaving seat; one idle 20 minutes with no waiting work is simply closed. Each restart is a
