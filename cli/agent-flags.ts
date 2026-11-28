@@ -10,11 +10,12 @@ import { ADAPTERS, AGENT_KINDS, type AgentKind } from './agents/index.ts';
 /** What a probe found: path null = not installed here; error = installed, but its help could not be read. */
 export type AgentProbe = (kind: AgentKind) => { path: string | null; version?: string; help?: string; error?: string };
 
-// A sample launch per adapter: values only an adapter's own checks need (a model it accepts, OpenCode's port); the
+// A sample launch per adapter: values only an adapter's own checks need (a model it accepts, OpenCode's port), and an
+// effort so that a CLI that drops its effort flag shows here; the
 // flags, not the values, are what is checked. Builder and a read-only role: a read-only seat gets other flags (codex -s).
-const SAMPLE: Record<AgentKind, { model: string; env?: Record<string, string> }> = {
-  claude: { model: 'sonnet' }, codex: { model: 'gpt-5' }, opencode: { model: 'openai/gpt-5', env: { CB_OPENCODE_PORT: '4999' } },
-  agy: { model: 'gemini-3-pro' },
+const SAMPLE: Record<AgentKind, { model: string; effort?: string; env?: Record<string, string> }> = {
+  claude: { model: 'sonnet', effort: 'high' }, codex: { model: 'gpt-5' }, opencode: { model: 'openai/gpt-5', env: { CB_OPENCODE_PORT: '4999' } },
+  agy: { model: 'gemini-3-pro', effort: 'high' },
 };
 const ROLES = ['builder', 'reviewer'];
 const FLAG = /^-{1,2}[A-Za-z]/;
@@ -28,7 +29,7 @@ export function launchFlags(kind: AgentKind, board: string, cwd: string): { flag
   let env: Record<string, string> = {};
   try {
     for (const role of ROLES) {
-      const spec = ADAPTERS[kind].buildLaunch({ name: `doctor-${role}`, role, repo: 'main', agent: kind, model: SAMPLE[kind].model,
+      const spec = ADAPTERS[kind].buildLaunch({ name: `doctor-${role}`, role, repo: 'main', agent: kind, model: SAMPLE[kind].model, effort: SAMPLE[kind].effort,
         board, cwd, env: { ...(SAMPLE[kind].env ?? {}) } });
       env = { ...env, ...(spec.env ?? {}) };
       spec.args.forEach((a, i) => {

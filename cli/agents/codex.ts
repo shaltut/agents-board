@@ -8,6 +8,7 @@ import { HANDLED_TOOLS } from '../../kit/guard/shim-codex.mjs';
 import type { AgentAdapter, AgentState, LaunchInput, QuotaSignal } from './types.ts';
 import { stripClaudeOnly, withNoPrompt } from './env.ts';
 import { codexPreseed } from './trust.ts';
+import { checkedEffort } from './effort.ts';
 
 /** Never a Claude model name: spec section 3 (catches a copy-paste when `agent` changes but `model` does not). */
 export const CLAUDE_MODEL_NAMES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
@@ -56,12 +57,14 @@ export function createCodexAdapter(run: Runner = (m, a, t) => realRun(m, a, t)):
     buildLaunch(l: LaunchInput) {
       const bad = codexModelProblem(l.model);
       if (bad) throw new Error(`codex seat ${l.name}: ${bad}`);
+      const effort = checkedEffort('codex', l.name, l.effort);
       const env = withNoPrompt(stripClaudeOnly(l.env));
       return {
         kind: 'codex',
         args: [
           '--no-daemon', // without it Codex joins the shared daemon, and the daemon's env (not the pane's) would reach the seat
           ...(l.model ? ['-m', l.model] : []),
+          ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []),
           '-a', 'never', // never ask a person: a failed command goes back to the model; the guard hook is the fence
           // #4002 install gate (Ahmed, Q3004): Codex runs hooks only once a person trusts them, and Esc on "Hooks need
           // review" goes on without them (the guard fails open). With this flag the installed hooks always run; the
