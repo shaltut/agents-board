@@ -404,8 +404,9 @@ test('API mode: a notice missed while the stream was down is claimed as soon as 
   const restored = Date.now();
   worker!.restoreStreams();
   assert.equal((await ended(id)).state, 'passed');
+  const trace = () => `ms from the restore: ${JSON.stringify(worker!.seen.filter((s) => s.at > restored - 3000).map((s) => [s.what, s.at - restored]))}\n${runner.out.slice(-1500)}`;
   const opened = worker!.seen.find((s) => s.what === 'events' && s.at >= restored);
-  assert.ok(opened, 'the stream was opened again');
+  assert.ok(opened, `the stream was opened again; ${trace()}`);
   assert.ok(worker!.seen.some((s) => s.what === 'job_claim' && s.at >= opened.at && s.at - opened.at < 2000), 'and the runner looked for work at once');
 });
 
