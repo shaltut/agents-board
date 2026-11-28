@@ -327,10 +327,10 @@ function stripMessagesOnce(cmd, inner) {
 // #4774: a message's text is dropped only where the shell reads it as one. The message command, and each quote that opens
 // its text, must be code to bashReader: not in a comment, not inside a quoted word, and not past something the reader
 // cannot follow (from there the text is judged as commands). docs: the heredocs already read, which it steps over.
-function stripMessageArgs(text, docs, inner) {
-  const bash = bashReader(text);
+// (at) -> does bash read the character at `at` as code? Asked with a growing `at`, so all asks together are one pass
+function codeReader(text, docs, bash = bashReader(text)) {
   let k = 0;
-  const isCode = (at) => {
+  return (at) => {
     for (; k < docs.length && docs[k].at < at && !bash.unsure; k++) {
       const d = docs[k];
       bash.read(d.at);
@@ -344,6 +344,10 @@ function stripMessageArgs(text, docs, inner) {
     bash.read(at);
     return !bash.unsure && bash.at() === at && !inQuotes(bash.open.at(-1));
   };
+}
+function stripMessageArgs(text, docs, inner) {
+  const bash = bashReader(text);
+  const isCode = codeReader(text, docs, bash);
   let out = '', done = 0;
   MESSAGE_AT.lastIndex = 0;
   for (let m; (m = MESSAGE_AT.exec(text));) {
@@ -1860,6 +1864,9 @@ const TAKER_WORD = /read|mapfile|printf|getopts/i;
 const TAKER_ARG = { read: new Set(['-d', '-i', '-n', '-N', '-p', '-t', '-u']), mapfile: new Set(['-d', '-n', '-O', '-s', '-u', '-C', '-c']) };
 TAKER_ARG.readarray = TAKER_ARG.mapfile;
 const takenName = (t) => /[$`]/.test(t) || SEAT_VAR.test(unquote(t).split(/[<>[]/)[0]);
+// #4792: herdr's own read subcommand takes no variable name. Only the words in a row, with blanks alone between them:
+// x=$(herdr pane) read V runs the builtin
+const HERDR_READ = /((?:^|[\s(])herdr(?:[ \t]+--machine[ \t]+[\w.@-]+)?[ \t]+(?:pane|agent)[ \t]+)read(?=[ \t]|$)/g;
 function nameTakers(seg) {
   const w = seg.match(WORD) ?? [];
   for (let i = 0; i < w.length; i++) {
@@ -1878,8 +1885,59 @@ function nameTakers(seg) {
   }
   return false;
 }
+// #4758: text handed to gh, or written to a note, changes no variable. For the seat-variable rule alone: the shared
+// stripping drops every quoted argument of its commands, a quoted file path too, which the rules about secrets must see.
+// A heredoc is such text only when its whole header line is one of two forms (a pipe, another command or anything the
+// shell fills in is neither): gh reading its body from stdin, or cat writing a .md or .txt file. Each pattern repeats
+// only over words split by blanks, so it is linear
+const GH_BODY_LINE = /^[ \t]*(?:cd[ \t]+[\w./:~-]+[ \t]*&&[ \t]*)?gh[ \t]+(?:pr|issue)[ \t]+(?:create|edit|comment|review)((?:[ \t]+(?:\x22[^\x22\\$\x60]*\x22|\x27[^\x27]*\x27|[\w./:@=,#+-]+))*)[ \t]*<<-?[ \t]*([\x22\x27])\w+\2\r?$/;
+const BODY_FROM_STDIN = /(?:^|[ \t])(?:(?:--body-file|-F)[ \t]+-|--body-file=-)(?=[ \t]|$)/;
+const NOTE_LINE = /^[ \t]*(?:cd[ \t]+[\w./:~-]+[ \t]*&&[ \t]*)?cat[ \t]*<<-?[ \t]*([\x22\x27])\w+\1[ \t]*>>?[ \t]*[\w./:~-]+\.(?:md|txt)\r?$/;
+const isTextDoc = (line) => NOTE_LINE.test(line) || BODY_FROM_STDIN.test(GH_BODY_LINE.exec(line)?.[1] ?? '');
+// gh's body and title flags on the commands the shared list does not hold, gh as the command itself (after echo or in
+// quotes it is only words). A value is dropped only when it is one quoted string that bash and PowerShell both end in the
+// same place and run nothing of: no backslash before a double quote, no curly quote, and in double quotes no command or
+// brace substitution and no backtick
+const GH_TEXT_AT = /(?<=(?:^|[;&|(\n])[ \t]*)gh[ \t]+(?:pr[ \t]+edit|issue[ \t]+(?:create|comment|edit))(?=[ \t])/g;
+const GH_TEXT_FLAG = /^(?:--body|--title|-b|-t)$/;
+const plainText = (v) => /^(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27)$/.test(v) && !/\\\x22|[\u2018-\u201f]/.test(v) && !(v[0] === '"' && /\$[({]|\x60/.test(v));
+// only a command that may hold such text pays for the second reading
+const MAY_HOLD_TEXT = /\bgh[ \t]+(?:pr|issue)[ \t]|\bcat[ \t]*(?:<<|>)/;
+const GH_WORD = /(?:\x22(?:\\.|[^\x22\\])*\x22|\x27[^\x27]*\x27|\\.|[^\s;&|\x22\x27\\])+/y;
+function seatText(command) {
+  if (!MAY_HOLD_TEXT.test(command)) return stripMessages(command);
+  const docs = [];
+  const text = replaceHeredocs(stripMessages(command), (all, line, id) => (isTextDoc(line) ? `${line}\n${id}` : all), docs);
+  const bash = bashReader(text);
+  const isCode = codeReader(text, docs, bash);
+  let out = '', done = 0;
+  GH_TEXT_AT.lastIndex = 0;
+  for (let m; (m = GH_TEXT_AT.exec(text));) {
+    if (!isCode(m.index)) continue;
+    let i = GH_TEXT_AT.lastIndex, flagged = false;
+    for (;;) {
+      ARG_BLANKS.lastIndex = i;
+      if (!ARG_BLANKS.test(text)) break;
+      const from = ARG_BLANKS.lastIndex;
+      GH_WORD.lastIndex = from;
+      const word = GH_WORD.exec(text)?.[0];
+      if (word === undefined) break;
+      i = from + word.length;
+      const eq = /^(?:--body|--title)=/.exec(word)?.[0].length ?? 0;
+      const value = flagged ? word : eq ? word.slice(eq) : '';
+      flagged = !flagged && GH_TEXT_FLAG.test(word);
+      const at = i - value.length;
+      if (!value || !plainText(value) || !isCode(at)) continue;
+      out += text.slice(done, at) + '""';
+      done = i;
+      bash.skip(done);
+    }
+    GH_TEXT_AT.lastIndex = i;
+  }
+  return out + text.slice(done);
+}
 function seatVarChangeOne(command) {
-  const raw = stripMessages(String(command ?? ''));
+  const raw = seatText(String(command ?? ''));
   const t = SEAT_RUNS_CODE.test(raw) ? raw : blankQuoted(raw);
   if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
   if (NAME_ASSIGNER.test(raw) && (hiddenNameref(raw) || assignsThrough(raw))) return SEAT_VARS_CHANGE;
@@ -1891,7 +1949,7 @@ function seatVarChangeOne(command) {
   }
   // the word walks run only where their command names appear (a cheap test first keeps big commands fast)
   for (const seg of raw.match(SEGMENTS) ?? []) {
-    if ((ENV_WORD.test(seg) && envChangesSeat(seg)) || (TAKER_WORD.test(seg) && nameTakers(seg))) return SEAT_VARS_CHANGE;
+    if ((ENV_WORD.test(seg) && envChangesSeat(seg)) || (TAKER_WORD.test(seg) && nameTakers(seg.replace(HERDR_READ, '$1herdr-read')))) return SEAT_VARS_CHANGE;
   }
   // the Env: drive and .NET take the name as text: judged unblanked (Remove-Item ("Env:" + $n), Env:CB_*)
   for (const seg of raw.match(SEGMENTS) ?? []) {
@@ -3441,9 +3499,14 @@ function unplacedRedirect(text) {
 const shellScript = (path, text) => (text.startsWith('#!') ? /^#![^\n]*[/ \t](?:ba|da|z|k)?sh(?=\s|$)/.test(text) : /(?:\.(?:sh|bash|zsh|ksh)|(?:^|[\\/])[^\\/.]+)$/i.test(path));
 const UNPLACED = 'the guard cannot find where a redirect\'s target ends, so it cannot see the command behind it: split the command, or give the target a plain name';
 // cat >file <<WORD at a line's start, with nothing after the header, hides nothing: left as written, so the usual huge
-// command, a file written from a heredoc, is judged once. Each test reads a bounded piece
-const catToFile = (redirect, at, text) => /^>>?[ \t]*[A-Za-z0-9_./-]+$/.test(redirect) && /(?:^|\n)[ \t]*cat[ \t]+$/.test(text.slice(Math.max(0, at - 40), at))
-  && /^[ \t]*<<-?[ \t]*(["']?)\w{1,40}\1[ \t]*(?:\n|$)/.test(text.slice(at + redirect.length, at + redirect.length + 80));
+// command, a file written from a heredoc, is judged once. cat <<WORD >file is the same command (#4758). Each test reads
+// a bounded piece
+const catToFile = (redirect, at, text) => {
+  if (!/^>>?[ \t]*[A-Za-z0-9_./-]+$/.test(redirect)) return false;
+  const before = text.slice(Math.max(0, at - 80), at), after = text.slice(at + redirect.length, at + redirect.length + 80);
+  return (/(?:^|\n)[ \t]*cat[ \t]+$/.test(before) && /^[ \t]*<<-?[ \t]*([\x22\x27]?)\w{1,40}\1[ \t]*(?:\n|$)/.test(after))
+    || (/(?:^|\n|&&)[ \t]*cat[ \t]*<<-?[ \t]*([\x22\x27]?)\w{1,40}\1[ \t]+$/.test(before) && /^[ \t]*(?:\r?\n|$)/.test(after));
+};
 function unredirected(text, left = (redirect, at, all) => (catToFile(redirect, at, all) ? redirect : ' ')) {
   if (!/[<>]/.test(text)) return [text];
   const kept = stripMessages(text), forms = new Set([text]);

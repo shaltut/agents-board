@@ -1400,6 +1400,12 @@ test('long commands stay fast', () => {
   const escaped = '\\"'.repeat(100000);
   const tail100KB = 'x '.repeat(50000);
   const cases: [string, (again: number) => unknown][] = [
+    // #4758: the seat rule's own reading of gh text and notes
+    ['#4758, 200 KB of gh pr edit lines with a body each', asBuilder(kb200("gh pr edit 1 -b 'unset x'; "))],
+    ['#4758, one gh pr edit with 200 KB of body flags', asBuilder('gh pr edit 1 ' + kb200("-b 'x' "))],
+    ['#4758, 200 KB of gh edit heads inside an open quote', asBuilder('echo "' + kb200('; gh pr edit -b '))],
+    ['#4758, 200 KB of notes written by cat', asBuilder(kb200("cat <<'EOF' > a.md\nx\nEOF\n"))],
+    ['#4758, 200 KB of cat headers and redirects with no end', asBuilder(kb200("cat <<'E' >a "))],
     // the kill scan: a ProcessId filter is read once per segment, not once per win32_process / wmic process word; an
     // earlier < feed is a running flag, not a look-back from every by-name lookup
     // secret files (#4347): names everywhere, with and without a reader, and one 200 KB word ending in .key
@@ -2328,4 +2334,43 @@ test('#4773: a text-only edit by an interpreter heredoc stays refused, and the r
     assert.equal(r.kind, 'role', text);
     assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
   }
+});
+
+// #4758 (with 4792's shape): text handed to a program is not a seat-variable change. Three narrow forms only: herdr's own
+// `read` subcommand, a quoted body or title of gh pr|issue, and a heredoc that gh reads as the body. The blocked list is
+// asserted first: each of those was refused before the change too
+test('the seat-variable rule lets text-only gh and herdr lines through, and nothing that runs', () => {
+  const refused = (command: string) => /changing CB_ROLE or CB_AGENT/.test(evaluate({ tool: 'shell', command, role: 'builder' }).reason ?? '');
+  const heredoc = (head: string, body: string, delimiter = "'EOF'") => `${head} <<${delimiter}\n${body}\nEOF`;
+  const blocked = [
+    'read "$HERDR_PANE_ID"', 'herdr pane list | read $n', 'herdr pane list; read -r CB_ROLE', 'herdr pane read w1 | read CB_ROLE',
+    'x=$(herdr pane) read CB_ROLE <<< v', 'herdr pane list\nread CB_ROLE', 'echo herdr pane read; read CB_ROLE', 'herdr pane read w1 && unset CB_ROLE',
+    'gh pr edit 1 --body "x"; unset CB_ROLE', 'gh pr edit 1 --body "a\nb"\nunset CB_ROLE',
+    // PowerShell does not read \" as an escape, nor a curly quote as text: either ends the string there
+    'gh pr edit 1 --body "a\\" ; Remove-Item Env:CB_ROLE ; echo \\"b"', 'gh pr edit 1 --body "a” ; Remove-Item Env:CB_ROLE ; echo “b"',
+    heredoc('gh pr edit 1 --body-file -', '$(unset CB_ROLE)', 'EOF'), heredoc('bash', 'unset CB_ROLE'),
+    heredoc('gh pr edit 1 --body-file - | bash', 'unset CB_ROLE'), heredoc('gh api repos/o/r/issues -F -', 'unset CB_ROLE'),
+    heredoc('gh pr edit 1 --body-file notes.md; bash', 'unset CB_ROLE'), heredoc('echo ok; bash -s -- gh pr edit -F -', 'unset CB_ROLE'),
+    `${heredoc('gh pr edit 1 -F -', 'text')}\nunset CB_ROLE`, "gh pr edit 1 -F - <<'EOF'\ntext\n EOF \nunset CB_ROLE\nEOF",
+    `bash -c "gh pr edit 1 -F - <<'X'\ntext\nX\nunset CB_ROLE"`,
+    // a note written by cat stays judged when the file is no note, or the line goes on
+    heredoc('cat', 'unset CB_ROLE'), "cat <<'EOF' > x.sh\nunset CB_ROLE\nEOF", "cat <<'EOF' > b.md | bash\nunset CB_ROLE\nEOF", "cat <<'EOF' > b.md; bash\nunset CB_ROLE\nEOF",
+    // a title or body flag of a command that is not gh, and one gh runs through a shell
+    'sh -c "gh pr edit 1 --body x; unset CB_ROLE"', 'gh pr edit 1 --body x; bash -c "unset CB_ROLE"',
+    // the first try at the gh exception let both through: a gh head inside quotes, and one a shell is then fed
+    "echo 'gh pr edit -b \"'; unset CB_ROLE; echo '\"'", 'echo gh pr edit -b "x; unset CB_ROLE; codex" | sh',
+  ];
+  for (const c of blocked) assert.ok(refused(c), `should be refused: ${JSON.stringify(c)}`);
+  const text = 'the guard refuses these:\nunset CB_ROLE\nenv -u CB_AGENT codex\nCB_ROLE= codex';
+  const allowed = [
+    'herdr pane read "$HERDR_PANE_ID" | head -c 2000', 'herdr agent read $p', 'herdr --machine macbook pane read "$p" --source visible',
+    'cd /w/t1; echo "pane ${HERDR_PANE_ID:-none}"; herdr pane read "$HERDR_PANE_ID" | head -c 2000; echo a; echo b; sed -n \'1,5p\' test/a.test.ts; grep -n "SessionStart" hooks/x.mjs',
+    `gh pr edit 1 --body "${text}"`, `gh issue create --title t --body '${text}'`, `gh issue comment 2 -b "${text}"`, `gh issue edit 2 --body="${text}"`,
+    heredoc('gh pr edit 1 --body-file -', text), heredoc('cd /w/t1 && gh pr create --title "a b" --body-file -', text),
+    heredoc('gh issue create -t t -F -', text, '"EOF"'), heredoc('gh pr comment 1 --repo o/r --body-file=-', text),
+    `${heredoc('gh pr review 1 --comment -F -', text)}\ngh pr view 1`,
+    `cat <<'EOF' > /tmp/b.md\n${text}\nEOF`, `cd /w/t1 && cat <<'EOF' >> notes.txt\n${text}\nEOF\ngh pr edit 1 --body-file notes.txt`,
+    `gh pr edit 1 --title "t" -b '${text}' && gh pr view 1`,
+  ];
+  for (const c of allowed) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, JSON.stringify(c));
 });
