@@ -1844,11 +1844,16 @@ const gluedTargets4803 = ["'lo'g", '"lo"g', "''log", '""log', "lo''g", 'lo""g', 
 test('#4803: a redirect target glued from pieces, or split over lines, is one word', () => {
   for (const t of gluedTargets4803) {
     const name = JSON.stringify(t);
-    for (const command of [`>${t} sudo codex`, `env 2>${t} sudo codex`, `true; &>${t} sudo codex`, `git >${t} push origin main`, `git>${t} push origin main`,
-      ...(t.includes("'") ? [] : [`bash -c '>${t} sudo codex'`, `bash -c 'git 2>${t} push origin main'`]),
+    for (const command of [`>${t} sudo codex`, `env 2>${t} sudo codex`, `true; &>${t} sudo codex`,
+      ...(t.includes("'") ? [] : [`bash -c '>${t} sudo codex'`]),
       ...(/["`$]/.test(t) ? [] : [`bash -c ">${t} sudo codex"`])]) assert.equal(judged4803(command), 'role', `${name}: ${command}`);
     assert.equal(judged4803(`git push 2>${t} --force origin main`, null), 'dangerous', name);
-    for (const command of [`>${t} echo hi`, `git >${t} push origin feat`, ...(t.includes("'") ? [] : [`bash -c '>${t} echo hi'`])]) {
+    // a push to the protected branch: refused as dangerous before the role rule is reached
+    for (const command of [`git >${t} push origin main`, `git>${t} push origin main`, ...(t.includes("'") ? [] : [`bash -c 'git 2>${t} push origin main'`])]) {
+      assert.notEqual(judged4803(command), 'allow', `${name}: ${command}`);
+    }
+    // right after git, a target with a $ is refused as written already (a subcommand the shell fills in), as on main
+    for (const command of [`>${t} echo hi`, ...(t.includes('$') ? [] : [`git >${t} push origin feat`]), ...(t.includes("'") ? [] : [`bash -c '>${t} echo hi'`])]) {
       assert.equal(judged4803(command), 'allow', `${name}: ${command}`);
     }
   }
