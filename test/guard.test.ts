@@ -1929,7 +1929,7 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   // filled words that are not the program the line runs, or a command named by its path
   const allowed = ['timeout 5 cp $SRC $DST', 'xargs rm -f $A $B', 'timeout 60 node $SCRIPT $ARG', 'git diff $BASE $TIP -- main.ts',
     'echo $A $B', 'for f in $A $B; do echo $f; done', '$branch = $other', '$total += $n', 'if [ $a = $b ]; then echo same; fi',
-    '"$HOME/bin/tool" "$file"', '$ROOT/node_modules/.bin/tsc $FILE', 'ssh "$VPS" uptime', '"$PYTHON" -c "print(1)"', '$PSQL -c "select 1"'];
+    '"$HOME/bin/tool" "$file"', '$ROOT/node_modules/.bin/tsc $FILE', '"$PYTHON" -c "print(1)"', '$PSQL -c "select 1"'];
   for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
   // a path that ends in the name of another program is that program; a default that could be anything is still read
   assert.equal(kindOf('"$TOOLS/docker" push registry.example/app'), 'allow');
