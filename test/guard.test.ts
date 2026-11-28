@@ -338,12 +338,18 @@ test('#4774: a message in a substitution in quotes is still text to every rule',
 });
 test('#4774: a command a shell runs is never dropped as message text; real message text still is', () => {
   const missed: string[] = []; // every miss, so one failing run names them all
+  const allows = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' }).allow;
+  // the same text with no message command or text writer in it
+  const noMessage = (s: string) => s.replace(/\bcb log\b|\bgit commit\b|\bherdr agent prompt\b|\bcat > a\b/g, 'echo');
   for (const [name, make] of [...hiddenByMessage, ...hiddenByGluedQuote]) {
     // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
     if (!stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE')) missed.push(`${name}: the line does not reach the rules`);
     if (!check(make('git reset --hard'))) missed.push(`${name}: a reset passes`);
-    for (const c of ['git push origin main', 'git push -f origin feat/x', 'taskkill /IM node.exe', 'env -i git push origin feat/x']) {
-      if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
+    if (allows(make('git push origin main'))) missed.push(`${name}: a builder may push to main`);
+    // the other rules read less inside quotes, with or without a message there: what they block without the message
+    // words, they must block with them
+    for (const c of ['git push -f origin feat/x', 'taskkill /IM node.exe', 'env -i git push origin feat/x']) {
+      if (allows(make(c)) && !allows(noMessage(make(c)))) missed.push(`${name}: the message words let "${c}" pass`);
     }
   }
   assert.deepEqual(missed, []);

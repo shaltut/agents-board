@@ -308,6 +308,9 @@ function writesText(line) {
 // in double quotes, where a $( ) or backtick runs whatever quotes this reading sees around it, so text holding one stays
 let stripLast = null;
 const SUBSTITUTES = /\$\(|\x60/;
+// in a word read again, a backtick may already stand as $ (the push and kill rules read it so), so there any $ counts
+const SUBSTITUTES_INNER = /[$\x60]/;
+const substitutes = (text, inner) => (inner ? SUBSTITUTES_INNER : SUBSTITUTES).test(text);
 export function stripMessages(cmd, inner = false) {
   if (stripLast && stripLast.in === cmd && stripLast.inner === inner) return stripLast.out;
   const out = stripMessagesOnce(cmd, inner);
@@ -316,7 +319,7 @@ export function stripMessages(cmd, inner = false) {
 }
 function stripMessagesOnce(cmd, inner) {
   const docs = [];
-  const drops = (all, line) => writesText(line) && !(inner && SUBSTITUTES.test(all));
+  const drops = (all, line) => writesText(line) && !(inner && substitutes(all, true));
   const text = replaceHeredocs(cmd, (all, line, id) => (drops(all, line) ? `${line}\n${id}` : all), docs);
   return stripMessageArgs(text, docs, inner);
 }
@@ -357,7 +360,7 @@ function stripMessageArgs(text, docs, inner) {
         if (!q) continue;
         if (!isCode(i)) break args;
         // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
-        if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && SUBSTITUTES.test(q))) continue;
+        if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && substitutes(q, inner))) continue;
         out += text.slice(done, i) + '""';
         done = i + q.length;
         bash.skip(done);
