@@ -2389,7 +2389,9 @@ test('#4789: a long run of find actions is read in linear time', () => {
 test('#4789: Windows PowerShell runs its bare words as the command', () => {
   refused(['powershell Start-ScheduledTask -TaskName x', 'powershell -NoProfile schtasks /run /tn x', 'powershell.exe wsl codex',
     'powershell -ExecutionPolicy Bypass -NoLogo Start-ScheduledTask x', 'powershell -ep bypass -w hidden Start-ScheduledTask x',
-    'powershell Write-Output hi -c "Start-ScheduledTask x"']);
+    'powershell Write-Output hi -c "Start-ScheduledTask x"',
+    // PR 173 lead review: the working folder takes a value too, by its short name or any prefix
+    'powershell -wd x Start-ScheduledTask -TaskName y', 'powershell -WorkingDirectory x schtasks /run /tn y', 'powershell -Work x wsl codex']);
   letThrough(['powershell Get-ScheduledTask', 'powershell -NoProfile -File x.ps1', 'powershell -ExecutionPolicy Bypass -File x.ps1 -Name sudo',
     'powershell -NoProfile -Command "Get-Date"', 'powershell -ExecutionPolicy Bypass Get-Date', 'pwsh x.ps1', 'pwsh -NoProfile x.ps1 sudo']);
 });
@@ -2408,6 +2410,14 @@ test('#4789: after the end of rg\'s options nothing is its pre-processor option'
     'rg -e "" -- --pre sudo x', "rg -e '' -- --pre sudo x", `rg -e ""'' -- --pre sudo x`, "rg --regexp '''' -- --pre sudo x", 'rg -e "" "" -- --pre sudo x'];
   for (const off of ['', ...thrownOff]) refused(maybeValue.map((c) => off + c));
   letThrough(["rg 'a*b' -- --pre=sudo f", "rg --glob='*.ts' -- --pre=sudo", 'rg "TODO" src -- --pre=sudo', 'rg -F src/a.ts -- --pre=sudo']);
+  // PR 173 lead review: Windows PowerShell puts a word on the native command line without escaping it, so a double quote
+  // inside it, or a backslash before the quote it adds, can swallow the -- that follows. Any word before the mark that
+  // may do that, next to it or not, leaves the mark ending nothing
+  const swallows = [`rg 'a"b' -- '"' --pre sudo x`, `rg 'a"b' -n -- '"' --pre sudo x`, `rg "a""b" -- '"' --pre sudo x`, `rg "a""b" -n -- '"' --pre sudo x`,
+    `rg 'x y\\' -- '"' --pre sudo x`, `rg 'x y\\' -n -- '"' --pre sudo x`, `rg $q -n -- '"' --pre sudo x`, `rg @q -n -- '"' --pre sudo x`, 'rg a`"b -n -- \'"\' --pre sudo x',
+    `rg \u2018a"b\u2019 -n -- '"' --pre sudo x`];
+  for (const off of ['', ...thrownOff]) refused(swallows.map((c) => off + c));
+  letThrough(["rg 'a b' 'c*d' -n -- --pre=sudo", `rg -g '*.ts' "TODO" -- --pre=sudo`, "rg 'C:\\x' -n -- --pre=sudo", 'rg src\\lib -n -- --pre=sudo']);
 });
 
 // what the empty-word refusals above rest on, read from the shell itself: the native program here only prints the
@@ -2427,6 +2437,11 @@ test('#4789: Windows PowerShell hands a native program no empty argument', { ski
     // the control: an argument with text arrives, so a missing one below is the empty one
     assert.deepEqual(argv('-e "a" -- --pre harmless x'), ['-e', 'a', '--', '--pre', 'harmless', 'x']);
     for (const empty of ['""', "''", `""''`]) assert.deepEqual(argv(`-e ${empty} -- --pre harmless x`), ['-e', '--', '--pre', 'harmless', 'x'], empty);
+    // and the swallowing rows: the mark never arrives as a word of its own, and what follows it does
+    for (const torn of [`'a"b'`, `"a""b"`, `'x y\\'`, `'a"b' -n`]) {
+      const got = argv(`${torn} -- '"' --pre harmless x`);
+      assert.ok(!got.includes('--') && got.includes('--pre'), `${torn}: ${JSON.stringify(got)}`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
