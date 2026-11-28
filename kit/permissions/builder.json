@@ -106,6 +106,7 @@
       "Read(//**/.pypirc)",
       "Read(//**/cb-seat-*.claude.json)",
       "Read(//**/cb-relay-*.bridge)",
+      "Read(//**/.claude-board/keys/**)",
       "Read(//**/.env.ci)",
       "Read(//**/.env.uat)",
       "Read(//**/.env.sit)",

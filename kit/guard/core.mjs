@@ -1395,6 +1395,31 @@ function ghRuns(w, i, j) {
 const SECRET_LEAD = String.raw`(?:^|[\s"'=:(\\/~@<,{};|&>$` + '`' + String.raw`])`;
 const SECRET_END = String.raw`(?=[\s"';&|)<>*?[{},:` + '`' + String.raw`]|$)`;
 const SOURCE_EXT = String.raw`(?:md|mdx|ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|txt|html|css)`;
+// #3222 S6: the worker keys, ~/.claude-board/keys/<kind>.key: a key lets its holder act as every seat of the machine on
+// the board. The folder and all in it, however the home folder is spelled, a glob that reaches it, and the folder the
+// test override CB_KEY_DIR names. Each name starts at a literal, and what follows is read once
+const KEY_DIR_NAME = String.raw`(?:\.claude-board["']?[\\/]+(?:\.[\\/]+)*["']?(?:keys(?![\w.-])|k(?:ey?)?[*?]|[*?][\w*?.-]{0,40}["']?[\\/])|(?:\$\{?(?:env:)?|%)CB_KEY_DIR(?!\w))`;
+const KEY_DIR = new RegExp(SECRET_LEAD + KEY_DIR_NAME, 'i');
+// the whole board folder, with nothing under it named
+const BOARD_END = String.raw`\.claude-board[\\/]*(?:["'](?![\\/\w*?]))?\*?(?=[\s;&|)<>]|$)`;
+const BOARD_MOVE = new RegExp(SECRET_LEAD + BOARD_END, 'i'); // where a move goes
+// as what a read goes down into, it stands behind a path (~/, $HOME/, C:\...\): alone it is the folder's name in a
+// search of the code. A backslash after a quote is such a search's escaped dot
+const BOARD_DIR = new RegExp(String.raw`(?<=[~\w}%.:)"']\/|[~\w}%.:)]\\)` + BOARD_END, 'i');
+// after moving into the board folder, a relative name that reaches the keys; and the move one step further down
+const KEYS_FROM_BOARD = /(?:^|[\s"'=<])(?:\.[\\/]+)?(?:keys[\\/*]|k(?:ey?)?[*?]|[*?][\w*?.-]{0,40}[\\/])/i;
+const KEYS_STEP = /\s["']?(?:\.[\\/]+)?keys[\\/]*["']?\s*$/i;
+const MOVES = /^[\s({]*(?:cd|chdir|pushd|sl|set-location|push-location)(?![\w.-])/i;
+// a read that goes down into folders. In each flag class the letter that counts is left out before it, so one reading only
+const ALWAYS_DOWN = /(?<![\w.$\\/-])(?:rg|tar|zip|7z|rsync)(?![\w.\\/-])|(?<![\w-])-recurse(?![\w-])/i;
+const DOWN_WITH_R = /(?<![\w.$\\/-])(?:[ef]?grep|diff|cp|scp)(?![\w.\\/-])/i;
+const DOWN_WITH_A = /(?<![\w.$\\/-])(?:cp|scp)(?![\w.\\/-])/i;
+const R_FLAG = /\s(?:-[a-qs-z]*r[a-z]*|--recursive)(?=\s|$)/i;
+const A_FLAG = /\s-[b-z]*a[a-z]*(?=\s|$)/i;
+const readsDown = (seg) => ALWAYS_DOWN.test(seg) || (DOWN_WITH_R.test(seg) && R_FLAG.test(seg)) || (DOWN_WITH_A.test(seg) && A_FLAG.test(seg));
+// inside the board folder it reaches the keys when it starts here (. or *), or is a search that names no folder
+const HERE = /(?:^|\s)(?:\.[\\/]*|(?:\.[\\/])?\*)(?=\s|$)/;
+const RG_HERE = /(?<![\w.$\\/-])rg(?:\s+-\S+)*\s+(?:"[^"]*"|'[^']*'|[^\s"'-]\S*)\s*$/i;
 // #4882: the relay's bridge file (cli/bridge.ts) holds the token its local socket runs any SQL for, and the seat's
 // endpoint files hold its messaging token or password. Each is named in full, by a glob in the name, or by a glob that
 // ends the word and so reaches it (cb-relay*, not cb-relay*.log or a cut-short .lo*); the bridge file also as *.bridge.
@@ -1420,16 +1445,63 @@ const TEMPLATE_COPY = /^\s*(?:cp|copy|copy-item|cpi)\s+(?:-\S+\s+)*["']?[^\s"']+
 const EXCLUDE = /--exclude(?:-dir)?=\S*/gi;
 const dequote = (t) => t.replace(/""|''/g, '');
 const SECRET = 'secret files (#4347): what a seat reads goes to the model provider, so no seat reads .env, a private key, .pgpass/.netrc, git, npm or cloud credentials, a seat token file or the relay\'s bridge file. Use the file where it lives (node --env-file=.env, docker compose --env-file .env) and name where a value lives instead of printing it; .env.example shows the keys. A value you need: cb ask';
+const WORKER_KEY = 'worker keys (#3222): a key in ~/.claude-board/keys lets its holder act as every seat of this machine on the board, so no seat reads, copies or prints one. Listing the folder is fine; check a key with cb key check. Anything else about a key: cb ask';
+// the command cut at ; & | and line ends outside quotes, so a pipe in a quoted pattern leaves the reader beside the
+// file. A line end closes any quote, and a text this gets wrong is joined, never cut. One pass
+function quotedSegments(text) {
+  const out = [];
+  let from = 0, quote = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\n') quote = '';
+    else if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\\' && quote === '"') i++;
+      continue;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    } else if (c === '\\') {
+      i++;
+      continue;
+    } else if (c !== ';' && c !== '&' && c !== '|') continue;
+    if (i > from) out.push(text.slice(from, i));
+    from = i + 1;
+  }
+  if (from < text.length) out.push(text.slice(from));
+  return out;
+}
+// #3222 S6: a read of a worker key, by name or from where an earlier move put the shell
+function keyRead(segments) {
+  let where = null;
+  for (const seg of segments) {
+    if (MOVES.test(seg)) {
+      where = KEY_DIR.test(seg) ? 'keys' : BOARD_MOVE.test(seg) ? 'board' : where === 'board' && KEYS_STEP.test(seg) ? 'keys' : null;
+      // a substitution in the move's own words runs first, and may read
+      if (!/\$\(|`/.test(seg)) continue;
+    }
+    if (!SECRET_READER.test(seg)) continue;
+    if (where === 'keys' || KEY_DIR.test(seg) || (BOARD_DIR.test(seg) && readsDown(seg))) return true;
+    if (where === 'board' && (KEYS_FROM_BOARD.test(seg) || (readsDown(seg) && HERE.test(seg)) || RG_HERE.test(seg))) return true;
+  }
+  return false;
+}
 // a file path that is a secret file (for an adapter whose agent reads files natively, review I4)
 export function secretPath(path) {
-  return typeof path === 'string' && path !== '' && SECRET_NAME.test(` ${path}`);
+  return typeof path === 'string' && path !== '' && (SECRET_NAME.test(` ${path}`) || KEY_DIR.test(` ${path}`));
 }
 // Stripping only removes text: a raw command naming no secret file cannot name one stripped (the cheap test first). A
 // backtick substitution inside a message runs before the message goes anywhere (review I1), so with one the message
 // text is judged too. #4589: the joined text is judged as well as the raw lines (rawAndJoined, as for the fence, #4587):
 // cat \<newline>.env split the reader from the name, and .e\<newline>nv hid the name from the cheap test.
 // (called through, not built here: rawAndJoined is defined further down)
-function secretRead(raw) { return rawAndJoined(secretReadOne)(raw); }
+function secretRead(raw) { return rawAndJoined(workerKeyOne)(raw) ?? rawAndJoined(secretReadOne)(raw); }
+// #3222 S6, with the same message stripping; both cuts, never one instead of the other
+function workerKeyOne(command) {
+  if (!/\.claude-board|CB_KEY_DIR/i.test(dequote(command))) return null;
+  const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
+  return keyRead(text.match(SEGMENTS) ?? []) || keyRead(quotedSegments(text)) ? WORKER_KEY : null;
+}
 function secretReadOne(command) {
   if (!SECRET_NAME.test(command) && !SECRET_NAME.test(dequote(command))) return null;
   const text = dequote(command.includes('`') ? command : stripMessages(command)).replace(EXCLUDE, ' ');
