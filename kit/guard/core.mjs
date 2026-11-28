@@ -2354,7 +2354,7 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
   const seatVars = seatVarChange(String(command ?? '')) ?? freshEnv(String(command ?? ''), hostList, role, deployHost);
   if (seatVars) return seatVars;
   if (typeof readScript === 'function') {
-    const pending = scriptCalls(command, '', deployHost), seen = new Set();
+    const pending = calledIn(String(command ?? ''), '', deployHost), seen = new Set();
     let bytes = 0;
     for (let i = 0; i < pending.length; i++) {
       if (i >= 32) return 'shell script traversal exceeds the guard limit (32 files): split the command';
@@ -2366,14 +2366,14 @@ export function checkRole(command, role, { readScript = null, hosts = [], deploy
       bytes += text.length;
       if (bytes > 1024 * 1024) return 'shell scripts exceed the guard read limit (1 MB): split the command';
       const read = readings(text); // #4776: bash drops a script's carriage returns too
-      for (const t of read) {
+      for (const t of read.flatMap(unredirected)) {
         const why = seatVarChange(t) ?? freshEnv(t, hostList, role, vps);
         if (why) return `running ${p.slice(0, 120)}, whose text is ${why}`;
       }
       // the scripts it runs, as read without them, so a CRLF script's calls count once; with a CR alone (PowerShell ends
       // a line there) as written too
       const named = /\r(?!\n)/.test(text) ? read : read.slice(-1);
-      for (const t of named) pending.push(...scriptCalls(t, cwd, vps));
+      for (const t of named) pending.push(...calledIn(t, cwd, vps));
     }
   }
   const secret = secretRead(String(command ?? ''));
@@ -3045,6 +3045,25 @@ function judge(name, args, fed, depth, vars = new Map()) {
 // one runs. Text holding any is judged without them as well as as written, never instead: PowerShell ends a line at one
 function readings(text) { return text.includes('\r') ? [text, text.replaceAll('\r', '')] : [text]; }
 
+// #4803: bash takes a redirect anywhere in a command. One before the command word was read as the command, and the & in
+// one (2>&1, &>log) cut the command in two. Text holding a redirect is judged without them too, never instead. Read with
+// no regard to quotes, so a command string inside one is covered; a quoted target counts only where its closing quote
+// ends the word. << (a heredoc) stays. A substitution as the target is bounded, so the scan stays linear. Messages and
+// heredoc data are dropped first: which text is data depends on the redirect (cat > notes <<EOF writes its text away)
+const REDIRECT = /(?:\d{1,3}|\*|&|\{[A-Za-z_]\w{0,40}\})?(?:<<<|>>|>\||<>|>&|<&|>|(?<!<)<(?![<#(]))&?[ \t]*(?:\$\{[^{}\n]{0,200}\}|\$\([^()\n]{0,200}\)|[<>]\([^()\n]{0,200}\)|`[^`\n]{0,200}`|"(?:\\.|[^"\\\n])*"(?=[\s;&|)]|$)|'[^'\n]*'(?=[\s;&|)]|$)|\\.|[^\s"'`\\;&|<>(){}])+/g;
+function unredirected(text) {
+  if (!/[<>]/.test(text)) return [text];
+  const kept = stripMessages(text), bare = kept.replace(REDIRECT, ' ');
+  return bare === kept ? [text] : [text, bare];
+}
+// the scripts a text calls, read with and without its redirects; a call both readings show is listed once
+function calledIn(text, cwd, deployHost) {
+  const calls = scriptCalls(text, cwd, deployHost), [, bare] = unredirected(text);
+  if (bare === undefined) return calls;
+  const key = (c) => `${c.cwd}\n${c.path}\n${c.deployHost}`, listed = new Set(calls.map(key));
+  return [...calls, ...scriptCalls(bare, cwd, deployHost).filter((c) => !listed.has(key(c)))];
+}
+
 export function evaluate(req) {
   const block = (kind, reason) => ({ allow: false, kind, reason });
   try {
@@ -3059,7 +3078,8 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      for (const written of readings(command)) {
+      const spellings = readings(command).flatMap(unredirected); // #4776, #4803
+      for (const written of spellings) {
         // #4737: judged as written, then with split and built names read out (only when that changes something)
         const shown = revealed(written);
         for (const text of shown === written ? [written] : [written, shown]) {
@@ -3072,7 +3092,7 @@ export function evaluate(req) {
         }
       }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
-      const session = stdin === true && role ? readings(command).map((text) => stdinSession(text)).find(Boolean) : null;
+      const session = stdin === true && role ? spellings.map((text) => stdinSession(text)).find(Boolean) : null;
       return session ? block('role', SESSION(session)) : { allow: true };
     }
     // a plan update (Codex update_plan) changes nothing outside the session, like Claude's own plan tool
