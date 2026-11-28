@@ -1033,6 +1033,20 @@ test('guard: quoted, defaulted and empty-output pieces inside the git name do no
   for (const c of everyday) assert.equal(judged(c, 'builder'), true, `must pass: ${c}`);
 });
 
+// #4737, R2's note on PR 132: an expansion with nothing in it between two brace groups still leaves them side by side
+test('guard: an empty expansion between brace groups does not keep the $HOME/ exemption (#4737)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  for (const set of ['declare {HO,X}$(){ME,Y}=x', 'declare {HO,X}${Z}{ME,Y}=x', 'export {H,}$@{OME,}=x', 'declare {HO,X}$(true){ME,Y}=x',
+    'declare {HO,X}"${Z:-}"{ME,Y}=x']) {
+    assert.equal(judged(`${set}; ${run}`), false, `must block: ${set}`);
+  }
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  for (const c of [`cp f "\${name}"{,.bak}; ${fetch}`, `mkdir -p \${dir}/{a,b}; ${fetch}`, `echo \${A}\${B}; ${fetch}`]) {
+    assert.equal(judged(c), true, `must pass: ${c}`);
+  }
+});
+
 // #4737: a PowerShell variable name joined from two strings is still that name
 test('guard: a concatenated PowerShell variable name drops the $HOME/ exemption (#4737)', () => {
   const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;

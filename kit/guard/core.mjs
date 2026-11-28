@@ -890,7 +890,8 @@ function namesHome(text) {
   if (HOME_NAMED.test(bare) || DRIVE_HOME.test(bare)) return true;
   const code = joinLines(stripMessages(text));
   const loose = bareText(code);
-  if (unquotedText(code).split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
+  // (#4737: {HO,X}$(){ME,Y} has side-by-side groups once the empty expansion is out of the way)
+  if (unquotedText(code).replace(EMPTIES, '').split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
   if (PS_SETTER.test(loose) && (ANY_CASE_HOME.test(loose) || ANY_CASE_HOME.test(joinedStrings(loose)) || QUOTED_WILD.test(code))) return true;
   return (code.match(NAME_STATEMENT) ?? []).some(wildAfterSetter);
 }
@@ -1907,6 +1908,7 @@ const EMPTY_BRACE = /\{([a-z]{1,3}),\}/gi;
 // what a shell leaves out of a word: a command that prints nothing, and an expansion with nothing in it, quoted or not
 const NOTHING = String.raw`(?:(?:echo|printf)[ \t]{1,4}(?:""|'')|true|false|echo|:)`;
 const EMPTY = String.raw`(?:\$\([ \t]{0,4}(?:${NOTHING}[ \t]{0,4})?\)|\$\{(?:\w+|[@*])(?::?[-=+])?\}|\$[@*!1-9])`;
+const EMPTIES = new RegExp(EMPTY, 'g');
 const GAP = String.raw`(?:\`[ \t]{0,4}${NOTHING}[ \t]{0,4}\`|\`|\^|"${EMPTY}{1,4}"|\$?""|\$?''|\\|${EMPTY})`;
 // no gap holds a name's first letter except inside ${...}, where a word character or { is before it: so a match never
 // starts inside another's gaps, and the unbounded * stays linear
