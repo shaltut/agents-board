@@ -294,6 +294,26 @@ test('the fence judges a shell-filled word before a writing git subcommand as gi
 
 // PR 77 round 3: after a shell-filled word, the next word that is not an option decides: any git command (or a filled
 // one) is judged with the command-position rule, so merge-file, stage, a read's --output and $SUB write.
+// #4798: only a slash OUTSIDE every substitution and ${...} makes a filled word a path. One inside (a redirect, a
+// ${v/a/b} replacement) says nothing about what the word comes out as
+test('the fence does not read a slash inside a substitution as a path', () => {
+  const hidden = ['"$(echo checkout </dev/null)x"', '"`echo checkout </dev/null`x"', '"$(echo checkou 2>/dev/null)t"', 'x"$(echo checkout </dev/null)"',
+    '"$(echo $(echo checkout </dev/null))x"', '"${S/q/checkout}"', '"$(echo checkout \')\' </dev/null)x"', '"$( (echo checkout) </dev/null)x"',
+    '"$(echo checkout </dev/null"'];
+  const paths = ['"${A}/${B}"', '"$(pwd)/$(date)"', '"`pwd`/`date`"', '"$(echo \')\')/x"', '"$(pwd)\\opencode.json"', '"$(cat /tmp/dir)/x"',
+    '"${HOME:-/root}/.codex"', '"$ROOT/$NAME"'];
+  for (const role of ['builder', 'reviewer', 'lead']) {
+    for (const w of hidden) {
+      const c = `caffeinate $GIT ${w} -- opencode.json`;
+      assert.equal(shell(c, role), false, `${role}: ${c}`);
+    }
+    for (const w of paths) {
+      const c = `ls $HOME ${w} opencode.json`;
+      assert.equal(shell(c, role), true, `${role}: ${c}`);
+    }
+  }
+});
+
 // #4795: after a git name held in a variable, a quoted word with a backtick substitution fills the subcommand place as
 // one with $( ) does. Each shape is pinned in both spellings: the $( ) one blocked before, the backtick one did not
 test('the fence reads a backtick substitution in a quoted subcommand place as it reads the $( ) one', () => {

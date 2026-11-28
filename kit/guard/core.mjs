@@ -1339,6 +1339,33 @@ function filledEnd(raw, k) {
 }
 // a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
 const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
+// #4798: a slash makes a filled word a path only when it is outside every $( ), ${ } and backtick pair (a redirect or a
+// ${v/a/b} inside one says nothing about what comes out). One pass; quotes and \ are skipped only inside those, where a
+// quoted ) closes nothing (outside, \ is Windows' separator). Left open, the rest counts as inside: judged, fail closed
+function slashOutside(v) {
+  const open = [];
+  let quote = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i];
+    if (!open.length) {
+      if (c === '/' || c === '\\') return true;
+    } else if (quote) {
+      if (c === quote) quote = '';
+      continue;
+    } else if (c === '\\') {
+      i++;
+      continue;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      continue;
+    }
+    if (c === open[open.length - 1]) open.pop();
+    else if (c === '`') open.push('`');
+    else if (c === '$' && (v[i + 1] === '(' || v[i + 1] === '{')) open.push(v[++i] === '(' ? ')' : '}');
+    else if (open.length && (c === '(' || c === '{')) open.push(c === '(' ? ')' : '}');
+  }
+  return false;
+}
 // git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
 const MAX_FILLED_OPTS = 32;
 const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', '--exec-path', '--html-path', '--man-path', '--info-path',
@@ -1368,7 +1395,7 @@ function filledWrites(raw, k, judge) {
       if (GIT_OPT_ARG.has(v)) j++;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
+    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !slashOutside(v));
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
     return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
