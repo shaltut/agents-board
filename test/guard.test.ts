@@ -1740,3 +1740,37 @@ test('#4773: a text-only edit by an interpreter heredoc stays refused, and the r
     assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
   }
 });
+
+// #4789: what PR 142's review left (#4741), and the exec forms the walk did not follow
+const verdict = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' });
+const refused = (list: string[]) => { for (const c of list) assert.match(verdict(c).reason ?? '', /fresh environment/, c); };
+const passes = (list: string[]) => { for (const c of list) assert.deepEqual(verdict(c), { allow: true }, c); };
+test('#4789: after text that throws the quote count off, fish --command= is read to its end', () => {
+  const off = "echo $'a\\'b'; ";
+  refused(["fish --command='ssh localhost uptime; true'", 'fish --command="at now; true"', "fish --command='herdr pane run w1:p2 codex && true'",
+    "fish --command='env sudo codex | cat'"].map((c) => off + c));
+  passes([off + "fish --command='ls -la; true'"]);
+});
+
+test('#4789: find -exec, -execdir, -ok and -okdir start a command of their own', () => {
+  refused(['find . -exec sudo codex \\;', 'find . -exec sh -c su \\;', "find . -exec bash -c 'su' {} +", 'find . -name x -execdir at now +',
+    "find . -ok sh -c su '{}' ';'", 'find . -okdir eval sudo codex \\;', 'find . -exec env -S "sudo codex" +', 'find . -exec grep x {} \\; -exec sh -c su \\;',
+    'timeout 5 find /tmp -type f "-exec" sudo codex {} +', 'busybox sh -c su']); // busybox was read already: pinned
+  passes(['find . -name "*.ts" -exec grep -l sudo {} +', 'find . -exec sh -c "ls -la" \\;', 'find . -name sudo', 'echo -exec sudo codex',
+    'grep -rn -e -exec sudo.md', 'busybox sh -c "ls -la"', 'busybox ls -la']);
+});
+
+test('#4789: Windows PowerShell runs its bare words as the command', () => {
+  refused(['powershell Start-ScheduledTask -TaskName x', 'powershell -NoProfile schtasks /run /tn x', 'powershell.exe wsl codex',
+    'powershell -ExecutionPolicy Bypass -NoLogo Start-ScheduledTask x', 'powershell -ep bypass -w hidden Start-ScheduledTask x',
+    'powershell Write-Output hi -c "Start-ScheduledTask x"']);
+  passes(['powershell Get-ScheduledTask', 'powershell -NoProfile -File x.ps1', 'powershell -ExecutionPolicy Bypass -File x.ps1 -Name sudo',
+    'powershell -NoProfile -Command "Get-Date"', 'powershell -ExecutionPolicy Bypass Get-Date', 'pwsh x.ps1', 'pwsh -NoProfile x.ps1 sudo']);
+});
+
+test('#4789: after the end of rg\'s options nothing is its pre-processor option', () => {
+  passes(["rg -n -- '--pre=sudo' src", 'rg -- --pre=sudo f', 'rg --fixed-strings -- --pre=sudo f', "rg -in -- '--pre' sudo", 'rg -t js src -- --pre=sudo']);
+  // a -- that may be the value of the option before it ends nothing, and a real pre-processor before the mark still counts
+  refused(['rg -e -- --pre sudo x', 'rg --regexp -- --pre=sudo x', 'rg -ne -- --pre sudo x', 'rg --pre sudo -- x f', 'rg $FLAGS -- --pre sudo x',
+    'rg x f > -- --pre sudo']);
+});
