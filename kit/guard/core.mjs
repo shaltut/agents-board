@@ -997,7 +997,7 @@ function gitHides(w, i, j, role, text) {
   if (!READ_ONLY_ROLES.includes(role)) return null;
   if (RO_GIT_WRITES.has(sub) || (sub === 'hash-object' && w.slice(j + 1).some((x) => /^-[^-]*w/.test(x)))) return `git ${sub}: ${readsOnly(role)}`;
   // git as the command: first in its segment, or after assignments, launchers (sudo git ci) and $( (x=$(git ci))
-  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub.toLowerCase())) {
+  if (isCommandWord(w, i) && !GIT_COMMANDS.has(sub)) { // as written (#4833): git's own names are case-sensitive
     return `git ${sub} is not a git command (an alias, or a word the shell fills in): a ${role} runs git subcommands by their own names; ${readsOnly(role)}`;
   }
   return null;
@@ -1096,7 +1096,9 @@ function subtreePush(w, j, hit) {
 function aliasPush(w, i, j, hit) {
   const sub = w[j];
   if (sub === undefined || !isCommandWord(w, i)) return null;
-  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub.toLowerCase())) return null;
+  // as written (#4833): git runs its own commands by their exact names, but finds an alias in any case, so PUSH is an
+  // alias named push, not git push
+  if (!isFilled(sub) && !/[$`%]/.test(sub) && GIT_COMMANDS.has(sub)) return null;
   // B4: a branch the shell fills in counts too, as for git push (not HEAD or --all: git lg --all is a log alias)
   const words = stopArgs(w.slice(j + 1));
   const branch = words.filter((x) => !x.startsWith('-')).find((x) => x.includes('$')) ?? namesBranch(words, hit);
@@ -1117,7 +1119,7 @@ function hiddenPushes(text, hit, list) {
     if (!filledName(w[i]) || w[i].endsWith('=')) return -1;
     const read = filledOptions(w, i);
     const word = read === -1 ? undefined : w[read.j];
-    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word.toLowerCase())) return -1;
+    if (word === undefined || (word !== '{}' && !BARE.test(word)) || GIT_COMMANDS.has(word)) return -1;
     if (!lastNamed.has(w)) lastNamed.set(w, w.findLastIndex((x) => namesBranch([x], hit) !== null));
     return lastNamed.get(w) > read.j && isProgram(w, i) ? read.j : -1;
   };
