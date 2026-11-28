@@ -381,3 +381,42 @@ test('F1: a card kept for several agents is cancelled by an idle seat of any of 
   const b2 = sess('sv-B2@macbook', 'builder', { agent: 'codex' });
   assert.deepEqual(tick(mixedState({ waiting: { builder: { main: 1 } }, kept: { builder: { main: { 'agy,codex': 1 } } }, sessions: [b2] })).start, []);
 });
+
+// ---------------- #4559 slice 3 (Q3018): a project that gets no work winds its seats down
+const winding = (sessions: Session[], o: Partial<State> = {}): State => ({ ...state({ supervised: false, sessions, waiting: { builder: { main: 5 } } }), winding_down: true, state_at: ago(60), ...o });
+const ready = (...n: string[]) => ({ herdrStatus: Object.fromEntries(n.map((x) => [x.replace('@', '-').toLowerCase(), 'idle'])) });
+const B1 = 'sv-B1@macbook', B2 = 'sv-B2@macbook', R1 = 'sv-R1@macbook';
+
+test('winding down: a squad seat idle 10 minutes is closed, one holding a card too; nothing is started or restored', () => {
+  const p = tick(winding([sess(B1, 'builder', { holds: 2, questions: 1, jobs: 1, asks: 1, last_event: ago(11) }),
+    sess(B2, 'builder', { live: false, holds: 1, last_event: ago(90) })]), ready(B1, B2));
+  assert.deepEqual(p.close, [B1]);
+  assert.deepEqual([p.start, p.restore, p.restart, p.notes, p.leaving], [[], [], [], [], []]);
+});
+
+test('winding down: a working seat, a busy herdr, a running job, a close under way or a down machine waits', () => {
+  const quiet = (o: Partial<Session> = {}) => winding([sess(B1, 'builder', { holds: 1, last_event: ago(30), ...o })]);
+  assert.deepEqual(tick(quiet(), ready(B1)).close, [B1], 'the control');
+  assert.deepEqual(tick(quiet({ last_event: ago(9) }), ready(B1)).close, [], 'quiet 9 minutes');
+  assert.deepEqual(tick(quiet(), { herdrStatus: { 'sv-b1-macbook': 'working' } }).close, [], 'herdr says working');
+  assert.deepEqual(tick(quiet(), { ...ready(B1), safeToClose: { [B1]: false } }).close, [], 'its adapter says no');
+  assert.deepEqual(tick(quiet({ jobs_running: 1 }), ready(B1)).close, [], 'a job of its own is running');
+  assert.deepEqual(tick(quiet({ closing: true }), ready(B1)).close, []);
+  assert.deepEqual(tick(quiet({ bound: 'other' }), ready(B1)).close, [], 'moved to another project');
+  assert.deepEqual(tick(quiet({ bound: 'sv' }), ready(B1)).close, [B1]);
+  assert.deepEqual(tick(quiet(), { ...ready(B1), herdrDown: new Set(['macbook']) }).close, []);
+});
+
+test('winding down: the 10 minutes count from the disable at the earliest, so every seat has them to reach a safe point', () => {
+  const st = (since: number) => winding([sess(B1, 'builder', { holds: 1, last_event: ago(300) })], { state_at: ago(since) });
+  assert.deepEqual(tick(st(9), ready(B1)).close, []);
+  assert.deepEqual(tick(st(10), ready(B1)).close, [B1]);
+});
+
+test('winding down: never the lead or a hand-started session; a seat an earlier squad named is closed too', () => {
+  const old = (actor: string, role: string) => sess(actor, role, { last_event: ago(30) });
+  const all = [old('sv-orch@shaltoot', 'lead'), old('foo@macbook', 'builder'), old('sv-B7@macbook', 'builder'), old(B1, 'builder'), old(B2, 'builder'), old(R1, 'reviewer')];
+  const p = tick(winding(all), { ...ready(...all.map((s) => s.actor)), pastSeats: new Set(['sv-B7@macbook']) });
+  // every one that qualifies is planned: the supervisor stops after two closes a tick
+  assert.deepEqual([...p.close].sort(), [B1, B2, 'sv-B7@macbook', R1].sort());
+});

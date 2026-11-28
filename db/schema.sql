@@ -6507,10 +6507,12 @@ begin
      where f.stage in ('build', 'review') and not exists (select 1 from cb.task_parts pt where pt.task_id = f.id)
   )
   select jsonb_build_object(
-    -- #4559: a project that gets no work is not supervised: nothing is started or restored for it (its seats stay as
-    -- they are, as with the pipeline off); state says why
+    -- #4559: a project that gets no work is not supervised: nothing is started or restored for it; state says why. A
+    -- squad the supervisor runs winds down instead (Q3018): its idle seats are closed, counted from state_at at the earliest
     'project', p, 'squad', sq, 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true' and cb._live(p), false),
+    'winding_down', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true' and not cb._live(p), false),
     'state', (select pr.state from cb.projects pr where pr.slug = p),
+    'state_at', (select pr.state_at from cb.projects pr where pr.slug = p),
     'waiting', jsonb_build_object(
       'builder', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'build' and w.repo = r)) from unnest(rs) r),
       'reviewer', (select jsonb_object_agg(r, (select count(*) from repo_work w where w.stage = 'review' and w.repo = r)) from unnest(rs) r),
@@ -6531,11 +6533,13 @@ begin
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
         -- the session's agent (#4002) and the model it bound with (#4332); null for a holder with no session row
         'agent', s.agent, 'model', s.model,
+        'bound', s.project, -- #4559: the project that latest session is bound to
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))
                  + (select count(*) from cb._held_parts() h where h.assignee = a.actor),
         'questions', (select count(*) from cb.questions q where q.asked_by = a.actor and q.status = 'open'),
         'jobs', (select count(*) from cb.jobs j where j.requester = a.actor and j.state in ('queued', 'running')),
+        'jobs_running', (select count(*) from cb.jobs j where j.requester = a.actor and j.state = 'running'),
         'asks', (select count(*) from cb.asks k where k.to_actor = a.actor and k.status = 'open'),
         -- greatest: a squad name is reused, so its old events must not make a fresh bind look idle
         'last_event', greatest((select max(e.at) from cb.events e where e.actor = a.actor), s.started_at),
@@ -6555,6 +6559,8 @@ begin
       left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
       left join lateral (select e.at, e.data ->> 'note' = 'start failed' as failed from cb.events e
                           where e.actor = 'supervisor' and e.data ->> 'what' = 'restore' and e.data ->> 'session' = a.actor
+                            -- #4559: not one from before the project's last state change: it was wound down since
+                            and e.at > coalesce((select pr.state_at from cb.projects pr where pr.slug = p), '-infinity')
                           order by e.at desc, e.id desc limit 1) r on true
       where a.actor is not null and a.actor <> ''), '[]'))
   into res;
@@ -6562,15 +6568,20 @@ begin
 end $$;
 
 -- Mark a session closing (or clear it). A mark loses to a card the session holds: a claim that won the race
--- clears the mark and the close is skipped. True when the mark stands.
+-- clears the mark and the close is skipped. True when the mark stands. #4559 (Q3017): a seat of a project that gets no
+-- work is closed with its cards, which stay its own; a card of a live project, or a seat bound to one, keeps the rule.
 create function cb.supervise_mark(actor text, closing boolean) returns boolean language plpgsql as $$
 #variable_conflict use_variable
 begin
   perform cb._supervisor_only();
   update cb.sessions s set closing_at = case when closing then now() end where s.actor = actor;
   if not found then return false; end if;
-  if closing and (exists (select 1 from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled'))
-                  or exists (select 1 from cb._held_parts() h where h.assignee = actor)) then
+  if closing and exists (
+       select 1 from (select t.project from cb.tasks t where t.assignee = actor and t.status not in ('done', 'cancelled')
+                      union all
+                      select t.project from cb._held_parts() h join cb.tasks t on t.id = h.task_id where h.assignee = actor) w
+        where cb._live(w.project)
+           or cb._live((select s.project from cb.sessions s where s.actor = actor order by s.last_seen desc limit 1))) then
     update cb.sessions s set closing_at = null where s.actor = actor;
     return false;
   end if;
