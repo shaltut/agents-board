@@ -819,14 +819,24 @@ const HOME_NAMED = /(?<![$\w{/\\.])(?:HOME|USERPROFILE)\b(?![/\\.])/;
 // it, so these count too, outside message text: a brace expansion inside a word (H{O,}ME); a setter anywhere with home
 // anywhere; home or a wildcard on the variable: or env: drive; a wildcard after a setter or Get-Variable in its
 // statement; and, with a setter anywhere, a quoted wildcard name ($n='hom*'). Blocking too much is the accepted cost)
-const unquotedText = (t) => t.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '')
-  .replace(/\$\{(HOME|USERPROFILE)(?:\}|(?=:?[-+]|[#%]))/g, '$$$1 ').replace(/[\\`]\r?\n/g, '').replace(/["'`\\^]/g, '');
+// (#4729, PR 132 re-read: $'...' and $"..." leave no dollar sign in the word bash builds. The dollar goes with the quote,
+// and in a text with a $' its numeric escapes are decoded anywhere, with no pairing of quotes, so an earlier $' that
+// opens nothing cannot hide the real one. Decoding too much only adds a block)
+const ANSI_NUMBER = /\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|U([\da-fA-F]{1,8})|([0-7]{1,3}))/g;
+const ansiChar = (all, x, u, long, oct) => {
+  const n = parseInt(x ?? u ?? long ?? oct, oct === undefined ? 16 : 8);
+  return n <= 0x10ffff ? String.fromCodePoint(n) : all;
+};
+const plainQuotes = (t) => (t.includes("$'") ? t.replace(ANSI_NUMBER, ansiChar) : t).replace(/\$(?=["'])/g, '');
+const unquotedText = (t) => plainQuotes(t.replace(/\$(?:HOME|USERPROFILE|\{(?:HOME|USERPROFILE)\})(?=[\\/])/g, '')
+  .replace(/\$\{(HOME|USERPROFILE)(?:\}|(?=:?[-+]|[#%]))/g, '$$$1 ').replace(/[\\`]\r?\n/g, '')).replace(/["'`\\^]/g, '');
 const bareText = (t) => unquotedText(t).replace(/[{},]/g, ' ');
-// a word bash or zsh may expand into the name: braces with a list or a range, touching a letter (each word read once)
+// a word bash or zsh may expand into the name: braces with a list or a range, touching a letter or another brace group
+// ({HO,X}{ME,Y}); each word is read once
 const braceWord = (word) => {
   if (!word.includes('{')) return false;
   const w = word.replace(/\$\{[^{}]*\}/g, '$');
-  return w.includes('{') && w.includes('}') && (w.includes(',') || w.includes('..')) && /\w\{|\}\w/.test(w);
+  return w.includes('{') && w.includes('}') && (w.includes(',') || w.includes('..')) && /[\w}]\{|\}[\w{]/.test(w);
 };
 const SETTERS = 'set-variable|new-variable|remove-variable|set-item|new-item|setenvironmentvariable|set|sv|nv|rv|si|ni';
 const PS_SETTER = new RegExp(String.raw`(?<![\w-])(?:${SETTERS})(?![\w-])`, 'i');

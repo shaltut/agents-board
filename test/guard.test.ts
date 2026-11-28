@@ -934,6 +934,25 @@ test('guard: the PR 132 review spellings drop the $HOME/ exemption; default-valu
   for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
 });
 
+// #4729, the PR 132 re-read: brace groups side by side spell the name with no letter beside a brace, and an ANSI-C or
+// locale quote ($'...', $"...") leaves no dollar sign in the word bash builds, its escapes decoded
+test('guard: side-by-side brace groups and ANSI-C or locale quotes drop the $HOME/ exemption (#4729)', () => {
+  const judged = (command: string) => evaluate({ tool: 'shell', command, role: 'builder', protectedBranches: [] }).allow;
+  const run = 'git -c core.fsmonitor="$HOME/k" status';
+  const blocked = [
+    'declare {HO,X}{ME,Y}=x', 'export {H,}{O,}{M,}{E,}=x', 'read -r {HO,X}{ME,Y} <<< x', 'cat src/{a,b}{1,2}.ts', // the accepted cost
+    String.raw`declare HOM$'E'=x`, 'declare HOM$"E"=x', String.raw`export $'\x48'OME=x`, String.raw`export $'\x48OME=x'`,
+    String.raw`export $'\110OME'=x`, String.raw`declare $'HOME'=x`, String.raw`declare $'\U00000048OME'=x`,
+    // an earlier $' that opens no quote must not pair with the real one
+    String.raw`echo 'a$' ; declare HOM$'E'=x`, String.raw`echo 'a$' ; export $'\x48'OME=x`,
+  ].map((set) => `${set}; ${run}`);
+  const fetch = 'git -c core.sshCommand="ssh -i $HOME/k" fetch';
+  const kept = [`grep -n 'end$' src/a.ts; ${fetch}`, String.raw`printf $'a\tb\n'; ${fetch}`, `echo "cost: $" ; ${fetch}`,
+    `echo \${A}\${B}; ${fetch}`, `echo '[{"a":1},{"b":2}]'; ${fetch}`, String.raw`printf '\UFFFFFFFF'; ${fetch}`, String.raw`echo $'\UFFFFFFFF'; ${fetch}`];
+  for (const c of blocked) assert.equal(judged(c), false, `must block: ${c}`);
+  for (const c of kept) assert.equal(judged(c), true, `must pass: ${c}`);
+});
+
 // #4729: bash drops a backslash before an ordinary letter, so g\it is git (and g\h is gh, a\z is az) to every rule that
 // reads those commands; a Windows path to git.exe stays git, and a quoted 'g\it' keeps its backslash
 test('guard: a backslash inside the git, gh or az name does not hide the command (#4729)', () => {
@@ -1017,7 +1036,9 @@ test('long commands stay fast', () => {
     ['git settings, 200 KB of quoted and braced words beside a $HOME/ value', asBuilder(kb200('echo ""{a,b} \\x ') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     // PR 132 review: the brace and wildcard tests read each word and statement once
     ['git settings, one 200 KB word of unclosed braces and commas', asBuilder('a{' + kb200(',,{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
-    ['git settings, 200 KB of setters and wildcard starts', asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of ANSI-C quote starts and escapes', asBuilder(kb200(String.raw`$'\x48\U0000`) + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, one 200 KB word of side-by-side braces', asBuilder('a' + kb200('}{') + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
+    ['git settings, 200 KB of setters and wildcard starts',asBuilder(kb200('sv x ') + kb200("'hom ") + '; git -c core.sshCommand="ssh -i $HOME/k" fetch')],
     ['kill scan, 200 KB of win32_process', () => check(kb200('win32_process '))],
     ['kill scan, 200 KB of wmic process', () => check(kb200('wmic process '))],
     ['kill scan, 200 KB of by-name lookups after a stop', () => check('kill $x; ' + kb200('gps '))],
