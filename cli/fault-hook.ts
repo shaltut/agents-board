@@ -11,9 +11,9 @@ import { isNetworkError } from './survive.ts';
 import { isAgentKind } from './agents/index.ts';
 
 // the first word of these commands that is a subcommand (never a value: a card id, a project, a title)
-const SUBS: Record<string, string[]> = {
-  page: ['show', 'set'], lock: ['take', 'release', 'queue'], job: ['show', 'cancel', 'log'],
-  mem: ['add', 'find', 'list', 'show', 'rule', 'supersede', 'retire'], squad: ['show', 'set', 'up'],
+export const SUBS: Record<string, string[]> = {
+  page: ['show', 'set'], lock: ['take', 'release', 'queue'], job: ['show', 'cancel', 'log', 'retry', 'move', 'hold', 'release'],
+  mem: ['add', 'find', 'list', 'show', 'rule', 'supersede', 'retire'], squad: ['show', 'set', 'up', 'trust'],
   huddle: ['open', 'say', 'add', 'show', 'close'], github: ['add', 'remove', 'mute', 'unmute'], asks: ['add'], user: ['add', 'role', 'password'],
 };
 // long-running by design: never "slow"
@@ -23,14 +23,31 @@ export const SLOW_MS = 5000;
 type Opt = { type: string; short?: string };
 type Rec = { first?: any; last?: any; stderr?: string; crash?: string; answer?: boolean; localStart?: boolean; bridgeError?: boolean };
 
+const shortNames = (options: Record<string, Opt>) => new Map(Object.entries(options).filter(([, o]) => o.short).map(([k, o]) => [o.short!, k]));
+
+/** Where the command word is: the first argument that is neither a flag nor a leading flag's value (#4722: cb --json
+ *  show, cb --as <name> run). -1 when there is none. */
+export function commandIndex(argv: string[], options: Record<string, Opt>): number {
+  const shorts = shortNames(options);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (!a.startsWith('-')) return i;
+    const name = a.startsWith('--') ? a.slice(2) : shorts.get(a.slice(1)); // --as=x names no option: its value is in it
+    if (name && options[name]?.type === 'string') i++;
+  }
+  return -1;
+}
+
 /** The argv shape: command, subcommand, flag names, positional count, and every value (to mask in the message). */
 export function argvShape(argv: string[], options: Record<string, Opt>) {
-  const shorts = new Map(Object.entries(options).filter(([, o]) => o.short).map(([k, o]) => [o.short!, k]));
-  const cmd = argv[0] && !argv[0].startsWith('-') ? argv[0] : null;
-  const sub = cmd && SUBS[cmd]?.includes(argv[1] ?? '') ? argv[1]! : null;
+  const shorts = shortNames(options);
+  const cmdPos = commandIndex(argv, options);
+  const cmd = argv[cmdPos] ?? null;
+  const sub = cmd && SUBS[cmd]?.includes(argv[cmdPos + 1] ?? '') ? argv[cmdPos + 1]! : null;
   const flags = new Set<string>(), values: string[] = [];
   let argc = 0;
-  for (let i = cmd ? (sub ? 2 : 1) : 0; i < argv.length; i++) {
+  for (let i = 0; i < argv.length; i++) {
+    if (cmd !== null && (i === cmdPos || (sub !== null && i === cmdPos + 1))) continue;
     const a = argv[i]!;
     const long = /^--([a-z][a-z0-9-]*)(?:=([\s\S]*))?$/.exec(a), short = /^-([a-zA-Z])$/.exec(a);
     const name = long ? long[1]! : short ? shorts.get(short[1]!) : undefined;

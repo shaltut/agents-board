@@ -662,7 +662,9 @@ test('fix 6, 8, 9, 11: role-less pass, review move, close refusal wording, pipel
   await assert.rejects(() => s`select cb.task_move(${a}::text, 'done', 'x', 'B1@mac')`, /waiting for Ahmed/);
   await sql`select cb.project_pipeline('demo', false, 'ahmed')`;
   await assert.rejects(() => pass(sql, b, 'B1@mac'), /pipeline is off for demo: finish it with cb done \d+/);
-  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'R1@mac')`, /pipeline is off for demo: finish it with cb done \d+/);
+  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'B1@mac')`, /pipeline is off for demo: finish it with cb done \d+/);
+  // #4744: a reviewer is not told to cb done the card it reviews
+  await assert.rejects(() => sql`select cb.stage_fail(${b}::text, 'x', null, 'R1@mac')`, /demo has no pipeline stages.*the lead hands you pull requests/);
 });
 
 test('fix 12: aliasing a project that has pages moves them, and a dashboard project move follows', async () => {

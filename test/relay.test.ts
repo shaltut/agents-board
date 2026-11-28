@@ -519,7 +519,7 @@ test('broadcasts reach every session once, filtered by project', async () => {
   await sql`select cb.task_add(project => 'board', title => 'y')`;
   await sql`select cb.iam('pc', 'p1', 'W1', 'iris')`;
   await sql`select cb.iam('pc', 'p2', 'B1', 'board')`;
-  await sql`select cb.broadcast('relay is live, run cb relay', null, 'ahmed')`;
+  await sql`select cb.broadcast('relay is live, run cb relay', null, 'ahmed', true)`;
   await sql`select cb.broadcast('iris only', 'iris', 'orch')`;
   const box = async (pane: string) => (await sql`select cb.inbox('pc', ${pane}, 0) as i`)[0].i;
   assert.deepEqual((await box('p1')).broadcasts.map((b: any) => b.summary), ['relay is live, run cb relay', 'iris only']);
