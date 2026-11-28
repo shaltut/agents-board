@@ -151,14 +151,12 @@ test('the page read: runner card facts, counts of the whole queue, a project fil
   await assert.rejects(sql`select cb.runner_queue('nope')`);
 });
 
-test('the supervisor flag is true while a connection holds the cb-supervisor advisory lock', async () => {
+test('the supervisor flag is true while the supervisor lease has not run out', async () => {
   const { queue } = await setup();
-  const lock = conn('cb-supervisor/test');
-  const c = await lock.reserve();
-  await c`select pg_advisory_lock(hashtext('cb-supervisor'))`;
+  const sup = conn('cb-supervisor/test');
+  const [{ r }] = await sup`select cb.lease_take('supervisor', 'pc pid 1') as r`;
   assert.equal((await queue()).supervisor, true);
-  await c`select pg_advisory_unlock(hashtext('cb-supervisor'))`;
-  c.release();
+  await sup`select cb.lease_release('supervisor', ${r.token})`;
   assert.equal((await queue()).supervisor, false);
 });
 

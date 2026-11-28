@@ -4,7 +4,7 @@
 // not one value. No _name is ever listed. test/ops-list.test.ts keeps it equal to what cb calls and to db/schema.sql.
 /** The kinds of worker key (cb.worker_keys). */
 export type Kind = 'machine' | 'runner' | 'supervisor';
-/** kinds: whose keys may call it over the worker API; none: only cb's own database connection (the owner's work).
+/** kinds: whose keys may call it over the worker API; none: only a caller with its own database connection.
  *  bytes: pictures travel in it, so its request may be 32 MB, not 1. machineLabel: its machine argument says what a row
  *  is about, not who is calling. */
 export type Op = { setof?: true; kinds: readonly Kind[]; bytes?: true; machineLabel?: true };
@@ -16,8 +16,8 @@ const one = {}, rows = { setof: true } as const, never = { kinds: [] };
 
 export const OPS: Record<string, Op> = Object.fromEntries([
   ...list(one, `
-    answer_delivered ask_record ask_reply asks_list brief broadcast digest epics_list github_watches goals_list
-    huddle_add huddle_close huddle_open huddle_say huddles_list iam lock_queue lock_release lock_take log
+    answer_delivered ask_record ask_reply asks_list brief broadcast digest epics_list fault_file github_watches
+    goals_list huddle_add huddle_close huddle_open huddle_say huddles_list iam lock_queue lock_release lock_take log
     machine_models_set mem_find mem_list mem_pack mem_retire mem_rule mem_show mem_supersede next_empty_words next_step
     page_get page_set project_state_preview question_assign read_project resolve resume role_text seat_backup_clear
     seat_effort session_project_of sessions_overview squad_get squad_options squad_set stage_fail stage_pass stage_set
@@ -35,4 +35,8 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   // users, sign-ins and the GitHub watch are the owner's: never over the worker API
   ...list(never, 'github_mute github_watch_add github_watch_remove user_add user_known user_password user_set_role'),
   ...list({ ...never, ...rows }, 'user_show'),
+  // the runner's: not served yet. The slice that moves the runner (S4) gives them its kind, once each is bound to the
+  // key's runner (some name it by another argument, or by a job).
+  ...list(never, 'job_claim job_finish runner_beat runner_hello runner_reconcile_held runner_settings'),
+  ...list({ ...never, ...rows }, 'jobs_cancelled'),
 ]);

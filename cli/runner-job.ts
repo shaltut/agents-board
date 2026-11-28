@@ -7,6 +7,7 @@ import {
 import { uptime } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { pgCtl } from '../db/pg.ts';
+import type { Board } from './runner-board.ts';
 import { checkParams, expand, jobCwd, jobEnv, missingPaths, recipeFolder, relPaths, type RunnerConfig } from './recipes.ts';
 import { dropLinks } from './slot-links.ts';
 import { afterCounts, cut, logTail, mask, summarize } from './summary.ts';
@@ -514,12 +515,12 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
  *  running job ('gone': it ended on the board, e.g. cancelled just before). A refusal (a `raise`, P0001) gets one resend: the summary becomes a pointer to the log (and the
  *  exit code is dropped unless the refusal was the summary's `looks like`); a second refusal is logged and given up ('gave-up'), so
  *  the slot frees. Any other board error (a missing function, no permission) is logged and given up the same way. */
-export async function finish(sql: any, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<'done' | 'gone' | 'gave-up'> {
+export async function finish(board: Board, runner: string, id: number, r: Result, say: (m: string) => void, wait = 30_000): Promise<'done' | 'gone' | 'gave-up'> {
   const withheld = `summary withheld: see cb job log ${id}`;
   let { exit_code, summary } = r;
   for (;;) {
     try {
-      return (await sql`select cb.job_finish(${id}, ${runner}, ${r.state}, ${exit_code}, ${summary}) as ok`)[0].ok === true ? 'done' : 'gone';
+      return await board('job_finish', { id, runner, state: r.state, exit_code, summary }) === true ? 'done' : 'gone';
     } catch (e: any) {
       if (e?.name === 'PostgresError' && e.code !== 'P0001' && !/^(08|40|53|57|25)/.test(e.code ?? '')) {
         say(`job #${id}: the board cannot take its end (${e.message}); giving up, it stays running until the next runner start`);

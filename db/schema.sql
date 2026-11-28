@@ -6183,6 +6183,10 @@ drop function if exists cb._lead_by_role cascade;
 drop function if exists cb._is_owner cascade;
 drop function if exists cb._queue_manager cascade;
 drop function if exists cb._supervisor_up cascade;
+drop function if exists cb.lease_take cascade;
+drop function if exists cb.lease_renew cascade;
+drop function if exists cb.lease_release cascade;
+drop function if exists cb.board_now cascade;
 drop function if exists cb.runner_queue cascade;
 drop function if exists cb.job_retry cascade;
 drop function if exists cb.job_move cascade;
@@ -6444,14 +6448,55 @@ create function cb._is_owner(a text) returns boolean language sql stable as $$ s
 create function cb._queue_manager(a text, proj text) returns boolean language sql stable as $$
   select cb._is_owner(a) or cb._is_lead(a, proj)
 $$;
--- The supervisor holds the session advisory lock hashtext('cb-supervisor') while it runs (cli/supervise.ts); pg_locks
--- shows it to every role. A bigint key is split into classid (high 32 bits) and objid (low 32 bits), objsubid 1.
+-- #3222 S5: named leases, so far the supervisor's: one supervisor anywhere. A row, not a session's advisory lock, so the
+-- rule holds the same over an API, where a call has no session of its own. Taken for 180 s and renewed by its token
+-- (cli/lease.ts, every 30 s); another may take it once it has run out. One that ran out and nobody took is still its
+-- holder's to renew (a PC that slept). The same holder (a machine and process) may take it again: the answer to its
+-- take can be lost on the way
+create table if not exists cb.leases (
+  name       text primary key,
+  holder     text not null,
+  token      uuid not null,
+  expires_at timestamptz not null
+);
+
+-- {"token"} when taken; else {"holder", "left_s"}: who has it and for how long unless renewed
+create function cb.lease_take(name text, holder text) returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare t uuid := gen_random_uuid(); l cb.leases;
+begin
+  perform cb._supervisor_only();
+  insert into cb.leases as x (name, holder, token, expires_at) values (name, holder, t, now() + interval '180 seconds')
+  on conflict on constraint leases_pkey do update set holder = excluded.holder, token = excluded.token, expires_at = excluded.expires_at
+   where x.expires_at <= now() or x.holder = excluded.holder;
+  if found then return jsonb_build_object('token', t); end if;
+  select * into l from cb.leases x where x.name = name;
+  return jsonb_build_object('holder', l.holder, 'left_s', ceil(extract(epoch from l.expires_at - now()))::int);
+end $$;
+
+-- false: the lease is no longer this token's
+create function cb.lease_renew(name text, token uuid) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+begin
+  perform cb._supervisor_only();
+  update cb.leases x set expires_at = now() + interval '180 seconds' where x.name = name and x.token = token;
+  return found;
+end $$;
+
+create function cb.lease_release(name text, token uuid) returns boolean language plpgsql as $$
+#variable_conflict use_variable
+begin
+  perform cb._supervisor_only();
+  delete from cb.leases x where x.name = name and x.token = token;
+  return found;
+end $$;
+
 create function cb._supervisor_up() returns boolean language sql stable as $$
-  select exists (select 1 from pg_locks l where l.locktype = 'advisory' and l.granted and l.objsubid = 1
-    and l.database = (select d.oid from pg_database d where d.datname = current_database())
-    and l.classid::bigint = ((hashtext('cb-supervisor')::bigint >> 32) & 4294967295)
-    and l.objid::bigint = (hashtext('cb-supervisor')::bigint & 4294967295))
+  select exists (select 1 from cb.leases l where l.name = 'supervisor' and l.expires_at > now())
 $$;
+
+-- the board's clock: the supervisor compares its times with the board's
+create function cb.board_now() returns timestamptz language sql stable as $$ select now() $$;
 
 -- Everything the Runners page shows, in one read. project narrows the job lists only: the runners, the counts of the
 -- whole queue and every place number stay the machine's, so a wait still makes sense. why: the first reason that stops
@@ -7524,3 +7569,60 @@ create function cb._actor_ok(kind text, machine text, actor text) returns boolea
     when 'supervisor' then actor = 'supervisor'
   end, false)
 $$;
+
+-- ---------------------------------------------------------------- The runner's and cb triage's own SQL (#3222 S1c)
+drop function if exists cb.runner_settings cascade;
+drop function if exists cb.jobs_cancelled cascade;
+drop function if exists cb.runner_reconcile_held cascade;
+drop function if exists cb.fault_file cascade;
+
+-- Ahmed's settings for a runner (#4527, #4710); null: no row yet. A board without this function is older than the
+-- runner, which then starts on runner.json's counts (cli/runner-board.ts).
+create function cb.runner_settings(name text) returns jsonb language sql stable as $$
+  select jsonb_build_object('slots_set', r.slots_set, 'lanes_set', r.lanes_set, 'stack_gap_set', r.stack_gap_set)
+    from cb.runners r where r.name = runner_settings.name
+$$;
+
+-- of the jobs a runner's slots hold (ids: [1, 2]), those cancelled on the board
+create function cb.jobs_cancelled(ids jsonb) returns table(id bigint) language sql stable as $$
+  select j.id from cb.jobs j
+   where j.state = 'cancelled' and j.id in (select x::bigint from jsonb_array_elements_text(jobs_cancelled.ids) x)
+$$;
+
+-- cb.runner_reconcile with the held ids as jsonb, as a named call sends a list. Its own name: a runner from before
+-- still calls runner_reconcile with a bigint[].
+create function cb.runner_reconcile_held(runner text, held jsonb) returns int language sql as $$
+  select cb.runner_reconcile(runner_reconcile_held.runner,
+                             array(select x::bigint from jsonb_array_elements_text(coalesce(runner_reconcile_held.held, '[]'::jsonb)) x))
+$$;
+
+-- cb triage files one fault (#4535), under the template's advisory lock, so two machines never file it twice (Q2999).
+-- It writes on claude-board only, and only on a card that carries this fault's marker (Q3001): a note on the open one,
+-- or a new bug. The caller has checked the texts for what a card may not hold, and sends null for one it held back:
+-- seen (the note), or title and body (the new card). facts closes the new card's body and carries the marker.
+-- Returns {action: filed | noted | held | cancelled | fixed | none, id}.
+create function cb.fault_file(tmpl text, seen text, last timestamptz, title text, body text, facts text, actor text)
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare marker text := 'fault:' || tmpl; hit cb.tasks; made bigint;
+begin
+  if tmpl is null or tmpl !~ '^ft-[0-9a-f]{12}$' then
+    raise exception 'not a fault template: "%". cb triage files ft- and 12 hex digits', tmpl;
+  end if;
+  if facts is null or strpos(facts, marker) = 0 then raise exception 'a fault card''s facts must carry its marker %', marker; end if;
+  perform pg_advisory_xact_lock(hashtext('cb-fault:' || tmpl));
+  select * into hit from cb.tasks t where t.project = 'claude-board' and strpos(t.body, marker) > 0
+   order by t.status in ('done', 'cancelled'), t.id desc limit 1;
+  if hit.id is not null and hit.status not in ('done', 'cancelled') then
+    if seen is null then return jsonb_build_object('action', 'held', 'id', hit.id); end if;
+    perform cb.log(project => 'claude-board', summary => seen, task_id => hit.id::text, actor => actor);
+    return jsonb_build_object('action', 'noted', 'id', hit.id);
+  end if;
+  if hit.status = 'cancelled' then return jsonb_build_object('action', 'cancelled', 'id', hit.id); end if;
+  if hit.status = 'done' and last <= hit.done_at then return jsonb_build_object('action', 'fixed', 'id', hit.id); end if;
+  if coalesce(title, '') = '' or coalesce(body, '') = '' then return jsonb_build_object('action', 'none', 'id', hit.id); end if;
+  made := cb.task_add(project => 'claude-board', title => title,
+    body => body || E'\n\n' || coalesce('Seen again after #' || hit.id || E' was done.\n\n', '') || facts,
+    status => 'next', priority => 'P2', actor => actor, type => 'bug');
+  return jsonb_build_object('action', 'filed', 'id', made);
+end $$;

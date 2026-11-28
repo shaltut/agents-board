@@ -79,7 +79,10 @@ test('what is not listed does not exist: 42883, whatever the key', async () => {
   const key = await issue(sql);
   for (const fn of ['nope', 'type_to', 'user_add', 'user_password', 'user_show', 'user_set_role', 'key_issue', 'key_revoke', 'key_check',
     'keys_list', '_actor_ok', 'set_actor', 'answer', 'send_back', 'seen', 'mem_confirm', 'runner_set', 'project_state', 'github_mute',
-    'github_watch_add', 'github_watch_remove', 'role_text_set', 'constructor', '__proto__']) {
+    'github_watch_add', 'github_watch_remove', 'role_text_set', 'lease_take', 'lease_renew', 'lease_release',
+    // the runner's own, until the slice that moves it lists them for its key
+    'job_claim', 'job_finish', 'runner_beat', 'runner_hello', 'runner_reconcile_held', 'runner_settings', 'jobs_cancelled',
+    'constructor', '__proto__']) {
     const res = await call(key, fn, { actor: 'W1@boxa' });
     const body = await res.json() as any;
     assert.deepEqual([res.status, body.ok, body.code], [404, false, '42883'], `${fn}: ${JSON.stringify(body)}`);
