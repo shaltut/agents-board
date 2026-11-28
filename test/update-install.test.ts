@@ -22,7 +22,12 @@ const port = await new Promise<number>((res) => server.once('listening', () => r
 const base = `http://127.0.0.1:${port}`;
 const clients: any[] = [];
 const repo = join(tmp, 'board'), live = join(tmp, 'w', 'claude-board'), home = `${live}.home`;
+// #4919: another checkout's runner, started by a relative path, runs for the whole file, as a real one on the same PC
+// can: Windows does not show its folder, so a cb update that sees it refuses. It ends when this test process does.
+const otherRunner = spawn(process.execPath, ['-e', "process.stdin.resume().on('end', () => process.exit())", 'cli/runner.ts'],
+  { cwd: tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] });
 after(async () => {
+  otherRunner.kill(); // our own child, by its pid
   server.close();
   await Promise.all(clients.map((c) => c.end()));
   try { if (lstatSync(live).isSymbolicLink()) unlinkSync(live); } catch {} // the link first: a delete never goes through it
