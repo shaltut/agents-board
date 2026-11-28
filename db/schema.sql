@@ -267,6 +267,9 @@ select cb._ensure_check('cb.sessions', 'sessions_agent_check', $c$agent in ('cla
 -- with the endpoint). Another id in the same pane is another session: cb.inbox resets the row. Null (a row from before
 -- it, or one a cb iam just bound) takes the next id as it is
 alter table cb.sessions add column if not exists session_id text;
+-- #4786: the model the seat's relay last read off its agent's screen (cb.seat_model). model is what the session was bound
+-- with; an agent can change model inside its pane. Cleared by cb.iam and when another session takes the pane
+alter table cb.sessions add column if not exists running_model text;
 -- #3221: a relay holding low-priority notices (runner results, GitHub, digests, nudges, card edits, broadcasts, memory)
 -- marks it here: hold_from is the card-event cursor (`after`) the held read used, hold_at when the hold began. A relay
 -- that restarts mid-hold reads from hold_from again and keeps the window's clock, so nothing held is lost or doubled.
@@ -304,6 +307,7 @@ drop function if exists cb.norm_type cascade;
 drop function if exists cb.triagers cascade;
 drop function if exists cb.norm_id cascade;
 drop function if exists cb.ensure_project cascade;
+drop function if exists cb._freed_status cascade;
 drop function if exists cb.slug cascade;
 drop function if exists cb.read_project cascade;
 drop function if exists cb._live cascade;
@@ -329,7 +333,11 @@ drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb._seat_name cascade;
 drop function if exists cb.iam cascade;
+drop function if exists cb.seat_model cascade;
+drop function if exists cb._running_model cascade;
+drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
+drop function if exists cb._person cascade;
 drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
@@ -525,6 +533,8 @@ begin
   if a = t then raise exception 'a project cannot be an alias of itself'; end if;
   -- #4559: merged work would land where nothing picks it up
   if not cb._live(t) then raise exception '%: nothing is merged into it until Ahmed enables it on Projects', cb._state_words(t); end if;
+  -- #4621: nor is such a project merged away: its cards would be handed out again under the other name
+  if not cb._live(a) then raise exception '%: it is not merged into another project until Ahmed enables it', cb._state_words(a); end if;
   perform cb.ensure_project(t);
   if exists (select 1 from cb.projects p where p.slug = a) then
     perform set_config('cb.quiet', 'on', true);
@@ -595,6 +605,12 @@ create function cb._wait_words(project text) returns text language sql stable as
   select cb._state_words($1) || case when cb._live($1) then '' when (select p.state from cb.projects p where p.slug = $1) = 'archived'
     then '. File new work elsewhere, or ask Ahmed to unarchive it'
     else '. Write where you stopped (cb log <card> "...") and wait: you will be told when it is enabled' end
+$$;
+
+-- #4621: where a card goes when its question stops holding it: its holder takes it up again, or it waits in Next. A
+-- project that gets no work starts nothing: the holder keeps the card and finds it in Next.
+create function cb._freed_status(assignee text, project text) returns text language sql stable as $$
+  select case when $1 is null or not cb._live($2) then 'next' else 'in_progress' end
 $$;
 
 create function cb.ensure_project(project text) returns text language plpgsql as $$
@@ -1399,9 +1415,10 @@ begin
     perform set_config('cb.note', 'Q' || c.id || ' waits again: back as before it asked', true);
     update cb.tasks x set blocked_on = live,
            status = case when live is not null then 'blocked'
-                         when h ->> 'blocked_on' is null then h ->> 'status'
+                         when h ->> 'blocked_on' is null then
+                           case when h ->> 'status' = 'in_progress' and not cb._live(x.project) then 'next' else h ->> 'status' end
                          when cardinality(cb._waits_on(x.id)) > 0 then 'blocked'
-                         when x.assignee is null then 'next' else 'in_progress' end
+                         else cb._freed_status(x.assignee, x.project) end
      where x.id = (h ->> 'task')::bigint and x.blocked_on = c.id and x.status = 'blocked';
   end loop;
   perform set_config('cb.note', '', true);
@@ -1449,7 +1466,7 @@ begin
   perform set_config('cb.note', 'Q' || qid || ' withdrawn; still waits on its blocking tasks', true);
   update cb.tasks t set blocked_on = null where t.blocked_on = qid and t.status = 'blocked' and cardinality(cb._waits_on(t.id)) > 0;
   perform set_config('cb.note', '', true);
-  update cb.tasks t set status = case when t.assignee is null then 'next' else 'in_progress' end
+  update cb.tasks t set status = cb._freed_status(t.assignee, t.project)
    where t.blocked_on = qid and t.status = 'blocked';
 end $$;
 
@@ -1511,6 +1528,10 @@ begin
   end if;
   if q.status not in ('open', 'sent_back') then
     raise exception 'Q% is %: only an open or sent-back question can be rewritten', qid, q.status;
+  end if;
+  -- #4621: as cb.ask: nothing is asked in a project that gets no work, and a rewrite asks again
+  if not cb._live(q.project) then
+    raise exception '%: nothing is asked there until Ahmed enables it. Write where you stopped with cb log <card> "..."', cb._state_words(q.project);
   end if;
   if q.sent_back ->> 'reason' = 'visual' and not pictures and not cb._is_dashboard() then
     raise exception 'Q% was sent back with "Show me": rewrite it with pictures (cb reask Q% -i "Now=<screenshot>" -i "After=<mockup>"). No way to make one? cb withdraw Q% and ask again saying why', qid, qid, qid;
@@ -1594,7 +1615,7 @@ begin
   perform set_config('cb.note', 'Q' || qid || ' answered; still waits on its blocking tasks', true);
   update cb.tasks t set blocked_on = null where t.blocked_on = qid and t.status = 'blocked' and cardinality(cb._waits_on(t.id)) > 0;
   perform set_config('cb.note', 'unblocked: Q' || qid || ' answered', true);
-  update cb.tasks t set status = case when t.assignee is null then 'next' else 'in_progress' end
+  update cb.tasks t set status = cb._freed_status(t.assignee, t.project)
    where t.blocked_on = qid and t.status = 'blocked';
   perform set_config('cb.note', '', true);
 end $$;
@@ -1682,7 +1703,7 @@ declare p text := cb.read_project(project);  -- unknown project raises; null kee
         mo text := nullif(trim(model), '');
         rp text := nullif(trim(repo), '');
         ag text := nullif(trim(agent), '');  -- the CLI the session runs (#4002); null: claude, or what it said before
-        pp text;
+        pp text; held record; eff text;
 begin
   if ag is not null and ag not in ('claude', 'codex', 'opencode', 'agy') then
     raise exception 'agent must be one of claude, codex, opencode, agy (got %)', ag;
@@ -1698,11 +1719,13 @@ begin
   end if;
   if coalesce(trim(actor), '') = '' or coalesce(trim(pane), '') = '' then raise exception 'pane and actor are required'; end if;
   perform cb.not_ahmed(actor);
-  -- #4559: no new seat binds to a project that gets no work; a pane already bound to it keeps its binding (a re-bind
-  -- after a compaction included), and a call that names no project keeps the pane's
-  if p is not null and not cb._live(p)
-     and (select s.project from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane)) is distinct from p then
-    raise exception '%: no new seat binds to it until Ahmed enables it', cb._state_words(p);
+  -- #4559: no new seat binds to a project that gets no work; the same name on a pane already bound to it keeps its
+  -- binding (a re-bind after a compaction included), and a call that names no project keeps the pane's. Another name
+  -- there is a new seat (#4621)
+  select s.project, s.actor into held from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane);
+  eff := coalesce(p, held.project);
+  if not cb._live(eff) and (held.project is distinct from eff or held.actor is distinct from trim(actor)) then
+    raise exception '%: no new seat binds to it until Ahmed enables it', cb._state_words(eff);
   end if;
   -- a new session starts from now: it never gets broadcasts or messages sent before it existed
   insert into cb.sessions (machine, pane, actor, project, broadcast_seen, role, area, model, repo, agent)
@@ -1729,11 +1752,17 @@ begin
                        then cb.sessions.hold_at end,
         -- the relay's next check takes its session id as it is (#4379): the session that bound may be one its relay
         -- has not seen yet, and must not be reset to the relay's own name a moment after it bound
-        session_id = null;
+        session_id = null,
+        running_model = null; -- #4786: what ran before this bind says nothing about now; the relay reads it again
   -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
   update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
   return trim(actor);
 end $$;
+
+-- A person, not a session: the owner, or a signed-in user acting under their own name.
+create function cb._person(a text) returns boolean language sql stable as $$
+  select a = 'ahmed' or exists (select 1 from cb.users u where u.name = a)
+$$;
 
 -- What the relay pushes into a session: answers addressed to its pane, and changes other people
 -- made to its actor's tasks (moves, edits, done, notes) after event `after_event`.
@@ -1757,6 +1786,7 @@ begin
         role = case when sid <> cb.sessions.session_id then null else cb.sessions.role end,
         area = case when sid <> cb.sessions.session_id then null else cb.sessions.area end,
         model = case when sid <> cb.sessions.session_id then null else cb.sessions.model end,
+        running_model = case when sid <> cb.sessions.session_id then null else cb.sessions.running_model end,
         repo = case when sid <> cb.sessions.session_id then null else cb.sessions.repo end,
         broadcast_seen = case when sid <> cb.sessions.session_id then excluded.broadcast_seen else cb.sessions.broadcast_seen end,
         hold_from = case when sid <> cb.sessions.session_id then null else cb.sessions.hold_from end,
@@ -1779,7 +1809,8 @@ begin
                  else jsonb_build_object('from', greatest(hf, coalesce((select e.id from cb.events e where e.at <= now() - interval '24 hours'
                                                                          order by e.at desc limit 1), 0)),
                                          'age_ms', floor(extract(epoch from now() - coalesce(ha, now())) * 1000)) end,
-    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary) order by e.id)
+    'broadcasts', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'project', e.project, 'summary', e.summary,
+                                                             'urgent', cb._person(e.actor)) order by e.id)
                               from cb.events e
                              where e.kind = 'broadcast' and e.id > seen and proj is not null and (e.project is null or e.project = proj)
                                -- 24 h, as messages and huddles: a reused pane id keeps the old row's broadcast_seen (#4343)
@@ -1789,13 +1820,18 @@ begin
     -- notice (#3221): a routine board message the relay may hold (a digest, a stall or ping nudge); null for every
     -- other message, and for a digest that carries a new P0 or a supervisor problem (data.urgent)
     -- urgent (#3221): never held: marked so (a part freed off me, GitHub lines by Ahmed's login), or about a P0 card (a
-    -- nudge's card, a job's card in data.task), its priority as it is now
+    -- nudge's card, a job's card in data.task), its priority as it is now; (Q3128: a session's line may now wait the
+    -- relay's settle window) a person's line (cb._person), or a direct question: a session's message with a ? that ends
+    -- a sentence (a ? inside a URL is followed by text and does not count)
     'messages', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'actor', e.actor, 'summary', e.summary,
                                                               'raw', e.actor = 'ahmed' and e.data ->> 'raw' = 'true',
                                                               'notice', case when e.data ->> 'urgent' = 'true' then null
                                                                              when e.data ? 'digest' then 'digest'
                                                                              when e.data ? 'nudge' then 'nudge' end,
                                                               'urgent', coalesce(e.data ->> 'urgent' = 'true', false)
+                                                                        or cb._person(e.actor)
+                                                                        or (e.actor not in ('board', 'github', 'runner', 'supervisor')
+                                                                            and e.summary ~ '[?]($|[[:space:]]|[)"''])')
                                                                         or exists (select 1 from cb.tasks t where t.priority = 'P0'
                                                                                       and t.id = coalesce(e.task_id, case when e.data ->> 'task' ~ '^[0-9]{1,18}$'
                                                                                                                          then (e.data ->> 'task')::bigint end))) order by e.id)
@@ -1810,7 +1846,8 @@ begin
                                   and q.asked_by <> me and e.id > seen and e.at > now() - interval '24 hours'), '[]'),
     -- new unassigned bugs filed in my project, if I triage it (cb.triagers: its lead, else everyone bound)
     'bugs', coalesce((select jsonb_agg(jsonb_build_object('event_id', e.id, 'id', t.id, 'project', t.project, 'title', t.title,
-                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor) order by e.id)
+                                                          'body', t.body, 'priority', t.priority, 'actor', e.actor,
+                                                          'urgent', cb._person(e.actor)) order by e.id)
                         from cb.events e join cb.tasks t on t.id = e.task_id
                        where e.kind = 'task_created' and t.type = 'bug' and t.assignee is null and t.status not in ('done', 'cancelled')
                          and t.project = proj and e.actor <> me and e.id > seen and e.at > now() - interval '24 hours'
@@ -1840,8 +1877,13 @@ begin
                             where q.status = 'sent_back' and q.sent_back ->> 'delivered_at' is null
                               and ((lower(q.reply_to ->> 'machine') = m and q.reply_to ->> 'pane' = pane)
                                    or (coalesce(q.reply_to ->> 'pane', '') = '' and q.asked_by = me))), '[]'),
+    -- urgent (Q3128): never held for the settle window: a P0 card, a person's line, or my card cancelled, blocked or
+    -- taken off me (#3221 review M1: stop what you are doing)
     'events', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'task_id', e.task_id, 'kind', e.kind, 'summary', e.summary,
-                                                            'actor', e.actor, 'title', t.title, 'status', t.status) order by e.id)
+                                                            'actor', e.actor, 'title', t.title, 'status', t.status,
+                                                            'urgent', coalesce(t.priority = 'P0' or cb._person(e.actor)
+                                                                               or e.data ->> 'to' in ('cancelled', 'blocked')
+                                                                               or e.data -> 'assignee' ->> 'from' = me, false)) order by e.id)
                           from cb.events e join cb.tasks t on t.id = e.task_id
                          where me is not null and e.id > after_event and e.actor <> me
                            and e.kind in ('task_created', 'moved', 'updated', 'done', 'note')
@@ -1867,7 +1909,7 @@ begin
     'memory', coalesce((select jsonb_agg(jsonb_build_object('id', e.id, 'action', e.data ->> 'action', 'actor', e.actor, 'memory', x.id,
                                                             'kind', x.kind, 'title', x.title,
                                                             'why', case when e.data ? 'why_flagged' then null else e.data ->> 'why' end,
-                                                            'why_hidden', e.data ? 'why_flagged',
+                                                            'why_hidden', e.data ? 'why_flagged', 'urgent', cb._person(e.actor),
                                                             'replaces', x.source ->> 'supersedes', 'by', n.id, 'by_title', n.title) order by e.id)
                           from cb.events e join cb.memories x on x.id = (e.data ->> 'memory')::bigint
                           left join cb.memories n on n.id = x.superseded_by
@@ -1940,6 +1982,32 @@ begin
   return cur;
 end $$;
 
+-- #4786: the relay's reading of the model on its agent's screen. The screen is the agent's own output: only a model id
+-- is taken, anything else is ignored, and the reading is only ever shown
+create function cb.seat_model(machine text, pane text, model text) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare mo text := trim(coalesce(model, ''));
+begin
+  if mo !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' then return; end if;
+  update cb.sessions s set running_model = mo
+   where s.machine = lower(trim(machine)) and s.pane = trim(pane) and s.running_model is distinct from mo;
+end $$;
+
+-- The model a seat really runs, where the board can tell: the relay's screen reading, else what the usage hook reported
+-- for the pane's own session (Claude: the last finished turn's model). plpgsql: cb.session_usage is created further down
+create function cb._running_model(m text, pn text) returns text language plpgsql stable as $$
+begin
+  return (select coalesce(s.running_model,
+                          (select nullif(u.model, 'unknown') from cb.session_usage u where u.session_id = s.session_id and u.machine = s.machine))
+            from cb.sessions s where s.machine = m and s.pane = pn);
+end $$;
+
+-- Another model than the one it was started with? The running id may say more (a date, an effort) than the launch one,
+-- which may be an alias (sonnet) or carry a context mark ([1m]) the running id lacks. Either side unknown: not judged
+create function cb._model_differs(launched text, running text) returns boolean language sql immutable as $$
+  select coalesce(position(lower(regexp_replace(launched, '\[[^]]*\]$', '')) in lower(running)) = 0, false)
+$$;
+
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
 -- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
@@ -1953,6 +2021,8 @@ begin
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
+      'running_model', cb._running_model(s.machine, s.pane),  -- #4786
+      'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
       'agent', s.agent,  -- #4002; null for a worker with no session row
       'lead', cb._is_lead(a.actor, s.project),  -- #3771: the dashboard's lead is the board's (by role, #3746), not an orch@ name
       'doing', coalesce((select jsonb_agg(d.j order by d.at desc) from (
@@ -5740,6 +5810,8 @@ begin
     'seats', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', s.actor, 'machine', s.machine, 'role', s.role, 'area', s.area, 'repo', s.repo,
         'agent', s.agent, 'model', s.model,
+        'running_model', cb._running_model(s.machine, s.pane),  -- #4786
+        'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
         'in_squad', coalesce(sq->'roles' ? s.role, false),
         'want_agent', w.want->>'agent', 'want_model', w.want->>'model',
         -- a seat bound without --model is not judged on its model

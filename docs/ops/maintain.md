@@ -408,8 +408,8 @@ lock at once. Removing someone, or a new link for a member, is on the Users page
 
 ## GitHub watch: Ahmed's own login (#3221)
 
-The lead's relay holds routine notices up to 10 minutes; a PR, comment, review or commit by Ahmed on a watched repo goes
-through at once (with the rest of that poll's message). The watch knows which login is his only from the `github-owner` setting (a JSON string). None is
+The lead's relay holds routine notices up to 10 minutes (and a session's own lines 120 s: `cb help relay`); a PR,
+comment, review or commit by Ahmed on a watched repo goes through at once (with the rest of that poll's message). The watch knows which login is his only from the `github-owner` setting (a JSON string). None is
 set by default, and then nothing is marked urgent. It is never taken from gh's own login: the agents post under it.
 Ahmed sets it once (not a secret, but keep it out of cards, pages and this repo):
 

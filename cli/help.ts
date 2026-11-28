@@ -32,7 +32,7 @@ const GROUPS: [string, Record<string, Cmd>][] = [
       does: 'After a compaction or restart (after a compaction or a resume the SessionStart hook prints it by itself in a bound pane): every card you hold with its stage, the command that finishes it, its design page (the approved version if you build, review or check), your last notes and open questions. Read-only.',
       eg: 'cb resume' },
     relay: { use: 'cb relay [--agent <agent>] [--restart]', topic: 'relay',
-      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. Routine notices (runner results, GitHub lines, digests and nudges, broadcasts and memory changes not from Ahmed) wait up to 10 minutes and arrive together, one line each; anything else (Ahmed, answers, any change to your cards, anything about a P0 card, a teammate\'s message, new work) arrives at once and brings the waiting ones with it. One relay per pane: the SessionStart hook usually starts it (a Codex, OpenCode or agy seat: its seat prestart, once the seat checks ready; that relay waits up to 3 minutes for the agent to come up, and leaves when it never does; an agent started again by hand in the pane its last one left has no relay: run cb relay --agent <agent> in that pane first); running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name. A relay that starts some other way (the hook, a restart after a code change) and cannot serve the agent in its pane tells the project of that pane once, as a new bug is routed (its leads seen today, else its recent sessions), and exits 1; cb relay then fails instead of saying the relay is on.',
+      does: 'Start the push into this session: answers, changes to your tasks, messages, huddle lines, broadcasts, new work. Lines that can wait are held and arrive together, one line each: routine notices (runner results, GitHub lines, digests and nudges, broadcasts and memory changes not from Ahmed) up to 10 minutes; a teammate\'s tell, a change or note on your card, a bug to triage and new work 120 s from the first of them; a "closed" card notice until the next push, never waking a session by itself. Urgent lines arrive at once and bring the waiting ones with them: Ahmed and other people, answers, huddle lines, the supervisor, anything about a P0 card, a tell with a direct question (a ? ending a sentence), your card cancelled, blocked or taken off you. One relay per pane: the SessionStart hook usually starts it (a Codex, OpenCode or agy seat: its seat prestart, once the seat checks ready; that relay waits up to 3 minutes for the agent to come up, and leaves when it never does; an agent started again by hand in the pane its last one left has no relay: run cb relay --agent <agent> in that pane first); running it twice is harmless; --restart replaces a running one. --agent is the agent in this pane (default: $CB_AGENT, else the agent the pane is bound with, else claude); an agent cb cannot serve yet is refused by name. A relay that starts some other way (the hook, a restart after a code change) and cannot serve the agent in its pane tells the project of that pane once, as a new bug is routed (its leads seen today, else its recent sessions), and exits 1; cb relay then fails instead of saying the relay is on.',
       eg: 'cb relay' },
     brief: { reads: true, use: 'cb brief [project] [--tag <tag>] [--type <type>]',
       does: 'The project at a glance: Ahmed\'s active goals, in progress, next, blocked, review, waiting on Ahmed, broadcasts, answers to deliver. --tag / --type filter it (--type bug = open bugs). In a pipeline project a staged card ends its line with its stage in words: in progress, blocked and review always, Next at every stage but build, Design included (a Next card at design is design work, at merge or qa it is already built: neither is build work); --json carries stage and stage_words (null otherwise). A blocked card says what holds it: a question, other cards, else the note given with cb move <id> blocked "<why>", else "no reason given" and its last note (--json: block_note, last_note). A disabled project says so on its first line (--json: disabled); with no project given, disabled and archived projects are left out.',
@@ -196,7 +196,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'What needs the lead in a pipeline project (the 15-minute digest, now), each line with the command that acts on it. The digest caps each group at 5 lines; --all shows every line. Read-only.',
       eg: 'cb digest iris --all' },
     sessions: { reads: true, use: 'cb sessions [project]', topic: 'orchestrate',
-      does: 'Every session: relay live or not, what it holds, idle time, questions to Ahmed. "holds work, gone quiet" = reassign or close.',
+      does: 'Every session: relay live or not, what it holds, idle time, questions to Ahmed. "holds work, gone quiet" = reassign or close. A seat that now runs another model than it was started with gets a "⚠ model" line: a Claude seat is read from its usage hook (as of its last finished turn), an agy seat from its screen footer (once a minute). Other agents report no running model yet.',
       eg: 'cb sessions' },
     session: { reads: true, use: 'cb session <name>', topic: 'orchestrate',
       does: 'One session: open tasks, questions, last 10 actions. Check it before handing out work.',
@@ -510,9 +510,14 @@ or agy session. It listens to the board and puts "[Agents Board] ..." messages i
 An idle session gets a new turn; a busy one reads it between tool calls. Act on it now: a cancel means
 stop, a move means follow it, an answer means do what it says.
 
-Routine notices (runner results, GitHub lines, the board's digests and nudges, broadcasts and memory changes not from
-Ahmed) wait up to 10 minutes and arrive together. Anything else arrives at once and brings the waiting ones with it:
-Ahmed, answers, changes to your cards, anything about a P0 card, a teammate's tell or huddle line, new work.
+Lines that can wait are held and arrive together:
+  - routine notices (runner results, GitHub lines, the board's digests and nudges, broadcasts and memory changes not
+    from Ahmed): up to 10 minutes;
+  - a teammate's tell, a note or change on your card, a bug to triage, new work: 120 s from the first of them;
+  - a "closed" card notice: until the next push. It never wakes a session by itself.
+These arrive at once and bring the waiting ones with them: Ahmed and other people, answers, huddle lines, the
+supervisor, anything about a P0 card, a tell that asks a direct question (a ? ending a sentence), and your card
+cancelled, blocked or taken off you. Need a teammate now? Ask it as a question, or open a huddle.
 
 Start   Claude Code: the SessionStart hook starts it. codex, opencode and agy: the seat prestart (cb squad up) starts it
         once the seat checks ready; it waits up to 3 minutes for the agent to come up, and leaves if it never does.

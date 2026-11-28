@@ -14,7 +14,7 @@ import { getAdapter } from './agents/index.ts';
 import { readClaudeEndpoint, socketExists } from './agents/claude.ts';
 import { squadUp } from './squad-up.ts';
 import { squadTrust } from './squad-trust.ts';
-import { squadShow } from './squad-show.ts';
+import { modelDrift, squadShow } from './squad-show.ts';
 import { makeLister, modelsShow, reportModels } from './models.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
@@ -635,7 +635,8 @@ async function run(): Promise<unknown> {
         const head = `${r.actor}${r.role ? ` (${r.role})` : ''} ${r.live ? 'relay live' : 'no relay'}${r.pane ? ` · ${r.pane}` : ''} · idle ${dur(idle(r))}` +
           ` · ${r.queued} queued · ${r.done_24h} done 24h${r.open_questions ? ` · ${r.open_questions} asking Ahmed` : ''}` +
           (!r.live && r.doing.length && idle(r) > 60 ? '  ⚠ holds work, gone quiet' : '');
-        return [head, ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.part ? `part ${t.part}: ` : ''}${t.status}]`) : ['  (nothing in progress)'])].join('\n');
+        const drift = modelDrift(r); // #4786
+        return [head, ...(drift ? [drift] : []), ...(r.doing.length ? r.doing.map((t: any) => `  #${t.id} ${t.title} [${t.part ? `part ${t.part}: ` : ''}${t.status}]`) : ['  (nothing in progress)'])].join('\n');
       });
       const quiet = rows.length - open.length;
       return { out: (out.join('\n') || 'no sessions') + (quiet ? `\n(${quiet} quiet sessions hidden: no relay, nothing open)` : ''), json: rows };
