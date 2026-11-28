@@ -1400,6 +1400,9 @@ test('long commands stay fast', () => {
     ['#4669, 200 KB of bash x.sh; with a script reader, as a builder', () => evaluate({ tool: 'shell', command: kb200('bash x.sh; '), role: 'builder', readScript: () => 'echo hi\n' })],
     ['role scan, one pipe stage of 50,000 words ending in | env bash', () => evaluate({ tool: 'shell', command: "echo 'a b' | " + 'x '.repeat(50000) + '| env bash', role: 'builder' })],
     // #4742: a double quote with no close was tried again from every later \" (6 to 43 s here, past a hook's timeout)
+    ['#4815, 200 KB of filled words, as a builder', asBuilder(kb200('$G '))],
+    ['#4815, 200 KB of filled words each with an option value, as a builder', asBuilder(kb200('$a -C '))],
+    ['#4815, 200 KB of launcher then filled words, as a builder', asBuilder(kb200('timeout $a x '))],
     ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
     ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
     ['#4742, escaped quotes after a brace', asBuilder('echo {a} ' + escaped)],
@@ -1853,6 +1856,37 @@ test('#4776: a script the seat runs is read without its carriage returns too', (
   assert.equal(kindOf('bash outer.sh', 'builder', read), 'role', 'the script it names, spelled with a CR');
   assert.equal(kindOf('bash plain.sh', 'builder', read), 'allow');
   assert.equal(kindOf('bash many.sh', 'builder', read), 'allow', 'a CRLF script counts each script it runs once');
+});
+
+// #4815: the push rules read only the word git, so a git name held in a variable pushed to a protected branch. A command
+// word the shell fills in is now read as git for the push rules, when its subcommand is push or is filled in too
+test('#4815: a push through a command word the shell fills in is judged as git push', () => {
+  const blocked = [
+    // the card's shape, behind a wrapper and bare
+    'timeout 30 "$GIT" push origin main', 'env ${GIT:-git} push origin main', 'nice $G -C /x push origin main',
+    'xargs $G push origin main', 'caffeinate $G push origin main', '$G push origin main', '& $git push origin main',
+    'cmd /c %GIT% push origin main', 'bash -c "timeout 5 $G push origin main"', '$G push origin HEAD:main',
+    '$G push origin refs/heads/master',
+    // the subcommand filled in too, naming a protected branch
+    '$G $(echo push) origin main', 'timeout 5 $G `echo push` origin main', 'timeout 5 $G $SUB origin main',
+    // the other push rules, as for the word git
+    '$G push -f origin feat/my-card', '$G push origin +feat/my-card', '$G push --all origin', '$G push --mirror origin',
+    'timeout 5 $G push', '$G push origin', '$G push origin $B', '$G push origin HEAD',
+  ];
+  for (const c of blocked) assert.notEqual(kindOf(c), 'allow', c);
+  const allowed = [
+    'timeout 5 $G push origin feat/my-card', '& $git push -u origin feat/my-card', '$G status', '$G log --oneline origin/main',
+    '"$PYTHON" tool.py origin main', 'echo $HOME $USER main', 'echo $HOME push', '$ADB -s emulator-5554 push file.txt /sdcard/',
+    '$x = git rev-parse origin/main', 'ls $DIR push.log',
+  ];
+  for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
+  // the configured list too, with or without a role, and the reason says what to write instead
+  assert.ok(protectedPush('timeout 5 $G push origin develop', ['develop']), 'a configured branch');
+  assert.equal(protectedPush('timeout 5 $G push origin feat/x', ['develop']), null);
+  const r = evaluate({ tool: 'shell', command: 'timeout 5 $G push origin develop', protectedBranches: ['develop'] });
+  assert.match(r.reason!, /protected branch develop.*\$G is filled in by the shell and read as git: write the command's own name/);
+  // a read-only role pushes nothing, by any name
+  assert.match(evaluate({ tool: 'shell', command: 'timeout 5 $G push origin feat/x', role: 'reviewer' }).reason!, /git push: a reviewer session reads/);
 });
 
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
