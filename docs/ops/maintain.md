@@ -730,7 +730,8 @@ denied by the role permission files. Card #3746.
   in too), by this list and by every role's rules against a push (#4815): write `git` by its name. A variable that holds
   another tool with a `push` command (`$DOCKER push <image>`) is refused the same way: write that tool's name.
 - In a seat, a command and its first argument both filled in (`$G $SUB`, also `$CC $CFLAGS`) are refused whatever they
-  hold: write the command's name (#4815).
+  hold: write the command's name (#4815). Text such as `"$id: $(date)"` is refused too. One shape is spared: a redirect
+  to a quoted PowerShell file name that escapes a dot (`> "$name`.txt"`, #4836).
 - A filled command word followed by a word that is no git command (`$G p origin main`, xargs' `{}`) and then a protected
   branch is refused, like the same line with `git`: an alias set earlier can make that word a push (#4826). A word that
   is a script or a path is not such a word (`"$PYTHON" tool.py origin main` runs).
