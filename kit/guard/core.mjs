@@ -872,6 +872,9 @@ const PS_SETTER = new RegExp(String.raw`(?<![\w-])(?:${SETTERS})(?![\w-])`, 'i')
 const PS_REACH = new RegExp(String.raw`(?<![\w-])(?:${SETTERS}|get-variable|gv)(?![\w-])`, 'i');
 const ANY_CASE_HOME = /(?<![\w$])(?:home|userprofile)\b(?![/\\.])/i;
 const DRIVE_HOME = /\b(?:variable|global|script|local|private|env):\/?(?:home|userprofile)\b(?![/.])/i;
+// (#4737: ('HO'+'ME') is HOME, so the text with its + joins closed up is read too; the blanks around + are bounded, so
+// the join stays linear)
+const joinedStrings = (t) => t.replace(/[ \t]{0,4}\+[ \t]{0,4}/g, '');
 const DRIVE_WILD = /\b(?:variable|env):\/?[\w-]*[*?[]/i;
 const QUOTED_WILD = /(["'])(?=[\w\]]{0,32}[*?[])[\w*?[\]]{1,32}\1/;
 // a statement keeps its pipeline (gv hom* | sv); a quoted ; ends none. Each is read once from its first setter: linear
@@ -887,8 +890,9 @@ function namesHome(text) {
   if (HOME_NAMED.test(bare) || DRIVE_HOME.test(bare)) return true;
   const code = joinLines(stripMessages(text));
   const loose = bareText(code);
-  if (unquotedText(code).split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
-  if (PS_SETTER.test(loose) && (ANY_CASE_HOME.test(loose) || QUOTED_WILD.test(code))) return true;
+  // (#4737: {HO,X}$(){ME,Y} has side-by-side groups once the empty expansion is out of the way)
+  if (unquotedText(code).replace(EMPTIES, '').split(/\s+/).some(braceWord) || DRIVE_WILD.test(loose)) return true;
+  if (PS_SETTER.test(loose) && (ANY_CASE_HOME.test(loose) || ANY_CASE_HOME.test(joinedStrings(loose)) || QUOTED_WILD.test(code))) return true;
   return (code.match(NAME_STATEMENT) ?? []).some(wildAfterSetter);
 }
 // (the command is read only when a value has such a path start, once per text: nested values stay linear, r3-2)
@@ -2160,6 +2164,46 @@ Ask on Agents Board instead, then KEEP WORKING on something else:
 - Add --blocking -t <task id> only if that task truly cannot continue; it parks the task in Blocked.
 - The answer arrives in this session by itself (cb relay); without a relay, check with \`cb pending\`. More: cb help ask`;
 
+// #4737: the command with split or built spellings of git, gh and az read out, judged beside the command as written (never
+// instead of it: which shell runs it is not known here, so this reading can only add a block). In order: $'...' decoded
+// ($'g\x69t'); $(echo g) and its backtick form read as the word; {gi,} as gi; the name's letters joined across what a
+// shell can drop between them (a backtick, ^, "", '', a backslash, $(), $(true), ${x}, $@, $*, $!, $1); and $x where the
+// same command sets x to one of the names. A name built any other way (from two variables, a file, a decoder) is not
+// read: server-side branch protection is the fence for those.
+const ANSI_C = /\$'((?:\\.|[^'\\])*)'/g;
+const ANSI_ESCAPE = new RegExp(String.raw`${ANSI_NUMBER.source}|\\([\s\S])`, 'g');
+const ANSI_NAMED = { n: '\n', t: '\t', r: '\r' };
+const ansiText = (body) => body.replace(ANSI_ESCAPE, (all, x, u, long, oct, ch) => (ch !== undefined ? ANSI_NAMED[ch] ?? ch
+  : ansiChar(all, x, u, long, oct)));
+const requote = (s) => (s.includes("'") ? `"${s.replace(/["\\$`]/g, '\\$&')}"` : `'${s}'`);
+// every run of blanks below is bounded: two open-ended ones side by side were quadratic (30 s on 200 KB, past the hook's
+// timeout, and a timed-out hook allows; PR 135 review)
+const PRINTS = String.raw`(?:-[neE]{1,3}|--|'%[sb](?:\\n)?'|"%[sb](?:\\n)?"|%[sb])`; // echo's options, printf's format
+const SAYS = String.raw`(?:echo|printf)(?:[ \t]{1,4}${PRINTS}){0,3}[ \t]{1,4}`;
+const ECHOED = new RegExp(String.raw`\$\([ \t]{0,4}${SAYS}(["']?)([\w.-]+)\1[ \t]{0,4}\)|\`${SAYS}(["']?)([\w.-]+)\3\``, 'g');
+const EMPTY_BRACE = /\{([a-z]{1,3}),\}/gi;
+// what a shell leaves out of a word: a command that prints nothing, and an expansion with nothing in it, quoted or not
+const NOTHING = String.raw`(?:(?:echo|printf)[ \t]{1,4}(?:""|'')|true|false|echo|:)`;
+const EMPTY = String.raw`(?:\$\([ \t]{0,4}(?:${NOTHING}[ \t]{0,4})?\)|\$\{(?:\w+|[@*])(?::?[-=+])?\}|\$[@*!1-9])`;
+const EMPTIES = new RegExp(EMPTY, 'g');
+const GAP = String.raw`(?:\`[ \t]{0,4}${NOTHING}[ \t]{0,4}\`|\`|\^|"${EMPTY}{1,4}"|\$?""|\$?''|\\|${EMPTY})`;
+// no gap holds a name's first letter except inside ${...}, where a word character or { is before it: so a match never
+// starts inside another's gaps, and the unbounded * stays linear
+// (cmd drops a caret before the first letter too: ^g^i^t)
+const SPLIT_NAME = new RegExp(String.raw`(?<![\w{$])\^?(?:g${GAP}*i${GAP}*t|g${GAP}*h|a${GAP}*z)(?!\w)`, 'gi');
+const GAPS = new RegExp(GAP, 'g');
+const NAME_SET = /(?<![\w$-])\$?([a-z_]\w*)[ \t]*=[ \t]*(["']?)(git|gh|az)\2(?![\w=./\\-])/gi;
+const VAR_USE = /\$(?:\{(\w+)\}|(\w+))/g;
+export function revealed(command) {
+  const text = command.replace(ANSI_C, (_all, body) => requote(ansiText(body)))
+    .replace(ECHOED, (_all, _q, a, _p, b) => a ?? b)
+    .replace(EMPTY_BRACE, '$1')
+    .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''))
+    .replace(/\$(?=(["'])(?:git|gh|az)\1)/gi, ''); // $"git" is git: the dollar goes with the locale quote
+  const set = new Map([...text.matchAll(NAME_SET)].map((m) => [m[1], m[3]]));
+  return set.size ? text.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : text;
+}
+
 // One decision for one tool call. req: { tool: 'shell' | 'edit' | 'ask' | 'unknown'; command?; role?; protectedBranches?;
 // allowAsk?; agent? (CB_AGENT); paths? (an edit's targets, editTargets) }. Returns { allow: true } or { allow: false, kind, reason }: kind 'dangerous' (a dangerous command or a
 // CB_PROTECTED_BRANCHES push), 'role' (a role rule), 'input' (unreadable input, unknown tool or role) or 'ask'. The
@@ -2734,12 +2778,16 @@ export function evaluate(req) {
     }
     if (tool === 'shell') {
       if (typeof command !== 'string') return block('input', 'guard could not read hook input (the command is not a string)');
-      const danger = check(command);
-      if (danger) return block('dangerous', danger);
-      const branch = protectedPush(command, Array.isArray(protectedBranches) ? protectedBranches : []);
-      if (branch) return block('dangerous', pushReason(branch));
-      const byRole = checkRole(command, role, { readScript, hosts, deployHost });
-      if (byRole) return block('role', byRole);
+      // #4737: judged as written, then with split and built names read out (only when that changes something)
+      const shown = revealed(command);
+      for (const text of shown === command ? [command] : [command, shown]) {
+        const danger = check(text);
+        if (danger) return block('dangerous', danger);
+        const branch = protectedPush(text, Array.isArray(protectedBranches) ? protectedBranches : []);
+        if (branch) return block('dangerous', pushReason(branch));
+        const byRole = checkRole(text, role, { readScript, hosts, deployHost });
+        if (byRole) return block('role', byRole);
+      }
       // #4626: only where the tool keeps a stdin open (Codex's exec_command) and only in a role seat
       const session = stdin === true && role ? stdinSession(command) : null;
       return session ? block('role', SESSION(session)) : { allow: true };

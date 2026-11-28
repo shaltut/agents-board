@@ -39,21 +39,21 @@ test('launchFlags: the flags each adapter passes, from builder and read-only lau
   const codex = launchFlags('codex', ROOT, ROOT);
   for (const f of ['--no-daemon', '-m', '-a', '--dangerously-bypass-hook-trust', '-s', '-c']) assert.ok(codex.flags.includes(f), `codex ${f}`);
   assert.ok(!codex.flags.some((f) => !f.startsWith('-')), 'values are not flags');
-  assert.deepEqual(new Set(launchFlags('claude', ROOT, ROOT).flags), new Set(['--model', '--permission-mode', '--settings', '--strict-mcp-config', '--mcp-config']));
+  assert.deepEqual(new Set(launchFlags('claude', ROOT, ROOT).flags), new Set(['--model', '--effort', '--permission-mode', '--settings', '--strict-mcp-config', '--mcp-config']));
   for (const f of ['--hostname', '--port', '-m', '--auto']) assert.ok(launchFlags('opencode', ROOT, ROOT).flags.includes(f), `opencode ${f}`);
-  for (const f of ['--dangerously-skip-permissions', '--settings', '--model']) assert.ok(launchFlags('agy', ROOT, ROOT).flags.includes(f), `agy ${f}`);
+  for (const f of ['--dangerously-skip-permissions', '--settings', '--model', '--effort']) assert.ok(launchFlags('agy', ROOT, ROOT).flags.includes(f), `agy ${f}`);
 });
 
 const probe = (table: Partial<Record<string, ReturnType<AgentProbe> | null>>): AgentProbe => (kind) => table[kind] ?? { path: null };
 
 test('the report: a CLI that no longer lists a launch flag fails, naming the flag and the adapter; one not installed is skipped', () => {
   const r = agentFlagsReport({ root: ROOT, probe: probe({
-    claude: { path: '/bin/claude', version: '2.1.0 (Claude Code)', help: '--model --permission-mode --settings --strict-mcp-config --mcp-config' },
+    claude: { path: '/bin/claude', version: '2.1.0 (Claude Code)', help: '--model --effort --permission-mode --settings --strict-mcp-config --mcp-config' },
     codex: { path: '/bin/codex', version: 'codex-cli 0.160.0', help: '-m, --model\n-a, --ask-for-approval\n-s, --sandbox\n-c, --config\n--dangerously-bypass-hook-trust\n--disable' },
   }) });
   assert.equal(r.ok, false);
   assert.equal(r.problems, 1);
-  assert.ok(r.lines.some((l) => /^agents: claude 2\.1\.0 \(Claude Code\) lists all 5 launch flags$/.test(l)), r.lines.join('\n'));
+  assert.ok(r.lines.some((l) => /^agents: claude 2\.1\.0 \(Claude Code\) lists all 6 launch flags$/.test(l)), r.lines.join('\n'));
   const codex = r.lines.find((l) => l.startsWith('agents: codex'))!;
   assert.match(codex, /codex-cli 0\.160\.0: --help does not list --no-daemon/);
   assert.match(codex, /cli\/agents\/codex\.ts/);
@@ -78,9 +78,9 @@ test('cb doctor: the agent check runs only when given a probe, and a missing fla
   assert.ok(!without.lines.some((l) => l.startsWith('agents:')), 'no probe, no agent lines: the existing callers spawn nothing');
   const bad = probe({ claude: { path: '/bin/claude', version: '2.1.0', help: '--model --settings' } });
   const withBad = doctor({ ...base, agentProbe: bad });
-  assert.ok(withBad.lines.some((l) => /agents: claude 2\.1\.0: --help does not list --permission-mode, --strict-mcp-config, --mcp-config/.test(l)), withBad.lines.join('\n'));
+  assert.ok(withBad.lines.some((l) => /agents: claude 2\.1\.0: --help does not list --effort, --permission-mode, --strict-mcp-config, --mcp-config/.test(l)), withBad.lines.join('\n'));
   assert.equal(withBad.json.problems, without.json.problems + 1);
-  assert.deepEqual(withBad.json.agents.claude.missing, ['--permission-mode', '--strict-mcp-config', '--mcp-config']);
+  assert.deepEqual(withBad.json.agents.claude.missing, ['--effort', '--permission-mode', '--strict-mcp-config', '--mcp-config']);
 });
 
 test('the report: an adapter value the CLI no longer offers fails, naming flag and value (PR 95 review F3)', () => {

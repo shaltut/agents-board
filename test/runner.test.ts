@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
-import { runJob } from '../cli/runner-job.ts';
+import { runJob, servesFolder } from '../cli/runner-job.ts';
+import { ensurePg } from '../db/pg.ts';
 import { loadConfig } from '../cli/recipes.ts';
 
 const WIN = process.platform === 'win32';
@@ -98,6 +99,7 @@ const recipes = {
   nmswap: { steps: [node('nmswap.mjs')], timeout: 60 },
   nulplant: { steps: [node('folder.mjs')], timeout: 60 },
   junkref: { steps: [node('junk.mjs')], timeout: 60 },
+  leavepg: { steps: [node('leavepg.mjs')], timeout: 180 },
   headless: { steps: [node('-e', "require('fs').writeFileSync('.git/HEAD', '')")], timeout: 60 },
 };
 const project = (gitUrl: string, rs: object) => ({ git: gitUrl, base: join(TMP, 'r'), lockfile: 'lock.txt', install: node('-e', "console.log('installed')"), installTimeout: 60, recipes: rs });
@@ -533,6 +535,60 @@ test('a NUL folder a job plants in the slot does not break the next job', { skip
   assert.equal(jp.state, 'passed', jp.summary);
   const jq = await ended(await add('ok'));
   assert.equal(jq.state, 'passed', jq.summary);
+});
+
+// #4756: a Postgres a job leaves running is no child of the job (pg_ctl starts it outside the tree), and it holds
+// .pgdata/server.log open: the next job's git clean deleted the cluster's other files under it, then failed on that one
+const PG_BIN = process.env.CB_PG_BIN ?? 'C:/Program Files/PostgreSQL/16/bin';
+const pgUp = (dir: string) => { try { execFileSync(join(PG_BIN, 'pg_ctl.exe'), ['-D', dir, 'status'], { stdio: 'ignore' }); return true; } catch { return false; } };
+const pgDown = (dir: string) => { try { execFileSync(join(PG_BIN, 'pg_ctl.exe'), ['-D', dir, 'stop', '-m', 'immediate', '-w'], { stdio: 'ignore' }); } catch {} };
+const slotOf = (id: number) => new RegExp(`job #${id} started in slot (\\d+)`).exec(runner.out)?.[1];
+
+test('a Postgres a job leaves running in the slot is stopped before the next job, and only that one', { skip: !WIN && 'Windows only', timeout: 300_000 }, async () => {
+  const port = await freePort(), otherPort = await freePort();
+  git('checkout', '-q', '-b', 'leavepg', 'main');
+  const P = commit('leavepg', { 'leavepg.mjs': `import { spawnSync } from 'node:child_process';
+const run = (exe, args) => { if (spawnSync(${JSON.stringify(PG_BIN)} + '/' + exe, args, { stdio: 'ignore' }).status !== 0) { console.log(exe + ' failed'); process.exit(1); } };
+run('initdb.exe', ['-D', '.pgdata', '-U', 'cb', '--auth=trust', '-E', 'UTF8']);
+run('pg_ctl.exe', ['-D', process.cwd() + '/.pgdata', '-o', '-p ${port} -c listen_addresses=127.0.0.1', '-l', '.pgdata/server.log', '-w', 'start']);
+console.log('left one running');
+` });
+  git('push', '-q', 'origin', 'leavepg');
+  git('checkout', '-q', 'main');
+  const first = await add('leavepg', P);
+  const j1 = await ended(first);
+  assert.equal(j1.state, 'passed', j1.summary);
+  const slot = slotOf(first)!, pgdata = join(TMP, 'r', `demo-${slot}`, '.pgdata'), other = join(TMP, 'other', '.pgdata');
+  try {
+    assert.ok(pgUp(pgdata), 'the job left its cluster running');
+    const second = await add('ok');
+    const j2 = await ended(second);
+    assert.equal(slotOf(second), slot, 'the same slot');
+    assert.equal(j2.state, 'passed', `${j2.summary}
+${logOf(second)}`);
+    assert.ok(!pgUp(pgdata), 'the leftover cluster is stopped');
+    // a stale pid file whose pid now belongs to another cluster (reused after a crash) never stops that one
+    ensurePg(other, otherPort);
+    mkdirSync(pgdata, { recursive: true });
+    writeFileSync(join(pgdata, 'postmaster.pid'), readFileSync(join(other, 'postmaster.pid')));
+    const j3 = await ended(await add('ok'));
+    assert.equal(j3.state, 'passed', j3.summary);
+    assert.ok(pgUp(other), "another folder's cluster is left running");
+  } finally {
+    pgDown(pgdata);
+    pgDown(other);
+  }
+});
+
+test("servesFolder: only a postmaster whose -D is that very folder", () => {
+  const cmd = '"C:/Program Files/PostgreSQL/16/bin/postgres.exe"  -D "C:/r/demo-1/.pgdata" -p 5434';
+  const slot = String.raw`C:\r\demo-1\.pgdata`;
+  assert.ok(servesFolder(cmd, slot));
+  assert.ok(servesFolder(cmd, 'c:/R/Demo-1/.pgdata'), 'Windows paths ignore case');
+  assert.ok(!servesFolder(cmd, String.raw`C:\r\demo-10\.pgdata`));
+  assert.ok(!servesFolder(cmd.replace('demo-1', 'demo-10'), slot));
+  assert.ok(!servesFolder('"C:/x/postgres.exe" -D "C:/main/.pgdata" -p 5434', slot));
+  assert.ok(!servesFolder('', slot));
 });
 
 test('a non-ref file a job leaves under .git/refs starts the slot over, not a failed fetch', async () => {

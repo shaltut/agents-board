@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   CLAUDE_MODELS, REPO_BOUND, agentLabel, homeRepo, isMulti, machineLabel, modelLabel, modelProblem, patchRole, plural, roleLabel,
-  seatCount, seatKeyLabel, seatName, seatNote, setCount, setRoleOn, setupLabel,
+  seatCount, seatEffort, seatKeyLabel, seatName, seatNote, setCount, setRoleOn, setupLabel,
   type Fallback, type Role, type Seat, type Squad, type SquadOptions,
 } from '@/lib/squad'
 import { NativeSelect, Problems, Stepper } from './bits'
@@ -54,12 +54,28 @@ function AgentField({ value, onChange, label, options, backup }: {
   )
 }
 
+/** How hard the agent thinks, from the levels that agent takes at start; the first choice leaves it to the agent. An
+ *  agent that takes none gets a line of text instead of a list. */
+function EffortField({ agent, value, onChange, label, options }: {
+  agent: string; value: string; onChange: (e: string | undefined) => void; label: string; options: SquadOptions
+}) {
+  const levels = options.efforts[agent] ?? []
+  if (levels.length === 0) return <span className="text-[13px] text-muted-foreground">{agentLabel(agent)} takes no effort setting.</span>
+  return (
+    <NativeSelect label={label} value={value} onChange={(e) => onChange(e || undefined)}>
+      <option value="">Default effort</option>
+      {levels.map((l) => <option key={l} value={l}>{l} effort</option>)}
+    </NativeSelect>
+  )
+}
+
 /** Backups a seat moves to if its agent stops (nothing switches to one yet: it is carried on each start). */
 function Backups({ list, onChange, own, options, label }: {
   list: Fallback[]; onChange: (l: Fallback[] | undefined) => void; own: Fallback; options: SquadOptions; label: string
 }) {
   const [agent, setAgent] = useState('codex')
   const [model, setModel] = useState('')
+  const [effort, setEffort] = useState<string>()
   const max = options.limits.fallbacks
   const problem = model ? modelProblem(agent, model, options.models_used[agent]) : null
   const dup = list.some((f) => f.agent === agent && f.model === model) || (own.agent === agent && own.model === model)
@@ -71,7 +87,7 @@ function Backups({ list, onChange, own, options, label }: {
         {list.map((f, i) => (
           <li key={`${f.agent}-${f.model}`} className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground tabular-nums">{i + 1}.</span>
-            <span className="min-w-0 truncate">{setupLabel(f.agent, f.model)}</span>
+            <span className="min-w-0 truncate">{setupLabel(f.agent, f.model, f.effort)}</span>
             <Button variant="ghost" size="icon-xs" aria-label={`Remove backup ${i + 1} of ${label}`}
               onClick={() => { const l = list.filter((_, j) => j !== i); onChange(l.length ? l : undefined) }}><X /></Button>
           </li>
@@ -79,10 +95,11 @@ function Backups({ list, onChange, own, options, label }: {
       </ol>
       {list.length < max && (
         <div className="flex flex-wrap items-center gap-2">
-          <AgentField value={agent} onChange={(a) => { setAgent(a); setModel(a === 'claude' ? 'sonnet' : '') }} label={`Backup agent for ${label}`} options={options} backup />
+          <AgentField value={agent} onChange={(a) => { setAgent(a); setModel(a === 'claude' ? 'sonnet' : ''); setEffort(undefined) }} label={`Backup agent for ${label}`} options={options} backup />
           <ModelField agent={agent} value={model} onChange={setModel} label={`Backup model for ${label}`} options={options} />
+          <EffortField agent={agent} value={effort ?? ''} onChange={setEffort} label={`Backup effort for ${label}`} options={options} />
           <Button variant="outline" size="sm" disabled={!model || !!problem || dup}
-            onClick={() => { onChange([...list, { agent, model }]); setModel(agent === 'claude' ? 'sonnet' : '') }}><Plus /> Add a backup</Button>
+            onClick={() => { onChange([...list, { agent, model, ...(effort ? { effort } : {}) }]); setModel(agent === 'claude' ? 'sonnet' : ''); setEffort(undefined) }}><Plus /> Add a backup</Button>
           {model && problem && <span className="w-full text-[13px] text-destructive">{problem}</span>}
           {model && !problem && dup && <span className="w-full text-[13px] text-muted-foreground">That one is already listed, or is the seat itself.</span>}
         </div>
@@ -146,6 +163,7 @@ export function RoleCard({ role, squad, options, seats, supervised, problems, ed
             <span className="w-16 text-xs text-muted-foreground">Runs</span>
             <AgentField value={agent} onChange={(a) => edit((s) => patchRole(s, role, { agent: a }, defaults))} label={`Agent for ${name}`} options={options} />
             <ModelField agent={agent} value={spec.model ?? ''} onChange={(m) => edit((s) => patchRole(s, role, { model: m }, defaults))} label={`Model for ${name}`} options={options} />
+            <EffortField agent={agent} value={spec.effort ?? ''} onChange={(v) => edit((s) => patchRole(s, role, { effort: v }, defaults))} label={`Effort for ${name}`} options={options} />
           </div>
           {agent !== 'claude' && <p className="text-[13px] text-muted-foreground">Starts only on machines where its tool check has been confirmed.</p>}
           <Backups list={spec.fallback ?? []} own={{ agent, model: spec.model ?? '' }} options={options} label={name}
@@ -155,7 +173,7 @@ export function RoleCard({ role, squad, options, seats, supervised, problems, ed
               <div className="text-xs text-muted-foreground">Seats set differently</div>
               {Object.entries(spec.seats).map(([k, sv]) => (
                 <div key={k} className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="min-w-0">{seatKeyLabel(squad, role, k)} runs {setupLabel(sv.agent ?? spec.agent, sv.model ?? spec.model)}{sv.fallback?.length ? ', with its own backups' : ''}</span>
+                  <span className="min-w-0">{seatKeyLabel(squad, role, k)} runs {setupLabel(sv.agent ?? spec.agent, sv.model ?? spec.model, seatEffort(spec, sv))}{sv.fallback?.length ? ', with its own backups' : ''}</span>
                   <Button variant="ghost" size="xs" onClick={() => edit((s) => {
                     const next = patchRole(s, role, {}, defaults)
                     const st = next.roles[role]!.seats!
