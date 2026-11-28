@@ -179,12 +179,16 @@ async function quotaStops(d: Deps, state: State, herdr: { status: Record<string,
       if (!pane) throw new Error('herdr lists it with no pane');
       const r = d.run(m, ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', String(READ_LINES), '--format', 'text'], 15_000);
       if (r.status !== 0) throw new Error((r.error?.message || r.stderr || 'herdr failed').trim().slice(0, 200));
-      const stop: QuotaSignal | null = a.detectQuotaStop(seatOf(state, s.actor, a.kind, pane, s.machine), { agent_status: herdr.status[hn] }, paneTail(r.stdout ?? ''));
+      const tail = paneTail(r.stdout ?? '');
+      const stop: QuotaSignal | null = a.detectQuotaStop(seatOf(state, s.actor, a.kind, pane, s.machine), { agent_status: herdr.status[hn] }, tail);
       d.memory.unreadTold.delete(s.actor);
       if (stop?.kind !== 'quota') continue;
       const lead = leadOf(state), isLead = s.role === 'lead' || s.actor === lead, toTell = isLead ? undefined : lead;
       const want = wantList(state.project, state.squad).find((w) => w.name === s.actor);
-      const seat = state.supervised && state.auto_backup && !isLead ? want : undefined; // the seat that may be switched
+      // the seat that may be switched: the switch applies, and the words stand where the CLI prints its own limit message
+      // (a seat whose own output quotes them is only told of)
+      const applies = state.supervised && !!state.auto_backup && !isLead, banner = a.atQuotaBanner(tail);
+      const seat = applies && banner ? want : undefined;
       const next = seat ? nextBackup(state.project, state.squad, seat, s, startProblem) : null;
       if (s.quota_told) {
         if (!seat) continue;
@@ -210,6 +214,7 @@ async function quotaStops(d: Deps, state: State, herdr: { status: Record<string,
       await tell(d, toTell, `supervisor: ${s.actor} looks stopped by its model's quota: ${where} shows the CLI's limit message. It holds ${s.holds} card(s).`
         + (stop.retryAfterSec ? ` The CLI says to retry in about ${Math.ceil(stop.retryAfterSec / 60)} min.` : '')
         + (backups ? ` Backups named for the seat: ${backups}.` : '')
+        + (applies && !banner ? " Automatic backup will not switch it: the words are not where the CLI prints its own limit message." : '')
         + (next ? ` If the next check still sees it, with nothing done on the board in between, the supervisor switches it to ${runsOn(next.launch)}: it is closed and started there, and keeps its cards.`
           : ' Nothing was switched or closed: check the pane, then restart it on another model or hand its cards over.'), out);
     } catch (e) {
@@ -468,7 +473,7 @@ export const locked = async (lock: any) => (await lock`select pg_try_advisory_lo
 
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`;
   let sql = connect(undefined, { app, max: 1 });

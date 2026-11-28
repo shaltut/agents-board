@@ -620,7 +620,9 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   once in its log (`cannot check <seat> for a quota stop`);
 - switches a stopped seat to its squad's backup, only where the owner turned **Automatic backup** on for the project
   (settings page, off by default: a switch can send the project's code to the backup's provider) and the squad is
-  supervised. A seat, never the lead, seen stopped at two checks in a row with nothing done on the board in between is
+  supervised. The words must also stand where the CLI prints its own limit message (at the start of a line, the input
+  area right below, nothing the agent printed after it); elsewhere the lead is only told. A seat, never the lead, seen
+  stopped like that at two checks in a row with nothing done on the board in between is
   closed with its cards, which stay its own, and started under its name on the first later entry of its `fallback`
   list that this machine can start; at most 2 a tick, each taking one of the 3 starts. The lead is told at the first
   sighting what will happen, and after the switch. Each is a `switch` board event (`switch <seat> (sonnet to haiku)`).
