@@ -1444,40 +1444,39 @@ const HERDR_OPT_ARG = new Set(['--machine', '-m', '--session', '--remote', '--re
 const LEAD_HERDR = new Set(['agent prompt', 'pane send-keys']);
 const LEAD_SSH_HOST = /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$/;
 const OWN_HOST_VAR = /^\$\{?(?:HOSTNAME|HOST|COMPUTERNAME)\}?$/i;
-// #4734: "at" is also an English word and a variable name, so quoted text and script lines (if (at < 0), grep "a|at|b")
-// reach command position. It schedules only with a time: its first operand starts like one (a digit, now, noon, midnight,
-// teatime, today, tomorrow, next, a month or weekday, a + increment, a Windows \\host), or the guard cannot read it ($, a backtick), or -t gives it, or xargs
-// feeds it. -b is batch, which needs no time. A redirect whose target the segment split cut off (at 2>&1 now) hides what
-// follows, so it counts too; <= and >= are redirects to a file named =. An operand the shell turns into nothing ("") is
-// skipped, and one it may expand into a time (a brace list, a glob) counts. -l -r -d -c first only list or remove jobs.
-const AT_DAY = 'next|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|satur|sun)(?:day)?|sat';
-const AT_TIME = new RegExp(String.raw`^(?:\d|\+(?!=)|(?:now|noon|midnight|teatime|today|tomorrow|${AT_DAY})(?![a-z])|\\\\|.*[$\x60])`, 'i');
-const AT_REDIRECT = /^(?:\d*|&)(?:<<<|<<-?|<>|>>|>\||<|>)(.*)$/;
-const BRACES = /\{([^{}\s]*)\}/g; // one pass: a run stops at the next brace or blank
-const braceList = (text) => { for (const m of text.matchAll(BRACES)) if (/,|\.\./.test(m[1])) return true; return false; };
-const hasGlob = (word) => /[*?[]/.test(word.replace(new RegExp(QUOTED, 'g'), ''));
-// seg is the command's segment: WORD drops braces, so a brace list (at {,now}) is only seen there
-function atSchedules(a, seg) {
-  if (/^-[lrdc]$/.test(a[0] ?? '')) return false;
-  if (braceList(seg)) return true;
-  for (let i = 0; i < a.length; i++) {
-    const redirect = AT_REDIRECT.exec(a[i]);
-    if (redirect) {
-      if (!redirect[1] && ++i >= a.length) return true;
-      continue;
-    }
-    if (a[i].startsWith('-')) {
-      if (/^-[A-Za-z]*b/.test(a[i]) || /^-[mMvkV]*t/.test(a[i])) return true;
-      if (/^-[mMvkV]*[fqu]$/.test(a[i]) && hasGlob(a[++i] ?? '')) return true;
-      continue;
-    }
-    if (!a[i].replace(/["'\\\s]/g, '')) continue; // "", " " and "\ " leave the time to the next operand
-    const word = a[i].replace(/["']/g, '').trim(); // n""ow is now to the shell, and so is n\ow
-    return hasGlob(a[i]) || AT_TIME.test(word) || AT_TIME.test(word.replace(/\\/g, ''));
-  }
-  return false;
+// #4734: "at" is also an English word and a variable name, so a script line (if (at < 0)) reaches command position. It is
+// blocked, like every other scheduler word, unless what follows is one of a few shapes that cannot schedule. Working out
+// when at WOULD schedule was tried and failed three reviews: a shell has too many ways to write a flag or a time. The
+// shapes, judged on the text as written:
+//   - nothing after the word (at refuses to run without a time), unless the segment was cut at & (&> is a redirect)
+//   - the end of a search pattern's group: (before|at)\b
+//   - a comparison with a number, closed: at < 0)   (< only: after > or <= the number is at's time)
+//   - a script's assignment or equality: at = k, at === -1
+//   - listing or removing jobs: at -l, at -c 5, at -r 3, at -d 3; at -V or --version with nothing after
+// The words of the last two may hold nothing the shell rewrites (a quote, \, $, a backtick, a brace, a glob, a redirect)
+// and no further option, and their segment must not have been cut at & (&> is a redirect). Where a ) follows, bash takes
+// do or then straight after it, so only the end, a { or a script's throw, return, break or continue may come next.
+const AT_NOTHING = /^[ \t\r]*$/;
+const AT_GROUP_END = /^\)\\{1,2}[bBsSwWdD]/;
+const AT_COMPARE = /^[ \t]*<[ \t]*\d{1,19}[ \t]*\)/;
+const AT_SCRIPT = /^[ \t]+(?:={1,3}|!={1,2}|-[lcrd])(?=[ \t\r)]|$)/;
+const AT_VERSION = /^[ \t]+(?:-V|--version)[ \t\r]*$/;
+const AT_UNREAD = /["'\\$`{}<>*?[\]~]|(?:^|[^\w.])-[-A-Za-z]/;
+const AT_AFTER = /^[ \t\r]*(?:\{[ \t\r]*)?(?:$|(?:throw|return|break|continue)(?![\w-]))/;
+// tail: the segment's text after the word; cut: the segment ended at an &
+function atHarmless(tail, cut) {
+  if (AT_NOTHING.test(tail)) return !cut;
+  if (AT_GROUP_END.test(tail)) return true;
+  const compare = AT_COMPARE.exec(tail);
+  if (compare) return AT_AFTER.test(tail.slice(compare[0].length));
+  if (AT_VERSION.test(tail)) return !cut;
+  const shape = AT_SCRIPT.exec(tail);
+  if (!shape) return false;
+  const close = tail.indexOf(')', shape[0].length);
+  if (AT_UNREAD.test(tail.slice(shape[0].length, close < 0 ? tail.length : close))) return false;
+  return close < 0 ? !cut : AT_AFTER.test(tail.slice(close + 1));
 }
-function freshLaunch(name, a, hosts, role, seg = '') {
+function freshLaunch(name, a, hosts, role, atSafe = () => false) {
   const only = (ok) => a.length > 0 && a.every((x) => ok.test(x));
   if (OTHER_USER.has(name)) return only(/^(?:--version|-V|-h|--help|-l|--list|-k|-K)$/) ? null : name;
   if (name === 'ssh' || name === 'mosh') {
@@ -1492,7 +1491,7 @@ function freshLaunch(name, a, hosts, role, seg = '') {
   }
   if (name === 'wsl') return only(/^(?:-l|--list|-v|--verbose|--status|--version|--help|-q|--quiet|--shutdown|--update|--all|--running)$/) ? null : name;
   if (name === 'launchctl') return a.some((x) => /^(?:submit|load|bootstrap|start|kickstart|asuser)$/.test(x)) ? name : null;
-  if (name === 'at') return atSchedules(a, seg) ? name : null;
+  if (name === 'at') return atSafe() ? null : name;
   if (name === 'crontab') return a.some((x) => /^-[lr]$/.test(x)) ? null : name;
   if (name === 'systemd-run') return only(/^(?:--version|-h|--help)$/) ? null : name;
   if (name === 'batch') return name;
@@ -1567,7 +1566,9 @@ function blankSearchPatterns(text) {
 }
 function freshEnvOne(command, hosts, role) {
   const raw = stripMessages(String(command ?? ''));
-  for (const seg of blankSearchPatterns(raw).match(SEGMENTS) ?? []) {
+  const shell = blankSearchPatterns(raw);
+  for (const found of shell.matchAll(SEGMENTS)) {
+    const seg = found[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
     if (!FRESH_NAME.test(seg)) continue;
     const w = seg.match(WORD) ?? [];
@@ -1578,7 +1579,9 @@ function freshEnvOne(command, hosts, role) {
       if (ASSIGNMENT.test(w[i]) || FRESH_WRAP.has(name)) continue;
       if (name === 'env') { while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) i++; continue; }
       if (name === 'timeout') { while (w[i + 1] && w[i + 1].startsWith('-')) i++; i++; continue; }
-      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, seg)
+      // asked once a segment at most: only its first command word is judged
+      const atSafe = () => atHarmless(seg.slice([...seg.matchAll(WORD)][i].index + w[i].length), shell[found.index + seg.length] === '&');
+      const why = freshLaunch(name, w.slice(i + 1, i + 41), hosts, role, atSafe)
         ?? (name === 'at' && w.slice(0, i).some((x) => cmdName(x) === 'xargs') ? name : null);
       if (why) return FRESH_ENV(why);
       cmd = false;
