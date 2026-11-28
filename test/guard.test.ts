@@ -310,6 +310,42 @@ test('#4824: a heredoc message to git commit stays text beside a redirect; what 
   }
 });
 
+// #4834: a heredoc body is text only when the words before its marker are a command of their own (a ; or & inside quotes
+// starts none) and a cat sends it to a file, not on to a shell
+test('#4834: a heredoc body a shell runs is judged; a body written to a file or fed to a message command stays text', () => {
+  const allow = (command: string) => evaluate({ tool: 'shell', command, role: 'builder' }).allow;
+  const run = (head: string, end = '') => `${head}\nunset CB_ROLE\nEOF${end}`;
+  assert.deepEqual([
+    run(`bash -c "bash; cb x" <<'EOF'`),
+    run(`bash -c 'bash; cb x' <<'EOF'`),
+    run(`bash -c "bash\ncb x" <<'EOF'`),
+    run(`bash -c "bash & git commit -F - " <<'EOF'`),
+    run(`bash -c 'eval "$0";cb log 1 ' "$(cat <<'EOF'`, '\n)"'),
+    run("cat > /dev/stdout <<'EOF' | bash"),
+    run(`cat > "/dev/fd/1" <<'EOF' | sh`),
+    run("cat >> //proc//self/fd/1 <<'EOF' | bash"),
+    run("cat > notes -n > /dev/stdout <<'EOF'"),
+    run("cat > $OUT <<'EOF' | bash"),
+    run("cat <<'EOF' > $OUT |& bash"),
+    run("{ cat > /dev/stdout <<'EOF'", '\n} | bash'),
+  ].filter(allow), []);
+  const text = (head: string, end = '') => `${head}\nThe loader does not read the row; unset values stay, and CB_ROLE is only named.\nEOF${end}`;
+  assert.deepEqual([
+    text("cd /tmp/w && git add -A && git commit -q -F - <<'EOF'"),
+    text(`echo "a; b" && cat > notes.md <<'EOF'`),
+    text(`echo 'x; y' ; cb log 1 - <<'EOF'`),
+    text(`echo "line one\nline two"\ncat > notes.md <<'EOF'`),
+    text("cat > a.txt <<'EOF'\nfirst\nEOF\ncb log 1 - <<'EOF'"),
+    text("cat > /home/u/dev/notes.md <<'EOF'"),
+    text("cat > /dev/null <<'EOF'"),
+    text(`cat > "$S/notes.md" <<'EOF'`),
+    text("cat > notes.md <<'EOF' || echo no"),
+    text("cat > notes.md <<'EOF' && git add notes.md"),
+    text(`git commit -m "$(cat <<'EOF'`, '\n)"'),
+    text(`git add -A && git commit -m "$(cat <<'EOF'`, '\n)"'),
+  ].filter((c) => !allow(c)), []);
+});
+
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
 // .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
 const fenceWrites = [
