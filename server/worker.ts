@@ -155,7 +155,6 @@ export function workerApp(listen: () => Promise<unknown>) {
   const w = new Hono();
   w.use('*', async (c, next) => {
     c.header('X-CB-Proto', '1');
-    c.header('X-CB-Code', servedSha() ?? '');
     await next();
   });
 
@@ -164,12 +163,14 @@ export function workerApp(listen: () => Promise<unknown>) {
   const signedIn = (label: (c: Context<any>) => string, run: (c: Context<any>, s: Signed) => Promise<Response>) => async (c: Context<any>) => {
     const started = Date.now();
     const m = KEY.exec(c.req.header('authorization') ?? '');
-    let sent = false, res: Response;
+    let sent = false, why = '', res: Response;
     try {
       if (!m) throw new Refused(401, 'a worker key is needed: Authorization: Bearer cbk1_...');
       const key = { id: m[1]!, hash: createHash('sha256').update(m[2]!).digest() };
       const from = c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim().slice(0, 64) || null;
       const who = await whoIs(db(), key, from);
+      const release = servedSha();
+      if (release) c.header('X-CB-Code', release); // only a signed-in worker is told what the board runs
       const wait = overLimit(key.id);
       if (wait) {
         c.header('Retry-After', String(wait));
@@ -179,8 +180,10 @@ export function workerApp(listen: () => Promise<unknown>) {
     } catch (e: any) {
       const reply = failure(e, sent);
       res = c.json(reply.body, reply.status);
+      // the code alone says what broke; a message can hold an address or an argument
+      if (reply.status >= 500) why = ` ${String((e as any)?.code ?? (e as any)?.name).replace(/[^\w]/g, '').slice(0, 40)}`;
     }
-    console.log(`worker api: key ${m?.[1] ?? '-'} ${label(c)} ${res.status} ${Date.now() - started}ms`);
+    console.log(`worker api: key ${m?.[1] ?? '-'} ${label(c)} ${res.status} ${Date.now() - started}ms${why}`);
     return res;
   };
 
