@@ -137,6 +137,34 @@ test('a switch planned on a squad that has since changed records nothing', async
   assert.equal(await backups(sql), 0);
 });
 
+// R1 on 568016b: the switch was checked before the row lock, so a call that waited on one of these still recorded
+for (const [name, change] of [
+  ['automatic backup going off', (tx: any) => tx`select cb.project_auto_backup('sv', false, 'ahmed')`],
+  ['the project being disabled', (tx: any) => tx`select cb.project_state('sv', 'disabled', 'ahmed')`],
+  ['the pipeline going off', (tx: any) => tx`select cb.project_pipeline('sv', false, 'ahmed')`],
+] as const) {
+  test(`a switch that waits for ${name} records nothing`, async () => {
+    const { sql, sup } = await setup();
+    await on(sql);
+    const planned = (await state(sup)).squad;
+    // not the transaction's own connection: it would see pg_stat_activity as it first read it
+    const watch = conn('cb-test/watch');
+    const waiting = async () => (await watch`select count(*)::int as n from pg_stat_activity
+      where datname = current_database() and wait_event_type = 'Lock' and query like '%seat_switch%'`)[0].n;
+    let outcome: Promise<string> | undefined;
+    await sql.begin(async (tx: any) => {
+      await change(tx); // not committed yet
+      outcome = switchTo(sup, 1, B1, planned).then(() => 'recorded', (e: Error) => e.message);
+      for (let i = 0; !(await waiting()); i++) {
+        assert.ok(i < 400, 'the switch never waited for the change');
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    });
+    assert.match(await outcome!, /automatic backup is off/);
+    assert.equal(await backups(sql), 0);
+  });
+}
+
 // PR 175 (#4766) added the effort a seat should run; a seat on a backup has the backup's
 test("a seat on a backup is meant to run the backup's effort, else its role's on the role's agent", async () => {
   const { sql, sup } = await setup();
