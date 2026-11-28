@@ -72,7 +72,7 @@ test('the runner\'s reads and its reconcile take their lists as jsonb', async ()
   const { sql } = await board();
   const runner = postgres(TEST_URL, { onnotice: () => {}, max: 1, connection: { application_name: 'cb-runner/test' } }); clients.push(runner);
   assert.equal((await runner`select cb.runner_settings('pc') as s`)[0].s, null);
-  await runner`select cb.runner_hello('pc', 'http://h:1', ${runner.json({})})`;
+  await runner`select cb.runner_hello('pc', 'http://h:1', ${runner.json([])})`;
   await sql`update cb.runners set slots_set = 6, stack_gap_set = 45 where name = 'pc'`;
   assert.deepEqual((await runner`select cb.runner_settings('pc') as s`)[0].s, { slots_set: 6, lanes_set: null, stack_gap_set: 45 });
   const add = async (state: string) => (await sql`insert into cb.jobs (project, recipe, sha, requester, runner, state)
