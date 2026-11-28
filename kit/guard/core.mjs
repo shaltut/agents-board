@@ -86,6 +86,7 @@ function bashReader(text) {
     low: 0, // the fewest open since the caller last set it
     unchecked: 0,
     unsure: false,
+    starts: new Set([0]), // #4834: where a command may start, as read: after a ; & | ( or line break that no quote holds
     at: () => i,
     skip(to) { i = to; },
     read(to) {
@@ -99,7 +100,7 @@ function bashReader(text) {
         if (c === '$') {
           const d = text[i + 1];
           if (d === '(') {
-            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; continue;
+            push((quoted ? open.at(-1) === 'g' : !startsWord()) ? 'x' : '('); i += 2; r.starts.add(i); continue;
           }
           if (d === '{') {
             PLAIN_PARAM.lastIndex = i;
@@ -141,6 +142,7 @@ function bashReader(text) {
         else if (c === '-' && text.startsWith('--%', i)) lost(); // PowerShell stops reading quotes after it
         else if (c === 'c' && startsWord()) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) lost(); }
         i++;
+        if (c === ';' || c === '&' || c === '|' || c === '(' || c === '\n') r.starts.add(i);
       }
     },
   };
@@ -213,7 +215,7 @@ function replaceHeredocs(text, fn) {
     if (found && !isHeredoc(found.at, nl, found)) found = null;
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
-    out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id);
+    out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id, (o) => bash.starts.has(s + o));
     pos = found.end;
     LINE_START.lastIndex = pos;
     const next = LINE_START.exec(text);
@@ -232,21 +234,36 @@ const MESSAGE_ARG = new RegExp(String.raw`(?:^|[;&|(][ \t]*)(?:${MESSAGE_HEAD})[
 const FD_DUP = /(?<=>)&(?=(?:\d+|-)(?:[ \t<>]|$))/g;
 const MESSAGE_READER = /^[ \t]*(?:cb[ \t]|git[ \t]+commit\b.*-F[ \t]+-)/;
 
-// the command segment holding the << at `at`
+// #4834: a cat's body is its output: text only when that goes to a file. A device may be the pipe itself (/dev/stdout,
+// /proc/self/fd/1), and a command piped on may hand the body to a shell, whatever the target is called ($OUT)
+const CAT = /^[ \t]*cat(?![\w-])/;
+const DEVICE_TARGET = />>?[ \t]*\/+(?:\.\/+)*(?:dev|proc)\/+(?!null(?![\w./-]))/;
+const PIPED_ON = /^[^;&|]*\|(?!\|)/;
+
+// the command segment holding the << at `at`, and where in the line it starts
 function heredocSegment(line, at) {
   const before = line.slice(0, at);
-  const seg = before.slice(Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1);
+  const from = Math.max(...[';', '&', '|', '('].map((c) => before.lastIndexOf(c))) + 1;
   const after = line.slice(at).search(/[;&|]/);
-  return seg + (after < 0 ? line.slice(at) : line.slice(at, at + after));
+  return { from, text: before.slice(from) + (after < 0 ? line.slice(at) : line.slice(at, at + after)) };
 }
 
-// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<.
-function writesText(line) {
+// Does the heredoc header line belong to a text writer? Judged from the command segment holding the <<, which must start
+// where the shell starts a command (startsAt, #4834): the words after a quoted ; are part of some other command
+function writesText(line, startsAt) {
   if (line.split('<<').length !== 2) return false; // two heredocs on one line: strip neither
   const at = line.indexOf('<<');
   const before = line.slice(0, at);
-  if (SUBST_CAT.test(before)) return MESSAGE_ARG.test(before.replace(SUBST_CAT, '')); // "$(cat <<'EOF' in a message arg
-  return TEXT_WRITER.test(heredocSegment(line, at)) || MESSAGE_READER.test(heredocSegment(line.replace(FD_DUP, '_'), at));
+  if (SUBST_CAT.test(before)) { // "$(cat <<'EOF' in a message arg
+    const m = MESSAGE_ARG.exec(before.replace(SUBST_CAT, ''));
+    return m !== null && startsAt(m.index + (/^[;&|(]/.test(m[0]) ? 1 : 0));
+  }
+  const plain = line.replace(FD_DUP, '_');
+  const writes = (re, { from, text }) => re.test(text) && startsAt(from);
+  if (writes(MESSAGE_READER, heredocSegment(plain, at))) return true;
+  const seg = heredocSegment(line, at);
+  if (!writes(TEXT_WRITER, seg)) return false;
+  return !CAT.test(seg.text) || !(DEVICE_TARGET.test(seg.text.replace(/["'\\]/g, '')) || PIPED_ON.test(plain.slice(at)));
 }
 
 // #4669: several rules strip the same command in one evaluate; the last answer is kept (a pure string function)
@@ -258,7 +275,7 @@ export function stripMessages(cmd) {
   return out;
 }
 function stripMessagesOnce(cmd) {
-  return replaceHeredocs(cmd, (all, line, id) => (writesText(line) ? `${line}\n${id}` : all))
+  return replaceHeredocs(cmd, (all, line, id, startsAt) => (writesText(line, startsAt) ? `${line}\n${id}` : all))
     .replace(MESSAGE_CMD, (_all, head, args) =>
       // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
       head + replaceQuoted(args, (q) =>
