@@ -23,7 +23,7 @@ const CALLED = [...new Set([
   ...named(read('cli/squad-trust.ts'), /\bcallFn\(/g),
   // the runner's three files name theirs through board(), which is call() on the runner's own connection
   ...['cli/runner.ts', 'cli/runner-board.ts', 'cli/runner-job.ts'].flatMap((f) => named(read(f), /(?<![\w.])board\(/g)),
-  ...named(read('cli/triage.ts'), /(?<![\w.])call\(/g),
+  ...['cli/triage.ts', 'cli/supervise.ts', 'cli/lease.ts'].flatMap((f) => named(read(f), /(?<![\w.])call\(/g)),
 ])].sort();
 
 const returnsRows = (fn: string) => {
@@ -42,6 +42,15 @@ test('OPS names no helper of the schema, only functions it has, each read as it 
     assert.ok(!fn.startsWith('_'), `${fn}: a _name is the schema's own helper, never a board operation`);
     assert.equal(!!op.setof, returnsRows(fn), `${fn}: setof in server/ops.ts must say whether cb.${fn} returns rows`);
   }
+});
+
+// two branches can each add a name, and the object keeps only the later entry: a seat's operation would silently stop
+// being served
+test('no name is listed twice', () => {
+  const names = [...read('server/ops.ts').matchAll(/\.\.\.list\((?:\{[^}]*\}|\w+), (?:`([^`]*)`|'([^']*)')\)/g)]
+    .flatMap((m) => (m[1] ?? m[2])!.trim().split(/\s+/));
+  assert.deepEqual(names.filter((n, i) => names.indexOf(n) !== i), []);
+  assert.deepEqual([...new Set(names)].sort(), Object.keys(OPS).sort(), 'the check reads every list');
 });
 
 test('OPS holds nothing cb does not call', () => {
