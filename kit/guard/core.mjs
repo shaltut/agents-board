@@ -3105,22 +3105,33 @@ const NAME_OVERLAP = 64; // a name split over quotes is looked for this far back
 // (lost.handed). Each character is looked at once, plus the overlap at each call
 function pipelines(text, lost) {
   let from = 0, checked = 0, named = false, held = false;
+  // names are read only while a lost string waits for a shell, so a text that loses nothing costs nothing
   const look = (to) => {
-    if (!named && to > checked) { named = namesShell(text.slice(Math.max(from, checked - NAME_OVERLAP), to)); checked = to; }
-    if (named && held) lost.handed = true;
+    if (!held || to <= checked) return;
+    if (!named) named = namesShell(text.slice(Math.max(from, checked - NAME_OVERLAP), to));
+    checked = to;
+    if (named) lost.handed = true;
   };
   return {
     look,
     gap(start, end) {
-      for (const s of text.slice(start, end).matchAll(/\|\||&&|\|&|[;&\n|]/g)) {
+      if (end <= start) return;
+      const piece = text.slice(start, end);
+      if (!/[;&\n|]/.test(piece)) return;
+      for (const s of piece.matchAll(/\|\||&&|\|&|[;&\n|]/g)) {
         look(start + s.index);
         named = false;
         if (s[0] !== '|' && s[0] !== '|&') held = false;
         from = checked = start + s.index + s[0].length;
       }
     },
-    // a string with a lost target: its own words name no shell
-    hold(end) { held = true; lost.quoted = true; checked = Math.max(checked, end); },
+    // a string with a lost target, from start to end: what is before it is read now, its own words name no shell
+    hold(start, end) {
+      held = true;
+      lost.quoted = true;
+      look(start);
+      checked = Math.max(checked, end);
+    },
   };
 }
 // as bash counts quotes: each redirect goes with its whole target. A quoted piece, or a target that holds a command or a
@@ -3141,13 +3152,11 @@ function shellUnredirected(text, left, depth = 0, lost = {}) {
     let swap = match, end = next.lastIndex;
     pipe.gap(plain, m.index);
     if (quoted !== undefined) {
-      pipe.look(m.index);
       if (depth < 3 && /[<>]/.test(quoted)) {
         const inner = within(quoted.slice(1, -1));
         swap = quoted[0] + inner.bare + quoted[0];
-        if (inner.lost) pipe.hold(end);
+        if (inner.lost) pipe.hold(m.index, end);
       }
-      pipe.look(end);
     } else if (!match.startsWith('\\')) {
       let to = wordEnd(text, end, powershell);
       if (to === -1 && !powershell) { powershell = true; to = wordEnd(text, end, true); }
@@ -3157,11 +3166,9 @@ function shellUnredirected(text, left, depth = 0, lost = {}) {
       }
       if (to > end) {
         const word = text.slice(end, to);
-        pipe.look(m.index);
         if (depth < 3 && /[<>]/.test(word)) {
           const inner = within(word); // a here-string is the command's input; a >( ) target runs its own commands
-          if (inner.lost) { if (match.includes('<<<')) pipe.hold(to); else lost.quoted = true; }
-          pipe.look(m.index);
+          if (inner.lost) { if (match.includes('<<<')) pipe.hold(m.index, to); else lost.quoted = true; }
         }
         swap = left(text.slice(m.index, to), m.index, text);
         end = to;
