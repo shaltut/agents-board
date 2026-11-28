@@ -403,7 +403,9 @@ their name).
 
 **Sign-ins are stored as hashes (#4868).** The first setup with that change turns each user's old plain value into a
 hashed sign-in and empties `cb.users.token`: existing links and signed-in browsers keep working. Backups taken before
-it still hold the old values, which work until replaced (**New link**, or **Sign out everywhere** for an admin).
+it still hold the old values, which work until replaced (**New link**, or **Sign out everywhere** for an admin). Let
+the new container apply this schema (the [upgrade](#upgrade) does): applied ahead of it, the old server cannot sign
+anyone in once the column is empty.
 
 **Rolling the board back past that change** leaves the older code with an empty column: everyone is signed out and an
 admin cannot sign in. After the rollback, give every user a fresh value, then send members new links:
