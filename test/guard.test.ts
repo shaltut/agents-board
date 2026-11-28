@@ -1941,7 +1941,9 @@ test('#4789: after the end of rg\'s options nothing is its pre-processor option'
   // argument at all, so the word before it may take the --
   const maybeValue = ['rg * -- --pre sudo input.txt', 'rg @argv -- --pre sudo input.txt', 'rg ? -- --pre sudo x', 'rg [-]e -- --pre sudo x', 'rg a,-e -- --pre sudo x',
     'rg -e > out -- --pre sudo x', 'rg -e 2> err -- --pre sudo x', 'rg -e 2>/dev/null -- --pre sudo x', 'rg -e <<< w -- --pre sudo x', 'rg -e < in -- --pre sudo x',
-    'rg %F% -- --pre sudo x', 'rg "$F" -- --pre sudo x'];
+    'rg %F% -- --pre sudo x', 'rg "$F" -- --pre sudo x',
+    // PR 173 second review (R1): Windows PowerShell drops an empty argument, so the -- is -e's value
+    'rg -e "" -- --pre sudo x', "rg -e '' -- --pre sudo x", `rg -e ""'' -- --pre sudo x`, "rg --regexp '''' -- --pre sudo x", 'rg -e "" "" -- --pre sudo x'];
   for (const off of ['', ...thrownOff]) refused(maybeValue.map((c) => off + c));
   letThrough(["rg 'a*b' -- --pre=sudo f", "rg --glob='*.ts' -- --pre=sudo", 'rg "TODO" src -- --pre=sudo', 'rg -F src/a.ts -- --pre=sudo']);
 });
