@@ -151,3 +151,33 @@ test('pings_due: an unowned in_progress card is asked about once, with the fix; 
   await sql`select cb.pings_due()`;
   assert.equal(await orphans(), 2);
 });
+
+// #4679 (PR 112 N1, N3): an orphan asked once was forgotten for good, and a staged one used its ask without a message
+for (const pipeline of [false, true]) {
+  test(`pings_due: an unowned in_progress card is asked about again after a day (${pipeline ? 'staged, pipeline on' : 'unstaged'})`, async () => {
+    const sql = await freshDb(); clients.push(sql);
+    await sql`select cb.ensure_project('demo')`;
+    await sql`select cb.iam('pc', 'p2', 'orch@pc', 'demo')`;
+    await sql`select cb.task_add(project => 'demo', title => 'Orphan', status => 'in_progress', actor => 'orch@pc')`;
+    if (pipeline) await sql`select cb.project_pipeline('demo', true, 'ahmed')`;
+    await sql.begin(async (tx) => {
+      await tx`select set_config('cb.stage_ok', 'on', true)`;
+      await tx`update cb.tasks set assignee = '', stage = ${pipeline ? 'build' : null}, updated_at = now() - interval '30 hours'`;
+    });
+    await sql`update cb.events set at = now() - interval '30 hours'`;
+    await sql`select cb.task_ping_bulk(null, 'demo', true, 'ahmed')`;
+    const asks = async () => (await sql`select data ->> 'to' as to_, summary from cb.events where data ? 'nudge'`) as any[];
+    await sql`select cb.pings_due()`;
+    let a = await asks();
+    assert.deepEqual(a.map((x) => x.to_), ['orch@pc'], 'the lead is told, staged or not');
+    assert.match(a[0].summary, /nobody holds it: move it back \(cb move 1 next\) or assign it\. Asked again in a day/);
+    await sql`update cb.task_pings set last_ping_at = now() - interval '23 hours'`;
+    await sql`select cb.pings_due()`;
+    assert.equal((await asks()).length, 1, 'not within a day');
+    await sql`update cb.task_pings set last_ping_at = now() - interval '25 hours'`;
+    await sql`select cb.pings_due()`;
+    assert.equal((await asks()).length, 2, 'again after a day');
+    // the fix the line names works on a staged card too
+    await sql`select cb.task_move('1', 'next', null, 'orch@pc')`;
+  });
+}

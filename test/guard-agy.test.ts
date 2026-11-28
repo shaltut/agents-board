@@ -321,3 +321,77 @@ test('a shim copied without core.mjs, or beside a broken one, still denies', () 
 });
 
 test('cleanup', () => { rmSync(ws, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+
+// #4730: a builder works in one worktree per card, outside workspacePaths[0]. The workspace's registered linked worktrees
+// are inside the confinement; a registration counts only when the worktree's .git file points back at that same entry.
+function gitIn(cwd: string, ...args: string[]) {
+  const env: Record<string, string | undefined> = { ...process.env, GIT_CONFIG_GLOBAL: join(outside, 'no-gitconfig'), GIT_CONFIG_NOSYSTEM: '1' };
+  for (const k of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE)$/i.test(k)) delete env[k];
+  const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+}
+function repoWithWorktree() {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'agy-wt-')));
+  const main = join(base, 'main'), wt = join(base, 'card'), wt2 = join(base, 'card2');
+  mkdirSync(main);
+  gitIn(main, 'init', '-q');
+  gitIn(main, 'commit', '-q', '--allow-empty', '-m', 'x');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'one', wt);
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'two', wt2);
+  return { base, main, wt, wt2 };
+}
+const from = (root: string) => ({ cwd: root, workspacePaths: [root] });
+
+test('#4730: reads and edits inside a registered worktree of the workspace are allowed, absolute or relative', () => {
+  const { main, wt } = repoWithWorktree();
+  for (const t of [join(wt, 'src', 'a.ts'), '../card/src/a.ts']) {
+    assert.deepEqual(read({ TargetFile: t }, from(main)), { decision: 'allow' }, t);
+    assert.deepEqual(edit({ TargetFile: t }, from(main)), { decision: 'allow' }, t);
+  }
+  assert.deepEqual(edit({ TargetFile: 'src/a.ts' }, { cwd: wt, workspacePaths: [main] }), { decision: 'allow' });
+});
+
+test('#4730: a workspace that is itself a linked worktree reaches its sibling worktrees, not the main checkout', () => {
+  const { main, wt, wt2 } = repoWithWorktree();
+  assert.deepEqual(edit({ TargetFile: join(wt2, 'a.ts') }, from(wt)), { decision: 'allow' });
+  assert.match(edit({ TargetFile: join(main, 'a.ts') }, from(wt)).reason ?? '', /editing outside the workspace/);
+});
+
+test('#4730: the deny rules hold inside a worktree', () => {
+  const { main, wt } = repoWithWorktree();
+  for (const t of ['.git', '.agents/hooks.json', '.gemini/x', 'kit/guard/core.mjs', 'src/.git/x']) {
+    assert.equal(edit({ TargetFile: join(wt, t) }, from(main)).decision, 'deny', t);
+  }
+  for (const t of ['.agents/x', '.gemini/x', 'kit/guard/core.mjs']) assert.match(read({ TargetFile: join(wt, t) }, from(main)).reason ?? '', /not allowed/, t);
+  assert.deepEqual(read({ TargetFile: join(wt, '.git') }, from(main)), { decision: 'allow' }); // reading .git, as in the workspace
+  assert.match(edit({ TargetFile: join(wt, '.claude', 'settings.json') }, from(main)).reason ?? '', /fence/);
+  assert.match(read({ TargetFile: join(wt, '.env') }, from(main)).reason ?? '', /secret file/);
+  assert.match(edit({ TargetFile: wt }, from(main)).reason ?? '', /outside the workspace/);
+});
+
+test('#4730: a worktree nested in the workspace keeps its own kit/guard denied', () => {
+  const { main } = repoWithWorktree();
+  const nested = join(main, '.worktrees', 'n');
+  gitIn(main, 'worktree', 'add', '-q', '-b', 'nested', nested);
+  assert.match(edit({ TargetFile: join(nested, 'kit', 'guard', 'core.mjs') }, from(main)).reason ?? '', /kit\/guard is not allowed/);
+});
+
+test('#4730: only a registration whose worktree points back counts; neighbours and unrelated repos stay outside', () => {
+  const { base, main, wt } = repoWithWorktree();
+  const denied = (t: string) => assert.match(read({ TargetFile: t }, from(main)).reason ?? '', /reading outside the workspace/, t);
+  denied(join(base, 'card-sibling', 'a.ts'));
+  denied(join(base, 'a.ts'));
+  denied(join(repoWithWorktree().wt, 'a.ts'));
+  // a forged entry naming a folder that does not point back
+  const target = join(base, 'private');
+  mkdirSync(target);
+  mkdirSync(join(main, '.git', 'worktrees', 'forged'), { recursive: true });
+  writeFileSync(join(main, '.git', 'worktrees', 'forged', 'gitdir'), `${join(target, '.git')}\n`);
+  denied(join(target, 'a.ts'));
+  writeFileSync(join(target, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'card')}\n`); // points at another entry
+  denied(join(target, 'a.ts'));
+  // a stale entry: the folder was removed and reused without git
+  rmSync(wt, { recursive: true, force: true });
+  mkdirSync(wt);
+  denied(join(wt, 'a.ts'));
+});

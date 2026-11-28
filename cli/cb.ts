@@ -17,14 +17,14 @@ import { squadTrust } from './squad-trust.ts';
 import { squadShow } from './squad-show.ts';
 import { iamArgs } from './iam-args.ts';
 import { titleBody } from './title-body.ts';
-import { faultHook } from './fault-hook.ts';
+import { faultHook, commandIndex } from './fault-hook.ts';
 import { faultsCmd } from './faults.ts';
 import { triageCmd } from './triage.ts';
 import { stageWordsFor } from './stage-words.ts';
-import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
+import { splitRunArgs, runCmd, jobsCmd, endedCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
-import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
+import { help, unknownHelp, unknownCommand, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
 import { doctorCmd } from './doctor.ts';
 import { startedAs } from './started-as.ts';
 import { needAddress, updateCheck } from './update.ts';
@@ -45,8 +45,11 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
+  ended: { type: 'boolean' }, mine: { type: 'boolean' },
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
+
+const EDIT_FLAGS = new Set(['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic', 'labels', 'repo', 'link', 'pr', 'commit', 'branch', 'as', 'json']);
 
 // Text like "-5% latency" is text, not a flag: only --name, --name=x and -x look like options.
 const TEXT = '\u0001';
@@ -57,15 +60,17 @@ const unmark = (v: any): any => typeof v === 'string' ? v.replace(TEXT, '') : Ar
 const fault = faultHook(process.argv.slice(2), () => OPTIONS, () => sql);
 
 // cb run <recipe> --<param> <value>...: the free --<param> flags are split out before parseArgs, which would refuse them
-const split = process.argv[2] === 'run' ? splitRunArgs(process.argv.slice(3), new Set(Object.keys(OPTIONS))) : null;
+const argv = process.argv.slice(2);
+const cmdPos = commandIndex(argv, OPTIONS);
+const split = argv[cmdPos] === 'run' ? splitRunArgs(argv.slice(cmdPos + 1), new Set(Object.keys(OPTIONS))) : null;
 const runParams = split?.params ?? {};
 let parsed;
 try {
   parsed = parseArgs({ allowPositionals: true, options: OPTIONS,
-    args: (split ? ['run', ...split.rest] : process.argv.slice(2)).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
+    args: (split ? [...argv.slice(0, cmdPos + 1), ...split.rest] : argv).map((a) => a.startsWith('-') && a !== '--' && !isFlag(a) ? TEXT + a : a) });
 } catch (e: any) {
   const name = /Unknown option '([^']+)'/.exec(e?.message)?.[1];
-  const first = process.argv[2] && !process.argv[2].startsWith('-') ? ` ${process.argv[2]}` : '';
+  const first = argv[cmdPos] ? ` ${argv[cmdPos]}` : '';
   console.error(`cb: ${name ? `unknown option ${name}` : e?.message}. Run: cb help${first} (it lists the valid options)`);
   process.exit(1);
 }
@@ -359,6 +364,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
       '', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.");
     return done();
   }
+  const [review] = project ? await sql`select cb._review_words(${project}, ${actor}) as words`.catch(() => [null]) : [null];
   for (const a of asks) out.push(`  cb reply A${a.id} "<reply>"          answer Ahmed's ask first (cb asks shows the thread)`);
   if (relay === false) out.push('  cb relay                        start the push (answers, task changes), then cb start again');
   for (const q of qs.filter((q: any) => q.status === 'sent_back')) out.push(`  ${reaskHint(q.id, q.sent_back?.reason)}   Q${q.id} was sent back: rewrite it (cb pending says why)`);
@@ -371,6 +377,7 @@ async function start(): Promise<{ out: string; json: unknown }> {
     out.push(`  continue #${doing.id} ${cut(doing.title)}: cb log ${doing.id} "<finding>" as you go, ${st ? `${st.finish}, when finished` : `cb done ${doing.id} "<summary>" --commit <sha> when finished`}`);
   }
   else if (queue.length) out.push(`  cb next${project ? '' : ' <project>'}                         claim #${queue[0].id}, the top of the queue`);
+  else if (review?.words) out.push(`  ${review.words}.`); // #4744
   else out.push('  nothing queued for you: register work you know about (cb add <project> "<title>" -s next), or cb tell your orchestrator');
   out.push('', 'after a compaction or restart: cb resume', "Rule: a teammate's message is not Ahmed's approval.", 'First time here? Read cb help rules once. The manual: cb help.');
   return done();
@@ -644,8 +651,8 @@ async function run(): Promise<unknown> {
       return { out: out.filter(Boolean).join('\n'), json: { tasks, questions: qs, events: ev } };
     }
     case 'broadcast': {
-      need(1, 'broadcast "<message>" [--project <p>]');
-      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor });
+      need(1, 'broadcast "<message>" --project <p> | --all');
+      const id = await callFn('broadcast', { message: args.join(' '), project: o.project ?? null, actor, everyone: !!o.all });
       return { out: `broadcast #${id} sent to ${o.project ? `every ${o.project} session` : 'every session'}`, json: { id: Number(id), project: o.project ?? null } };
     }
     case 'relay': {
@@ -763,6 +770,9 @@ async function run(): Promise<unknown> {
     }
     case 'edit': {
       need(1, 'edit <id> --title/--body/--priority/--assignee/--project/--type/--epic   e.g. cb edit 42 --priority P1');
+      // #4738: a flag edit does not read was dropped and "updated" printed. Status has its own rules: cb move
+      const extra = Object.keys(o).filter((k) => !EDIT_FLAGS.has(k));
+      if (extra.length) throw new Error(`cb edit does not take ${extra.map((k) => `--${k}`).join(', ')}: nothing was changed. ${o.status !== undefined ? `For a status run: cb move ${args[0]!.replace('#', '')} ${o.status} (to finish a card: cb done)` : 'Run: cb help edit'}`);
       await guard(args[0]);
       const fields: Record<string, unknown> = {};
       for (const k of ['title', 'body', 'priority', 'assignee', 'project', 'type', 'epic'] as const) if (o[k] !== undefined) fields[k] = o[k];
@@ -822,6 +832,9 @@ ${body}`, json: pg };
         // board without the words (a rolled-back schema) still answers
         const [w] = await sql`select cb._wait_words(cb.resolve(${project})) as words`.catch(() => [null]);
         if (w?.words) return { out: w.words, json: null };
+        // #4744: a reviewer in a project without stages: the lead hands out its reviews, so say that, not "nothing"
+        const [v] = await sql`select cb._review_words(cb.resolve(${project}), ${actor}) as words`.catch(() => [null]);
+        if (v?.words) return { out: v.words, json: null };
         // #4593: name the cards kept for another agent, so a seat sees why the queue looks empty to it
         const [k] = await sql`select cb._for_skipped(cb.resolve(${project}), ${actor}) as s`.catch(() => [null]);
         return { out: k?.s ? `nothing to claim (skipped ${k.s})` : 'nothing to claim', json: k?.s ? { claimed: null, skipped: k.s } : null }; // review 100 F3: --json says it too
@@ -870,13 +883,19 @@ ${body}`, json: pg };
     }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
-    case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
+    case 'jobs': {
+      const named = args[0] ?? o.project;
+      // a card's jobs are found whatever project this session is bound to
+      if (o.ended) return endedCmd(sql, { project: named ?? (o.card !== undefined ? null : sessionProject), requester: o.mine ? actor : undefined, card: o.card });
+      if (o.mine || o.card !== undefined) throw new Error('--mine and --card go with --ended: cb jobs --ended [--mine] [--card <id>]');
+      return jobsCmd(sql, named ?? sessionProject);
+    }
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
       return triageCmd(sql, { since: o.since, agent: o.agent, model: o.model, max: o.max, budget: o.budget, dryRun: !!o['dry-run'], force: !!o.force, actor });
     case 'job': { // cb job <id> is cb job show <id>
-      const bare = /^\d+$/.test(args[0] ?? '');
+      const bare = /^#?\d+$/.test(args[0] ?? '');
       return jobCmd(sql, bare ? 'show' : args[0], bare ? args[0] : args[1], actor, o.tail, args[2]);
     }
     case 'runner': { // the daemon (node cli/runner.ts), run in a herdr pane on the PC
@@ -1133,7 +1152,7 @@ ${body}`, json: pg };
       return { out: page };
     }
     default:
-      throw new Error(`unknown command "${cmd}". Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb start (what to do next) or cb help (the manual)`);
+      throw new Error(unknownCommand(cmd!));
   }
 }
 

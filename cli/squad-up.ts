@@ -244,8 +244,10 @@ function cleanLine(line: string): string {
     if (!/[A-Za-z0-9]/.test(core)) { push('…'); continue; }
     if (open) {
       if (LINKING.has(core.toLowerCase())) { push(cleanToken(lead, core, trail)); continue; }
-      open = false;
-      push(OUTCOME.test(core) ? cleanToken(lead, core, trail) : '…');
+      const outcome = OUTCOME.test(core);
+      // #4679: a scheme or another secret word cut here (Authorization: Bearer x) is not the value: the next one is
+      open = !outcome && (secretWord(core) || /^basic$/i.test(core));
+      push(outcome ? cleanToken(lead, core, trail) : '…');
       continue;
     }
     push(cleanToken(lead, core, trail));
@@ -270,16 +272,27 @@ const BUSY_TRIES = 6, BUSY_WAIT_MS = 2000;
 
 // #4687: a TUI can drop a paste that comes the moment herdr agent start returns (OpenCode 1.19.4 did: its input box
 // stayed empty, the seat never ran cb iam). So the first prompt waits until the agent starts working; herdr says
-// agent_prompt_stalled when it does not within 5 s. A stall is not proof the text was lost (the status can lag), so the
-// visible screen is read first: the prompt is sent once more only when that read worked and the prompt's start is not on
-// it. A second prompt that lands would have cb next take a second card (PR 117 B1), so anything less certain (a read that
-// fails or comes back empty, herdr's own timeout, which counts the submit time over a slow --machine relay) sends nothing
-// more: the line asks a person to check the pane. Every agent kind.
-const PROMPT_WAIT = ['--wait', '--until', 'working', '--until', 'blocked', '--timeout', '20000'];
+// agent_prompt_stalled when it does not within 5 s. A stall is not proof the text was lost (the status can lag, or the
+// text sits in the input box with its Enter not taken), so herdr's status and the visible screen are read first: the
+// text is sent once more only when that read worked and the prompt is not on it. A second prompt that lands would have
+// cb next take a second card (PR 117 B1), and one typed after a first still in the box goes as one joined message
+// (#4716), so a prompt on the screen gets Enter alone. Enter also answers a dialog: it goes only to an agent herdr shows
+// idle or done. Anything less certain (a read that fails or comes back empty, herdr's own timeout, which counts the
+// submit time over a slow --machine relay) sends nothing more: the line asks a person to check the pane. Every agent kind.
+const UNTIL_STARTED = ['--until', 'working', '--until', 'blocked', '--timeout', '20000'];
+const PROMPT_WAIT = ['--wait', ...UNTIL_STARTED];
 const PROMPT_RETRY_MS = 3000;
 const STALLED = /agent_prompt_stalled/i;
 const TIMED_OUT = /\btimeout\b|timed out/i;
-const squash = (t: string) => t.replace(/\s+/g, '');
+// without spaces, line ends and the box borders and bars a TUI draws (U+2500-U+259F)
+const flat = (t: string) => t.replace(/[\s\u2500-\u259f]+/g, '');
+/** The prompt's start or end is on the screen (an input box shows only the end of a long line when it scrolls). Each
+ *  row loses its prompt mark and ASCII border first, so a wrapped line reads as one. */
+function promptOnScreen(screen: string, text: string): boolean {
+  const shown = screen.split('\n').map((row) => flat(row).replace(/^[|>›❯]+/, '').replace(/\|$/, '')).join('');
+  const want = flat(text);
+  return shown.includes(want.slice(0, 24)) || shown.includes(want.slice(-24));
+}
 /** 'ok' once the agent took the prompt; 'unconfirmed' when that is not known (a person checks the pane). Other herdr
  *  errors throw (the prompt was not sent). */
 function sendFirstPrompt(l: Launch, text: string, pane: string, run: Runner, pause: (ms: number) => void): 'ok' | 'unconfirmed' {
@@ -294,16 +307,22 @@ function sendFirstPrompt(l: Launch, text: string, pane: string, run: Runner, pau
   const first = send();
   if (first !== 'stalled') return first;
   pause(PROMPT_RETRY_MS);
-  // S1: the visible screen (a TUI's own rows), not the last lines of scrollback; a long line wraps, so the start of the
-  // prompt is compared without any spaces or line ends
+  let status = '';
+  try { status = String(find(herdrJson(run, l.herdr, ['agent', 'get', herdrName(l.name)], 10_000), 'agent_status') ?? ''); } catch { /* unknown */ }
+  if (status === 'working') return 'ok';
+  if (status === 'blocked') return 'unconfirmed'; // a dialog, or a question about the prompt: a person looks
+  // S1: the visible screen (a TUI's own rows), not the last lines of scrollback
   let screen = '';
   try {
     const r = run(l.herdr, ['pane', 'read', pane, '--source', 'visible', '--format', 'text'], 10_000);
     if (r.status === 0) screen = String(r.stdout ?? '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
   } catch { /* unread: unknown */ }
   if (!screen.trim()) return 'unconfirmed';
-  if (squash(screen).includes(squash(text).slice(0, 24))) return 'ok';
-  return send() === 'ok' ? 'ok' : 'unconfirmed';
+  if (!promptOnScreen(screen, text)) return send() === 'ok' ? 'ok' : 'unconfirmed';
+  if (status !== 'idle' && status !== 'done') return 'unconfirmed';
+  // on an empty box (the prompt had landed) Enter does nothing
+  if (run(l.herdr, ['agent', 'send-keys', herdrName(l.name), 'enter'], 10_000).status !== 0) return 'unconfirmed';
+  return run(l.herdr, ['agent', 'wait', herdrName(l.name), ...UNTIL_STARTED], 30_000).status === 0 ? 'ok' : 'unconfirmed';
 }
 const sleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
