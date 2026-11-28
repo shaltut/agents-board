@@ -279,9 +279,13 @@ COMMANDS   cb help <command>: syntax, example, pitfalls (e.g. cb help done)
 ACTOR      who you act as: --as <name>, else $CB_ACTOR, else this pane's cb iam name, else <pane>@<host>
 OUTPUT     plain text; --json prints one JSON value instead (all but help, runner, supervise: cb help json lists each).
            Exit 0 = ok. Exit 1 = error on stderr, text even with --json: "cb: <what went wrong>. <what to run>"
+           Also exit 1, but the result on stdout as usual (JSON with --json) and no error: cb doctor or cb update --check
+           found a failed check, or cb run --wait ended with a job that did not pass or is still running.
            Exit 2 = cb lock take queued you (not held). Exit 3 = a board on another machine was unreachable and nothing
            of the command reached it, or the command only reads: safe to run again unchanged (this machine's own board
-           never gives 3).
+           never gives 3, except to cb triage).
+           cb triage exits 3 with its result on stdout, on any board, when it cannot reach the board for the duplicate
+           check: nothing was sent to the judge and nothing filed.
 IDS        task: 42 or #42. question: Q12 or 12. memory: M12.`;
 
 const TOPICS: Record<string, string> = {
@@ -478,8 +482,8 @@ is a bug": cb bug <project> "<title>" -b "..."; then post the id back: cb huddle
 
   relay: `cb help relay: how the board reaches you
 
-The relay is one small background process per seat (this machine and herdr pane). It listens to the board
-and writes into this session's inbox as "[Agents Board] ..." messages:
+The relay is one small background process per seat (this machine and herdr pane), for a Claude Code, codex, opencode
+or agy session. It listens to the board and puts "[Agents Board] ..." messages into that session:
   - Ahmed's asks: "[Ahmed asks] A<id>: ..." is Ahmed himself; answer with cb reply A<id> "..." (cb help reply)
     When Ahmed asks you something in your terminal that wants a result back, record it first:
     cb asks add "<his ask>", then answer it with cb reply A<id> so the answer is on his Today page
@@ -493,12 +497,22 @@ and writes into this session's inbox as "[Agents Board] ..." messages:
 An idle session gets a new turn; a busy one reads it between tool calls. Act on it now: a cancel means
 stop, a move means follow it, an answer means do what it says.
 
-Start   the SessionStart hook starts it. cb relay starts it by hand (harmless if running);
-        cb relay --restart replaces it.
-Needs   a herdr pane ($HERDR_PANE_ID) and the session's inbox: Claude Code 2.1.234+ ($CLAUDE_CODE_MESSAGING_SOCKET),
-        handed to the relay in cb-seat-<id>.claude.json in the OS temp folder. A new session in the same pane
-        is served by the same relay, and its pane's binding starts again (the session id changed).
-Stops   by itself when the session ends (its inbox stops answering): no more "live" for that pane.
+Routine notices (runner results, GitHub lines, the board's digests and nudges, broadcasts and memory changes not from
+Ahmed) wait up to 10 minutes and arrive together. Anything else arrives at once and brings the waiting ones with it:
+Ahmed, answers, changes to your cards, anything about a P0 card, a teammate's tell or huddle line, new work.
+
+Start   Claude Code: the SessionStart hook starts it. codex, opencode and agy: the seat prestart (cb squad up) starts it
+        once the seat checks ready; it waits up to 3 minutes for the agent to come up, and leaves if it never does.
+        By hand (harmless if running): cb relay [--agent claude|codex|opencode|agy]; --restart replaces it. --agent
+        defaults to $CB_AGENT, else the agent the pane is bound with, else claude. An agent started again by hand in the
+        pane its last one left has no relay: run it with --agent there.
+Needs   a herdr pane ($HERDR_PANE_ID). An agent other than claude also needs CB_MCP_GATE_OK to name it.
+        claude    the session's inbox, Claude Code 2.1.234+ ($CLAUDE_CODE_MESSAGING_SOCKET), handed to the relay in
+                  cb-seat-<id>.claude.json in the OS temp folder. A new session in the same pane is served by the same
+                  relay, and its pane's binding starts again (the session id changed).
+        codex, agy   herdr: the relay finds the pane's agent there and types each message with herdr agent prompt.
+        opencode  the seat's endpoint file (written by the seat prestart): messages go to OpenCode's local server.
+Stops   by itself when the agent is gone: no more "live" for that pane.
 Check   cb start says whether it is running. Log: cb-relay-<id>.log in the OS temp folder.
 
 Without a relay: run cb mine and cb pending between steps; after acting on an answer, cb delivered <qid> <you>.
@@ -618,21 +632,39 @@ NEVER
   json: `cb help json: what --json prints
 
 Every command but help, runner and supervise prints one JSON value on stdout instead of its text, with the same exit
-code. An error is still text on stderr ("cb: ..."), never JSON. Ids are numbers.
+code. An error is text on stderr ("cb: ..."), never JSON (cb start with the board down is not an error: below). Ids are
+numbers. A result can exit non-zero and still be JSON on stdout, with nothing on stderr: exit 1 from cb doctor and
+cb update --check (ok: false) and from cb run --wait (the job did not pass, or is still running); exit 2 from
+cb lock take; exit 3 from cb triage with board: "unreachable". An error in any of these commands (even finding out who
+this pane is) is still the stderr text.
 
 READS: the rows or the record the text is made from
   mine          task rows, each with stage_words (null when not staged) and open: true (yours to work on) or false
                 (closed or moved off you in the last 24h)
   show          the task row plus stage_words (null when not staged), notes and notes_total
   resume, brief, search, sessions, session, pending, asks, users, goals, epics, huddles, digest, jobs (--ended: {jobs, more}), lock queue, mem
-  find|list|show, github (list), squad show, role, page show, job show|log, tick: their rows or record
+  find|list|show, github (list), squad show, role, page show, job show|log, tick, usage: their rows or record
+                (squad show: the squad with its version)
   huddle show   {huddle, lines}: the huddle row and its lines
-  next          the claimed task, with its stage when staged (null: nothing to claim)
+  next          the claimed task, with its stage when staged. Nothing to claim: null, or {claimed: null, skipped} (an
+                object, so test claimed, not the value) when for:<agent> cards were skipped; skipped says which
   start         {actor, via, project, relay, text}
                 relay is on, off or unavailable; text is what cb start prints. Board unreachable: {board, error}
 
+THIS MACHINE
+  faults        {machine, since, home, lines, groups}
+  doctor        {root, checkout_sha, release, files, guard, wiring, agents, ok, problems}; files not compared:
+                files null, files_error says why (release may be missing)
+  triage        {machine, since, model, cost_usd, seconds, dry_run, decisions}
+                board unreachable (exit 3): {machine, since, decisions, board}
+  update --check     {root, from, checkout_sha, release, archive, files, ok, problems}
+  update             {ok, release, current, changed}; when it installed, also {previous, adopted, packages, relays,
+                     daemons}
+  update --rollback  {ok, current, previous, relays, daemons}
+
 WRITES: an object naming what changed
-  add           {id, project, status, stage}                     bug     {id, project, told} (+ stage when staged)
+  add           {id, project, status, stage} (+ disabled: the project's state, when it parked the card in Backlog)
+  bug           {id, project, told} (+ stage when staged; a disabled project: told [], stage, disabled)
   move, done    {id, status, released}: released lists the cards it held, each {id, status, blocked_on, waits_on}
   block, unblock  {id, by, waits, status}: waits true after block, false after unblock
   edit          {id, changed}: the names of the fields given
@@ -651,8 +683,11 @@ WRITES: an object naming what changed
   mem add|rule|supersede: the entry         mem retire {id, status}
   user add      {name, display, role}       user role {name, role}       user password {name, password_set}
   github add    the watch {to, project, since, ...}              github remove {repo, watched}
-  squad set     the saved squad             squad up {project, dry_run, lines}
-  run           the job (with --wait: the finished job)          job cancel {id, state}
+  squad set     the saved squad, with version and changed (false: it was already this)
+  squad up      {project, dry_run, lines}                        squad trust {project, lines} (no dry_run field)
+  run           the job (with --wait: the finished job, or the unfinished one after 30 min)
+  job cancel    {id, state}                                      job retry   the new job, as run prints it
+  job move      {id, moved}                                      job hold|release {project, held}
   lock take     {name, holder, held_at, queue} (exit 2 = queued, not held)
 LISTS AND NAMES, not objects (kept as they were)
   tag           the card's tags after the change                 huddle add  the names added
@@ -690,6 +725,17 @@ export function help(name?: string): string | null {
 
 export const unknownHelp = (name: string) =>
   `no help for "${name}". Topics: ${TOPIC_NAMES.join(', ')}. Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb help <one of them>`;
+
+// #4725: words sessions guess that are no command (from the fault log), and what to run instead
+const GUESSES: Record<string, string> = {
+  inbox: 'cb pending (answers waiting for you)', whoami: 'cb start (who you are, what to do), cb iam (set your name)',
+  list: 'cb brief (the project), cb mine (your cards)', status: 'cb brief (the project), cb mine (your cards)',
+  find: 'cb search', q: 'cb ask (ask Ahmed), cb pending (answers)', question: 'cb ask (ask Ahmed), cb pending (answers)',
+  claim: 'cb next', projects: 'cb start (an unbound pane gets the project list)', card: 'cb show <id>',
+};
+
+export const unknownCommand = (name: string) =>
+  `unknown command "${name}".${Object.hasOwn(GUESSES, name) ? ` Did you mean: ${GUESSES[name]}?` : ''} Commands: ${Object.keys(COMMANDS).join(', ')}. Run: cb start (what to do next) or cb help (the manual)`;
 
 // #4450: a whole command word after "cb ", so "check with cb before ..." (no command) no longer counts as naming one
 const NAMED = new RegExp(`\\bcb (?:${Object.keys(COMMANDS).join('|')})\\b`);
