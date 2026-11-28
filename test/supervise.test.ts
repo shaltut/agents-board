@@ -969,6 +969,6 @@ test('#4816: with no pipeline the lead is told once of a seat down again after a
     assert.equal((await events(sql, 'down_again')).length, 1);
     const told = await tells(sql);
     assert.equal(told.length, pipeline ? 0 : 1, JSON.stringify(told));
-    if (!pipeline) assert.match(told[0].summary, /sv-B2@macbook is down again after a restore.*restore it by hand/);
+    if (!pipeline) assert.match(told[0].summary, /sv-B2@macbook is down again after a restore.*restore it by hand/s);
   }
 });
