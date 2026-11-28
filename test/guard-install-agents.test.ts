@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AGENT_MATCHERS, AGENT_SHIMS, GUARD_FILES, checkAgentWiring, codexHooksFeature, installGuard, wireAgents } from '../kit/guard/install.mjs';
 import { seatRefusal } from '../cli/agents/seat-prestart.ts';
@@ -195,6 +195,21 @@ test('--check: the installed agent shims hash-match and each wiring passes the p
   assert.ok(bad.problems.some((p: string) => /codex/.test(p)), bad.problems.join('\n'));
   rmSync(pluginFile(w));
   assert.ok(checkAgentWiring(w.target, { ...opts, agents: ['opencode'] }).problems.some((p: string) => /cb-guard\.js/.test(p)));
+});
+
+test('#4817: wiring OpenCode also installs the 2.x plugin beside the 1.x one, and --check wants both', (t) => {
+  const w = world(t);
+  assert.ok(install(w, ['opencode']).ok);
+  assert.ok(wire(w, { agents: ['opencode'] }).ok);
+  const v2 = join(dirname(pluginFile(w)), 'cb-guard-v2.js');
+  const text = readFileSync(v2, 'utf8');
+  assert.ok(text.includes(JSON.stringify(fwd(join(w.target, 'shim-opencode.mjs')))), 'runs the installed shim');
+  const opts = { agents: ['opencode'], seats: [w.seat], env: w.env, home: w.home };
+  assert.ok(checkAgentWiring(w.target, opts).ok);
+  writeFileSync(v2, `${text}// changed`);
+  assert.ok(checkAgentWiring(w.target, opts).problems.some((p: string) => /cb-guard-v2\.js/.test(p)));
+  rmSync(v2);
+  assert.ok(checkAgentWiring(w.target, opts).problems.some((p: string) => /cb-guard-v2\.js/.test(p)));
 });
 
 test('the OpenCode plugin forwards every tool to the shim and throws on a block, an unknown tool, a missing shim or bad output', async (t) => {

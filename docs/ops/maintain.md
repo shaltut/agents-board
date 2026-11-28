@@ -223,6 +223,11 @@ run that installed copy, never the checkout, so a `git pull` does not change a l
 - **OpenCode**: `kit/guard/opencode-plugin.js` written to `$XDG_CONFIG_HOME/opencode/plugins/cb-guard.js` (else
   `~/.config/...`), with the absolute node and the installed shim filled in. Its `tool.execute.before` sends every tool
   call to the shim and stops the call on a block, a non-zero exit, a timeout or any other output.
+  **OpenCode 2.x (`opencode2`) never runs that file**, so the same step also writes `opencode-plugin-v2.js` beside it as
+  `cb-guard-v2.js` (#4817), which does the same through 2.x's `execute.before`; 1.x loads it too and gets no hook from
+  it. `--check` wants both. A shell call's `workdir` is judged as a `cd` to it before the command. The board cannot yet
+  start a 2.x seat. 2.x's default background service does not carry a pane's `CB_ROLE`, so only a server started with
+  that env applies a seat's rules.
 
 **These hooks are machine-wide** (agy's excepted: it is per seat folder), so they also run in the owner's own Codex and
 OpenCode. There, with neither `CB_ROLE` nor `CB_AGENT` set, Codex and OpenCode get exactly what Claude gets outside a
@@ -591,8 +596,12 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   (`--dry-run`: `would keep ... open`): a person hands its work over or closes it. A squad file with no seats besides
   the lead closes none of them (likely a bad save): every leaving seat is only listed. Only the closing mark of a close
   under way keeps new work off a leaving seat; until then a live one can still take a card from `cb next`;
-- restarts a squad seat running another agent or model than the squad file now names for it (#4332, Q2970: the
-  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them) once it is
+- restarts a squad seat running another agent, model or effort than the squad file now names for it (#4332, Q2970: the
+  agent and `cb iam --model` it bound with against its seat's, as the digest's wrong-model line reads them; the effort
+  is the `cb iam --effort` of its first prompt, `default` for none, #4766. The effort is not read from the running
+  agent, so one changed inside a session is not seen; a seat that said none is not judged, so a seat started before
+  this keeps running. Every machine's board checkout must know `--effort` before a squad starts seats there: an older
+  `cb` refuses the flag and the seat does not bind) once it is
   idle as above and quiet 5 minutes: it closes it as above, then starts it under the same name on the new setting, at
   most 2 a tick, each taking one of the 3 starts (waiting work starts first). Busy, it waits until idle. Never the lead,
   a hand-started name or a leaving seat; one idle 20 minutes with no waiting work is simply closed. Each restart is a
@@ -607,6 +616,16 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   for Enable. Never the lead or a hand-started session, and a seat holding a card of an enabled project is kept. After
   Enable, the seats that hold cards are restored as above, whatever was restored before the disable. A squad without
   `"supervise": true` gets only the disable message;
+- looks for a seat stopped by its model's quota (#4787). This one runs for **every enabled project with a squad**,
+  with or without a pipeline or `"supervise": true`, since it only reads screens and tells (it still needs `cb
+  supervise` running): for each seat of the squad, and the lead, that herdr shows
+  not working (`idle`, `done`, `blocked`), it reads the last lines of its screen (`herdr pane read`) and asks the
+  agent's adapter. A quota stop is a `quota` board event (`quota <seat> (herdr pane <id>)`, also a digest line), and
+  the lead is told once: again only after the seat has done something on the board, or bound anew, and stopped again.
+  A stopped lead is only in the digest. A rate limit the CLI retries is ignored, and no pane text goes to the board.
+  Nothing is closed or switched. The words can also be ordinary output at the bottom of an idle screen, so look at the
+  pane before acting. `--dry-run` reads the screens too and prints `would say ...`; a screen it cannot read is said
+  once in its log (`cannot check <seat> for a quota stop`);
 - restarts the PC runner (herdr tab `runner`, `cb runner`) when `runner.json` exists and the runner has not beaten
   for 3 minutes, at most once per 10 minutes (first closing the runner tab it opened before, that pane only). A start that does not beat, or a log port still held by an old
   runner, is told to each supervised project's lead once an hour.
@@ -699,6 +718,15 @@ denied by the role permission files. Card #3746.
 - The block says what to do instead: push your own branch and open a PR; the lead merges it.
 - While the list is set, a push whose remote or branch the shell fills in (`$B`, `$(git branch --show-current)`,
   backticks) is blocked too, since the hook cannot see the branch: name it literally.
+- A command word the shell fills in (`$G`, `"$GIT"`, `%GIT%`, `& $git`) is read as `git` when what follows can push
+  (`push`, `send-pack`, `http-push`, `subtree`, an alias set for the call or in git config, a subcommand that is filled
+  in too), by this list and by every role's rules against a push (#4815): write `git` by its name. A variable that holds
+  another tool with a `push` command (`$DOCKER push <image>`) is refused the same way: write that tool's name.
+- In a seat, a command and its first argument both filled in (`$G $SUB`, also `$CC $CFLAGS`) are refused whatever they
+  hold: write the command's name (#4815).
+- A filled command word followed by a word that is no git command (`$G p origin main`, xargs' `{}`) and then a protected
+  branch is refused, like the same line with `git`: an alias set earlier can make that word a push (#4826). A word that
+  is a script or a path is not such a word (`"$PYTHON" tool.py origin main` runs).
 - While the list is set, a wildcard destination (`refs/heads/*:refs/heads/*`, `develop*`) is blocked too: it can write
   a protected branch. Push one branch by name.
 - Sessions already running have no such variable: the fence holds only after each is restarted (closed, then started
