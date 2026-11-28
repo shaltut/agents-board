@@ -220,3 +220,29 @@ test('cb job log reads from the runner, 403 and a dead runner say why', async ()
   await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1/', ${runner.json(RECIPES as any)})`;
   assert.match(cb(['job', 'log', '1']).err, /runner on pc is not answering/);
 });
+
+// #4724: cb prints ids with '#' and every task command takes them back, so cb job and --card must too
+test('cb job and cb run --card take #<id> as well as <id> (#4724)', async () => {
+  const { sql, runner } = await setup();
+  const lead = { CB_ACTOR: 'L1@pc', CB_MACHINE: 'pc' };
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('pc','p4','L1@pc','demo','lead')`;
+  const [{ id: card }] = await sql`select cb.task_add('demo', 'a card', actor => 'B1@mac') as id`;
+  const q = cb(['run', 'test', '--sha', 'abc1234', '--files', 'a.test.ts', '--project', 'demo', '--card', `#${card}`]);
+  assert.equal(q.code, 0, q.err);
+  assert.equal(Number((await sql`select task_id from cb.jobs where id = 1`)[0].task_id), Number(card));
+  cb(['run', 'test', '--sha', 'abc1234', '--files', 'b.test.ts', '--project', 'demo']);
+  for (const args of [['job', '#1'], ['job', 'show', '#1']]) {
+    const r = cb(args);
+    assert.equal(r.code, 0, `${args.join(' ')}: ${r.err}`);
+    assert.match(r.out, /^job #1 test/);
+  }
+  assert.match(cb(['job', 'move', '#2', 'next'], lead).out, /job #2 moved next/);
+  assert.equal(cb(['job', 'cancel', '#1']).out, 'job #1 cancelled');
+  assert.deepEqual(JSON.parse(cb(['job', 'cancel', '#2', '--json']).out), { id: 2, state: 'cancelled' });
+  assert.match(cb(['job', 'retry', '#1'], lead).out, /again for job #1$/);
+  await runner`select cb.job_claim('pc', false)`;
+  assert.match(cb(['job', 'log', '#3']).err, /not answering/);
+  // one leading # only
+  assert.match(cb(['job', 'show', '##1']).err, /usage: cb job/);
+  assert.match(cb(['run', 'test', '--sha', 'abc1234', '--files', 'c.test.ts', '--project', 'demo', '--card', `##${card}`]).err, /--card needs a card number/);
+});
