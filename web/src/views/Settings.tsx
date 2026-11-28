@@ -227,7 +227,7 @@ function Switches({ project, page, squad, edit }: { project: string; page: Squad
             <span className="font-medium">Automatic backup</span> <span className="rounded-full bg-lamp-soft px-2 py-0.5 text-xs text-lamp-ink">Only Ahmed changes this</span>
             <span className="block text-muted-foreground">
               A seat stopped by its model's quota, seen at two checks in a row, restarts on the next backup its squad names. This can send the project's code to that backup's provider.
-              It needs the pipeline and the supervisor on. The lead is never switched, and nothing switches a seat back. Turning this off ends every backup in use.
+              It needs the supervisor on, and works with the pipeline on or off. The lead is never switched, and nothing switches a seat back. Turning this off ends every backup in use.
             </span>
           </span>
         </label>

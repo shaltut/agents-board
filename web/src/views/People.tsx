@@ -22,13 +22,13 @@ function useViewer() {
 const managesSignIn = (me: string, p: Person) => p.role !== 'admin' || me === 'ahmed' || me === p.name
 
 interface Person {
-  // token: a member's link; null for an admin (admins sign in by password, and the token is their cookie)
-  name: string; display: string; role: 'admin' | 'member'; token: string | null; created_at: string; last_active: string | null; projects: string[]; has_password: boolean
+  // has_link: a member has a private link. The board keeps only its hash, so the link itself is shown once, when made (#4868)
+  name: string; display: string; role: 'admin' | 'member'; has_link: boolean; created_at: string; last_active: string | null; projects: string[]; has_password: boolean
   questions: { id: number; project: string; body: string; blocking: boolean; created_at: string }[]
   tasks: { id: number; project: string; title: string; status: Task['status']; priority: Task['priority'] }[]
 }
 
-// Admins only (and only the page itself): it carries members' link tokens.
+// Admins only (and only the page itself).
 const usePeople = () => useQuery({ queryKey: ['people'], queryFn: () => get<{ public_url: string | null; people: Person[] }>('/api/people') })
 const linkOf = (base: string, token: string) => `${base}/?u=${token}`
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -104,10 +104,10 @@ function LinkBox({ link, who }: { link: string; who: string }) {
 function PersonCard({ p, base }: { p: Person; base: string }) {
   const qc = useQueryClient()
   const [confirm, setConfirm] = useState<'rotate' | 'remove' | null>(null)
-  // The whole link, shown after a new link is made or when the clipboard refused a copy.
-  const [shown, setShown] = useState<{ link: string; why: 'new' | 'copy' } | null>(null)
+  // The new link, shown right after it is made: the only time it can be.
+  const [shown, setShown] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const link = p.token ? linkOf(base, p.token) : ''
+  const admin = p.role === 'admin'
   const owner = p.name === 'ahmed'
   const me = useViewer()
   const holding = p.questions.filter((q) => q.blocking).length
@@ -117,13 +117,12 @@ function PersonCard({ p, base }: { p: Person; base: string }) {
     setBusy(true)
     try {
       if (kind === 'rotate') {
-        // the token the rotate returned, not the list's: that one is the old, dead link until the refetch lands.
         // An admin has no link: for them it only ends every sign-in (null comes back).
         const token = await rpc<string | null>('user_rotate', { name: p.name })
         await qc.invalidateQueries()
         if (token) {
-          setShown({ link: linkOf(base, token), why: 'new' })
-          toast.success(`New link for ${p.display}`, { description: 'The old one no longer works. Send this one privately.' })
+          setShown(linkOf(base, token))
+          toast.success(`New link for ${p.display}`, { description: 'Any old one no longer works. Send this one privately.' })
         } else toast.success(`${p.display} is signed out everywhere`, { description: 'Their password still works.' })
       } else {
         const r = await rpc<{ questions: number; tasks: number }>('user_remove', { name: p.name })
@@ -184,14 +183,14 @@ function PersonCard({ p, base }: { p: Person; base: string }) {
 
       <div className="mt-auto border-t pt-3">
         {confirm ? (
-          <div role="group" aria-label={confirm === 'rotate' ? (p.token ? 'Confirm new link' : 'Confirm signing out everywhere') : `Confirm removing ${p.display}`}
+          <div role="group" aria-label={confirm === 'rotate' ? (admin ? 'Confirm signing out everywhere' : 'Confirm new link') : `Confirm removing ${p.display}`}
             onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setConfirm(null) } }}
             className={cn('rounded-md p-3 text-sm', confirm === 'remove' ? 'bg-destructive/8' : 'bg-raised')}>
             <p className="text-pretty">
-              {confirm === 'rotate' && !p.token
+              {confirm === 'rotate' && admin
                 ? <>Every browser signed in as {p.display} is signed out{p.name === me && ', this one too'}. The password still works.</>
                 : confirm === 'rotate'
-                ? <>{p.display}'s current link stops working, and every browser signed in as {p.display} is signed out, by link or by password{p.has_password && '; the password itself still works'}. You'll need to send the new link.</>
+                ? <>{p.has_link ? <>{p.display}'s current link stops working, and every</> : 'Every'} browser signed in as {p.display} is signed out, by link or by password{p.has_password && '; the password itself still works'}. The new link is shown once: send it then.</>
                 : <>Remove {p.display}? Their link stops working.{' '}
                   {p.questions.length > 0 && <>Their {plural(p.questions.length, 'open question')} come{p.questions.length === 1 && 's'} back to you{holding > 0 && ', and work held on them stays held'}. </>}
                   {p.tasks.length > 0 && <>Their {plural(p.tasks.length, 'open task')} become{p.tasks.length === 1 && 's'} unassigned{working > 0 && ` (${working} in progress go${working === 1 ? 'es' : ''} back to Next)`}. </>}
@@ -199,25 +198,25 @@ function PersonCard({ p, base }: { p: Person; base: string }) {
             </p>
             <div className="mt-2.5 flex flex-wrap gap-2">
               <Button size="sm" variant={confirm === 'remove' ? 'destructive' : 'default'} disabled={busy} onClick={() => act(confirm)}>
-                {confirm === 'rotate' ? (p.token ? 'Make a new link' : 'Sign out everywhere') : `Remove ${p.display}`}
+                {confirm === 'rotate' ? (admin ? 'Sign out everywhere' : 'Make a new link') : `Remove ${p.display}`}
               </Button>
               <Button size="sm" variant="ghost" autoFocus onClick={() => setConfirm(null)}>Cancel</Button>
             </div>
           </div>
         ) : shown ? (
           <div className="grid gap-2">
-            <p className="text-sm">{shown.why === 'new' ? `New link for ${p.display}. Send it privately:` : `Copying didn't work. Select ${p.display}'s link and copy it:`}</p>
-            <LinkBox link={shown.link} who={p.display} />
+            <p className="text-sm">New link for {p.display}, shown only now. Send it privately:</p>
+            <LinkBox link={shown} who={p.display} />
             <Button size="sm" variant="ghost" className="justify-self-start" onClick={() => setShown(null)}>Done</Button>
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-            <code className="mr-auto min-w-0 basis-full truncate font-mono text-xs text-muted-foreground sm:basis-auto" title="The link is a secret: Copy it, don't show it">
-              {p.token ? <>…/?u=••••{p.token.slice(-4)}</> : owner ? 'The owner: signs in with his password' : 'Admin: signs in with a password, no link'}
-            </code>
-            {p.token && <Button size="sm" variant="secondary" onClick={async () => { if (!(await copy(link, p.display))) setShown({ link, why: 'copy' }) }}><Copy /> Copy link</Button>}
-            {p.token && <Button size="sm" variant="ghost" onClick={() => setConfirm('rotate')}><KeyRound /> New link</Button>}
-            {!p.token && managesSignIn(me, p) && <Button size="sm" variant="ghost" onClick={() => setConfirm('rotate')}><LogOut /> Sign out everywhere</Button>}
+            <span className="mr-auto min-w-0 basis-full truncate text-xs text-muted-foreground sm:basis-auto">
+              {owner ? 'The owner: signs in with his password' : admin ? 'Admin: signs in with a password, no link'
+                : p.has_link ? 'Has a private link' : 'No link yet'}
+            </span>
+            {!admin && <Button size="sm" variant="ghost" onClick={() => setConfirm('rotate')}><KeyRound /> New link</Button>}
+            {admin && managesSignIn(me, p) && <Button size="sm" variant="ghost" onClick={() => setConfirm('rotate')}><LogOut /> Sign out everywhere</Button>}
             {!owner && managesSignIn(me, p) && <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" onClick={() => setConfirm('remove')}><UserX /> Remove</Button>}
           </div>
         )}
@@ -318,14 +317,15 @@ function Access({ p }: { p: Person }) {
   )
 }
 
-/** Name and display name; then the link, ready to copy. Adding a name that exists keeps their link and updates the display name. */
+/** Name and display name; then a new member's link, ready to copy (this once). Adding a name that exists keeps their link
+ *  and updates the display name. */
 function AddPerson({ open, onOpenChange, base, people }: { open: boolean; onOpenChange: (o: boolean) => void; base: string; people: Person[] }) {
   const qc = useQueryClient()
   const [display, setDisplay] = useState('')
   const [name, setName] = useState('')
   const [role, setRole] = useState<'member' | 'admin'>('member')
   const [password, setPassword] = useState('')
-  const [made, setMade] = useState<{ display: string; link: string | null } | null>(null)
+  const [made, setMade] = useState<{ display: string; link: string | null; admin: boolean } | null>(null)
   const auto = display.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z0-9_-]/g, '') ?? ''
   const handle = name || auto
   const existing = people.find((p) => p.name === handle)
@@ -340,7 +340,7 @@ function AddPerson({ open, onOpenChange, base, people }: { open: boolean; onOpen
       // an admin signs in by password only: set it with the account, or they could never sign in
       const token = await rpc<string | null>('user_add', { name: handle, display, role })
       if (role === 'admin') await rpc('user_password', { name: handle, password })
-      setMade({ display: display.trim() || handle, link: token ? linkOf(base, token) : null })
+      setMade({ display: display.trim() || handle, link: token ? linkOf(base, token) : null, admin: role === 'admin' })
       await qc.invalidateQueries()
     } catch (err: any) { toast.error(err.message) }
   }
@@ -348,7 +348,16 @@ function AddPerson({ open, onOpenChange, base, people }: { open: boolean; onOpen
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent className="sm:max-w-lg">
-        {made && !made.link ? (
+        {made && !made.link && !made.admin ? (
+          <div className="grid gap-4">
+            <DialogHeader>
+              <DialogTitle>{made.display} is updated</DialogTitle>
+              <DialogDescription>They were already a user, and what signs them in is unchanged. A link cannot be shown
+                again: <strong className="font-medium text-foreground">New link</strong> on their card makes another and ends the old one.</DialogDescription>
+            </DialogHeader>
+            <DialogFooter><Button variant="ghost" onClick={() => close(false)}>Done</Button></DialogFooter>
+          </div>
+        ) : made && !made.link ? (
           <div className="grid gap-4">
             <DialogHeader>
               <DialogTitle>{made.display} is an admin</DialogTitle>
@@ -362,7 +371,7 @@ function AddPerson({ open, onOpenChange, base, people }: { open: boolean; onOpen
           <div className="grid gap-4">
             <DialogHeader>
               <DialogTitle>{made.display}'s link</DialogTitle>
-              <DialogDescription>Send it in a direct message, not a group chat: anyone with it can answer {made.display}'s questions. You can copy it again from Users any time.
+              <DialogDescription>Send it in a direct message, not a group chat: anyone with it can answer {made.display}'s questions. It is shown only now, so copy it before you close this (later, New link on their card makes another).
                 Next, put {made.display} on a project on their card: questions and tasks reach them only there.</DialogDescription>
             </DialogHeader>
             <LinkBox link={made.link} who={made.display} />
