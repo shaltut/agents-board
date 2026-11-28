@@ -1,6 +1,7 @@
 // #3222 slice S5: the supervisor's lease, in place of a session advisory lock: one supervisor anywhere. A row on the board
 // (cb.leases), taken for 180 s and renewed by its token, so it needs no database session of its own and works the same
-// over an API. Renewed on its own timer, apart from the tick's queries.
+// over an API. Renewed on its own timer, on a thread of its own, apart from the tick.
+import { Worker } from 'node:worker_threads';
 import { DeadlineError, withDeadline } from './deadline.ts';
 
 export const RENEW_MS = 30_000;
@@ -13,14 +14,17 @@ export type Lease = {
   /** null: held now (taken or renewed); else why it is not ours. Throws when the board does not answer. */
   keep: () => Promise<string | null>;
   holds: () => boolean;
+  /** the held lease's token, for the thread that renews it; null when not held */
+  token: () => string | null;
   /** renewed lately enough that no other can have taken it */
   sure: () => boolean;
   release: () => Promise<void>;
 };
 
-export function supervisorLease(o: { connect: () => any; holder: string; clock?: () => number }): Lease {
+/** token: a lease just taken elsewhere (the renewal thread is given the main thread's). */
+export function supervisorLease(o: { connect: () => any; holder: string; clock?: () => number; token?: string }): Lease {
   const clock = o.clock ?? Date.now;
-  let sql = o.connect(), token: string | null = null, sureFrom = -Infinity, givenBack = false;
+  let sql = o.connect(), token: string | null = o.token ?? null, sureFrom = o.token ? clock() : -Infinity, givenBack = false;
   const ask = async (query: (s: any) => PromiseLike<any>) => {
     try { return (await withDeadline(Promise.resolve(query(sql)), ANSWER_MS, 'the supervisor lease'))[0]; }
     catch (e) { // #4261: a query that hangs means a connection that may never error: drop it, ask on a fresh one
@@ -43,6 +47,7 @@ export function supervisorLease(o: { connect: () => any; holder: string; clock?:
       return null;
     },
     holds: () => token !== null,
+    token: () => token,
     sure: () => clock() - sureFrom < SURE_MS,
     async release() { // at exit: the next start need not wait the lease out. A board that is away: it runs out by itself
       const mine = token;
@@ -71,4 +76,23 @@ export function keepAlive(lease: Lease, o: { every?: number; abort: () => void; 
     } finally { asking = false; }
   }, every);
   return () => clearInterval(timer);
+}
+
+/** keepAlive on a thread of its own, for a held lease's token. A seat's start holds the main thread (its herdr calls and
+ *  pauses are synchronous), longer than the lease lasts when the first prompt stalls. What the thread reports is acted on
+ *  when the main thread is free again. A thread that fails or ends is a lease nobody renews: abort, then lost. Answers
+ *  the function that stops it; nothing is reported after that. */
+export function keepAliveApart(token: string, o: { app: string; every?: number; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
+  const thread = new Worker(new URL('./lease-worker.ts', import.meta.url), { workerData: { token, app: o.app, every: o.every } });
+  let over = false;
+  const gone = (why: string) => { if (over) return; over = true; o.abort(); o.lost(why); };
+  thread.on('message', ([what, line]: [string, string]) => {
+    if (over) return;
+    if (what === 'abort') o.abort();
+    else if (what === 'say') o.say(line);
+    else { over = true; o.lost(line); }
+  });
+  thread.on('error', (e) => gone(`the lease renewal thread failed: ${msg(e)}`));
+  thread.on('exit', (code) => gone(`the lease renewal thread ended (${code})`));
+  return async () => { over = true; await thread.terminate(); };
 }

@@ -15,7 +15,7 @@ import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand
 import { mayBeLeaving, nextBackup, onBackups, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
-import { keepAlive, supervisorLease } from './lease.ts';
+import { keepAliveApart, supervisorLease } from './lease.ts';
 import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
 
 const TICK_MS = 20 * 60_000;
@@ -492,12 +492,12 @@ const probe = (host: string, port: number) => new Promise<boolean>((ok) => {
 
 if (import.meta.main) {
   const dryRun = process.argv.includes('--dry-run'), once = process.argv.includes('--once');
-  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'lease.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
+  const version = createHash('sha256').update(['supervise.ts', 'supervise-plan.ts', 'lease.ts', 'lease-worker.ts', 'squad-up.ts', 'agents/index.ts', 'agents/screen.ts', 'agents/claude.ts', 'agents/codex.ts', 'agents/agy.ts', 'agents/opencode.ts']
     .map((f) => readFileSync(join(import.meta.dirname, f), 'utf8')).join('\0')).digest('hex').slice(0, 7);
   const app = `cb-supervisor/${version}`;
   let sql = connect(undefined, { app, max: 1 });
   // A dry run writes nothing, so it takes no lease (it may preview while a supervisor runs). Taken at start, then renewed
-  // before every tick and every 30 s on its own timer; board unreachable: the tick fails and the next one tries again
+  // before every tick and every 30 s on a thread of its own; board unreachable: the tick fails and the next one tries again
   const lease = dryRun ? null : supervisorLease({ connect: () => connect(undefined, { app, max: 1 }), holder: `${machine()} pid ${process.pid}` });
   const takeOrExit = async (tell: (line: string) => void) => {
     const why = await lease?.keep();
@@ -522,15 +522,17 @@ if (import.meta.main) {
     closeSkipAt: new Map(), elsewhereToldAt: new Map(), leavingTold: new Map(), restartTried: new Map(), unreadTold: new Set(), sighted: new Map() };
   // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
   let current: AbortController | undefined; // the running tick's
+  let stopRenewing: (() => Promise<void>) | undefined;
+  const giveBack = async () => { await stopRenewing?.(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
   if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
-    process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); lease.release().finally(() => process.exit(0)); });
+    process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); giveBack().finally(() => process.exit(0)); });
   }
-  if (lease) keepAlive(lease, { abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')),
-    lost: (why) => { say(why); process.exit(1); }, say });
   let code = 0;
   for (;;) {
     try {
       await takeOrExit(say);
+      if (lease) stopRenewing ??= keepAliveApart(lease.token()!, { app, say, lost: (why) => { say(why); process.exit(1); },
+        abort: () => current?.abort(new Error('the supervisor lease cannot be counted on: the tick stops here')) });
       const now = ((await withDeadline(sql`select cb.board_now() as t`, 30_000, 'the board clock'))[0]!.t as Date).getTime(); // the board's clock: planTick compares DB times
       const runnerConfig = existsSync(configPath) ? configPath : null;
       // the whole tick's cap is far above its worst case (3 starts at up to 180 s of herdr each, closes at 60 s each):
@@ -555,6 +557,6 @@ if (import.meta.main) {
     if (dryRun || once) break;
     await new Promise((r) => setTimeout(r, 60_000));
   }
-  await lease?.release();
+  await giveBack();
   process.exit(code);
 }
