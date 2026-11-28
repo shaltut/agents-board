@@ -931,6 +931,15 @@ test('#4787: the switch off, or anything the seat does on the board between two 
   assert.deepEqual(exits(busy.h.calls), []);
 });
 
+test('#4787: the switch on in a squad the supervisor does not run: told, never switched', async () => {
+  const { sql, sup, h } = await switchSetup();
+  const { version: _v, ...squad } = (await sql`select cb.squad_get('sv', true) as s`)[0].s;
+  await sql`select cb.squad_set('sv', ${sql.json({ ...squad, supervise: false })}, 'ahmed')`;
+  await tick(deps(sup, h.run)); await tick(deps(sup, h.run));
+  assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
+  assert.equal(await said(sql, /Nothing was switched or closed/), 1);
+});
+
 test('#4787: a seat that acts after the mark, right before /exit, is not closed', async () => {
   const { sql, sup, h } = await switchSetup();
   await tick(deps(sup, h.run));

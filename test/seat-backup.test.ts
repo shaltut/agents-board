@@ -105,6 +105,27 @@ test('a held card does not stop a close for a switch, only while the switch is o
   assert.equal(await mark(), false, 'the seat acted since');
 });
 
+test('only a squad the supervisor runs is switched; a switch ends the standing quota note, so the next stop needs two sightings again', async () => {
+  const { sql, sup } = await setup();
+  const [{ id }] = await sql`select cb.task_add(project => 'sv', title => 'c', type => 'bug', status => 'next', actor => 'orch@pc') as id`;
+  await sql`update cb.tasks set assignee = ${B1}, status = 'in_progress' where id = ${id}`;
+  await on(sql);
+  await sup`select cb.supervise_log('sv', 'quota', ${B1}, 'herdr pane p1')`;
+  for (const off of [() => sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`,
+    () => sql`select cb.project_pipeline('sv', false, 'ahmed')`]) {
+    await off();
+    await assert.rejects(switchTo(sup, 1), /automatic backup is off/);
+    assert.equal((await sup`select cb.supervise_mark(${B1}, true) as r`)[0].r, false);
+    await sql`select cb.squad_set('sv', ${sql.json(SQUAD)}, 'ahmed')`;
+    await sql`select cb.project_pipeline('sv', true, 'ahmed')`;
+  }
+  await sup`select cb.supervise_log('sv', 'quota', ${B1}, 'herdr pane p1')`;
+  assert.equal((await of(sup)).quota_told, true);
+  await switchTo(sup, 1);
+  await sup`select cb.supervise_log('sv', 'switch', ${B1}, 'sonnet to haiku')`;
+  assert.equal((await of(sup)).quota_told, false);
+});
+
 test('no_backup_told stands like quota_told; a switch and a missing backup have their digest lines', async () => {
   const { sql, sup } = await setup();
   assert.equal((await of(sup)).no_backup_told, false);
