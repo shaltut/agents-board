@@ -411,6 +411,26 @@ dc exec -e PGAPPNAME=cb-web board cb user role cai admin                       #
 A locked name (5 wrong passwords from one address) unlocks by itself after 2 minutes; `dc restart board` clears every
 lock at once. Removing someone, or a new link for a member, is on the Users page only.
 
+## Worker keys (#3222)
+
+What a machine will sign in to the worker API with ([README.md](README.md#who-can-do-what)); no worker uses one yet.
+Making and revoking a key is Ahmed's, from the VPS shell. `<machine>` is the name the board knows the machine by (its
+`CB_MACHINE`, else its hostname), in lower case.
+
+```bash
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -qAt -c "select cb.key_issue('<machine>', 'machine')"
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -qAt -c "select cb.key_issue('<machine>', 'runner', '<runner name>')"
+dc exec db psql -U cb -d claude_board -c "select jsonb_pretty(cb.keys_list())"   # no secrets: ids, machines, last use
+dc exec -e PGAPPNAME=cb-web db psql -U cb -d claude_board -c "select cb.key_revoke('<id>')"
+```
+
+`key_issue` prints the key **once** and the board cannot show it again. Send it straight into where the worker keeps it:
+never into a card, a message, a file in the repo or a chat. To replace a key, issue the new one, install it, then revoke
+the old one (two may be live). A revoked key is refused from its next request, and its open event streams end within
+25 s. Lost or leaked: revoke it. What a key did: `select * from cb.events where client = '<id>' order by id`, and
+`dc logs board | grep 'worker api: key <id>'`. `CB_API_RATE` in `.env` changes the limit of 1200 requests a minute per
+key.
+
 ## GitHub watch: Ahmed's own login (#3221)
 
 The lead's relay holds routine notices up to 10 minutes (and a session's own lines 120 s: `cb help relay`); a PR,
@@ -464,6 +484,8 @@ a new volume and a restore, never just a new image tag.
 | `healthz` 503, board logs `ECONNREFUSED db` | Postgres is down or still starting | `dc ps`, `dc logs db` |
 | db won't start: "cannot assign requested address" | Tailscale wasn't up when Docker started, so `CB_PG_BIND` doesn't exist yet | `sudo systemctl enable tailscaled`; `dc up -d db` |
 | A worker's `cb` says "board unreachable at 100.x.y.z" | the VPS, Tailscale or Postgres is down, or the URL/password is wrong | `tailscale ping vps2`; `dc ps`; check the worker's URL |
+| The worker API answers 401 "unknown or revoked worker key" | a mistyped or revoked key | `cb.keys_list()` (Worker keys): issue a new one |
+| The worker API answers 429 | one key made over 1200 requests in a minute, or holds 64 event streams | the log names the key id; find what loops, or raise `CB_API_RATE` |
 | A worker's `cb` errors "function cb.x(...) does not exist" | the worker's code is older or newer than the VPS's schema | update the worker's checkout (Upgrade) |
 | No Telegram pushes | no token, or another server polls with it (409 in the logs) | `TELEGRAM_BOT_TOKEN` in `.env`; stop the other server |
 | Log: "another board server polls Telegram and GitHub" | a second server (the PC's?) holds the poller lock | stop it; this one takes over within a minute |
