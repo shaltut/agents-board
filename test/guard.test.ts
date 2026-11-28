@@ -319,12 +319,30 @@ const messageText = [
   `git add -A && git commit -m 'fix: no git reset --hard' -m 'git reset --hard again'`,
   `cb log 1 "line one\ngit reset --hard\nline three"`, `cb log 1 "# not a comment" "git reset --hard"`,
 ];
+// a quote glued to a word is a string too: between double quotes ' is plain text, so a $( ) inside the "message" runs
+const hiddenByGluedQuote: [string, (c: string) => string][] = [
+  ['a quote glued to a word', (c) => `echo a"cb log 1 '$(${c})'"`],
+  ['a quote right after an assignment', (c) => `x=";cb log 1 '$(${c})'"`],
+  // review R2 at 7154e40: the "message" ran from inside the glued quote to a quote lines later
+  ['a glued quote, closed lines later', (c) => `echo x"cb log 1 '" >/dev/null\n${c}\necho "'" >/dev/null`],
+  // a rule that reads a quoted word as a command of its own must not drop a $( ) there: it ran with the outer quotes
+  ['a substitution in a double-quoted word that reads like a message', (c) => `echo "cb log 1 '$(${c})'"`],
+  ['the same with backticks', (c) => `echo "cb log 1 '\`${c}\`'"`],
+  ['the same handed to bash -c', (c) => `bash -c "cb log 1 '$(${c})'"`],
+];
+test('#4774: a message in a substitution in quotes is still text to every rule', () => {
+  for (const command of [`x="$(cb log 1 'never git push origin main')"`, `echo "$(cb log 1 'git push -f origin feat/x')"`]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
 test('#4774: a command a shell runs is never dropped as message text; real message text still is', () => {
-  for (const [name, make] of hiddenByMessage) {
+  for (const [name, make] of [...hiddenByMessage, ...hiddenByGluedQuote]) {
     // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
     assert.ok(stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE'), `the line must reach the rules: ${name}`);
     assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
-    assert.equal(evaluate({ tool: 'shell', command: make('git push origin main'), role: 'builder' }).allow, false, `builder must block a push to main: ${name}`);
+    for (const c of ['git push origin main', 'git push -f origin feat/x', 'taskkill /IM node.exe']) {
+      assert.equal(evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow, false, `builder must block "${c}": ${name}`);
+    }
   }
   for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
 });
