@@ -191,7 +191,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
     tick: { reads: true, use: 'cb tick [project]', topic: 'orchestrate',
       does: 'The actions due now, most urgent first, one person and one command per line: Ahmed\'s late asks to you, answers to act on, questions without options, PRs ready to merge, stuck/silent/blocked tasks, idle workers, PR state drift, held locks, quiet huddles. Prints nothing when nothing is due. A disabled project: a first line saying so, then only the answers and your questions. Read-only.',
       eg: 'cb tick',
-      more: 'Run it every loop. Each line carries the command to run; check it before running it. PRs come from links.pr (a GitHub URL, or #N with GITHUB_REPO_<PROJECT>=owner/repo in .env); PR state is cached for 5 minutes.' },
+      more: 'Run it every loop. Each line carries the command to run; check it before running it. PRs come from links.pr (a GitHub URL, or #N with GITHUB_REPO_<PROJECT>=owner/repo in .env); PR state is cached for 5 minutes. An Azure DevOps link is not looked up, so no line that rests on a PR\'s state (ready to merge, merged or closed) covers it: check those in Azure DevOps.' },
     digest: { reads: true, use: 'cb digest [project] [--all]', topic: 'orchestrate',
       does: 'What needs the lead in a pipeline project (the 15-minute digest, now), each line with the command that acts on it. The digest caps each group at 5 lines; --all shows every line. Read-only.',
       eg: 'cb digest iris --all' },
