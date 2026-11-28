@@ -105,6 +105,7 @@
       "Read(//**/.npmrc)",
       "Read(//**/.pypirc)",
       "Read(//**/cb-seat-*.claude.json)",
+      "Read(//**/.claude-board/keys/**)",
       "Read(//**/.env.ci)",
       "Read(//**/.env.uat)",
       "Read(//**/.env.sit)",

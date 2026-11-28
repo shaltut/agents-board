@@ -24,6 +24,8 @@ function cb(args: string[], env: Record<string, string> = {}) {
       // #4735: cb faults reads this log, not this machine's real one. Setting it also turns fault writes on under test
       // (they are off otherwise), so the control's failing write lands there too; after() removes the folder
       CB_FAULTS_HOME: faults,
+      // cb key check must never find this machine's real key, nor send one anywhere
+      CB_KEY_DIR: join(tmpdir(), `cb-keys-ro-${process.pid}`), CB_BOARD_URL: '',
       CLAUDE_CODE_MESSAGING_SOCKET: '', CB_GH_CACHE: join(tmpdir(), `cb-gh-ro-${process.pid}.json`), ...env } });
   return { code: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
@@ -34,9 +36,10 @@ const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['min
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
   ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],
-  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json'], ['models']];
-// no job exists to read: these stop at "no job #1", after the select that would have written
-const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1']);
+  ['usage', 'demo'], ['usage', '--all', '--since', '7d', '--json'], ['faults'], ['faults', '--since', '7d', '--json'], ['models'], ['key', 'check']];
+// no job exists to read: these stop at "no job #1", after the select that would have written. There is no board key
+// either: cb key check, which never uses the database, stops at saying what to set up
+const MAY_FAIL = new Set(['job show 1', 'job log 1', 'job 1', 'key check']);
 
 test('every form marked read-only runs on a read-only connection without writing', { timeout: 600_000 }, async () => {
   const sql = await freshDb(); clients.push(sql);
@@ -76,6 +79,7 @@ test('every form marked read-only runs on a read-only connection without writing
       const where = `cb ${f.join(' ')}${env.HERDR_PANE_ID ? ' (bound pane)' : ''}`;
       assert.doesNotMatch(r.err, /read-only transaction|25006/, `${where} wrote: ${r.err}`);
       if (!MAY_FAIL.has(f.join(' '))) assert.equal(r.code, 0, `${where}: ${r.err}`);
+      if (cmd === 'key') assert.match(r.err, /CB_BOARD_URL/, where);
     }
   }
   assert.equal((await sql`select (select count(*) from cb.events) + (select count(*) from cb.tasks) + (select count(*) from cb.sessions) as n`)[0].n, before);

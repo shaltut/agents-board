@@ -14,9 +14,11 @@ const named = (src: string, caller: RegExp) => [...src.matchAll(caller)].flatMap
   return [...first.matchAll(/(?<![=!]== )'([a-z_]+)'/g)].map((x) => x[1]!);
 });
 
-// cb.ts calls call(); it hands the same call() to squad-up and squad-trust, which know it as callFn
+// these call call() by that name; cb.ts hands the same call() to squad-up and squad-trust, which know it as callFn
+const CALL_FILES = ['cli/cb.ts', 'cli/relay.ts', 'cli/relay-refusal.ts', 'cli/jobs.ts', 'cli/usage.ts', 'cli/update-install.ts',
+  'cli/stage-words.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs'];
 const CALLED = [...new Set([
-  ...named(read('cli/cb.ts'), /(?<![\w.])call\(/g),
+  ...CALL_FILES.flatMap((f) => named(read(f), /(?<![\w.])call\(/g)),
   ...named(read('cli/squad-up.ts'), /\bcallFn\(/g),
   ...named(read('cli/squad-trust.ts'), /\bcallFn\(/g),
   // the runner's three files name theirs through board(), which is call() on the runner's own connection
