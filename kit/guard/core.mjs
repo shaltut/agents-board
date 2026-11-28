@@ -2247,13 +2247,13 @@ const SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'findstr', 'select-str
 // written out in quotes and is nothing but commands known to take stdin as data
 const CODE_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const DATA_ONLY = new Set(['cat', 'grep', 'wc', 'head', 'tail', 'sort', 'uniq', 'cut', 'tr', 'tee', 'jq']);
-const takesData = (code) => !/[$`(){}<\\"']/.test(code) && code.split(/[;&|\n]+/).every((part) => !part.trim() || DATA_ONLY.has(part.trim().split(/\s+/)[0]));
+const takesData = (code) => !/[$\x60(){}<\\\x22\x27]/.test(code) && code.split(/[;&|\n]+/).every((part) => !part.trim() || DATA_ONLY.has(part.trim().split(/\s+/)[0]));
 function runsOwnCode(words) {
   let i = 0;
   while (i < words.length && (cmdName(words[i]) === 'env' || ASSIGNMENT.test(words[i]))) i++;
   if (!CODE_SHELLS.has(cmdName(words[i] ?? ''))) return false;
   for (i++; /^-./.test(words[i] ?? '') && words[i] !== '--' && words[i] !== '-s'; i++) {
-    if (/^-[a-z]*c$/.test(words[i])) return /^(?:"[^"]*"|'[^']*')$/.test(words[i + 1] ?? '') && takesData(words[i + 1].slice(1, -1));
+    if (/^-[a-z]*c$/.test(words[i])) return /^(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27)$/.test(words[i + 1] ?? '') && takesData(words[i + 1].slice(1, -1));
   }
   return false;
 }
@@ -2280,7 +2280,7 @@ function stdinFed(raw, segments) {
 // printf print. null: a printf whose output is too long to work out
 const FEED_PRINTERS = new Set(['echo', 'printf', 'write-output', 'write-host']);
 // a word as it is handed on: quotes off (the $ of $'..' and $".." too), a written \n a new line, \x the character x
-const handedOn = (x) => unquote(x.replace(/^\$(?=["'])/, '')).replace(/\\n/g, '\n').replace(/\\([^\n])/g, '$1');
+const handedOn = (x) => unquote(x.replace(/^\$(?=[\x22\x27])/, '')).replace(/\\n/g, '\n').replace(/\\([^\n])/g, '$1');
 const PRINTF_SPEC = /%(?:%|[-+ #0]*[\d*]*(?:\.[\d*]+)?[a-zA-Z])/g;
 // the format is used again while arguments remain. Each round adds its own text, so the room bounds the work
 function printfOutput([format = '', ...args], room) {
@@ -2294,7 +2294,7 @@ function printfOutput([format = '', ...args], room) {
 }
 function fedLines(seg) {
   const w = seg.replace(/<<</g, ' <<< ').match(GIT_TOKEN) ?? [];
-  const lines = new Set(w.flatMap((x, i) => (/["']/.test(x) || w[i - 1] === '<<<' ? [handedOn(x)] : [])));
+  const lines = new Set(w.flatMap((x, i) => (/[\x22\x27]/.test(x) || w[i - 1] === '<<<' ? [handedOn(x)] : [])));
   const at = w.findIndex((x) => FEED_PRINTERS.has(cmdName(x)));
   if (at >= 0) {
     const name = cmdName(w[at]);
