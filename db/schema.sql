@@ -1951,6 +1951,7 @@ begin
     ) a
     left join lateral (select * from cb.sessions s3 where s3.actor = a.actor order by s3.last_seen desc limit 1) s on true
     where a.actor is not null and a.actor not in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner') and a.actor not in (select u.name from cb.users u)
+    offset 0  -- #4353: a fence. Without it the planner copies r, every subquery above with it, into both sort keys
   ) x), '[]');
 end $$;
 
