@@ -348,6 +348,10 @@ function stripMessageArgs(text, docs, inner) {
   MESSAGE_AT.lastIndex = 0;
   for (let m; (m = MESSAGE_AT.exec(text));) {
     if (!isCode(m.index)) continue;
+    // #4827: how deep the message command is. A quote deeper than this, or past a point where its own level closed, is a
+    // word of another command: one in a substitution among the arguments or beside it, which runs
+    const depth = bash.open.length;
+    bash.low = depth;
     const head = m[0];
     let next = MESSAGE_AT.lastIndex; // the end of the args read so far; the next command is looked for from there
     args: for (;;) {
@@ -359,6 +363,7 @@ function stripMessageArgs(text, docs, inner) {
         const q = piece[1];
         if (!q) continue;
         if (!isCode(i)) break args;
+        if (bash.open.length !== depth || bash.low < depth) continue;
         // kept: a "$(...)" or backtick the shell runs, and a herdr prompt starting with ! (it runs as a shell command there)
         if ((/^herdr/.test(head) && /^["']!/.test(q)) || ((inner || q.startsWith('"')) && substitutes(q, inner))) continue;
         out += text.slice(done, i) + '""';
