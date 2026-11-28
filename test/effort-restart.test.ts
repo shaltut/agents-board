@@ -131,7 +131,7 @@ const plan = (wanted: string | undefined, o: Partial<Session>, tried?: string) =
 const restart = (p: ReturnType<typeof planTick>) => p.restart.map((r) => [r.from, r.to]);
 
 test('an idle seat restarts when the effort it was started with is not the squad\'s', () => {
-  assert.deepEqual(restart(plan('high', { effort: 'default' })), [['sonnet', 'sonnet effort high']]);
+  assert.deepEqual(restart(plan('high', { effort: 'default' })), [['sonnet effort default', 'sonnet effort high']]);
   assert.deepEqual(restart(plan('high', { effort: 'low' })), [['sonnet effort low', 'sonnet effort high']]);
   assert.deepEqual(restart(plan(undefined, { effort: 'max' })), [['sonnet effort max', 'sonnet effort default']]);
   assert.match(plan('high', { effort: 'low' }).restart[0]!.launch.prompt, / --effort high, /);
