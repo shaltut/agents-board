@@ -5,9 +5,10 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
+import { killChild, killMarked } from './own-kill.ts';
 import { runJob, servesFolder } from '../cli/runner-job.ts';
 import { ensurePg } from '../db/pg.ts';
 import { loadConfig } from '../cli/recipes.ts';
@@ -16,19 +17,15 @@ const WIN = process.platform === 'win32';
 const NAME = 'pc-test';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code !== 'ESRCH'; } };
-const killTree = (pid: number | undefined) => {
-  if (!pid) return;
-  if (WIN) { try { execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {} }
-  else { try { process.kill(pid, 'SIGKILL'); } catch {} }
-};
 const freePort = () => new Promise<number>((ok) => { const s = createServer().listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 
 const kids: ChildProcess[] = [];
 const pids: number[] = []; // slow.mjs processes: on POSIX they outlive a killed runner
 const clients: any[] = [];
 after(async () => {
-  for (const k of kids) killTree(k.pid);
-  for (const p of pids) try { process.kill(p, 'SIGKILL'); } catch {}
+  // #4922: by now most of these have ended, and another job's process may have their number
+  for (const k of kids) killChild(k);
+  killMarked(pids, MARK);
   await Promise.all(clients.map((c) => c.end()));
   rmSync(TMP, { recursive: true, force: true, maxRetries: 5 }); // the repos, slot clones, homes
 });
@@ -40,6 +37,7 @@ await sql`insert into cb.sessions (machine, pane, actor, project, role) values (
 const session = postgres(TEST_URL, { onnotice: () => {}, connection: { application_name: 'claude-session' } }); clients.push(session);
 
 const TMP = mkdtempSync(join(tmpdir(), 'cbr-'));
+const MARK = basename(TMP); // on the command line of every process the cleanup may have to end by its number
 const ORIGIN = join(TMP, 'origin.git'), WORK = join(TMP, 'work'), HOME = join(TMP, 'home');
 writeFileSync(join(TMP, 'gitconfig'), '');
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: join(TMP, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
@@ -77,20 +75,20 @@ const node = (...a: string[]) => ['node', ...a];
 const recipes = {
   ok: { steps: [node('ok.mjs')], timeout: 60 },
   fail: { steps: [node('fail.mjs')], timeout: 60 },
-  slow: { steps: [node('slow.mjs')], timeout: 3 },
+  slow: { steps: [node('slow.mjs', MARK)], timeout: 3 },
   env: { steps: [node('env.mjs')], timeout: 60 },
   big: { steps: [node('big.mjs')], timeout: 60 },
   nocmd: { steps: [['no-such-program-xyz']], timeout: 60 },
   cmdfile: { steps: [['tool.cmd']], timeout: 60 },
   crash: { steps: [node('-e', 'process.exit(3221226505)')], timeout: 60 }, // 0xC0000409 on Windows: over the board's int
-  cleanup: { steps: [node('slow.mjs')], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
+  cleanup: { steps: [node('slow.mjs', MARK)], timeout: 2, finally: [node('-e', "require('fs').writeFileSync('done.txt','1')")] },
   pick: { params: { files: { pattern: '^ok\\.mjs$', max: 3 } }, steps: [node('{files}')], timeout: 60 },
   named: { params: { files: { pattern: '^[\\w.-]+\\.mjs$', max: 3 } }, steps: [node('ok.mjs')], timeout: 60 },
   insub: { cwd: 'sub', params: { files: { pattern: '^[\\w./-]+\\.mjs$', max: 4 } }, steps: [node('ok.mjs')], timeout: 60 },
   twice: { steps: [node('ok.mjs'), node('ok.mjs')], timeout: 60 },
-  multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs')], timeout: 60 },
+  multi: { steps: [node('ok.mjs'), node('ok.mjs'), node('slow.mjs', MARK)], timeout: 60 },
   // through an intermediary that is not libuv (as the pnpm shim, git.exe, docker.exe are): its child outlives it
-  wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs'] : ['sh', '-c', 'node slow.mjs']], timeout: 60 },
+  wrapped: { steps: [WIN ? ['cmd.exe', '/c', 'node', 'slow.mjs', MARK] : ['sh', '-c', `node slow.mjs ${MARK}`]], timeout: 60 },
   zero: { steps: [node('-e', "console.log('ℹ pass 0'); console.log('ℹ fail 0')")], timeout: 60 },
   // #4922: the teardown says the test database was lost; printing it is all a recipe has to do
   lost: { steps: [node('fail.mjs')], timeout: 60, finally: [node('-e', "console.log('database lost: the test Postgres crashed (made up)')")] },
@@ -370,7 +368,7 @@ test('the log server answers peers only', async () => {
   const denied = await fetch(`http://127.0.0.1:${port2}/jobs/${id}/log`);
   assert.equal(denied.status, 403);
   assert.match(await denied.text(), /this machine may not read job logs/);
-  killTree(other.child.pid);
+  killChild(other.child);
   await other.exited;
 });
 
@@ -384,14 +382,13 @@ test('a restarted runner ends its running job, kills what it left running and ru
   const id = await add('wrapped');
   const pid = await pidOf(id);
   // the runner alone dies (no tree kill), as in a crash: slow.mjs, under cmd.exe / sh, lives on in the slot
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   await sleep(500);
   assert.ok(alive(pid), 'the orphan is still running before the restart');
   // a decoy record whose pid was reused by another node.exe (an agent session, a relay): on Windows every recorded root
   // is node.exe (the launcher), so only the launcher's own mark (its slot's .nostart path) in the command line counts
-  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+  const decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', '--', MARK], { detached: true, stdio: 'ignore', windowsHide: true });
   pids.push(decoy.pid!);
   writeFileSync(join(HOME, 'state', 'slot-2.pids'), `${decoy.pid} ${WIN ? 'node.exe' : 'node'}\n`);
   // a record from before the last boot is never acted on, even when its pid carries the mark
@@ -416,8 +413,7 @@ test('a restarted runner ends its running job, kills what it left running and ru
 test('an over-long pid line does not switch reaping off', async () => {
   const id = await add('wrapped');
   const pid = await pidOf(id);
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   await sleep(500);
   const rec = readFileSync(join(HOME, 'state', 'slot-1.pids'), 'utf8');
@@ -626,8 +622,7 @@ test('the runner reports its slots, and at start runs Ahmed\'s board setting ove
   const row = async () => ({ ...(await sql`select slots, db_lanes from cb.runners where name = ${NAME}`)[0] });
   assert.deepEqual(await row(), { slots: 2, db_lanes: 1 }, 'runner.json\'s counts, reported');
   await sql`select cb.runner_limits_set(${NAME}, 12, null, 'ahmed')`;
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   runner = startRunner();
   await up(runner);
@@ -638,8 +633,7 @@ test('the runner reports its slots, and at start runs Ahmed\'s board setting ove
   // review M3: a setting runner.json cannot take (3 lanes on a file with no laneEnv) keeps the file's counts, and the
   // board learns why, so the page can say so
   await sql`select cb.runner_limits_set(${NAME}, null, 3, 'ahmed')`;
-  if (WIN) execFileSync('taskkill', ['/pid', String(runner.child.pid), '/F'], { stdio: 'ignore' });
-  else runner.child.kill('SIGKILL');
+  runner.child.kill('SIGKILL'); // this process alone, by its handle: never a reused number
   await runner.exited;
   runner = startRunner();
   await up(runner);
