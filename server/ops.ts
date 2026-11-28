@@ -6,7 +6,7 @@
 /** The kinds of worker key (cb.worker_keys). */
 export type Kind = 'machine' | 'runner' | 'supervisor';
 /** kinds: whose keys may call it over the worker API; none: only a caller with its own database connection.
- *  bytes: pictures travel in it, so its request may be 32 MB, not 1. machineLabel: its machine argument says what a row
+ *  bytes: pictures travel in it, so its request may be 16 MB, not 1. machineLabel: its machine argument says what a row
  *  is about, not who is calling. */
 export type Op = { setof?: true; kinds: readonly Kind[]; bytes?: true; machineLabel?: true };
 
