@@ -1,0 +1,72 @@
+// #3222 slice S5: the supervisor's lease, in place of a session advisory lock: one supervisor anywhere. A row on the board
+// (cb.leases), taken for 180 s and renewed by its token, so it needs no database session of its own and works the same
+// over an API. Renewed on its own timer, apart from the tick's queries.
+import { DeadlineError, withDeadline } from './deadline.ts';
+
+export const RENEW_MS = 30_000;
+// how long after the last renewal the lease is still counted on: the board gives 180 s, less room for a late answer
+export const SURE_MS = 150_000;
+const ANSWER_MS = 20_000;
+const msg = (e: unknown) => ((e as Error)?.message ?? String(e)).trim();
+
+export type Lease = {
+  /** null: held now (taken or renewed); else why it is not ours. Throws when the board does not answer. */
+  keep: () => Promise<string | null>;
+  holds: () => boolean;
+  /** renewed lately enough that no other can have taken it */
+  sure: () => boolean;
+  release: () => Promise<void>;
+};
+
+export function supervisorLease(o: { connect: () => any; holder: string; clock?: () => number }): Lease {
+  const clock = o.clock ?? Date.now;
+  let sql = o.connect(), token: string | null = null, sureFrom = -Infinity;
+  const ask = async (query: (s: any) => PromiseLike<any>) => {
+    try { return (await withDeadline(Promise.resolve(query(sql)), ANSWER_MS, 'the supervisor lease'))[0]; }
+    catch (e) { // #4261: a query that hangs means a connection that may never error: drop it, ask on a fresh one
+      if (e instanceof DeadlineError) { const old = sql; sql = o.connect(); old.end({ timeout: 0 }).catch(() => {}); }
+      throw e;
+    }
+  };
+  return {
+    async keep() {
+      const asked = clock(); // from before the question: the board's 180 s starts no earlier
+      if (token) {
+        if (!(await ask((s) => s`select cb.lease_renew('supervisor', ${token}) as ok`)).ok) return "the supervisor lease is no longer this supervisor's: another took it";
+      } else {
+        const { r } = await ask((s) => s`select cb.lease_take('supervisor', ${o.holder}) as r`);
+        if (!r.token) return `another supervisor is running: ${r.holder} holds the lease, for ${r.left_s} s more unless it renews it`;
+        token = r.token;
+      }
+      sureFrom = asked;
+      return null;
+    },
+    holds: () => token !== null,
+    sure: () => clock() - sureFrom < SURE_MS,
+    async release() { // at exit: the next start need not wait the lease out. A board that is away: it runs out by itself
+      if (token) await ask((s) => s`select cb.lease_release('supervisor', ${token}) as ok`).catch(() => {});
+      token = null;
+      await sql.end({ timeout: 5 }).catch(() => {});
+    },
+  };
+}
+
+/** The renewal on its own timer. The board saying the lease is not ours: the tick is aborted, then lost (which exits). A
+ *  board that does not answer is not that (a restart, a deploy): asked again next time, and the tick is aborted once the
+ *  lease can no longer be counted on. Answers the function that stops it. */
+export function keepAlive(lease: Lease, o: { every?: number; abort: () => void; lost: (why: string) => void; say: (line: string) => void }) {
+  const every = o.every ?? RENEW_MS;
+  let asking = false;
+  const timer = setInterval(async () => {
+    if (asking || !lease.holds()) return;
+    asking = true;
+    try {
+      const why = await lease.keep();
+      if (why) { clearInterval(timer); o.abort(); o.lost(why); }
+    } catch (e) {
+      o.say(`the supervisor lease was not renewed (${msg(e)}): trying again in ${Math.round(every / 1000)} s`);
+      if (!lease.sure()) o.abort();
+    } finally { asking = false; }
+  }, every);
+  return () => clearInterval(timer);
+}
