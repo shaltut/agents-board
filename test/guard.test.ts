@@ -252,6 +252,8 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['after a # inside $(( ))', (c) => `echo $(( 1 # )) '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside (( ))', (c) => `(( 1 # )); echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside a [[ =\ ]] pattern', (c) => `[[ a =\ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # inside an array subscript', (c) => `a[ 1 # ]=2; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
   ['after a # that follows a number',(c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
   ['in a PowerShell here-string',(c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
@@ -261,11 +263,11 @@ const heredocText = [
   `cb log 1 -b - <<'EOF'\ndon't "quote" # git reset --hard\nEOF`, `git commit -F - <<'EOF'\ngit reset --hard\nEOF`,
   `git commit -m "$(cat <<'EOF'\nfix: it's done; git reset --hard is only described\nEOF\n)"`,
   `cat > a <<'EOF'\ndon't\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`,
-  `echo "a # b" 'c <<' # it's a comment <<\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "a # b" 'c <<' # a comment; [with] {plain} words\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
-  `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # \u201cnote\u201d\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # note\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `mkdir -p out && [ -f *.md ] && { echo $HOME $?; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
-  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # don't\ngit reset --hard\nEOF`,
+  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # done\ngit reset --hard\nEOF`,
   `echo "\${HOME}" \${#x} \${y:-z} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
 ];
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
@@ -1290,6 +1292,8 @@ test('long commands stay fast', () => {
     // #4768: the shell reader walks the command once, however deep it nests
     ['#4768, 100,000 open parens then 8,000 empty heredocs, as a builder', asBuilder('( '.repeat(100000) + "\ncat > a <<'EOF'\nEOF".repeat(8000))],
     ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
+    ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
+    ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
