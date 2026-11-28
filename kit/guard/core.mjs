@@ -1264,6 +1264,9 @@ const ASSIGN_WORD = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^\s"'\\])+/g;
 // statement of an earlier one is not walked again.
 const NAME_ASSIGNERS = new RegExp(NAME_ASSIGNER.source, 'gi');
 const STATEMENT = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\.|[^;&|\n"'\\])*/y;
+// #4707 review M5: declare -n r=$x makes r stand for a name the guard cannot read. In command position only (a quoted
+// search for it is text); every repeat is bounded, so it stays linear
+const HIDDEN_NAMEREF = /(?:^|[;&|\n({]|(?<![\w-])(?:then|do|else)[ \t])[ \t]*(?:declare|typeset|local)[ \t]+(?:[-+]\w{1,8}[ \t]+){0,8}?-[A-Za-z]{0,8}n[A-Za-z]{0,8}[ \t]+(?:[-+]\w{1,8}[ \t]+){0,8}[A-Za-z_]\w*=["']?[^\s;&|"'$`]*[$`]/;
 function assignsThrough(raw) {
   let end = 0;
   for (const m of raw.matchAll(NAME_ASSIGNERS)) {
@@ -1298,6 +1301,7 @@ function envChangesSeat(seg) {
   let added = 0;
   for (let i = 0; i < w.length; i++) {
     if (!/^(?:\S*[\\/])?env(?:\.exe)?$/i.test(w[i])) continue;
+    let splits = 0;
     for (let j = i + 1; j < w.length; j++) {
       const x = w[j];
       let split = null;
@@ -1305,6 +1309,7 @@ function envChangesSeat(seg) {
       else if (x.startsWith('--split-string=')) split = x.slice(15);
       else if (/^-[a-zA-Z0-9]*S/.test(x)) split = x.slice(x.indexOf('S') + 1) || (w[++j] ?? '');
       if (split !== null) {
+        if (++splits > 64) return true; // more than any real command: blocked, so the walk from each env stays short
         const more = split.trim().split(/[ \t]+/).filter(Boolean).slice(0, Math.max(0, 64 - added));
         added += more.length;
         w.splice(j + 1, 0, ...more);
@@ -1355,7 +1360,7 @@ function seatVarChangeOne(command) {
   const raw = stripMessages(String(command ?? ''));
   const t = SEAT_RUNS_CODE.test(raw) ? raw : raw.replace(QUOTED_TEXT, '""');
   if (SEAT_VAR_SET.test(t) || SEAT_VAR_FOR.test(t) || ENV_CLEARS.test(t)) return SEAT_VARS_CHANGE;
-  if (NAME_ASSIGNER.test(raw) && assignsThrough(raw)) return SEAT_VARS_CHANGE;
+  if (NAME_ASSIGNER.test(raw) && (HIDDEN_NAMEREF.test(raw) || assignsThrough(raw))) return SEAT_VARS_CHANGE;
   for (const seg of t.match(SEGMENTS) ?? []) {
     const r = SEAT_VAR_REMOVER.exec(seg);
     if (r && SEAT_VAR_NAMED.test(seg.slice(r.index))) return SEAT_VARS_CHANGE;
@@ -1399,8 +1404,16 @@ const TMUX_SAFE = new Set(['ls', 'list-sessions', 'list-windows', 'lsw', 'list-p
   'show-environment', 'showenv', 'info', 'server-info', 'kill-session', 'kill-window', 'kill-pane', 'kill-server', 'select-pane', 'selectp', 'select-window',
   'selectw', 'resize-pane', 'resizep', 'rename-session', 'rename', 'rename-window', 'renamew', 'detach-client', 'detach', '-V']);
 const HERDR_RUNS = new Set(['run', 'send', 'send-keys', 'send-text', 'type', 'paste', 'start', 'create', 'new', 'exec', 'prompt', 'spawn', 'split', 'respawn', 'keys']);
+// the {env} shorthand, anywhere in an option object ({stdio: 'inherit', env}); the lookbehind runs only after "env"
+const ENV_SHORTHAND = /(?:spawn|exec|fork|Command)\w*[\s\S]{0,400}?env(?<=[{,]\s*env)\s*(?=[,}])/;
+const ENV_SET = /(?<![\w.])env\s*=(?!=)/g;
+const ENV_COPY = /\s*(?:\{\s*\.\.\.\s*)?process\.env\b(?!\s*[.[])/y;
+// every "env =" in the code is a copy of process.env, so the shorthand hands the child that copy
+const envIsCopy = (code) => {
+  const sets = [...code.matchAll(ENV_SET)];
+  return sets.length > 0 && sets.every((m) => { ENV_COPY.lastIndex = m.index + m[0].length; return ENV_COPY.test(code); });
+};
 const FRESH_CODE = [
-  /(?:spawn|exec|fork|Command)\w*[\s\S]{0,400}?\{\s*env\s*(?=[,}])/,
   /(?:spawn|exec|fork|Command)\w*[\s\S]{0,400}?\benv\s*:(?!\s*process\.env\b|\s*\{\s*\.\.\.\s*process\.env\b)/,
   /(?:subprocess|Popen|create_subprocess)[\s\S]{0,400}?\benv\s*=(?!=|\s*os\.environ\b|\s*dict\(\s*os\.environ\b|\s*\{\s*\*\*\s*os\.environ\b)/,
   /\bclearEnv\s*:\s*true/, /\bunsetenv_others\b/, /\.Environment(?:Variables)?\.Clear\s*\(/i,
@@ -1410,10 +1423,32 @@ const FRESH_CODE = [
 const OS_EXEC_E = /os\.(?:exec|spawn)\w*e\s*\(/;
 // URL's IPv4 parser accepts the short, octal, hex and integer forms the OS resolver accepts.
 const hostName = (h) => String(h).toLowerCase().replace(/\.$/, '').replace(/^\[|\]$/g, '');
-const hostAddress = (h) => { try { return new URL(`http://${h}`).hostname; } catch { return h; } };
+// (an IPv6 address needs brackets there, and has no %zone)
+const hostAddress = (h) => {
+  const bare = h.split('%')[0];
+  try { return new URL(`http://${bare.includes(':') ? `[${bare}]` : bare}`).hostname; } catch { return h; }
+};
+// an IPv4 loopback or zero address written as IPv6, as URL normalizes it
+const MAPPED_LOCAL = /^::ffff:(?:7f[0-9a-f]{2}|0):[0-9a-f]{1,4}$/;
+// the host in an ssh destination: [ssh://][user@]host[:port], the user ending at the last @ (as OpenSSH splits it)
+const sshHost = (word) => {
+  const uri = /^ssh:\/\//i.test(word);
+  const h = word.replace(/^ssh:\/\//i, '').replace(/^.*@/s, '');
+  if (!uri) return h;
+  const authority = h.split('/')[0];
+  return authority.startsWith('[') ? authority.replace(/\]:\d*$/, ']') : authority.replace(/^([^:]*):\d*$/, '$1');
+};
+// ssh -o Key=value: HostName replaces the destination, and ProxyCommand may tunnel back to this machine's sshd
+const sshOptionLocal = (option, hosts) => {
+  const m = /^\s*([A-Za-z]+)(?:\s*=\s*|\s+)([\s\S]*)$/.exec(option);
+  const key = m?.[1].toLowerCase();
+  if (key === 'hostname') return m[2] !== '%h' && (/[$`]/.test(m[2]) || localHost(sshHost(m[2]), hosts));
+  if (key !== 'proxycommand') return false;
+  return m[2].split(/[\s;&|'"]+/).some((w) => w && !/^(?:-|\d+$)/.test(w) && localHost(sshHost(w).replace(/^([^:]*):\d+$/, '$1'), hosts));
+};
 const localHost = (h, hosts) => {
   const n = hostName(h), address = hostName(hostAddress(n));
-  return LOCAL_HOST.test(n) || /^127\./.test(address) || hosts.some((v) => {
+  return LOCAL_HOST.test(n) || LOCAL_HOST.test(address) || MAPPED_LOCAL.test(address) || /^127\./.test(address) || hosts.some((v) => {
     if (typeof v !== 'string' || !v) return false;
     const own = hostName(v), short = own.split('.')[0];
     return own === n || hostName(hostAddress(own)) === address ||
@@ -1434,18 +1469,27 @@ function freshLaunch(name, a, hosts, role, vars) {
   const only = (ok) => a.length > 0 && a.every((x) => ok.test(x));
   if (OTHER_USER.has(name)) return only(/^(?:--version|-V|-h|--help|-l|--list|-k|-K)$/) ? null : name;
   if (name === 'ssh' || name === 'mosh') {
+    let destination = null;
     for (let i = 0; i < a.length; i++) {
+      const option = /^-[46AaCfGgKkMNnqsTtVvXxYy]*o(.*)$/s.exec(a[i]);
+      if (option) {
+        const value = option[1] || (a[++i] ?? '');
+        if (sshOptionLocal(value, hosts)) return `${name} -o ${value.slice(0, 60)}`;
+        continue;
+      }
       if (SSH_ARG.has(a[i])) { i++; continue; }
       if (a[i].startsWith('-')) continue;
-      let host = unquote(a[i]).replace(/^[^@]*@/, '');
-      if (role === 'lead' && name === 'ssh' && LEAD_SSH_HOST.test(host) && !OWN_HOST_VAR.test(host)) {
-        const key = host.replace(/^\$\{?|\}$/g, '');
-        host = vars.get(key);
-        if (host !== DEPLOY_TARGET || localHost(host, hosts)) return `${name} variable host outside the deploy target`;
-      }
-      return /[$`]/.test(host) || !host || localHost(host, hosts) ? `${name} ${a[i].slice(0, 60)}` : null;
+      if (destination !== null) break; // the remote command: ssh still reads options between the host and it
+      destination = a[i];
     }
-    return null;
+    if (destination === null) return null;
+    let host = sshHost(unquote(destination));
+    if (role === 'lead' && name === 'ssh' && LEAD_SSH_HOST.test(host) && !OWN_HOST_VAR.test(host)) {
+      const key = host.replace(/^\$\{?|\}$/g, '');
+      host = vars.get(key);
+      if (host !== DEPLOY_TARGET || localHost(host, hosts)) return `${name} variable host outside the deploy target`;
+    }
+    return /[$`]/.test(host) || !host || localHost(host, hosts) ? `${name} ${destination.slice(0, 60)}` : null;
   }
   if (name === 'wsl') return only(/^(?:-l|--list|-v|--verbose|--status|--version|--help|-q|--quiet|--shutdown|--update|--all|--running)$/) ? null : name;
   if (name === 'launchctl') return a.some((x) => /^(?:submit|load|bootstrap|start|kickstart|asuser)$/.test(x)) ? name : null;
@@ -1472,16 +1516,84 @@ function freshLaunch(name, a, hosts, role, vars) {
   }
   return null;
 }
-const FRESH_OPT_ARG = new Set(['-a', '--arg-file', '-I', '-J', '-L', '-n', '-P', '-s', '-E', '--eof', '--replace', '--max-args', '--max-procs', '--max-lines', '--max-chars']);
-const SSH_SET = /(?:^|[\s;&|(])([A-Za-z_]\w*)=('[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|()]+)/g;
+const TIMEOUT_OPT_ARG = /^(?:-s|-k|--signal|--kill-after)$/;
+const FRESH_OPT_ARG = new Set(['-a', '--arg-file', '-d', '--delimiter', '--process-slot-var', '-I', '-J', '-L', '-n', '-P', '-s', '-E', '--eof', '--replace', '--max-args', '--max-procs', '--max-lines', '--max-chars']);
 const SHELL_COMMENT = /"(?:\\.|[^"\\])*"|'[^']*'|\\.|(?:^|[ \t])#[^\n]*/gm;
+// comments as spaces, so every later position still holds
+const blankComments = (t) => t.replace(SHELL_COMMENT, (s) => /^[ \t]*#/.test(s) ? ' '.repeat(s.length) : s);
 const sshValue = (key, value, inherited) => key === 'VPS' && value === '${VPS:-vps2}' ? (inherited || DEPLOY_TARGET) : value;
+// set, but to something the guard cannot know: never the deploy target (and not "unset", which takes the script default)
+const UNKNOWN_HOST = '$?';
+const PLAIN_SET = /^([A-Za-z_]\w*)(\+?)=([\s\S]*)$/;
+const DECLARES = new Set(['export', 'readonly', 'declare', 'typeset', 'local']);
+const WRITES_NAMES = new Set(['read', 'mapfile', 'readarray', 'getopts', 'unset', 'for', 'select', 'let', 'printf']);
+// a block or a function body may not run, may run again or runs apart: from its first word on, no assignment is certain
+const OPENS_BLOCK = /^(?:if|while|until|for|select|case|function|\{)$|^\(|\(\)/;
+// #4707 R2-1: the variable writes of a command, in order, each from the end of its statement. Only a statement that is
+// nothing but assignments (after export and the like), run for certain in this shell, gives a value. A prefix
+// (X=1 cmd) leaves the shell's variable as it was. Any other writer, a condition, a pipe or a subshell makes the name
+// unknown; eval and source make every name unknown, and a nameref does so for the rest of the command. Linear.
+function varWrites(text) {
+  const out = [];
+  let nameref = false, compound = false, before = '';
+  for (let at = 0; at < text.length;) {
+    STATEMENT.lastIndex = at;
+    STATEMENT.exec(text);
+    const end = Math.max(STATEMENT.lastIndex, at);
+    let next = end;
+    while (next < text.length && ';&|\n'.includes(text[next])) next++;
+    const after = text.slice(end, next);
+    const words = text.slice(at, end).match(ASSIGN_WORD) ?? [];
+    // run only on a condition (&& || before it, or inside a block), or in a subshell (a pipe on either side, or sent to
+    // the background)
+    compound ||= words.some((word) => OPENS_BLOCK.test(word));
+    const unsure = compound || /&&|\|/.test(before) || /^(?:\|(?!\|)|&(?!&))/.test(after);
+    const set = (key, value) => out.push({ at: end, key, value: nameref ? undefined : value });
+    let k = 0;
+    if (DECLARES.has(words[0])) {
+      for (k = 1; /^[-+]/.test(words[k] ?? ''); k++) {
+        if (words[0] !== 'export' && words[0] !== 'readonly' && /n/.test(words[k])) { nameref = true; set('*'); }
+      }
+    }
+    let first = k;
+    while (PLAIN_SET.test(words[first] ?? '')) first++;
+    if (first === words.length) {
+      for (let i = k; i < words.length; i++) {
+        const [, key, plus, value] = PLAIN_SET.exec(words[i]);
+        set(key, unsure || plus ? undefined : unquote(value));
+      }
+    } else {
+      const printsInto = words.includes('-v');
+      let writes = false;
+      for (let i = first; i < words.length; i++) {
+        const word = unquote(words[i]).replace(/^[({]+/, '');
+        if (word === 'eval' || word === 'source' || (word === '.' && i === first)) set('*');
+        if (writes || (WRITES_NAMES.has(word) && (word !== 'printf' || printsInto))) {
+          writes = true;
+          const name = /^[A-Za-z_]\w*/.exec(word);
+          if (name) set(name[0]);
+        }
+        const assigned = /^[({]*([A-Za-z_]\w*)\+?=/.exec(words[i]);
+        if (assigned) set(assigned[1]);
+      }
+    }
+    before = after;
+    at = Math.max(next, at + 1);
+  }
+  return out;
+}
+function applyWrite(vars, { key, value }) {
+  if (key === '*') { // every name is unknown now: any but VPS is simply forgotten, and a forgotten name is no host
+    vars.clear();
+    vars.set('VPS', UNKNOWN_HOST);
+  } else vars.set(key, value === undefined ? UNKNOWN_HOST : sshValue(key, value, vars.get(key)));
+}
 function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
-  const raw = stripMessages(String(command ?? '')).replace(SHELL_COMMENT, (s) => /^[ \t]*#/.test(s) ? ' ' : s);
+  const raw = blankComments(stripMessages(String(command ?? '')));
   const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
-  const assignments = raw.matchAll(SSH_SET);
-  let next = assignments.next();
+  const writes = varWrites(raw);
+  let written = 0;
   for (const segment of raw.matchAll(SEGMENT)) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
@@ -1491,11 +1603,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
     const runsQuote = runnerArg(w, u, names, false);
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
-      while (!next.done && next.value.index < segment.index + tokens[i].index) {
-        const m = next.value, value = unquote(m[2]);
-        vars.set(m[1], sshValue(m[1], value, vars.get('VPS')));
-        next = assignments.next();
-      }
+      while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
       if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
         const why = freshEnvOne(u[i], hosts, role, vars.get('VPS'), depth + 1);
         if (why) return why;
@@ -1513,15 +1621,29 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0) {
         }
         continue;
       }
-      if (name === 'env') { while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) i++; continue; }
-      if (name === 'timeout') { while (w[i + 1] && w[i + 1].startsWith('-')) i++; i++; continue; }
+      if (name === 'env') {
+        while (w[i + 1] && (w[i + 1].startsWith('-') || ASSIGNMENT.test(w[i + 1]))) {
+          const option = u[++i];
+          // env -S splits its value into the command and arguments that run
+          const split = /^(?:-S|--split-string)$/.test(option) ? u[++i] ?? '' : /^(?:-S|--split-string=)([\s\S]+)$/.exec(option)?.[1];
+          if (split !== undefined) {
+            const why = freshEnvOne([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
+            if (why) return why;
+            cmd = false;
+            break;
+          }
+          if (/^(?:-u|-C|--unset|--chdir)$/.test(option)) i++;
+        }
+        continue;
+      }
+      if (name === 'timeout') { while (w[i + 1]?.startsWith('-')) { if (TIMEOUT_OPT_ARG.test(u[++i])) i++; } i++; continue; }
       const why = freshLaunch(name, u.slice(i + 1, i + 41), hosts, role, vars);
       if (why) return FRESH_ENV(why);
       cmd = false;
     }
   }
   if (SEAT_RUNS_CODE.test(raw)) {
-    if (FRESH_CODE.some((re) => re.test(raw))) return FRESH_ENV('interpreter code that gives a child an environment of its own');
+    if (FRESH_CODE.some((re) => re.test(raw)) || (ENV_SHORTHAND.test(raw) && !envIsCopy(raw))) return FRESH_ENV('interpreter code that gives a child an environment of its own');
     if (OS_EXEC_E.test(raw) && !/os\.environ/.test(raw)) return FRESH_ENV('os.exec*e or os.spawn*e with an environment of its own');
   }
   return null;
@@ -1540,26 +1662,39 @@ const SCRIPT_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'mksh', 'ash'
 const SCRIPT_LEAD = new Set(['nohup', 'time', 'exec', 'command', 'nice', 'builtin']);
 const pathWord = (w) => w.replace(/["']/g, '');
 const scriptPath = (base, p) => !base || /^(?:[a-z]:|[\\/])/i.test(p) ? p : `${base}/${p}`;
-function scriptCalls(command, base = '', deployHost) {
+const FEEDS = new Set(['cat', 'get-content', 'gc', 'head', 'tail']);
+const TOO_MANY_SCRIPTS = 'shell script traversal exceeds the guard limit (32 files): split the command';
+function scriptCalls(command, base = '', deployHost, depth = 0) {
+  if (depth > 8) throw new Error('shell commands nested deeper than the guard reads: split the command');
   const out = [];
-  const text = stripMessages(String(command ?? ''));
-  let cwd = base, feed = [], lastEnd = 0, vps = deployHost;
+  const text = blankComments(stripMessages(String(command ?? '')));
+  const vars = new Map(deployHost === undefined ? [] : [['VPS', deployHost]]);
+  const writes = varWrites(text);
+  let cwd = base, feed = [], lastEnd = 0, written = 0;
   for (const m of text.matchAll(SEGMENT)) {
     const seg = m[0], piped = /^\|&?$/.test(text.slice(lastEnd, m.index));
     lastEnd = m.index + seg.length;
     if (!piped) feed = [];
-    for (const a of seg.matchAll(SSH_SET)) if (a[1] === 'VPS') vps = sshValue(a[1], unquote(a[2]), vps);
-    const w = (seg.match(WORD) ?? []).map(pathWord);
+    while (written < writes.length && writes[written].at <= m.index) applyWrite(vars, writes[written++]);
+    let vps = vars.get('VPS'); // this command's: a VPS= prefix sets it for this one alone
+    const raw = seg.match(WORD) ?? [], w = raw.map(pathWord);
+    const prefix = (word) => { const set = /^VPS=([\s\S]*)$/.exec(word ?? ''); if (set) vps = sshValue('VPS', set[1], vps); };
     const add = (p) => {
       if (!p || /[$`*?]/.test(p)) return;
-      if (out.length >= 32) throw new Error('shell script traversal exceeds the guard limit (32 files): split the command');
+      if (out.length >= 32) throw new Error(TOO_MANY_SCRIPTS);
       out.push({ path: scriptPath(cwd, p), cwd, deployHost: vps });
     };
     let i = 0;
     for (;;) {
       const n = cmdName(w[i] ?? '');
-      if (ASSIGNMENT.test(w[i] ?? '') || SCRIPT_LEAD.has(n)) i++;
-      else if (n === 'timeout') { i++; while (w[i] && w[i].startsWith('-')) i++; i++; }
+      if (ASSIGNMENT.test(w[i] ?? '')) prefix(w[i++]);
+      else if (SCRIPT_LEAD.has(n)) i++;
+      else if (n === 'env') {
+        for (i++; w[i] && (w[i].startsWith('-') || ASSIGNMENT.test(w[i])); i++) {
+          if (/^(?:-u|-C|--unset|--chdir)$/.test(w[i])) i++; else prefix(w[i]);
+        }
+      } else if (n === 'timeout') { for (i++; w[i]?.startsWith('-'); i++) if (TIMEOUT_OPT_ARG.test(w[i])) i++; i++; }
+      else if (/^\d*<(?!<)/.test(w[i] ?? '')) i += /^\d*<$/.test(w[i]) ? 2 : 1; // a redirect before the command
       else break;
     }
     if (i >= w.length) continue;
@@ -1569,16 +1704,22 @@ function scriptCalls(command, base = '', deployHost) {
       if (p && !/[$`*?]/.test(p)) cwd = scriptPath(cwd, p);
       continue;
     }
-    if (n === 'cat' || n === 'get-content' || n === 'gc') { feed = a.filter((x) => !x.startsWith('-')).map((p) => ({ path: scriptPath(cwd, p), cwd, deployHost: vps })); continue; }
+    if (FEEDS.has(n)) { feed = a.filter((x) => !x.startsWith('-')).map((p) => ({ path: scriptPath(cwd, p), cwd, deployHost: vps })); continue; }
     if (n === 'source' || n === '.' || n === 'call') { add(a[0]); continue; }
     if (SCRIPT_SHELLS.has(n)) {
       if (piped) { out.push(...feed); feed = []; }
-      for (const r of seg.matchAll(/(?:^|\s)<[ \t]*("[^"]*"|'[^']*'|[^\s;&|<>]+)/g)) add(pathWord(r[1]));
+      for (const r of seg.matchAll(/(?:^|\s)0?<[ \t]*("[^"]*"|'[^']*'|[^\s;&|<>]+)/g)) add(pathWord(r[1]));
       for (let j = 0; j < a.length; j++) {
-        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(a[j])) break;
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(a[j])) { // the code it is given may run a script too
+          let c = j + 1;
+          while (a[c]?.startsWith('-')) c++;
+          if (a[c] !== undefined) out.push(...scriptCalls(unquote(raw[i + 1 + c]), cwd, vps, depth + 1));
+          if (out.length > 32) throw new Error(TOO_MANY_SCRIPTS);
+          break;
+        }
         if (/^[-+]O$|^[-+]o$|^--(?:rcfile|init-file)$/.test(a[j])) { j++; continue; }
         if (/^[-+]/.test(a[j])) continue;
-        if (/^[<>]/.test(a[j])) break;
+        if (/^\d*[<>]/.test(a[j])) break;
         add(a[j]);
         break;
       }
@@ -1593,6 +1734,17 @@ function scriptCalls(command, base = '', deployHost) {
   return out;
 }
 export const scriptRuns = (command) => scriptCalls(command).map((call) => call.path);
+// as bash tells a binary from a script: a NUL byte before the first newline, and no #! line. A reader that cannot look
+// says text, so the limit still holds
+function binaryFile(f, fs) {
+  if (typeof fs.openSync !== 'function') return false;
+  const head = Buffer.alloc(8192);
+  const fd = fs.openSync(f, 'r');
+  let n;
+  try { n = fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+  const start = head.subarray(0, n), nul = start.indexOf(0), line = start.indexOf(10);
+  return start.toString('latin1', 0, 2) !== '#!' && nul >= 0 && (line < 0 || nul < line);
+}
 /** The shims' readScript: a missing file is null; an existing script beyond the read limit fails closed. */
 export function scriptReader(cwd, fs) {
   return (p) => {
@@ -1602,7 +1754,10 @@ export function scriptReader(cwd, fs) {
       st = fs.statSync(f);
     } catch { return null; }
     if (!st.isFile()) return null;
-    if (st.size > 256 * 1024) throw new Error('shell script exceeds the guard read limit (256 KB): split it before running');
+    if (st.size > 256 * 1024) {
+      if (!SCRIPT_EXT.test(f) && binaryFile(f, fs)) return null; // a large program run by its path is not a script
+      throw new Error('shell script exceeds the guard read limit (256 KB): split it before running');
+    }
     return fs.readFileSync(f, 'utf8');
   };
 }

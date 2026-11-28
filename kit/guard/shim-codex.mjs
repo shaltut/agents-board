@@ -11,7 +11,7 @@
 // exec_command, its one shell tool on every platform, arrives as tool_name Bash with { command: <raw string> } (there is
 // no unified_exec or PowerShell tool); apply_patch as { command: <patch text> }; write_stdin fires no hook at all, since
 // it feeds a session whose command already passed here as Bash; every other function tool arrives under its own name.
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -71,7 +71,7 @@ export function parseCodexInput(raw) {
 // and through the real path of their nearest existing folder (review 68-I2: ./, ../ and links are judged where they land).
 const FS = { resolve, dirname, basename, join, realpathSync };
 // #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
-const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 export function editPaths(input, cwd) {
   return [...new Set(core.editTargets(input).flatMap((t) => core.editPathForms(t, cwd, FS)))];
 }

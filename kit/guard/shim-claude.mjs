@@ -4,7 +4,7 @@
 // It fails closed: empty or unreadable input, an unknown tool or CB_ROLE, a missing or broken core.mjs, or any error
 // blocks; nothing here ever allows by default. No static local imports: core.mjs loads dynamically, so a shim copied
 // without it still blocks. Deploy with node kit/guard/install.mjs.
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { hostname, networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -48,7 +48,7 @@ export function parseClaudeInput(raw) {
 }
 
 // #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
-const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 
 // One hook run: raw stdin and an env (CB_ROLE, CB_PROTECTED_BRANCHES, CB_ALLOW_ASK) in, the hook's JSON object out.
 export function runClaudeShim(raw, env = process.env) {

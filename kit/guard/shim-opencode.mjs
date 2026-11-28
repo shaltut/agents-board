@@ -5,7 +5,7 @@
 // unreadable input, an unknown tool or CB_ROLE, a missing or broken core.mjs, or any error blocks. The plugin must forward
 // only bash, powershell, the edit family, the read family (read, grep, glob, list) and question: every other tool name is
 // blocked here, never allowed by default. CB_AGENT without CB_ROLE blocks too (#4002): cb squad up always sets both.
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { hostname, networkInterfaces } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -51,7 +51,7 @@ export function parseOpencodeInput(raw) {
 }
 
 // #4669: an older core.mjs beside this shim (a hand copy, or mid-update) has no scriptReader: judge without the script read
-const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve }) : null);
+const readerFor = (cwd) => (typeof core?.scriptReader === 'function' ? core.scriptReader(cwd, { readFileSync, statSync, resolve, openSync, readSync, closeSync }) : null);
 
 export function runOpencodeShim(raw, env = process.env) {
   try {
