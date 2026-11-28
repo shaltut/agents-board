@@ -402,6 +402,8 @@ test('winding down: a working seat, a busy herdr, a running job, a close under w
   assert.deepEqual(tick(quiet(), { ...ready(B1), safeToClose: { [B1]: false } }).close, [], 'its adapter says no');
   assert.deepEqual(tick(quiet({ jobs_running: 1 }), ready(B1)).close, [], 'a job of its own is running');
   assert.deepEqual(tick(quiet({ closing: true }), ready(B1)).close, []);
+  assert.deepEqual(tick(quiet({ bound: 'other' }), ready(B1)).close, [], 'moved to another project');
+  assert.deepEqual(tick(quiet({ bound: 'sv' }), ready(B1)).close, [B1]);
   assert.deepEqual(tick(quiet(), { ...ready(B1), herdrDown: new Set(['macbook']) }).close, []);
 });
 
@@ -411,17 +413,10 @@ test('winding down: the 10 minutes count from the disable at the earliest, so ev
   assert.deepEqual(tick(st(10), ready(B1)).close, [B1]);
 });
 
-test('winding down: never the lead or a hand-started session; a seat an earlier squad named is closed too; two a tick', () => {
+test('winding down: never the lead or a hand-started session; a seat an earlier squad named is closed too', () => {
   const old = (actor: string, role: string) => sess(actor, role, { last_event: ago(30) });
   const all = [old('sv-orch@shaltoot', 'lead'), old('foo@macbook', 'builder'), old('sv-B7@macbook', 'builder'), old(B1, 'builder'), old(B2, 'builder'), old(R1, 'reviewer')];
   const p = tick(winding(all), { ...ready(...all.map((s) => s.actor)), pastSeats: new Set(['sv-B7@macbook']) });
-  assert.equal(p.close.length, 2, p.close.join());
-  const everyone: string[] = [];
-  let left = all;
-  for (let i = 0; i < 4; i++) {
-    const c = tick(winding(left), { ...ready(...all.map((s) => s.actor)), pastSeats: new Set(['sv-B7@macbook']) }).close;
-    everyone.push(...c);
-    left = left.filter((s) => !c.includes(s.actor));
-  }
-  assert.deepEqual(everyone.sort(), [B1, B2, 'sv-B7@macbook', R1].sort());
+  // every one that qualifies is planned: the supervisor stops after two closes a tick
+  assert.deepEqual([...p.close].sort(), [B1, B2, 'sv-B7@macbook', R1].sort());
 });
