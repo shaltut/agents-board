@@ -815,12 +815,19 @@ const secretReads = [
   'cat /tmp/cb-relay-[0-9a-f]*.bridge', 'cat /tmp/cb-relay-*', String.raw`gc $env:TEMP\cb-relay-ab12*`, 'head /tmp/cb-relay-ab12cd34ef56.*',
   'grep token $TEMP/*.bridge', 'base64 < /tmp/cb-relay-ab12cd34ef56.bridge', 'cat /tmp/cb-relay-*.bridge*', `cat "$TMPDIR"/cb-seat-*.claude.json`,
   String.raw`Get-Content $env:TEMP\cb-seat-*.opencode.json`,
+  // PR 203 review: a glob typed without the hyphen reaches the same files, and so does one ending at .json
+  'tail -n 50 /tmp/cb-relay*', String.raw`Get-Content $env:TEMP\cb-relay* -Tail 20`, String.raw`type %TEMP%\cb-relay*`, 'tail /tmp/cb-relay*.bridge',
+  'cat /tmp/cb-relay*.br*', 'cat /tmp/cb-seat*', String.raw`type %TEMP%\cb-seat*`, 'cat /tmp/cb-seat*.json', 'cat /tmp/cb-seat-????????????.json',
+  'cat /tmp/cb-seat*.claude.json', 'cat /tmp/cb-seat*.js*',
 ];
 const secretUses = [
   // #4882: the relay's other files stay readable, and so does the code that names the bridge file
   'tail -n 50 /tmp/cb-relay-ab12cd34ef56.log', 'tail -f /tmp/cb-relay-*.log', String.raw`Get-Content $env:TEMP\cb-relay-*.log -Tail 20`,
   'cat /tmp/cb-relay-ab12cd34ef56.pid', 'cat /tmp/cb-relay-*.log*', 'ls /tmp/cb-relay-*', 'rm /tmp/cb-relay-ab12cd34ef56.bridge',
   'cat cli/bridge.ts', 'grep -n "files.bridge" cli/bridge.ts', 'grep -rn "cb-relay-" cli', 'grep -n "cb-relay-bridge-" cli/bridge.ts',
+  // PR 203 review: a glob over the other files stays readable, a cut-short extension too; so do the markers squad up reads
+  'cat /tmp/cb-relay-*.lo*', 'tail /tmp/cb-relay*.log', 'cat /tmp/cb-relay*.pid', 'cat /tmp/cb-relay-*.he*', 'grep -n "cb-relay" cli/relay.ts',
+  'grep -rn "cb-seat-ready" cli', 'grep -rn "cb-seat-refused" cli/agents', 'ls /tmp/cb-seat*',
   // an escaped star in a search for the rule itself is no glob
   String.raw`grep -c "cb-relay-\*.bridge" kit/permissions/builder.json`,
   'cat .env.example', 'cat .env.sample', 'cat .env.template', 'node --env-file=.env server.js',
