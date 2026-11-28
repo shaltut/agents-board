@@ -197,10 +197,8 @@ async function main() {
   const { openBridge, seatKey } = await import('../cli/bridge.ts');
   const { call } = await import('../cli/board.ts');
   const m = machine(), url = databaseUrl();
-  let direct;
-  const openDirect = () => (direct ??= connect(url, { app: 'cb-usage', max: 1 }));
   // the seat's relay already holds a board connection: ride on it, and connect only when there is none
-  const db = (await openBridge(seatKey(m, pane), url, openDirect).catch(() => null)) ?? openDirect();
+  const db = (await openBridge(seatKey(m, pane), url).catch(() => null)) ?? connect(url, { app: 'cb-usage', max: 1 });
   await call('usage_report', { machine: m, pane, session_id: sid, model: r.model, input_tokens: r.input,
     output_tokens: r.output, cache_read_tokens: r.cacheRead, cache_write_tokens: r.cacheWrite, cost_usd: r.cost }, db);
   state.sent = r;

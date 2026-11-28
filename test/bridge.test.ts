@@ -193,10 +193,10 @@ test('a changed binding is announced on cb_bind, whatever changed it; a heartbea
 test('the hello carries the binding the relay holds: for its own pane only', async () => {
   const { key, stop } = await served(TEST_URL, { binding: (who: any) => who.machine === 'pc' && who.pane === 'p1' ? { actor: 'W1', project: 'demo' } : undefined });
   try {
-    const mine: any = await openBridge(key, TEST_URL, undefined, { machine: 'pc', pane: 'p1' });
+    const mine: any = await openBridge(key, TEST_URL, { machine: 'pc', pane: 'p1' });
     assert.deepEqual(mine.binding, { actor: 'W1', project: 'demo' });
     await mine.end();
-    const other: any = await openBridge(key, TEST_URL, undefined, { machine: 'pc', pane: 'p2' });
+    const other: any = await openBridge(key, TEST_URL, { machine: 'pc', pane: 'p2' });
     assert.equal(other.binding, undefined, 'another pane looks itself up');
     await other.end();
   } finally { await stop(); }

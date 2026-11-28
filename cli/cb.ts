@@ -6,7 +6,6 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { useDb } from '../server/rpc.ts';
 import { call, useBoard } from './board.ts';
 import { tick, dur, noRelayWhy, NO_RELAY_FIX } from './tick.ts';
 import { sql as direct, databaseUrl, machine, dotenv } from '../server/db.ts';
@@ -105,7 +104,7 @@ const manual = cmd === undefined || cmd === 'help';
 const offline = manual || cmd === 'doctor' || cmd === 'update' || cmd === 'faults' || cmd === 'key';
 if (pane && !process.env.PGAPPNAME && !offline && !o.help)
   for (const k of relayKeys()) {
-    const bridged = await openBridge(k, databaseUrl(), () => direct, { machine: machine(), pane }).catch(fault.bridgeError);
+    const bridged = await openBridge(k, databaseUrl(), { machine: machine(), pane }).catch(fault.bridgeError);
     if (bridged) { sql = bridged; break; }
   }
 const boardHost = new URL(databaseUrl()).hostname;
@@ -115,7 +114,6 @@ const localBoard = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(boardHost
 // Local is by name only: this machine's own Tailscale name or address counts as remote. cb start answers at once: it is
 // advice that always exits 0.
 if (!localBoard && cmd !== 'start') sql = withConnectRetry(sql);
-useDb(sql); // cb tick and the other modules that call callFn
 useBoard(sql);
 
 let sessionProject: string | null = null;

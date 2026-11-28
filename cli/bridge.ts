@@ -1,7 +1,8 @@
 // cb through its session's relay (2026-11-18 slowness work). A cb call used to open its own connection to the board:
 // TCP, SCRAM sign-in and postgres.js's type fetch are ~5 round trips before the first query, ~650 ms from the PC or
 // the Mac to the VPS, then 2 round trips per query (describe, execute). The session's relay already holds an open
-// connection with its statements prepared, so cb hands its queries to the relay over a local socket instead.
+// connection with its statements prepared, so cb hands its calls to the relay over a local socket instead. A call is
+// a board function's name and its arguments (#3222, v2), never SQL: the relay runs only what server/ops.ts lists.
 //
 // Only the relay's own machine user can use it: the socket (a named pipe on Windows) is announced in a file in the
 // user's temp dir, with a random token every request must carry. A cb pointed at another database (a test run inside
@@ -13,9 +14,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { call } from './board.ts';
 
-const V = 1; // bump when a message changes: an older relay is then refused and cb connects itself
-const IN = '\u0000cb-in'; // sql(list) inside a template: `where id in ${sql(ids)}`
+const V = 2; // bump when a message changes: an older relay is then refused and cb connects itself
 
 /** The relay's per-seat key: the same for every process on one machine and pane, whatever agent runs there. */
 export const seatKey = (machine: string, pane: string) => createHash('sha1').update(`${machine.trim().toLowerCase()}:${pane.trim()}`).digest('hex').slice(0, 12);
@@ -55,15 +56,24 @@ function framed(sock: net.Socket, onMessage: (m: any) => void) {
 }
 
 // syscall: cb retries a timed-out or unreachable board only when it came from connect() (connect-retry.ts, #4337)
-const errorOut = (e: any) => ({ message: String(e?.message ?? e), code: e?.code, syscall: e?.syscall, detail: e?.detail, hint: e?.hint, severity: e?.severity });
+const errorOut = (e: any) => ({ message: String(e?.message ?? e), name: e?.name, code: e?.code, syscall: e?.syscall, detail: e?.detail, hint: e?.hint, severity: e?.severity });
 
 /** What the relay adds (#3256): binding(who) is the pane's cb iam binding when the relay holds it, handed over with
- *  the hello so cb skips its own lookup; served(text) is told each query it ran, once it returned. */
-export type BridgeOpts = { binding?: (who: { machine: string; pane: string }) => unknown; served?: (text: string) => void };
+ *  the hello so cb skips its own lookup; served(fn) is told each call it ran, once it returned. */
+export type BridgeOpts = { binding?: (who: { machine: string; pane: string }) => unknown; served?: (fn: string) => void };
+
+const REQUEST = new Set(['id', 'fn', 'args']);
+/** A request is a function's name and its arguments, nothing beside them. */
+const isCall = (m: any) => typeof m?.fn === 'string' && !!m.args && typeof m.args === 'object' && !Array.isArray(m.args)
+  && Object.keys(m).every((k) => REQUEST.has(k));
 
 /** The relay's side: run each request on its connection. Returns stop(). */
 export async function serveBridge(sql: any, key: string, url: string, log: (m: string) => void = () => {}, opts: BridgeOpts = {}) {
   const files = bridgeFiles(key);
+  // prepared, unlike a plain unsafe: the text is a function's name and its argument names (the values are
+  // parameters), a small fixed set, so after its first call each is one round trip instead of two
+  const board = sql.api ? sql
+    : { unsafe: (text: string, values: any[]) => sql.unsafe(text, values, values.length ? { prepare: true } : {}) };
   const token = randomBytes(24).toString('hex');
   const open = new Set<net.Socket>();
   const server = net.createServer((sock) => {
@@ -78,23 +88,20 @@ export async function serveBridge(sql: any, key: string, url: string, log: (m: s
         if (good) ok = true; else sock.end();
         return;
       }
-      const { id } = m;
+      const id = m?.id;
       try {
-        const values = (m.values ?? []).map((v: any) => v && typeof v === 'object' && IN in v ? sql(v[IN]) : v);
-        const rows = m.text != null
-          // prepared, unlike a plain unsafe: callFn's text is a function and its argument names (the values are
-          // parameters), a small fixed set, so after its first call each is one round trip instead of two
-          ? await sql.unsafe(m.text, values, values.length ? { prepare: true } : {})
-          : await sql(Object.assign([...m.strings], { raw: [...m.strings] }), ...values);
+        if (!isCall(m)) throw new Error('the relay bridge carries a board function\'s name and its arguments, nothing else');
+        const result = await call(m.fn, m.args, board);
         served++;
-        opts.served?.(m.text ?? m.strings.join('$'));
-        send({ id, rows: [...rows] }); // a plain array: cb reads rows, never .count or .columns
+        opts.served?.(m.fn);
+        // rows as a plain array: cb reads rows, never .count or .columns
+        send({ id, result: Array.isArray(result) ? [...result] : result });
       } catch (e) {
         send({ id, error: errorOut(e) });
       }
     });
     sock.on('error', () => {});
-    sock.on('close', () => served && log(`bridge: served ${served} quer${served === 1 ? 'y' : 'ies'}`));
+    sock.on('close', () => served && log(`bridge: served ${served} call${served === 1 ? '' : 's'}`));
   });
   if (process.platform !== 'win32') rmSync(files.socket, { force: true }); // a relay that died left it
   // a relay handing over to its successor may still hold a Windows pipe name for a moment
@@ -112,10 +119,8 @@ export async function serveBridge(sql: any, key: string, url: string, log: (m: s
   };
 }
 
-/** cb's side: an object that answers like postgres.js's sql for what cb uses (tagged queries, sql(list), unsafe),
- *  or null if there is no relay to use. Transactions (sql.begin) are not bridged: openDirect() is used for them. */
-export async function openBridge(key: string, url: string, openDirect: () => any = () => { throw new Error('no direct connection'); },
-                                 who?: { machine: string; pane: string }): Promise<any> {
+/** cb's side: a connection call() (cli/board.ts) can run on, or null if there is no relay to use. */
+export async function openBridge(key: string, url: string, who?: { machine: string; pane: string }): Promise<any> {
   const files = bridgeFiles(key);
   let info: any;
   try { info = JSON.parse(readFileSync(files.info, 'utf8')); } catch { return null; }
@@ -127,7 +132,7 @@ export async function openBridge(key: string, url: string, openDirect: () => any
     if (hello) { const h = hello; hello = undefined; binding = m.binding; return h(!!m.ok); }
     const p = pending.get(m.id); if (!p) return;
     pending.delete(m.id);
-    if (m.error) p.rej(Object.assign(new Error(m.error.message), m.error)); else p.res(m.rows);
+    if (m.error) p.rej(Object.assign(new Error(m.error.message), m.error)); else p.res(m.result);
   });
   const lost = () => {
     hello?.(false); hello = undefined;
@@ -144,20 +149,13 @@ export async function openBridge(key: string, url: string, openDirect: () => any
   sock.unref(); // like a postgres.js pool: an open bridge alone does not keep cb running
 
   let n = 0;
-  const call = (m: any) => new Promise<any[]>((res, rej) => {
+  const ask = (fn: string, args: Record<string, unknown>) => new Promise<any>((res, rej) => {
     if (sock.destroyed) return rej(Object.assign(new Error('the session relay is gone'), { code: 'RELAY_LOST' }));
     const id = ++n; pending.set(id, { res, rej }); sock.ref();
-    send({ ...m, id });
+    send({ id, fn, args });
   }).finally(() => { if (!pending.size) sock.unref(); });
-  let direct: any;
-  const db: any = (strings: any, ...values: any[]) => Array.isArray(strings) && Array.isArray((strings as any).raw)
-    ? (values.some((v) => typeof v?.then === 'function')
-      ? Promise.reject(new Error('the relay bridge cannot carry a sql`` fragment (it is a Promise): write the condition inline'))
-      : call({ strings: [...strings], values }))
-    : { [IN]: strings };
-  db.unsafe = (text: string, values: any[] = []) => call({ text, values });
-  db.begin = (...a: any[]) => (direct ??= openDirect()).begin(...a);
-  db.end = async (o?: any) => { sock.end(); await direct?.end(o); };
+  const db: any = { api: ask };
+  db.end = async () => { sock.end(); };
   db.binding = binding; // this pane's { actor, project } as the relay holds it; undefined: look it up
   return db;
 }

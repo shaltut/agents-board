@@ -117,7 +117,7 @@ Then the workers, right away, because their `cb` must match the schema:
 - Relays restart themselves when their code changes. Their connections are named `cb-relay/<version>` (a hash of
   the relay's code), so one query shows which sessions run what:
   `dc exec db psql -U cb -d claude_board -c "select application_name, count(*) from pg_stat_activity group by 1"`.
-  Each session holds two (its LISTEN and its queries); `cb` calls ride on them (cli/bridge.ts).
+  Each session holds two (its LISTEN and its queries); `cb` calls ride on them (cli/bridge.ts), each a board function's name and its arguments, never SQL.
 - **The guard**, when the release changed `kit/guard/` (this one does): each machine runs its own installed copy in
   `~/.claude-board/guard`, not the checkout's. With Ahmed's yes, on the PC and then on the Mac (from
   `~/Work/claude-board`, after the tar step), run `node kit/guard/install.mjs` and then
