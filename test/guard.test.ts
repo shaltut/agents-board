@@ -1696,3 +1696,16 @@ test('#4776: a script the seat runs is read without its carriage returns too', (
   assert.equal(kindOf('bash plain.sh', 'builder', read), 'allow');
   assert.equal(kindOf('bash many.sh', 'builder', read), 'allow', 'a CRLF script counts each script it runs once');
 });
+
+// #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
+// seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
+test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {
+  const edit = (text: string) => ["cd /c/w/x && python - <<'EOF'", 's = open("cli/x.ts").read()',
+    's = s.replace("OLD", """' + text + '""")', 'open("cli/x.ts", "w").write(s)', 'EOF'].join('\n');
+  assert.deepEqual(evaluate({ tool: 'shell', command: edit('const total = items.length'), role: 'builder' }), { allow: true }, 'the control');
+  for (const text of ["fail('the value is unset: pass --name')", "spawnSync('rm', ['-f', file], { env: process.env })", 'export const line = [ ${k}= ]']) {
+    const r = evaluate({ tool: 'shell', command: edit(text), role: 'builder' });
+    assert.equal(r.kind, 'role', text);
+    assert.match(r.reason!, /Only changing the text of a file\? Use your file editing tool/, text);
+  }
+});
