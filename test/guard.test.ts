@@ -242,7 +242,9 @@ const hiddenByHeredoc: [string, (c: string) => string][] = [
   ['in a PowerShell block comment', (c) => `echo <# \ncat > a <<'EOF' #>\n${c}\nEOF`],
   ['in a PowerShell string that follows a backslash', (c) => `echo \\'; cat > a <<'EOF'\n'\n${c}\nEOF`],
   ['in a PowerShell comment after a comma', (c) => `echo a,# ; cat > a <<'EOF'\n${c}\nEOF`],
-  ['in a PowerShell here-string', (c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
+  // bash reads 1# as a word; PowerShell starts a comment there, so the quote after it opens nothing
+  ['after a # that follows a number', (c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
+  ['in a PowerShell here-string',(c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
 ];
 const heredocText = [
   `cat > notes.txt <<'EOF'\ngit reset --hard\nEOF`, `cd /tmp && cat >> notes.txt <<-"EOF"\n\tgit reset --hard\n\tEOF`,
@@ -252,9 +254,9 @@ const heredocText = [
   `echo "a # b" 'c <<' # it's a comment <<\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # \u201cnote\u201d\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
-  `mkdir -p out && [ -f *.md ] && { echo $HOME $? a#b; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `mkdir -p out && [ -f *.md ] && { echo $HOME $?; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
   `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # don't\ngit reset --hard\nEOF`,
-  `echo "\${HOME}" \${#x} \${y:-z} $$ a#b\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
+  `echo "\${HOME}" \${#x} \${y:-z} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
 ];
 test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
   for (const [name, make] of hiddenByHeredoc) {
