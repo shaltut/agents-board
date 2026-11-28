@@ -9,7 +9,8 @@ import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
-import { keepAlive, keepAliveApart, supervisorLease, SURE_MS } from '../cli/lease.ts';
+import { fenced, keepAlive, keepAliveApart, supervisorLease, SURE_MS } from '../cli/lease.ts';
+import { startOne, type Launch, type Runner } from '../cli/squad-up.ts';
 
 const clients: any[] = [], renewing: (() => unknown)[] = [];
 // every renewal a test starts is stopped here too: one left running after a failed assertion keeps the file's process
@@ -226,6 +227,85 @@ test('the thread stops renewing when the main thread says nothing past the limit
     await unlog();
     await mine.release();
   }
+});
+
+// R2 on PR 206: while startOne holds the main thread, what the renewal thread reports waits in the queue, so each herdr
+// call has to ask for itself whether the lease still stands
+const LAUNCH = { name: 'demo-B1@m', agent: 'claude', model: 'sonnet', role: 'builder', repo: 'main', machine: 'm', herdr: null,
+  cwd: 'C:/w/x', board: 'C:/w/board', prompt: 'cb next', env: {} } as unknown as Launch;
+/** A seat start whose first herdr call (its pane) holds the main thread for ms; the calls herdr was given */
+function heldStart(renewal: ReturnType<typeof keepAliveApart>, ms: number) {
+  const calls: string[] = [];
+  const herdr: Runner = (_m, args) => {
+    calls.push(args.slice(0, 2).join(' '));
+    if (calls.length === 1) hold(ms);
+    return { status: 0, stdout: JSON.stringify({ result: { pane_id: 'p1' } }), stderr: '' } as ReturnType<Runner>;
+  };
+  return { calls, r: startOne(LAUNCH, fenced(herdr, () => renewal), {}, () => {}) };
+}
+/** sends the query now, so that the database acts on it while this thread is held */
+async function meanwhile(sql: any, text: string) {
+  const query = sql.unsafe(text).execute();
+  await new Promise((r) => setTimeout(r, 300));
+  return { done: query };
+}
+
+test('a lease another takes while a seat start holds the thread: no herdr call follows, before the thread yields', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  const did: string[] = [];
+  const renewal = apart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, abort: () => did.push('abort'), lost: () => did.push('lost'), say: () => {} });
+  try {
+    assert.equal(renewal.sure(), true);
+    const other = await meanwhile(sql, `do $$ begin perform pg_sleep(1); update cb.leases set holder = 'mac pid 2', token = gen_random_uuid(); end $$`);
+    const { calls, r } = heldStart(renewal, 3000);
+    assert.deepEqual(did, [], 'nothing reported yet: this thread has not yielded');
+    assert.deepEqual(calls, ['tab create'], r.line);
+    assert.equal(r.ok, false);
+    assert.match(r.line, /supervisor lease cannot be counted on/);
+    await other.done;
+    await until(() => did.includes('lost'));
+  } finally { await renewal.stop(); await mine.release(); }
+});
+
+test('a board that stops answering while a seat start holds the thread: no herdr call follows once the lease cannot be counted on', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  const unlog = await logWrites(sql);
+  const renewal = apart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, sureMs: 2500, abort: () => {}, lost: () => {}, say: () => {} });
+  try {
+    await writesAfter(sql, 0);
+    // the row held locked: the thread's renewals get no answer
+    const locked = await meanwhile(sql, `do $$ begin perform 1 from cb.leases for update; perform pg_sleep(6); end $$`);
+    const { calls, r } = heldStart(renewal, 4000);
+    assert.deepEqual(calls, ['tab create'], r.line);
+    assert.equal(r.ok, false);
+    await locked.done;
+    for (let i = 0; i < 200 && !renewal.sure(); i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(renewal.sure(), true, 'renewed again: calls are made again');
+  } finally {
+    await renewal.stop();
+    await unlog();
+    await mine.release();
+  }
+});
+
+test('a lease still renewed lets every herdr call of a held start through; no renewal (a dry run) fences nothing', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  const renewal = apart(mine.token()!, { app: 'cb-supervisor/test', every: 100, silentMs: 60_000, sureMs: 2500, abort: () => {}, lost: () => {}, say: () => {} });
+  try {
+    await new Promise((r) => setTimeout(r, 1500));
+    const { calls, r } = heldStart(renewal, 4000);
+    assert.ok(calls.length > 1 && calls.includes('agent start'), `${calls.join(', ')}: ${r.line}`);
+    const seen: string[] = [];
+    fenced((_m, args) => { seen.push(args[0]!); return { status: 0 } as ReturnType<Runner>; }, () => undefined)(null, ['agent', 'list']);
+    assert.deepEqual(seen, ['agent']);
+  } finally { await renewal.stop(); await mine.release(); }
+  assert.equal(renewal.sure(), false, 'stopped: nothing is counted on');
 });
 
 // found reading the diff: the timer could renew a lease being deleted (read as "another took it", exit 1), and the loop
