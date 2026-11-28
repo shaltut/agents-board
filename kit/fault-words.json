@@ -1792,6 +1792,7 @@
 "noninteractive",
 "noprofile",
 "nor",
+"norelaywhy",
 "norm",
 "norun",
 "nostart",
