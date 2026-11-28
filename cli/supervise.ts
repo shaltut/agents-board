@@ -52,6 +52,7 @@ export async function tick(d: Deps): Promise<string[]> {
   for (const { slug } of await sql`select slug from cb.projects where squad is not null order by slug`) {
     try {
       const s = (await sql`select cb.supervise_state(${slug}) as s`)[0].s as State;
+      if (s.supervised_unstaged) s.supervised = true; // #4806
       // #4787: every project that gets work is checked for quota stops; only a supervised or winding-down one is acted on
       if (!s.supervised && !s.winding_down && !quotaWatched(s)) continue;
       // herdr null = the machine the supervisor runs on: a squad that puts it elsewhere is not this supervisor's

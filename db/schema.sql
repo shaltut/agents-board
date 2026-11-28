@@ -6589,7 +6589,10 @@ begin
   select jsonb_build_object(
     -- #4559: a project that gets no work is not supervised: nothing is started or restored for it; state says why. A
     -- squad the supervisor runs winds down instead (Q3018): its idle seats are closed, counted from state_at at the earliest
-    'project', p, 'squad', sq, 'pipeline', cb._pipeline(p), 'supervised', coalesce(sq ->> 'supervise' = 'true' and cb._live(p), false),
+    'project', p, 'squad', sq, 'pipeline', cb._pipeline(p), 'supervised', coalesce(cb._pipeline(p) and sq ->> 'supervise' = 'true' and cb._live(p), false),
+    -- #4806: under its own key: a supervisor not yet restarted plans from 'supervised', and with nothing counted as waiting
+    -- it would close every idle seat of a no-stage squad
+    'supervised_unstaged', coalesce(not cb._pipeline(p) and sq ->> 'supervise' = 'true' and cb._live(p), false),
     'winding_down', coalesce(sq ->> 'supervise' = 'true' and not cb._live(p), false),
     'state', (select pr.state from cb.projects pr where pr.slug = p),
     'state_at', (select pr.state_at from cb.projects pr where pr.slug = p),
