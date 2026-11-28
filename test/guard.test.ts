@@ -1548,7 +1548,8 @@ test('long commands stay fast', () => {
     ['#4815, 200 KB of launcher then filled words, as a builder', asBuilder(kb200('timeout $a x '))],
     ['#4815, 200 KB of filled words before a config subcommand, as a builder', asBuilder(kb200('$a config '))],
     ['#4815, 200 KB of assignments then filled pairs, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $b '))],
-    ['#4836, 200 KB of one line of unread pairs, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('x: $(y) '))],
+    ['#4836, 200 KB of labels before substitutions in one segment, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('x: $(y) '))],
+    ['#4836, 200 KB of unclosed substitutions after a filled word, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a $( '))],
     ['#4826, 200 KB of filled words before unknown words and main, as a builder', asBuilder('A=1 '.repeat(20000) + kb200('$a p ') + ' main')],
     ['#4742, 200 KB of escaped quotes, as a builder', asBuilder('echo ' + escaped)],
     ['#4742, escaped quotes after a board message', asBuilder('cb log 1 ' + escaped)],
@@ -2232,7 +2233,7 @@ test('#4815 review: in a seat, a command and its first argument both filled in a
   assert.notEqual(kindOf('${GIT:-/opt/bin/hub} push origin main'), 'allow');
 });
 
-// #4836: a filled program and first argument are refused only when both are plain variables or the segment could push
+// #4836: a filled program and first argument are refused when both are plain variables or the segment could push
 test('#4836: a filled pair that is not two plain variables and shows no push passes', () => {
   // the shapes of past commands this repo's seats ran, made up (B5)
   const allowed = [
@@ -2245,15 +2246,19 @@ test('#4836: a filled pair that is not two plain variables and shows no push pas
     'Get-Date > "$name`.txt"',
     'echo "$name`.txt"',
     '$id: $(date)',
+    '$id: $(date -u)',
     '"$k=$v" "$other-file"',
-    'echo "$f $(git show HEAD:package.json | wc -l)"', // the substitution's own git words are no signal
+    // the words of a git call inside a substitution are that call's own
+    'echo "$f $(git show HEAD:package.json | wc -l)"',
+    'echo "$b $(git log --oneline -1) done"',
+    'echo "$b $(git status -s)"',
   ];
   for (const c of allowed) assert.equal(kindOf(c), 'allow', c);
 });
 
 test('#4836: a filled pair stays refused when both are plain variables, or the segment shows a push', () => {
   const plain = ['$O $c --help', 'for c in run serve; do $O $c --help; done', '${tool} ${sub}', '$env:TOOL $args', '%TOOL% %SUB%',
-    '"$G" "$@"', '$G $1', '${GIT:-git} $SUB', "& $g $env:SUB"];
+    '"$G" "$@"', '$G $1', '${GIT:-git} $SUB', '& $g $env:SUB'];
   // not two plain variables, but the segment names a protected branch, push, --force or a refspec
   const signals = ['$id: $(date) main', '$id: $(date) push', '$k=$v "$a$b" --force', '$k=$v "$a$b" --force-with-lease origin',
     '"$a$b" "$c$d" origin feat/x:feat/y', '"$a$b" "$c$d" origin +feat/x', '"$a$b" "$c$d" origin HEAD', '"$a$b" "$c$d" origin refs/heads/x',
@@ -2269,6 +2274,22 @@ test('#4836: a filled pair stays refused when both are plain variables, or the s
   assert.equal(kindOf('"$a$b" "$c$d" https://example.invalid/x'), 'allow');
 });
 
+// the lead's review of ce3f33a
+test('#4836 review: any option after a filled pair is a push signal, unless the pair is printed text', () => {
+  const refused = ['$G $S$T --mirror', '$G $S$T --all origin', '$G $S$T -uf origin feat', '$G $S$T --tags -f', '$G p$S -f origin feat',
+    '$G "$a$b" -d origin feat', 'timeout 5 $G p$S --prune origin'];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
+  // printed text: a label before a substitution, or an assignment in the argument's place
+  for (const c of ['$j: $(date) -u', 'echo "$w base=$(wc -l < f) $(date -u)"']) assert.equal(kindOf(c), 'allow', c);
+});
+
+test('#4836 review: only a git substitution is skipped, to its closing bracket; one left open counts', () => {
+  const refused = ['$G $(git config x.y) -f origin feat', '"$a$b" $(git config x.y) --force', '$G $(git config x.y) origin feat:other',
+    '$G $(git rev-parse $(git config x.y)) --mirror', '$G $(git config x.y) origin HEAD',
+    // the substitution goes on past a pipe, so what follows it is not in this segment
+    '$G $(printf %s%s pu sh|cat) origin feat'];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
+});
 
 test('#4826: a filled program with a word that is no git command and a protected branch is read as git', () => {
   // an alias set by an earlier statement or in the environment makes the unknown word a push
