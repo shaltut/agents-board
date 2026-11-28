@@ -485,7 +485,9 @@ a new volume and a restore, never just a new image tag.
 | db won't start: "cannot assign requested address" | Tailscale wasn't up when Docker started, so `CB_PG_BIND` doesn't exist yet | `sudo systemctl enable tailscaled`; `dc up -d db` |
 | A worker's `cb` says "board unreachable at 100.x.y.z" | the VPS, Tailscale or Postgres is down, or the URL/password is wrong | `tailscale ping vps2`; `dc ps`; check the worker's URL |
 | The worker API answers 401 "unknown or revoked worker key" | a mistyped or revoked key | `cb.keys_list()` (Worker keys): issue a new one |
-| The worker API answers 429 | one key made over 1200 requests in a minute, or holds 64 event streams | the log names the key id; find what loops, or raise `CB_API_RATE` |
+| The worker API answers 429 "too many requests with this key" or "in flight" or "open streams" | one key made over 1200 requests in a minute, or holds too much at once ([README.md](README.md#security-in-one-place)) | the log names the key id; find what loops, or raise `CB_API_RATE` |
+| The worker API answers 429 "too many failed sign-ins from this address" | something there keeps sending a revoked or mistyped key, so a newly installed one is not looked up | stop it (the log's 401 lines name the key id); it clears within a minute |
+| The worker API answers 413 to `cb ask` with pictures | over 16 MB for the request | fewer or smaller pictures |
 | A worker's `cb` errors "function cb.x(...) does not exist" | the worker's code is older or newer than the VPS's schema | update the worker's checkout (Upgrade) |
 | No Telegram pushes | no token, or another server polls with it (409 in the logs) | `TELEGRAM_BOT_TOKEN` in `.env`; stop the other server |
 | Log: "another board server polls Telegram and GitHub" | a second server (the PC's?) holds the poller lock | stop it; this one takes over within a minute |

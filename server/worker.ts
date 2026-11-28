@@ -300,7 +300,7 @@ export function workerApp(listen: () => Promise<unknown>) {
     }
   }));
 
-  w.get('/events', signedIn(() => 'events', async (c, { key, who }) => {
+  w.get('/events', signedIn(() => 'events', async (c, { key, who, from }) => {
     const wanted = c.req.queries('ch') ?? [];
     if (!wanted.length || !wanted.every((ch) => CHANNELS[who.kind].includes(ch))) {
       throw new Refused(403, `a ${who.kind} key listens on: ${CHANNELS[who.kind].join(', ') || 'nothing'}`);
@@ -322,7 +322,7 @@ export function workerApp(listen: () => Promise<unknown>) {
         while (!stream.aborted) {
           await stream.sleep(pingMs());
           // a revoked key's stream ends here; so does one that cannot be checked (the worker connects again)
-          if (stream.aborted || !(await whoIs(db(), key, null).then(() => true, () => false))) break;
+          if (stream.aborted || !(await whoIs(db(), key, from).then(() => true, () => false))) break;
           await stream.write(': ping\n\n').catch(() => {});
         }
       } finally {

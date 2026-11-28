@@ -103,10 +103,20 @@ A runner key and a supervisor key can call nothing yet.
 - CSRF: a POST whose `Origin` is not the board's own `Host` is refused. The proxy must pass `Host` through unchanged.
 - **A board key (a worker key) is never logged, printed, copied or put in an error.** `cb.key_issue` returns it once,
   to the owner. Under `/w` only that key signs a request in: no cookie, link or local trust does, and no CSRF check
-  applies, since a browser never sends the key by itself. Each key gets 1200 requests a minute (`CB_API_RATE`); a
-  failed sign-in is not counted (the secret is 32 random bytes). A request is 1 MB at most (32 MB for a question with
-  pictures), a call 30 s. The board logs one line per request: key id, function, status, time, and for a 5xx the
-  error's code; never an argument, a result or an error's text.
+  applies, since a browser never sends the key by itself. A call runs for 30 s at most. The board logs one line per
+  request: key id, function, status, time, and for a 5xx the error's code; never an argument, a result or an error's
+  text. A revoked key is refused from its next request; a stream it already has open ends at its next check, up to
+  25 s later.
+- **What the worker API lets anyone take** (each refusal is a 429 with `Retry-After`, which `cb` sends again; all of it
+  is counted in the server's memory, so a restart forgets it):
+  - *A stranger:* 20 failed sign-ins a minute from one address (the one the password lock counts), after which keys not
+    seen to work are not even looked up from it. Such keys are looked up four at a time in all, so strangers never hold
+    the database pool. A key that has worked since the server started is unaffected. Behind a shared address (a
+    Cloudflare edge with `CB_BEHIND_CLOUDFLARE=0`), a flood can keep a worker's first sign-in after a restart waiting.
+  - *One key, a leaked one included:* 1200 requests a minute (`CB_API_RATE`), 8 calls in flight, 64 open event streams,
+    and 2 bodies over 1 MB at once. All keys together: 64 calls, 512 streams, 4 large bodies.
+  - *A request:* 1 MB at most (16 MB for a question with pictures, which is about 11 MB of picture files; over the
+    database a question takes 6 of 5 MB), and its body must arrive within 60 s.
 - An admin's token (their cookie) is never shown or sent anywhere; a member's link is their token, shown only on the
   Users page, to admins.
 - The server trusts "plainly local" requests only on Ahmed's PC (HOST on loopback, no proxy headers). In the container
