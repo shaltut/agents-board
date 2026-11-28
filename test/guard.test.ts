@@ -713,6 +713,30 @@ test('#4775: a seat variable changed inside a double-quoted substitution is bloc
   }
 });
 
+// #4775 (PR 178 lead review): a message written as "$(cat <<'EOF' ...)" is text, also to the second reading
+test('#4775: a commit, PR or log message from a quoted heredoc may name a change', () => {
+  const body = (text: string) => `"$(cat <<'EOF'\n${text}\nEOF\n)"`;
+  for (const command of [
+    `git commit -m ${body('fix(guard): unset CB_ROLE inside quotes is refused')}`,
+    `git commit -m ${body('fix(guard): env -i bash is refused')}`,
+    `gh pr create --title t --body ${body('Pinned:\n\nCB_ROLE=lead cb next is refused')}`,
+    `cb log 4775 ${body('Pinned: export CB_ROLE=lead now blocked')}`,
+    `git add -A && git commit -q -m ${body('subject\n\nunset CB_ROLE (inside "$( )") is refused')} && git push origin fix/x`,
+  ]) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+  // a body something runs is not a message, and what stands after the body still runs
+  for (const command of [
+    'echo "$(bash <<\'EOF\'\nunset CB_ROLE\nEOF\n)"',
+    'echo "$(cat <<\'EOF\' | bash\nunset CB_ROLE\nEOF\n)"',
+    'git commit -m "$(cat <<\'EOF\'\nsubject\nEOF\nunset CB_ROLE)"',
+    `git commit -m ${body('subject')} -m "$(unset CB_ROLE; cb mine)"`,
+  ]) {
+    const out = evaluate({ tool: 'shell', command, role: 'builder' });
+    assert.equal(out.allow, false, `must block: ${JSON.stringify(command)}`);
+  }
+});
+
 // #4669: a shell script the seat wrote (or found) and then runs is judged for the same two rules, from its text: the
 // shim passes readScript, which reads a local file (none: nothing to judge)
 test('#4669: running a shell script that changes the seat variables or starts a fresh environment is blocked', () => {

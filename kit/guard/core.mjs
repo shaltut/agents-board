@@ -2558,8 +2558,12 @@ function unquotedSubstitutions(text) {
 }
 const seatVarChangeRead = rawAndJoined(seatVarChangeOne);
 const seatVarChange = (raw) => {
-  const opened = unquotedSubstitutions(raw);
-  return seatVarChangeRead(raw) ?? (opened === raw ? null : seatVarChangeRead(opened));
+  const first = seatVarChangeRead(raw);
+  if (first || !SUBSTITUTES.test(raw)) return first;
+  // messages are dropped before the quotes close: afterwards "$(cat <<'EOF' ...)" no longer reads as a message
+  const text = stripMessages(String(raw));
+  const opened = unquotedSubstitutions(text);
+  return opened === text ? null : seatVarChangeRead(opened);
 };
 function fenceWriteOne(command) {
   if (!RAW_HINT.test(command) && !GUARD_INSTALL.test(command)) return null;
