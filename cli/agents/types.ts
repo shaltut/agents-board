@@ -41,6 +41,9 @@ export interface AgentAdapter {
   readStatus(seat: SeatHandle, herdrAgent: { agent_status?: string } | null): Promise<AgentStatus>;
   close(seat: SeatHandle, run: Runner): Promise<'sent' | 'failed'>;
   detectQuotaStop(seat: SeatHandle, herdrAgent: { agent_status?: string } | null, paneTail?: string): QuotaSignal | null;
+  /** #4786: the model the agent's own screen says it runs now, as a model id; null: the screen does not say. Absent: not
+   *  read from the screen (Claude's comes from its usage hook; the others report none yet). */
+  runningModel?(screen: string): string | null;
   guardInstallSpec(boardDir: string, platform: NodeJS.Platform): GuardInstallSpec;
   instructionMapping(launch: LaunchInput): InstructionMapping;
   /** #4765: the user-level rules file this agent reads on this machine, for cli/agent-context.ts to copy the owner's

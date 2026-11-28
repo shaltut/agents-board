@@ -252,6 +252,9 @@ select cb._ensure_check('cb.sessions', 'sessions_agent_check', $c$agent in ('cla
 -- with the endpoint). Another id in the same pane is another session: cb.inbox resets the row. Null (a row from before
 -- it, or one a cb iam just bound) takes the next id as it is
 alter table cb.sessions add column if not exists session_id text;
+-- #4786: the model the seat's relay last read off its agent's screen (cb.seat_model). model is what the session was bound
+-- with; an agent can change model inside its pane. Cleared by cb.iam and when another session takes the pane
+alter table cb.sessions add column if not exists running_model text;
 -- #3221: a relay holding low-priority notices (runner results, GitHub, digests, nudges, card edits, broadcasts, memory)
 -- marks it here: hold_from is the card-event cursor (`after`) the held read used, hold_at when the hold began. A relay
 -- that restarts mid-hold reads from hold_from again and keeps the window's clock, so nothing held is lost or doubled.
@@ -314,6 +317,9 @@ drop function if exists cb.task_claim cascade;
 drop function if exists cb.mine cascade;
 drop function if exists cb._seat_name cascade;
 drop function if exists cb.iam cascade;
+drop function if exists cb.seat_model cascade;
+drop function if exists cb._running_model cascade;
+drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
 drop function if exists cb.broadcast cascade;
 drop function if exists cb.sessions_overview cascade;
@@ -1714,7 +1720,8 @@ begin
                        then cb.sessions.hold_at end,
         -- the relay's next check takes its session id as it is (#4379): the session that bound may be one its relay
         -- has not seen yet, and must not be reset to the relay's own name a moment after it bound
-        session_id = null;
+        session_id = null,
+        running_model = null; -- #4786: what ran before this bind says nothing about now; the relay reads it again
   -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
   update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
   return trim(actor);
@@ -1742,6 +1749,7 @@ begin
         role = case when sid <> cb.sessions.session_id then null else cb.sessions.role end,
         area = case when sid <> cb.sessions.session_id then null else cb.sessions.area end,
         model = case when sid <> cb.sessions.session_id then null else cb.sessions.model end,
+        running_model = case when sid <> cb.sessions.session_id then null else cb.sessions.running_model end,
         repo = case when sid <> cb.sessions.session_id then null else cb.sessions.repo end,
         broadcast_seen = case when sid <> cb.sessions.session_id then excluded.broadcast_seen else cb.sessions.broadcast_seen end,
         hold_from = case when sid <> cb.sessions.session_id then null else cb.sessions.hold_from end,
@@ -1925,6 +1933,32 @@ begin
   return cur;
 end $$;
 
+-- #4786: the relay's reading of the model on its agent's screen. The screen is the agent's own output: only a model id
+-- is taken, anything else is ignored, and the reading is only ever shown
+create function cb.seat_model(machine text, pane text, model text) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare mo text := trim(coalesce(model, ''));
+begin
+  if mo !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' then return; end if;
+  update cb.sessions s set running_model = mo
+   where s.machine = lower(trim(machine)) and s.pane = trim(pane) and s.running_model is distinct from mo;
+end $$;
+
+-- The model a seat really runs, where the board can tell: the relay's screen reading, else what the usage hook reported
+-- for the pane's own session (Claude: the last finished turn's model). plpgsql: cb.session_usage is created further down
+create function cb._running_model(m text, pn text) returns text language plpgsql stable as $$
+begin
+  return (select coalesce(s.running_model,
+                          (select nullif(u.model, 'unknown') from cb.session_usage u where u.session_id = s.session_id and u.machine = s.machine))
+            from cb.sessions s where s.machine = m and s.pane = pn);
+end $$;
+
+-- Another model than the one it was started with? The running id may say more (a date, an effort) than the launch one,
+-- which may be an alias (sonnet) or carry a context mark ([1m]) the running id lacks. Either side unknown: not judged
+create function cb._model_differs(launched text, running text) returns boolean language sql immutable as $$
+  select coalesce(position(lower(regexp_replace(launched, '\[[^]]*\]$', '')) in lower(running)) = 0, false)
+$$;
+
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
 -- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
@@ -1938,6 +1972,8 @@ begin
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
+      'running_model', cb._running_model(s.machine, s.pane),  -- #4786
+      'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
       'agent', s.agent,  -- #4002; null for a worker with no session row
       'lead', cb._is_lead(a.actor, s.project),  -- #3771: the dashboard's lead is the board's (by role, #3746), not an orch@ name
       'doing', coalesce((select jsonb_agg(d.j order by d.at desc) from (
@@ -5715,6 +5751,8 @@ begin
     'seats', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', s.actor, 'machine', s.machine, 'role', s.role, 'area', s.area, 'repo', s.repo,
         'agent', s.agent, 'model', s.model,
+        'running_model', cb._running_model(s.machine, s.pane),  -- #4786
+        'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
         'in_squad', coalesce(sq->'roles' ? s.role, false),
         'want_agent', w.want->>'agent', 'want_model', w.want->>'model',
         -- a seat bound without --model is not judged on its model

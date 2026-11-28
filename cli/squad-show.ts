@@ -9,6 +9,11 @@ const runs = (p: Pick, shown: boolean) => `${p.model}${p.effort ? ` effort ${p.e
 // a fallback is a switch to another agent or model: each one names its agent
 const fallback = (f?: Pick[]) => (f?.length ? `; fallback ${f.map((x) => runs(x, true)).join(', ')}` : '');
 
+/** #4786: cb sessions' extra line for a seat that really runs another model than it was started with, else null. */
+export function modelDrift(r: { model?: string | null; running_model?: string | null; model_differs?: boolean }): string | null {
+  return r.model_differs ? `  ⚠ model: started on ${r.model}, now runs ${r.running_model}` : null;
+}
+
 export function squadShow(sq: any): string {
   // with repos, builder and reviewer counts are per repo ({"api": 2}) and areas are {name, repo}
   const count = (c: any) => (typeof c === 'object' ? Object.entries(c).map(([k, n]) => `${k} ${n}`).join(', ') : c);
