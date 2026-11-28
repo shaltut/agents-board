@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -13,7 +13,8 @@ import type { Runner } from '../cli/squad-up.ts';
 delete process.env.CB_MCP_GATE_OK;
 
 const clients: any[] = [];
-after(() => Promise.all(clients.map((c) => c.end())));
+// closed after each test: this many tests, each with its own clients, pass the server's connection limit otherwise
+afterEach(() => Promise.all(clients.splice(0).map((c) => c.end())));
 const conn = (name: string, max = 10) => { const c = postgres(TEST_URL, { onnotice: () => {}, max, connection: { application_name: name } }); clients.push(c); return c; };
 
 const SQUAD = {
