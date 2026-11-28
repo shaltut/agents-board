@@ -397,8 +397,31 @@ Then tell the sessions: `dc exec board cb broadcast "The board was restored to <
 
 ## Users
 
-Day to day, on the board: Users (key 7). Add a member, copy their link or set a password, put them on projects, make
-an admin, remove someone. Everyone changes their own password at the top of the page (admins: under their name).
+Day to day, on the board: Users (key 7). Add a member, copy their link (shown once) or set a password, put them on
+projects, make an admin, remove someone. Everyone changes their own password at the top of the page (admins: under
+their name).
+
+**Sign-ins are stored as hashes (#4868).** The first setup with that change turns each user's old plain value into a
+hashed sign-in and empties `cb.users.token`: existing links and signed-in browsers keep working. Backups taken before
+it still hold the old values, which work until replaced (**New link**, or **Sign out everywhere** for an admin). Let
+the new container apply this schema (the [upgrade](#upgrade) does): applied ahead of it, the old server cannot sign
+anyone in once the column is empty.
+
+**Rolling the board back past that change** leaves the older code without its sign-in column as it expects it: empty
+and without its default, or (on a board first set up after the change) not there at all. Everyone is signed out and an
+admin cannot sign in. **Copy these statements before you roll back** (the older checkout does not have this page), run
+them after the older code is up, then send members new links:
+
+```bash
+dc exec -T db psql -U cb -d claude_board -v ON_ERROR_STOP=1 -1 <<'SQL'
+alter table cb.users add column if not exists token text;
+update cb.users set token = gen_random_uuid()::text where token is null;
+alter table cb.users alter column token set default gen_random_uuid()::text, alter column token set not null;
+create unique index if not exists users_token_key on cb.users (token);
+SQL
+```
+
+Deploying the change again turns those values into hashes the same way.
 
 From the VPS shell, when the board itself can't be used (no admin can sign in):
 

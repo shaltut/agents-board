@@ -205,7 +205,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'Hand a question or task to a user (a person with a link); "ahmed" takes a question back.',
       eg: 'cb assign Q12 cai' },
     user: { use: 'cb user add <name> ["<Display Name>"] [--admin]\ncb user role <name> admin|member\ncb user password <name>   (the password on stdin)', topic: 'orchestrate',
-      does: "Add a person. A member answers their own questions and notes their own tasks, signing in by password or a private link Ahmed copies from the Users page; an admin gets the whole board, by password only. Making admins, passwords, a new link and removing someone are Ahmed's: the Users page, or the VPS shell with PGAPPNAME=cb-web for the first admin (docs/ops/deploy.md).",
+      does: "Add a person. A member answers their own questions and notes their own tasks, signing in by password or a private link Ahmed makes on the Users page (shown once); an admin gets the whole board, by password only. Making admins, passwords, a new link and removing someone are Ahmed's: the Users page, or the VPS shell with PGAPPNAME=cb-web for the first admin (docs/ops/deploy.md).",
       eg: 'cb user add cai "Cai"' },
     users: { reads: true, use: 'cb users', topic: 'orchestrate',
       does: 'Everyone who can sign in (admins marked), with their open questions and tasks.',
