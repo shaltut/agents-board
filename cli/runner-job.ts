@@ -6,6 +6,7 @@ import {
 } from 'node:fs';
 import { uptime } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
+import { pgCtl } from '../db/pg.ts';
 import { checkParams, expand, jobCwd, jobEnv, missingPaths, recipeFolder, relPaths, type RunnerConfig } from './recipes.ts';
 import { dropLinks } from './slot-links.ts';
 import { afterCounts, cut, logTail, mask, summarize } from './summary.ts';
@@ -100,6 +101,23 @@ export function reap(stateDir: string, say: (m: string) => void = () => {}): num
     } catch {}
   }
   return n;
+}
+
+/** Whether a postmaster's command line serves exactly this data folder (Windows paths: either slash, any case). A
+ *  cluster started with a relative -D does not match, and is left alone. */
+export const servesFolder = (cmd: string, dir: string): boolean => {
+  const plain = (t: string) => t.replace(/\\/g, '/').toLowerCase();
+  return plain(cmd).includes(`-d "${plain(dir)}"`);
+};
+
+// The pid of a Postgres a job left running from this data folder, or undefined. The pid file is the job's to write, and
+// a stale one (after a crash) may name a pid another cluster runs on now: only a process whose own command line names
+// this folder counts.
+function leftPostmaster(pgdata: string): string | undefined {
+  let pid = '';
+  try { pid = readFileSync(join(pgdata, 'postmaster.pid'), 'utf8').split(/\r?\n/)[0]!.trim(); } catch { return; }
+  if (!/^[1-9]\d{0,9}$/.test(pid) || Number(pid) > 4294967295) return;
+  return servesFolder(commandLines([pid])?.get(pid) ?? '', pgdata) ? pid : undefined;
 }
 
 // A `$ argv` line, always on a line of its own (the last command may have ended without a newline).
@@ -366,6 +384,15 @@ async function steps(j: JobRow, o: { cfg: RunnerConfig; home: string; slot: numb
     writeSync(io.fd, `runner: removed ${links.length} link(s) a job left in the slot: ${links.slice(0, 5).join(', ')}${links.length > 5 ? ', ...' : ''}\n`);
     // a dropped link may have been the install (node_modules swapped for one): the record must not outlive it (review I1)
     rmSync(lockState, { force: true });
+  }
+  // #4756: a Postgres a job left running in the slot is no child of the job (pg_ctl starts it outside the tree, so no
+  // tree kill reaches it) and holds .pgdata/server.log open: git clean deleted the cluster's other files under it, then
+  // failed on that one. Stop it first. After dropLinks: a linked .pgdata never points pg_ctl outside the slot.
+  const pgdata = join(dir, '.pgdata');
+  if (WIN && leftPostmaster(pgdata)) {
+    writeSync(io.fd, 'runner: a job left Postgres running in the slot: stopping it\n');
+    await run([pgCtl, '-D', pgdata, 'stop', '-m', 'immediate', '-w'], { cwd: dir, env: genv, io, ms: DOCKER_MS, stop });
+    if (stop.aborted) return null;
   }
   for (const args of [['checkout', '--force', '--detach', full], ['clean', '-ffdx', '-e', 'node_modules']]) {
     const r = await git(args);
