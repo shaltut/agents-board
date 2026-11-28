@@ -45,21 +45,104 @@ const PS_STRING_BODY = /(?:\\.|[^"\\$`])*/y;
 const MESSAGE_HEAD = String.raw`\bcb[ \t]+(?:tell|ask|log|add|done|move|fail|pass|edit)\b|\bgit[ \t]+commit\b|\bgh[ \t]+pr[ \t]+(?:create|comment|review)\b|\bherdr(?:[ \t]+--machine[ \t]+\S+)?[ \t]+agent[ \t]+prompt\b`;
 const MESSAGE_CMD = new RegExp(String.raw`(${MESSAGE_HEAD})((?:[ \t]+(?:${QUOTED}|\\.|[^\s;&|"'\\])+)*)`, 'g');
 // Only a quoted-delimiter heredoc is literal; an unquoted <<EOF body is expanded by the shell. A header line holds <<'ID'
-// or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), never the line
-// right after the header. One pass (#4002): the regex form, /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3
+// or <<"ID" (<<- too); its body runs to the first later line holding only ID (blanks around it allowed), which may be the
+// line right after the header (#4768: an empty body). A body is dropped only where bash reads a heredoc (bashReader).
+// One pass (#4002): the regex form, /^([^\n]*<<-?[ \t]*(['"])(\w+)\2[^\n]*)\n[\s\S]*?\n[ \t]*\3
 // [ \t]*(?=\n|$)/gm, searched to the end of the text again for every header without its end line ((headers x length):
 // 4 s on 156 KB through a role seat's six scans). Same matches: end lines are indexed once per word, a line's << are
 // tried last to first (the regex's greedy [^\n]*), and ^ and $ keep the m flag's line ends (\n, \r, U+2028, U+2029).
+
+// #4768, #4770: what bash is inside at a place in the command. It reads forward only, once. read(to) leaves at() === to
+// when `to` is not inside an escape, a comment or a single-quoted word; open holds the " ( and ` not yet closed. What it
+// cannot follow (a heredoc nobody skipped, a case, whose ) closes nothing) makes it unsure for good: from there nothing
+// is dropped, so its text is judged as commands.
+const WORD_BREAK = /[\s;&|()<>]/;
+const ANSI_BODY = /(?:\\[\s\S]|[^'\\])*/y;
+const CASE_AT = /case[ \t]/y;
+function bashReader(text) {
+  let i = 0;
+  const r = {
+    open: [],
+    low: 0, // the fewest open since the caller last set it
+    unsure: false,
+    at: () => i,
+    skip(to) { i = to; },
+    read(to) {
+      const { open } = r;
+      const close = () => { open.pop(); r.low = Math.min(r.low, open.length); };
+      while (i < to && !r.unsure) {
+        const c = text[i], top = open[open.length - 1];
+        if (c === '\\') { i += 2; continue; }
+        if (c === '$' && text[i + 1] === '(') { open.push('('); i += 2; continue; }
+        if (c === '`') { if (top === '`') close(); else open.push('`'); i++; continue; }
+        if (top === '"') { if (c === '"') close(); i++; continue; }
+        const wordStart = i === 0 || WORD_BREAK.test(text[i - 1]);
+        if (c === "'") {
+          let end;
+          if (text[i - 1] === '$') { ANSI_BODY.lastIndex = i + 1; ANSI_BODY.exec(text); end = ANSI_BODY.lastIndex; } else end = text.indexOf("'", i + 1);
+          i = end < 0 || end >= text.length ? text.length + 1 : end + 1;
+          continue;
+        }
+        if (c === '#' && wordStart) {
+          const nl = text.indexOf('\n', i);
+          i = nl < 0 ? text.length : nl;
+          continue;
+        }
+        if (c === '<' && text[i + 1] === '<') {
+          if (text[i + 2] === '<') { i += 3; continue; } // a here-string
+          r.unsure = true;
+          break;
+        }
+        if (c === 'c' && wordStart) { CASE_AT.lastIndex = i; if (CASE_AT.test(text)) r.unsure = true; }
+        if (c === '"' || c === '(') open.push(c);
+        else if (c === ')' && top === '(') close();
+        i++;
+      }
+    },
+  };
+  return r;
+}
 const END_LINE = /\n[ \t]*(\w+)[ \t]*(?=\n|$)/gm; // a line holding only a word, from the \n before it
+// a line bash takes as the end inside $( ) or backticks, though more follows the word: EOF) or EOF`
+const CLOSING_LINE = /\n[ \t]*(\w+)(?=[ \t]*[)`])/g;
 const HEADER_AT = /<<-?[ \t]*(['"])(\w+)\1/y;
 const LINE_START = /^/gm;
 function replaceHeredocs(text, fn) {
-  const ends = new Map(); // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
-  for (const m of text.matchAll(END_LINE)) {
-    const e = ends.get(m[1]) ?? { at: [], k: 0 };
-    e.at.push([m.index, m.index + m[0].length]);
-    ends.set(m[1], e);
-  }
+  // word -> { at: [[index of the \n before the line, end of the line's word and blanks], ...], k }
+  const index = (re) => {
+    const map = new Map();
+    for (const m of text.matchAll(re)) {
+      const e = map.get(m[1]) ?? { at: [], k: 0 };
+      e.at.push([m.index, m.index + m[0].length]);
+      map.set(m[1], e);
+    }
+    return map;
+  };
+  const ends = index(END_LINE), closings = index(CLOSING_LINE);
+  // the first line of a word's list whose \n is at or after `from`; callers ask with a growing `from`
+  const lineFrom = (e, from) => {
+    while (e && e.k < e.at.length && e.at[e.k][0] < from) e.k++;
+    return e?.at[e.k];
+  };
+  const bash = bashReader(text);
+  // whether bash reads the heredoc found at `at` on the line ending at nl, with its body ending where the guard's does
+  const isHeredoc = (at, nl, f) => {
+    bash.read(at);
+    if (bash.unsure || bash.at() !== at || bash.open.at(-1) === '"') return false;
+    // the rest of the header line must end as it began: a quote left open or a trailing \ puts commands where the body seemed to be
+    const depth = bash.open.length;
+    bash.low = depth;
+    bash.skip(at + f.header);
+    bash.read(nl);
+    if (bash.unsure || bash.at() !== nl || bash.open.length !== depth || bash.low < depth) return false;
+    const closing = lineFrom(closings.get(f.id), nl);
+    if (closing && closing[0] < f.before) { bash.unsure = true; return false; }
+    bash.skip(f.end);
+    // an end line bash does not take (blanks around it): bash's body goes on, so what follows cannot be read
+    const last = text.slice(f.before + 1, f.end);
+    if ((f.dash ? last.replace(/^\t+/, '') : last) !== f.id || (text[f.end] === '\r') !== (text[nl - 1] === '\r')) bash.unsure = true;
+    return true;
+  };
   let out = '';
   let pos = 0;
   for (let s = 0; ;) {
@@ -72,9 +155,10 @@ function replaceHeredocs(text, fn) {
       const h = HEADER_AT.exec(line);
       const e = h && ends.get(h[2]);
       if (!e) continue;
-      while (e.k < e.at.length && e.at[e.k][0] <= nl) e.k++; // its \n must come after the header's own
-      if (e.k < e.at.length) found = { id: h[2], end: e.at[e.k][1] };
+      const end = lineFrom(e, nl); // from the header line's own \n: the very next line may end it
+      if (end) found = { id: h[2], before: end[0], end: end[1], at: s + at, header: h[0].length, dash: h[0][2] === '-' };
     }
+    if (found && !isHeredoc(found.at, nl, found)) found = null;
     // no match from here: a later ^ on this line (after \r) only reaches some of the same <<, so none matches either
     if (!found) { s = nl + 1; continue; }
     out += text.slice(pos, s) + fn(text.slice(s, found.end), line, found.id);
