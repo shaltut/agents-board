@@ -415,22 +415,28 @@ const freshEnvFine = [
 const atFine = [
   `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
   String.raw`grep -n "fresh environment\|schtasks\|'at'\|cron" kit/guard/core.mjs`, 'grep -E "before|at|after" notes.md', 'grep -E "(at|on) the end" notes.md',
-  'rg "x;at;y" src', "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"", "node -e \"\n  if (at >= 0) break;\n\"",
+  'rg "x;at;y" src', "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"", "node -e \"\n  if (at < 0) { return; }\n\"",
   'at -l', 'at -c 5', 'at -r 3', 'at -V', 'at --version', 'echo x | at',
 ];
+// PR 139 review (R2) H1-H3: -b is batch and needs no time; <= and >= are redirects to a file named =; and an operand the
+// shell turns into nothing, or expands, can leave a time behind it
+const atReview = ['echo x | at -b', 'at -bf job.sh', 'echo x | at -mb', 'at >= now', 'at <= now', 'at {,now}', 'at {n..n}ow', 'at -f {job.sh,now}', 'at {,}now',
+  'at "" now', "at '' now", 'at " " now', String.raw`at "\ " now`, 'at no?', 'at n[o]w', 'at *', "node -e \"\n  if (at >= 0) break;\n\"",
+  // not in the review: some at builds take a bare increment, and sept is a month
+  'at +5min', 'at + 1 hour', 'at sept 4'];
 const atRuns = ['at now', 'at now+1min', 'at "now + 1 hour"', "at 'midnight'", 'at noon tomorrow', 'at teatime', 'at 4pm', 'at 16:00', 'at 0400 -f job.sh', 'at -m -q b now', 'at -f job.sh 10:00',
   'at -mf job.sh now', 'at -t 202601011200', 'at -mt202601011200', 'at < job.sh now', 'at <job.sh now', "at now <<'EOF'\nls\nEOF", 'at "$WHEN"', 'at $(date +%H:%M)', 'at `cat t`',
   'at 2>&1 now', 'echo now | xargs at', String.raw`at \\host 10:00 cmd`, 'echo x | /usr/bin/at now', 'if true; then at now; fi', 'bash -c "echo x | at now"', 'at \\\n now',
   'at n""ow', "at 'mid'night", String.raw`at \now`, 'at tomorrow', 'at friday', 'at jul 4', 'at next week'];
 test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {
   for (const c of atFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
-  for (const c of atRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
+  for (const c of [...atRuns, ...atReview]) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
 });
 
 // #4736 (folded into #4734): the | of a quoted search pattern is not a pipe, so the word between two of them is not a
 // command. Only a search command's own quoted strings are read as data; a quoted string a shell or a program runs is not
 const searchFine = [
-  'grep -E "a|batch|b" f', "grep -nE 'relay|batch|queue' cli/relay.ts", 'rg -n "x|sudo|y" src', "git grep -E 'tmux new|crontab' -- docs", 'git -C ../x grep "a;batch;b"',
+  'grep -E "a|batch|b" f', "grep -nE 'relay|batch|queue' cli/relay.ts", 'rg -n "x|sudo|y" src', "git grep -E 'tmux new|crontab' -- docs", 'git -C ../x grep "a|batch|b"',
   'cd cli && LC_ALL=C grep -E "a|batch|b" relay.ts | head -5', 'cb bug "guard: blocked" -b "the search was grep -E \\"a|batch|b\\" cli/relay.ts" -l guard',
   `python3 - <<'EOF'\nimport re\nat = 1\nx = re.compile('foo|at|bar')\nEOF`,
 ];
@@ -438,7 +444,21 @@ const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$
   "bash <<'EOF'\nat now\nEOF", "bash -c 'true | batch'", 'echo "see grep " ; sudo codex exec x "y"', "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
   "git grep -O'x;batch' y", "alias grep=eval; grep 'true;batch'", "grep() { eval \"$1\"; }; grep 'true;batch'",
   // PowerShell: a backslash does not escape, so "C:\src\" ends there and what follows runs
-  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`];
+  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`,
+  // PR 139 review (R2) H4, H5: PowerShell also closes a string at a smart quote, and at a quote after any backslash
+  'rg "a\u201D ; schtasks /run /tn y ; rg \u201Cb" f', 'rg \'a\u2019 ; schtasks /run /tn y ; rg \u2018b\' f', 'rg "a\u201E ; schtasks /run /tn y ; rg \u201Cb" f',
+  String.raw`rg "a\"x ; schtasks /run /tn y ; echo "b\"c`,
+  // nested quotes: inside "$( )" or "${ }" bash starts a new string, so the pass loses count
+  'grep x "$(echo " "; sudo codex; echo " ")"', 'grep x "${y:-"; sudo codex; "}"',
+  // PowerShell here-strings, block comments and --% quote differently
+  'rg @"\n"\n"@ ; sudo codex ; rg @"\n"\n"@', 'rg x <# " #> ; sudo codex ; <# " #>', 'rg --% " | sudo codex "',
+  // git takes any unique prefix of --open-files-in-pager, and a backslash in a flag is dropped
+  "git grep --op='x;batch' y", String.raw`git grep -\O'x;batch' y`,
+  // the same spellings with only pipes inside, so each bail is pinned by itself
+  'rg "a”|schtasks /run /tn y|rg “b" f', String.raw`rg "a\"x|schtasks /run /tn y|echo b\"c"`, 'grep x "$(echo "|sudo codex|echo ")"',
+  'grep x "${y:-"|sudo codex|echo "}"', 'rg x {# "\n|sudo codex|\n{# "', String.raw`rg x \; . "x|sudo|y"`,
+  // a quoted string holding ; & a newline or a spaced pipe is not blanked: a search pattern needs none of them
+  'rg "a; sudo codex" f', 'rg "a | batch" f'];
 test('#4736: a quoted search pattern or bug body naming a launcher passes; the same word where something runs it is blocked', () => {
   for (const c of searchFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of searchStillRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
@@ -1002,6 +1022,13 @@ test('long commands stay fast', () => {
     ['code strings, 200 KB of rg --pre in one segment, as a builder', asBuilder('rg ' + kb200('--pre cat '))],
     ['code strings, one 200 KB quoted -c word, as a builder', asBuilder("sh -c '" + kb200('a ') + "'")],
     ['code strings, a 200 KB cmd option word, as a builder', asBuilder('cmd ' + kb200('/a') + ' x')],
+    // PR 139 review (R2) H6: a newline is a separator and was also \s, so each one re-read every later one
+    ['search blanking, 200 KB of newlines, as a builder', asBuilder('grep x' + '\n'.repeat(200000))],
+    ['search blanking, 200 KB of blank lines, as a builder', asBuilder('grep x' + kb200(' \r\n'))],
+    ['search blanking, 200 KB of open parentheses and newlines, as a builder', asBuilder('grep x ' + kb200('(\n'))],
+    ['search blanking, 200 KB of separators, as a builder', asBuilder('grep x ' + kb200(';'))],
+    ['at, 200 KB of unclosed braces, as a builder', asBuilder('at ' + kb200('{,') )],
+    ['at, 200 KB of brace words, as a builder', asBuilder(kb200('at {a}; '))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
