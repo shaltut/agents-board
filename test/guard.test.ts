@@ -6,7 +6,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath } from '../kit/guard/core.mjs';
+import { check, evaluate, protectedPush, READ_ONLY_ROLES, ROLES, secretPath, stripMessages, uncommented } from '../kit/guard/core.mjs';
 import { parseClaudeInput, runClaudeShim } from '../kit/guard/shim-claude.mjs';
 import { runCodexShim } from '../kit/guard/shim-codex.mjs';
 import { runOpencodeShim } from '../kit/guard/shim-opencode.mjs';
@@ -266,6 +266,90 @@ test('#4768, #4770: a command bash runs is never dropped as heredoc text; real h
   // the card's own repro: a role rule that reads the same stripped text
   assert.equal(evaluate({ tool: 'shell', command: "cat > notes.txt <<'EOF'\nEOF\nunset CB_ROLE\nEOF", role: 'builder' }).allow, false, 'the seat variable');
   for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
+});
+
+// #4774: message text is dropped only where a shell runs the message command. In each of these the command, or the
+// quote that seems to open its message, stands in a comment or a quoted word, and the shell runs the line between
+const hiddenByMessage: [string, (c: string) => string][] = [
+  ['cb log in a comment', (c) => `# cb log 1 "\n${c}\n# "`],
+  ['cb log in a comment, single quotes', (c) => `# cb log 1 '\n${c}\n# '`],
+  ['git commit in a comment', (c) => `# git commit -m "\n${c}\n# "`],
+  ['gh pr comment in a comment after a command', (c) => `echo ok # gh pr comment 1 --body "\n${c}\n# "`],
+  ['herdr prompt in a comment', (c) => `# herdr agent prompt x "\n${c}\n# "`],
+  ['cb log in a single-quoted word', (c) => `echo 'cb log 1 "' >/dev/null\n${c}\necho '"' >/dev/null`],
+  ['cb log in a double-quoted word', (c) => `echo "cb log 1 '" >/dev/null\n${c}\necho "'" >/dev/null`],
+  ['cb log in a quote opened lines before', (c) => `echo '\ncb log 1 "\n' >/dev/null\n${c}\necho '"' >/dev/null`],
+  ['the quote after a message command is in a comment', (c) => `cb log 1 text # "\n${c}\n# "`],
+  ['the quote after a commit is in a comment', (c) => `git commit --amend --no-edit # '\n${c}\n# '`],
+  ['a second quote of a message is in a comment', (c) => `cb log 1 "a" # "\n${c}\n# "`],
+  ['cb log in a comment after a substitution', (c) => `echo $(echo a)# cb log 1 "\n${c}\n# "`],
+  ['cb log in a comment after a heredoc', (c) => `cat > a <<'EOF'\ntext\nEOF\n# cb log 1 "\n${c}\n# "`],
+  // seats also run PowerShell: each of these runs the line there
+  ['cb log in a PowerShell block comment', (c) => `<# cb log 1 " #>\n${c}\n<# " #>`],
+  ['cb log in PowerShell smart quotes', (c) => `echo “ cb log 1 " ”\n${c}\necho “ " ”`],
+];
+const messageText = [
+  `cb log 1 "git reset --hard is blocked"`, `cd ~/work && cb log 1 "never git reset --hard here"`,
+  `cd C:\\w\\x; cb tell lead "git reset --hard"`, `# post the result\ncb log 1 "git reset --hard"`,
+  `# don't forget the "log"\ncb log 1 "git reset --hard"`, `cb log 1 "a" && cb tell lead 'git reset --hard'`,
+  `out=$(cb log 1 "git reset --hard")`, `echo "$(cb log 1 'git reset --hard')"`,
+  `cat > a <<'EOF'\ndon't\nEOF\ncb log 1 "git reset --hard"`,
+  `python3 - <<'PY'\nprint("it's")\nPY\ncb log 1 "git reset --hard"`,
+  `git commit -m "$(cat <<'EOF'\nfix: it's done\nEOF\n)" && gh pr create --title "t" --body "git reset --hard"`,
+  `cb log 1 "he said \\"no\\" to git reset --hard"`,
+  `git add -A && git commit -m 'fix: no git reset --hard' -m 'git reset --hard again'`,
+  `cb log 1 "line one\ngit reset --hard\nline three"`, `cb log 1 "# not a comment" "git reset --hard"`,
+];
+test('#4774: a command a shell runs is never dropped as message text; real message text still is', () => {
+  for (const [name, make] of hiddenByMessage) {
+    // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
+    assert.ok(stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE'), `the line must reach the rules: ${name}`);
+    assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
+    assert.equal(evaluate({ tool: 'shell', command: make('git push origin main'), role: 'builder' }).allow, false, `builder must block a push to main: ${name}`);
+  }
+  for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
+});
+
+// #4777: a quote in a comment pairs with nothing. The rules that pair quotes paired it with one in a later comment and
+// lost the lines between. A shell runs the line between in each of these
+const hiddenByComment: [string, (c: string) => string][] = [
+  ['two comment lines, double quotes', (c) => `# "\n${c}\n# "`],
+  ['an apostrophe in a comment', (c) => `# it's fine\n${c}\n# '`],
+  ['a comment after a command', (c) => `true # don't\n${c}\n#'`],
+  ['a comment right after ;', (c) => `echo ok;# "\n${c}\n# "`],
+  ['CRLF lines', (c) => `# "\r\n${c}\r\n# "`],
+  ['a comment inside a substitution', (c) => `echo $(date # "\n)\n${c}\n# "`],
+  ['after a heredoc with an apostrophe', (c) => `cat > a <<'EOF'\ndon't\nEOF\n# '\n${c}\n# '`],
+  ['after a script heredoc with an apostrophe', (c) => `python3 - <<PY\nprint("don't")\nPY\n# '\n${c}\n# '`],
+  ['after an arithmetic shift', (c) => `echo $((1<<2))\n# "\n${c}\n# "`],
+  ['after a message with escaped quotes', (c) => `cb log 1 "a \\"b\\""\n# "\n${c}\n# "`],
+  ["after $'..' with an escaped quote", (c) => `echo $'it\\'s'\n# '\n${c}\n# '`],
+  ['PowerShell block comments', (c) => `<# " #>\n${c}\n<# " #>`],
+];
+const commentedRoleCmds: [string, string][] = [
+  ['builder', 'git push -f origin feat/x'], ['builder', 'git push'], ['builder', 'gh pr merge 1'], ['builder', 'git push origin main'],
+  ['reviewer', 'git commit -am x'], ['builder', 'unset CB_ROLE'], ['builder', 'export CB_ROLE=lead'], ['builder', 'git reset --hard'],
+];
+const commentText = [
+  `# don't force this\ngit push origin feat/x`, `git push origin feat/x # it's "done"`, `echo "# it's" && git status`,
+  `cb log 1 "# not a comment: don't unset CB_ROLE"`, `cat > a <<'EOF'\n# don't unset CB_ROLE\nEOF\ngit status`,
+  `echo \${#x} $# a#b # '\ngit status`,
+];
+test('#4777: a quote in a comment hides nothing from any rule', () => {
+  for (const [name, make] of hiddenByComment) {
+    for (const [role, c] of commentedRoleCmds) {
+      assert.equal(evaluate({ tool: 'shell', command: make(c), role }).allow, false, `${role} must block "${c}": ${name}`);
+    }
+  }
+  for (const command of commentText) {
+    assert.deepEqual(evaluate({ tool: 'shell', command, role: 'builder' }), { allow: true }, `must pass: ${JSON.stringify(command)}`);
+  }
+});
+
+test('#4777: a script a seat runs is read without its comment quotes too', () => {
+  const script = `#!/bin/sh\n# don't\nunset CB_ROLE\n# '\n`;
+  const out = evaluate({ tool: 'shell', command: 'bash run.sh', role: 'builder', readScript: () => script });
+  assert.equal(out.allow, false);
 });
 
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
@@ -1280,6 +1364,13 @@ test('long commands stay fast', () => {
     // #4768: the shell reader walks the command once, however deep it nests
     ['#4768, 100,000 open parens then 8,000 empty heredocs, as a builder', asBuilder('( '.repeat(100000) + "\ncat > a <<'EOF'\nEOF".repeat(8000))],
     ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
+    ['#4774, 200 KB of message commands in comments', asBuilder('# cb log 1 "\n'.repeat(15000))],
+    ['#4774, 200 KB of message commands in one comment', asBuilder('# ' + 'cb log 1 '.repeat(22000) + '"x"')],
+    ['#4774, 200 KB of messages, one command each', asBuilder('cb log 1 "a b";'.repeat(13000))],
+    ['#4777, 200 KB of block comment openers with no end', () => uncommented('echo <#x '.repeat(22000) + '# "')],
+    ["#4777, 200 KB of $' with escaped ends", () => uncommented("echo $'\\' ".repeat(20000) + '# "')],
+    ['#4777, 200 KB of heredoc openers with no end line', () => uncommented('cat <<EOF # "\n'.repeat(14000))],
+    ['#4777, 200 KB of comments holding a quote', asBuilder("true # it's\n".repeat(17000))],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
