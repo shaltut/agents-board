@@ -2239,18 +2239,13 @@ test('#4836: a filled pair that is not two plain variables and shows no push pas
   // the shapes of past commands this repo's seats ran, made up (B5)
   const allowed = [
     'echo "$b $(git rev-parse --short HEAD)"',
-    'echo "$w base=$(git grep -c x | wc -l)"',
-    'echo "$j: $(cb job log 1 | head -1)"',
-    'echo "$f crlf=$(grep -c x $f) lines=$(wc -l < $f)"',
     'for d in a b; do echo "$d: $(git -C $d log -1 --oneline)"; done',
     "powershell -NoProfile -Command '\"$($_.ProcessId) parent $($_.ParentProcessId)\"'",
     'Get-Date > "$name`.txt"',
     'echo "$name`.txt"',
     '$id: $(date)',
-    '$id: $(date -u)',
     '"$k=$v" "$other-file"',
-    // the words of a git call inside a substitution are that call's own
-    'echo "$f $(git show HEAD:package.json | wc -l)"',
+    // the words of a git call inside a substitution that closes in the segment are that call's own
     'echo "$b $(git log --oneline -1) done"',
     'echo "$b $(git status -s)"',
   ];
@@ -2275,20 +2270,30 @@ test('#4836: a filled pair stays refused when both are plain variables, or the s
   assert.equal(kindOf('"$a$b" "$c$d" https://example.invalid/x'), 'allow');
 });
 
-// the lead's review of ce3f33a
-test('#4836 review: any option after a filled pair is a push signal, unless the pair is printed text', () => {
+// the lead's reviews of ce3f33a and ddca32e: any option after the pair is a push signal, whatever the pair looks like
+test('#4836 review: any option after a filled pair is a push signal', () => {
   const refused = ['$G $S$T --mirror', '$G $S$T --all origin', '$G $S$T -uf origin feat', '$G $S$T --tags -f', '$G p$S -f origin feat',
-    '$G "$a$b" -d origin feat', 'timeout 5 $G p$S --prune origin'];
+    '$G "$a$b" -d origin feat', 'timeout 5 $G p$S --prune origin',
+    // no pair is excused as printed text: a name=... argument or a label
+    '$G alias.p=$P p -f origin feat', '$G: $(date) -f origin feat'];
   for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
-  // printed text: a label before a substitution, or an assignment in the argument's place
-  for (const c of ['$j: $(date) -u', 'echo "$w base=$(wc -l < f) $(date -u)"']) assert.equal(kindOf(c), 'allow', c);
 });
 
-test('#4836 review: only a git substitution is skipped, to its closing bracket; one left open counts', () => {
+test('#4836 review: a substitution is skipped only when it closes in the segment; one left open is refused', () => {
   const refused = ['$G $(git config x.y) -f origin feat', '"$a$b" $(git config x.y) --force', '$G $(git config x.y) origin feat:other',
     '$G $(git rev-parse $(git config x.y)) --mirror', '$G $(git config x.y) origin HEAD',
-    // the substitution goes on past a pipe, so what follows it is not in this segment
-    '$G $(printf %s%s pu sh|cat) origin feat'];
+    // the substitution goes on past a pipe or a ;, so what follows it is not in this segment: a git one too
+    '$G $(printf %s%s pu sh|cat) origin feat', '$G $(git remote | head -1) feat:main', '$G $(git remote; echo x) feat:main',
+    // a backtick substitution closes at the second backtick
+    '$G `git remote | head -1` feat:main', '$G "$a$b" `echo x;echo y` --force origin feat',
+    'echo "$G `git remote | head -1` feat:main"', "bash -c '$G `git remote | head -1` feat:main'"];
+  for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
+});
+
+test('#4836 review: false blocks accepted so that the rules stay simple', () => {
+  // a pipe inside a substitution, and an option of another program's substitution
+  const refused = ['echo "$w base=$(git grep -c x | wc -l)"', 'echo "$j: $(cb job log 1 | head -1)"',
+    'echo "$f crlf=$(grep -c x $f) lines=$(wc -l < $f)"', '$id: $(date -u)', 'echo "$f $(git show HEAD:package.json | wc -l)"'];
   for (const c of refused) assert.notEqual(kindOf(c), 'allow', c);
 });
 
