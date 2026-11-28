@@ -32,7 +32,10 @@ export function parseModels(agent: ListedAgent, out: string): ModelEntry[] {
 }
 
 /** path null: the CLI is not installed here; error: it is, but its list command did not answer. */
-export type Lister = (agent: ListedAgent) => { path: string | null; out?: string; error?: string };
+export type Lister = (agent: ListedAgent) => { path: string | null; out?: string; err?: string; error?: string };
+
+// #4856: agy over ssh on a Mac answered this though it was signed in there. Only matched, never repeated
+const AGY_SIGNED_OUT = /please sign in to view available models/i;
 
 /** Runs the CLI's list command, `timeoutMs` at most (30 s: agy asks its service), with the seats' update-off env.
  *  Codex's answer carries every model's prompt, hundreds of KB, so up to 4 MB is read. */
@@ -44,8 +47,8 @@ export function makeLister(o: { timeoutMs?: number; env?: NodeJS.ProcessEnv; spa
     const updateOff = Object.fromEntries(Object.entries(launchFlags(agent, BOARD, BOARD).env).filter(([k]) => /AUTO_?UPDATE/i.test(k)));
     const [r] = runCli(path, [LIST_ARGS[agent]], timeoutMs, { ...base, ...updateOff }, spawn, 4 * 1024 * 1024);
     if (r!.error) return { path, error: r!.error === 'ETIMEDOUT' ? `timed out after ${timeoutMs / 1000} s` : r!.error };
-    if (r!.status !== 0) return { path, error: `exit ${r!.status}` };
-    return { path, out: r!.out };
+    if (r!.status !== 0) return { path, error: `exit ${r!.status}`, out: r!.out, err: r!.err };
+    return { path, out: r!.out, err: r!.err };
   };
 }
 
@@ -64,6 +67,10 @@ export async function reportModels(o: { machine: string; list: Lister;
         if (models.length) { lists[agent] = models; continue; }
         why = `no model names in what \`${command(agent)}\` printed`;
       } catch (e: any) { why = String(e?.message ?? e); }
+    }
+    if (agent === 'agy' && AGY_SIGNED_OUT.test(`${r.out ?? ''}\n${r.err ?? ''}`)) {
+      said[agent] = 'agy: list not read (agy is not signed in in this session): the board keeps the last one. On ssh to a machine where agy is signed in, run `cb models report` in a herdr pane there instead; else sign in with `agy`';
+      continue;
     }
     said[agent] = `${agent}: list not read (${why}): the board keeps the last one. Run \`${command(agent)}\` here to see why`;
   }

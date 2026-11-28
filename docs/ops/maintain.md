@@ -713,6 +713,13 @@ pane takes the first session. Without `workspace` a session opens in whichever w
 Sessions already running stay where they are: move them with `herdr pane move <pane> --new-tab --workspace <id>`.
 Card #3719.
 
+## Model lists (`cb models report`)
+
+Run `cb models report` on each machine of a squad: the settings page offers what that machine last sent. **On a Mac, run
+it in a herdr pane or a terminal there, not as a plain ssh command** (a deploy step included): over ssh `agy models`
+answered "sign in" while the same command in a terminal there listed its models (seen 28 Nov 2026, #4856). The report
+then says `agy is not signed in in this session`, and the board keeps the last list.
+
 ## Squad file: Codex, OpenCode and agy seats (#4585)
 
 A role or a seat in any project may give `"agent": "codex"` (or `opencode`, `agy`) with that agent's model (Q3024).
