@@ -221,6 +221,88 @@ test('#4622: a quoted phrase after a variable is no git subcommand; every word t
     // m2, kept: two whole variables may be git and a writing command
     'python3 tools/check.py $A $B opencode.json']);
 });
+// #4768, #4770: the guard drops a heredoc body only where bash reads one. In each of these bash 5.2 runs the line the
+// guard dropped as file text (checked in a shell with a harmless echo in its place)
+const hiddenByHeredoc: [string, (c: string) => string][] = [
+  ['an empty heredoc', (c) => `cat > notes.txt <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty <<- heredoc, tab before the end', (c) => `cat >> notes.txt <<-"EOF"\n\tEOF\n${c}\nEOF`],
+  ['an empty heredoc, CRLF', (c) => `cat > notes.txt <<'EOF'\r\nEOF\r\n${c}\r\nEOF`],
+  ['an empty heredoc to cb log', (c) => `cb log 1 -b - <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty heredoc to git commit -F -', (c) => `git commit -F - <<'EOF'\nEOF\n${c}\nEOF`],
+  ['an empty heredoc in a commit message', (c) => `git commit -m "$(cat <<'EOF'\nEOF\n${c}\nEOF\n)"`],
+  ['the marker in a comment', (c) => `cat > notes.txt # <<'EOF'\n${c}\nEOF`],
+  ['the marker in a quoted word', (c) => `cat > notes.txt "a <<'EOF'"\n${c}\nEOF`],
+  ['the marker in a quoted cb message', (c) => `cb log 1 "see <<'EOF'"\n${c}\nEOF`],
+  ['the marker in a quote opened lines before', (c) => `echo "\ncat > notes.txt <<'EOF'\n" >/dev/null\n${c}\nEOF`],
+  ['a here-string', (c) => `cat > notes.txt <<<'EOF'\n${c}\nEOF`],
+  ['a quote left open after the marker', (c) => `cat > notes.txt <<'EOF' "a\n"; ${c}\nEOF`],
+  ['a line continuation after the marker', (c) => `cat > notes.txt <<'EOF' \\\n; ${c}\nEOF`],
+  ['EOF) ends it in a substitution', (c) => `git commit -m "$(cat <<'EOF'\ntext\nEOF)"\n${c}\nEOF`],
+  ['EOF ) ends it in a substitution', (c) => `git commit -m "$(cat <<'EOF'\ntext\nEOF )"\n${c}\nEOF`],
+  ['after an indented end line bash does not take', (c) => `cat > a <<'EOF'\n  EOF\necho "\nEOF\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
+  ['after an unquoted heredoc with a quote in it', (c) => `cat <<X\n"\nX\necho "\ncat > b <<'EOF'\n"\n${c}\nEOF`],
+  ['a delimiter that goes on after its quote', (c) => `cat > a <<'EOF'x\ntext\nEOFx\n${c}\nEOF`],
+  ['after $$ before a quote', (c) => `echo $$'a\\' >/dev/null; echo '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after an escaped $ before a quote', (c) => `echo \\$'a\\' >/dev/null; echo '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after quotes inside ${ }', (c) => `echo "\${x:-"a\ncat > a <<'EOF'\n"}" >/dev/null\n${c}\nEOF`],
+  ['after a # that follows a substitution', (c) => `echo $(echo a)# '\n' >/dev/null; echo "\ncat > a <<'EOF'\n" >/dev/null\n${c}\nEOF`],
+  ['after a # that follows a CR', (c) => `echo a\r# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  ['after a # on a continued line', (c) => `echo a\\\n# '\ncat > a <<'EOF'\n' >/dev/null\n${c}\nEOF`],
+  // PR 161 review (R1): bash scans backticks straight to the closing one, whatever quotes or # sit between
+  // Git Bash drops every carriage return, so there these lines end the heredoc
+  ['an end line with a CR before the word', (c) => `cat > a <<'EOF'\n\rEOF\n${c}\nEOF`],
+  ['an end line with a CR inside the word', (c) => `cat > a <<'EOF'\nE\rOF\n${c}\nEOF`],
+  ['after a quote inside backticks',(c) => `echo \`echo '\`; #'\`; cat > a <<'EOF'\n${c}\nEOF`],
+  ["after $' inside backticks", (c) => `echo \`echo $'\`; #'\`; cat > a <<'EOF'\n${c}\nEOF`],
+  // seats also run PowerShell, which has no heredoc: each of these runs the line there (checked in Windows PowerShell 5.1)
+  ['in PowerShell smart double quotes', (c) => `echo “; cat > a <<'EOF' ”\n${c}\nEOF`],
+  ['in PowerShell smart single quotes', (c) => `echo ‘; cat > a <<'EOF' ’\n${c}\nEOF`],
+  ['in a PowerShell block comment', (c) => `echo <# \ncat > a <<'EOF' #>\n${c}\nEOF`],
+  ['in a PowerShell string that follows a backslash', (c) => `echo \\'; cat > a <<'EOF'\n'\n${c}\nEOF`],
+  // bash reads 1# as a word; PowerShell starts a comment there, so the quote after it opens nothing
+  // PR 161 review round 2 (R1), and what the same search found next to it. Each runs in Git Bash 5.2 or PowerShell 5.1
+  ...['“', '”', '„'].map((q): [string, (c: string) => string] =>
+    [`after a backslash and the smart quote ${q.codePointAt(0)!.toString(16)}`, (c) => `echo "a\\${q}; # "; cat > a <<'EOF'\n${c}\nEOF`]),
+  ['in a substitution inside quoted ${ }', (c) => `echo "\${x:-$(# }"; cat > a <<'EOF'\n${c}\nEOF\n)}"`],
+  ['in a substitution inside ${ }', (c) => `echo \${x:-$(# }; cat > a <<'EOF'\n${c}\nEOF\n)}`],
+  ['after a $( split by a continued line', (c) => `echo "$\\\n(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside $(( ))', (c) => `echo $(( 1 # )) '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside (( ))', (c) => `(( 1 # )); echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside $[ ]', (c) => `echo $[ 1 # ] '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # inside a [[ =~ ]] pattern', (c) => `[[ a =~ ( #) ]]; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a $( split by a lone CR', (c) => `echo "$\r(echo '"')"; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  // PR 161 review (R2): PowerShell refuses a << only where it starts a token. Glued to a word it is part of that word
+  ...['cat > a', 'cat', 'cb log 1 -b -', 'cb log 1 0', 'git commit -F -', 'cat =', 'cat > a -'].map((head): [string, (c: string) => string] =>
+    [`a marker glued to the word before it: ${head}`, (c) => `${head}<<'EOF'\n${c}\nEOF`]),
+  // PowerShell does not check the syntax inside a $( ) that is part of a command's name, so there a << stops nothing
+  // (PowerShell 5.1's parser: no error, and the next line is a command)
+  ['in a PowerShell command name, a $( glued to a word', (c) => `x=$(cat > a <<'EOF'\n)\n${c}\nEOF`],
+  ['in a PowerShell command name, a quote glued to a word', (c) => `a="$(cat > a <<'EOF'\n)"\n${c}\nEOF`],
+  ['after a # inside an array subscript', (c) => `a[ 1 # ]=2; echo '\n' ; #' ; cat > a <<'EOF'\n${c}\nEOF`],
+  ['after a # that follows a number',(c) => `$x = 1# '\necho ' ; cat > a <<'EOF' # '\n${c}\nEOF`],
+  ['in a PowerShell here-string',(c) => `$x = @'\n' ; cat > a <<'EOF'\n'@\n${c}\nEOF`],
+];
+const heredocText = [
+  `cat > notes.txt <<'EOF'\ngit reset --hard\nEOF`, `cd /tmp && cat >> notes.txt <<-"EOF"\n\tgit reset --hard\n\tEOF`,
+  `cb log 1 -b - <<'EOF'\ndon't "quote" # git reset --hard\nEOF`, `git commit -F - <<'EOF'\ngit reset --hard\nEOF`,
+  `git commit -m "$(cat <<'EOF'\nfix: it's done; git reset --hard is only described\nEOF\n)"`,
+  `cat > a <<'EOF'\ndon't\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`, `cat > a <<'EOF'\nEOF\ncat > b <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "a # b" 'c <<' # a comment; [with] {plain} words\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `python3 - <<'PY'\nprint("don't")\nPY\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `echo "$(date)" "C:\\tools\\x" '\\d+' "caf\u00e9" # note\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `mkdir -p out && [ -f *.md ] && { echo $HOME $?; } > out/x 2>&1\ncat > a <<'EOF'\ngit reset --hard\nEOF`,
+  `cat > a <<'EOF'\r\ngit reset --hard\r\nEOF\r\n`, `cat > a <<'EOF' && echo ok # done\ngit reset --hard\nEOF`,
+  `echo "\${HOME}" \${#x} \${y:-z} \${sha:0:7} $$\ncat > a <<'EOF'\ngit reset --hard\nEOF`,`cat > a <<'EOF'>b\ngit reset --hard\nEOF`,
+];
+test('#4768, #4770: a command bash runs is never dropped as heredoc text; real heredoc text still is', () => {
+  for (const [name, make] of hiddenByHeredoc) {
+    assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
+    assert.equal(evaluate({ tool: 'shell', command: make('git push origin main'), role: 'builder' }).allow, false, `builder must block a push to main: ${name}`);
+  }
+  // the card's own repro: a role rule that reads the same stripped text
+  assert.equal(evaluate({ tool: 'shell', command: "cat > notes.txt <<'EOF'\nEOF\nunset CB_ROLE\nEOF", role: 'builder' }).allow, false, 'the seat variable');
+  for (const c of heredocText) assert.ok(!check(c), `text, must pass: ${JSON.stringify(c)}`);
+});
 
 // #4345: a squad seat runs under bypassPermissions, so the hook entry in ~/.claude/settings*.json (or a repo's
 // .claude/settings*.json), the installed guard and the runner config in ~/.claude-board are the fence itself.
@@ -1301,6 +1383,11 @@ test('long commands stay fast', () => {
     ['an unterminated quoted heredoc header, then 600 KB, as a builder', asBuilder(heredocThen600KB)],
     ['600 KB of unterminated quoted heredoc headers', () => check(heredocHeaders600KB)],
     ['600 KB of unterminated quoted heredoc headers, as a builder', asBuilder(heredocHeaders600KB)],
+    // #4768: the shell reader walks the command once, however deep it nests
+    ['#4768, 100,000 open parens then 8,000 empty heredocs, as a builder', asBuilder('( '.repeat(100000) + "\ncat > a <<'EOF'\nEOF".repeat(8000))],
+    ['#4768, 200 KB of heredoc markers in comments, as a builder', asBuilder("cat > a # <<'EOF'\n".repeat(12000) + 'EOF')],
+    ['#4768, 200 KB of comment lines before a heredoc, as a builder', asBuilder('#\n'.repeat(100000) + "cat > a <<'EOF'\nx\nEOF")],
+    ['#4768, 200 KB of # on one line before a heredoc, as a builder', asBuilder('#'.repeat(200000) + "\ncat > a <<'EOF'\nx\nEOF")],
     ['a 200 KB ordinary command', () => check(big)],
     ['a 200 KB ordinary command, as a builder with protected branches',
       () => evaluate({ tool: 'shell', command: big, role: 'builder', protectedBranches: ['development'] })],
@@ -1747,6 +1834,45 @@ test('#4734: the reported script and search commands pass; a real launch by that
   for (const c of card4734Fine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
   for (const c of card4734Runs) assert.equal(evaluate({ tool: 'shell', command: c, role: 'builder' }).kind, 'role', c);
 });
+
+// #4776: Git Bash drops every carriage return, quoted ones too, in -c text, a script file and stdin, so a word split by
+// one runs. Each command here was allowed although what bash runs is refused
+const kindOf = (command: string, role: string | null = 'builder', readScript?: (p: string) => string | null) => {
+  const r = evaluate({ tool: 'shell', command, role, readScript });
+  return r.allow ? 'allow' : r.kind;
+};
+test('#4776: a carriage return inside a word hides nothing from the dangerous-command rules or a role', () => {
+  assert.equal(kindOf('git re\rset --hard', null), 'dangerous', 'no role');
+  assert.equal(kindOf('git re\rset --hard'), 'dangerous');
+  assert.equal(kindOf('g\rit reset --hard', null), 'dangerous');
+  assert.equal(kindOf('bash -c "git re\rset --hard"'), 'dangerous', 'inside quotes too');
+  assert.equal(kindOf('gh pr me\rrge 5'), 'role');
+  assert.equal(kindOf('git push origin ma\rin'), 'role');
+  assert.equal(kindOf('unset CB_RO\rLE'), 'role');
+  assert.equal(kindOf('su\rdo codex'), 'role');
+});
+
+test('#4776: the command is still judged as written, and an ordinary CRLF command still passes', () => {
+  assert.equal(kindOf('Write-Host hi\rgit reset --hard'), 'dangerous', 'a lone CR ends a line in PowerShell');
+  assert.equal(kindOf("cat > n.txt <<'EOF'\r\ntext\r\nEOF\r\nunset CB_ROLE\r\n"), 'role', 'a heredoc closed by a CRLF line');
+  assert.equal(kindOf('cd /c/w/x\r\ngit status\r\ngit diff --stat\r\n'), 'allow');
+});
+
+test('#4776: a script the seat runs is read without its carriage returns too', () => {
+  const files: Record<string, string> = {
+    's.sh': 'echo hi\r\nunset CB_RO\rLE\r\n',
+    'outer.sh': 'bash inn\rer.sh\r\n',
+    'inner.sh': 'unset CB_AGENT\n',
+    'plain.sh': 'echo hi\r\ngit status\r\n',
+    'many.sh': Array.from({ length: 20 }, (_, i) => `bash leaf${i}.sh\r\n`).join(''),
+  };
+  const read = (p: string) => files[p] ?? (/^leaf\d+\.sh$/.test(p) ? 'echo ok\r\n' : null);
+  assert.equal(kindOf('bash s.sh', 'builder', read), 'role');
+  assert.equal(kindOf('bash outer.sh', 'builder', read), 'role', 'the script it names, spelled with a CR');
+  assert.equal(kindOf('bash plain.sh', 'builder', read), 'allow');
+  assert.equal(kindOf('bash many.sh', 'builder', read), 'allow', 'a CRLF script counts each script it runs once');
+});
+
 // #4773: an interpreter heredoc is judged as code, so ordinary program text it only writes into a file can read as a
 // seat-variable change. That stays refused (a script could do it); the refusal says how the file is meant to be edited.
 test('#4773: a text-only edit by an interpreter heredoc stays refused, and the refusal says to use the file edit tool', () => {

@@ -182,6 +182,53 @@ test('filing: a disabled project parks a card in its Backlog; an archived one re
   await assert.rejects(session`select cb.task_update('3', '{"project":"cedar"}'::jsonb, 'A1@pc')`, /Cedar is archived: nothing new goes there\. Move it elsewhere/);
 });
 
+test('#4621: while disabled no question is rewritten, the project is not merged away, and a bound pane takes no new name', async () => {
+  const { sql, session, set } = await setup();
+  const [{ q }] = await session`select cb.ask(project => 'cedar', body => 'which way?', actor => 'W2@pc') as q`;
+  await set('disabled');
+  for (const who of [session, sql]) {
+    await assert.rejects(who`select cb.reask(${q}, 'which way, then?', null, false, null, null, 'W2@pc')`,
+      /Cedar is disabled .*: nothing is asked there until Ahmed enables it/);
+  }
+  assert.equal((await sql`select body from cb.questions where id = ${q}`)[0].body, 'which way?');
+  // merged away, its cards would be handed out again under the other name
+  await assert.rejects(sql`select cb.project_alias('cedar', 'atlas')`, /Cedar is disabled .*: it is not merged into another project until Ahmed enables it/);
+  assert.equal((await sql`select count(*)::int as n from cb.tasks where project = 'cedar'`)[0].n, 2);
+  await sql`select cb.project_alias('never-a-project', 'atlas')`; // a plain alias of a name with no project
+  // a new name on a bound pane is a new seat, whether or not it names the project
+  await assert.rejects(session`select cb.iam('pc', 'p1', 'W9@pc', 'cedar')`, /Cedar is disabled .*: no new seat binds to it/);
+  await assert.rejects(session`select cb.iam('pc', 'p1', 'W9@pc')`, /Cedar is disabled .*: no new seat binds to it/);
+  assert.equal((await sql`select actor from cb.sessions where machine = 'pc' and pane = 'p1'`)[0].actor, 'W1@pc');
+  await session`select cb.iam('pc', 'p1', 'W1@pc')`;          // the same name re-binds
+  await session`select cb.iam('pc', 'p1', 'W9@pc', 'atlas')`; // and the pane may go to a project that gets work
+  await set('enabled');
+  await session`select cb.reask(${q}, 'which way, then?', null, false, null, null, 'W2@pc')`;
+});
+
+test('#4621: a card freed from its question while disabled waits in Next with its holder, however the question ends', async () => {
+  const { sql, session, set } = await setup();
+  for (const title of ['asks and is withdrawn', 'asked by a follow-up']) // #4 and #5
+    await sql`select cb.task_add(project => 'cedar', title => ${title}, status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
+  const blocking = async (task: string) =>
+    (await session`select cb.ask(project => 'cedar', body => ${'about ' + task}, blocking => true, task_id => ${task}, actor => 'W1@pc') as q`)[0].q;
+  const answered = await blocking('1'), withdrawn = await blocking('4');
+  // a follow-up that opens on one answer takes #5, and gives it back when the answer is changed to another
+  const parent = (await session`select cb.ask(project => 'cedar', body => 'ship?', options => '["yes","no"]'::jsonb, actor => 'W1@pc') as q`)[0].q;
+  await session`select cb.ask(project => 'cedar', body => 'when?', blocking => true, task_id => '5', parent => ${parent}, if_answer => 'yes', actor => 'W1@pc')`;
+  await set('disabled');
+  await sql`select cb.answer(${parent}, 'yes', 'ahmed')`;
+  assert.equal((await sql`select status from cb.tasks where id = 5`)[0].status, 'blocked', 'the follow-up holds it');
+  await sql`select cb.answer(${parent}, 'no', 'ahmed')`;
+  await sql`select cb.answer(${answered}, 'left', 'ahmed')`;
+  await session`select cb.answer_delivered(${answered}, 'W1@pc', 'W1@pc')`;
+  await session`select cb.withdraw(${withdrawn}, 'W1@pc')`;
+  const cards = await sql`select id::int, status, assignee, blocked_on from cb.tasks where id in (1, 4, 5) order by id`;
+  assert.deepEqual(cards.map((c: any) => ({ ...c })), [1, 4, 5].map((id) => ({ id, status: 'next', assignee: 'W1@pc', blocked_on: null })));
+  // enabled again, its holder takes it back
+  await set('enabled');
+  assert.equal((await session`select * from cb.task_claim('cedar', 'W1@pc')`)[0].assignee, 'W1@pc');
+});
+
 test('a design passed while disabled still asks for its approval: the stage_pass call is the one exempt ask', async () => {
   const { sql, session, set } = await setup();
   await sql`select cb.project_pipeline('cedar', true, 'ahmed')`;
