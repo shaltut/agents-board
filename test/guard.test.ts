@@ -329,6 +329,7 @@ const hiddenByGluedQuote: [string, (c: string) => string][] = [
   ['a substitution in a double-quoted word that reads like a message', (c) => `echo "cb log 1 '$(${c})'"`],
   ['the same with backticks', (c) => `echo "cb log 1 '\`${c}\`'"`],
   ['the same handed to bash -c', (c) => `bash -c "cb log 1 '$(${c})'"`],
+  ['a substitution in a double-quoted word that reads like a heredoc', (c) => `echo "cat > a <<'EOF'\n$(${c})\nEOF"`],
 ];
 test('#4774: a message in a substitution in quotes is still text to every rule', () => {
   for (const command of [`x="$(cb log 1 'never git push origin main')"`, `echo "$(cb log 1 'git push -f origin feat/x')"`]) {
@@ -336,14 +337,16 @@ test('#4774: a message in a substitution in quotes is still text to every rule',
   }
 });
 test('#4774: a command a shell runs is never dropped as message text; real message text still is', () => {
+  const missed: string[] = []; // every miss, so one failing run names them all
   for (const [name, make] of [...hiddenByMessage, ...hiddenByGluedQuote]) {
     // the line reaches the rules as written (what a rule makes of a quote in a comment is that rule's own: #4777)
-    assert.ok(stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE'), `the line must reach the rules: ${name}`);
-    assert.ok(check(make('git reset --hard')), `must block a reset: ${name}`);
+    if (!stripMessages(make('unset CB_ROLE')).includes('unset CB_ROLE')) missed.push(`${name}: the line does not reach the rules`);
+    if (!check(make('git reset --hard'))) missed.push(`${name}: a reset passes`);
     for (const c of ['git push origin main', 'git push -f origin feat/x', 'taskkill /IM node.exe']) {
-      assert.equal(evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow, false, `builder must block "${c}": ${name}`);
+      if (evaluate({ tool: 'shell', command: make(c), role: 'builder' }).allow) missed.push(`${name}: a builder may run "${c}"`);
     }
   }
+  assert.deepEqual(missed, []);
   for (const c of messageText) assert.equal(check(c), null, `text, must pass: ${JSON.stringify(c)}`);
 });
 
