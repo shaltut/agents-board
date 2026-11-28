@@ -115,11 +115,12 @@ writeFileSync(CFG, JSON.stringify({
 const API = process.env.CB_TEST_RUNNER_MODE === 'api';
 const apiOnly = { skip: !API && 'test/runner-api.test.ts runs it' };
 const worker = API ? await (await import('./api-board.ts')).apiBoardFor() : null;
-const onKey: Record<string, Record<string, string | undefined>> = {};
+const onKey: Record<string, Record<string, string | undefined>> = {}, issued: Record<string, string> = {};
 /** A runner key for the runner called `runner`, and the environment of a process that holds it, as `as`. */
 async function giveKey(as: string, runner = as) {
   const [row] = await sql`select cb.key_issue(${`box-${as}`}, 'runner', ${runner}) as key`;
   onKey[as] = worker!.env(row!.key, join(TMP, `keys-${as}`));
+  issued[as] = String(row!.key).split('_')[1]!; // its id, which is not secret
   return String(row!.key);
 }
 if (worker) for (const name of [NAME, 'pc-nopeers']) await giveKey(name);
@@ -409,6 +410,18 @@ test('API mode: a notice missed while the stream was down is claimed as soon as 
   assert.equal((await get(id)).state, 'queued', 'nothing told the runner');
   worker!.restoreStreams();
   assert.equal((await ended(id, 15_000)).state, 'passed');
+});
+
+test('API mode: a revoked key replaced in place needs no restart: calls and the stream come back', apiOnly, async () => {
+  worker!.cutStreams();
+  await sql`select cb.key_revoke(${issued[NAME]!})`;
+  worker!.restoreStreams();
+  await until('the stream to be refused', () => (/refused the notice stream/.test(runner.out) ? true : undefined), 40_000);
+  assert.equal(worker!.liveStreams(), 0);
+  await giveKey(NAME); // the same key file: the runner reads it for every request
+  await until('the stream to be open again', () => (worker!.liveStreams() === 1 ? true : undefined), 45_000);
+  assert.equal((await ended(await add('ok'), 15_000)).state, 'passed');
+  assert.equal(runner.child.exitCode, null);
 });
 
 test('API mode: another runner\'s key stops the runner and says what to do, without the key', apiOnly, async () => {

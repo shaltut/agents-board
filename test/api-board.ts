@@ -19,7 +19,7 @@ export async function apiBoardFor() {
   const inner = await port(server);
 
   let lose: ((fn: string, result: unknown) => boolean) | null = null, cut = false;
-  const streams = new Set<http.ServerResponse>();
+  const streams = new Set<http.ServerResponse>(), live = new Set<http.ServerResponse>();
   const seen: string[] = []; // the function of each call, as it arrived
   const proxy = http.createServer((req, res) => {
     const fn = /^\/w\/v1\/call\/(\w+)$/.exec(req.url ?? '')?.[1];
@@ -37,6 +37,10 @@ export async function apiBoardFor() {
         });
         return;
       }
+      if (stream && back.statusCode === 200) {
+        live.add(res);
+        res.on('close', () => live.delete(res));
+      }
       res.writeHead(back.statusCode!, back.headers);
       back.pipe(res);
     });
@@ -52,6 +56,8 @@ export async function apiBoardFor() {
 
   return {
     seen,
+    /** How many notice streams the board has open now. */
+    liveStreams: () => live.size,
     /** The reply of the next call this says yes to is lost, after the board has run it. */
     loseReply: (which: (fn: string, result: unknown) => boolean) => { lose = which; },
     /** Ends every open stream and refuses new ones, until restoreStreams. */
