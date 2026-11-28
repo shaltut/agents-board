@@ -484,7 +484,19 @@ supervisor reach the board through its API with a per-machine key. **Every step 
     to the server could still make addresses up. The first fix closes that.
 
   Never set `1` while anything but Cloudflare can reach those ports.
-- Every machine has its keys installed, and `cb key check` passes for each kind on each machine.
+- Every machine has its keys and is switched to the API, **in this order**:
+  1. Install the keys: `cb key install <kind>` for each kind the machine runs (`machine`, `runner`, `supervisor`),
+     **the machine key first**.
+  2. Only then set `CB_BOARD_URL`, the board's https address, and restart its relays, runner and supervisor. In a
+     checkout's `.env` it moves **every** `cb` on that checkout to the API, and each kind then needs its own key: a
+     board address with no key is an error, never a quiet way back to the database.
+  3. `cb key check <kind>` for each. **A pass shows that the key works, not that the machine has left the database:**
+     `CB_DATABASE_URL` in the environment (a shell profile, an already running pane) still wins over `CB_BOARD_URL`.
+     Step 1 below is the proof.
+
+  **Whoever holds a runner key is that runner:** it can take that runner's jobs and report any result, a false pass
+  included. A job runs as the runner's own user, so the code it tests could read the key file. If a runner's machine or
+  a job's code is in doubt, revoke the key and run what it reported since again.
 - A fresh backup: `sudo /opt/claude-board/deploy/backup.sh`. Keep that file: it is the board as it was. It holds client
   work, and until step 6 the sign-in values in older backups still matter.
 - Know that this cannot be undone from step 4 on, and that history from before the cut-over cannot be proven genuine.
@@ -582,7 +594,9 @@ this step brings the old sign-ins and passwords back:** run both commands again 
 **7. New keys and a new bot token.** Revoke every worker key and issue new ones (`cb key install <kind>` on each
 machine, then `cb key check`), and rotate the Telegram bot token ([Secrets](#secrets)).
 
-**Rolling back.** Steps 2 and 3 can be undone with the new password. Steps 4 to 7 are not meant to be undone.
+**Rolling back.** Steps 2 and 3 can be undone with the new password. To send a machine, or its runner, back to the
+database before step 3: remove `CB_BOARD_URL`, or start it with `CB_DATABASE_URL` set. **Removing only a key does
+not:** with a board address and no key it refuses to start. Steps 4 to 7 are not meant to be undone.
 
 ## Disk and housekeeping
 
