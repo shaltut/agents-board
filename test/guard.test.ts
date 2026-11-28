@@ -1947,3 +1947,25 @@ test('#4789: after the end of rg\'s options nothing is its pre-processor option'
   for (const off of ['', ...thrownOff]) refused(maybeValue.map((c) => off + c));
   letThrough(["rg 'a*b' -- --pre=sudo f", "rg --glob='*.ts' -- --pre=sudo", 'rg "TODO" src -- --pre=sudo', 'rg -F src/a.ts -- --pre=sudo']);
 });
+
+// what the empty-word refusals above rest on, read from the shell itself: the native program here only prints the
+// arguments it is given
+test('#4789: Windows PowerShell hands a native program no empty argument', { skip: process.platform !== 'win32' && 'Windows PowerShell only' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-guard-argv-'));
+  try {
+    const script = join(dir, 'argv.mjs');
+    writeFileSync(script, 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+    const quoted = (s: string) => `'${s.replaceAll("'", "''")}'`;
+    const argv = (words: string) => {
+      const command = `& ${quoted(process.execPath)} ${quoted(script)} ${words}`;
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 60_000 });
+      assert.equal(r.status, 0, `${words}: ${r.error?.message ?? r.stderr}`);
+      return JSON.parse(r.stdout.trim());
+    };
+    // the control: an argument with text arrives, so a missing one below is the empty one
+    assert.deepEqual(argv('-e "a" -- --pre harmless x'), ['-e', 'a', '--', '--pre', 'harmless', 'x']);
+    for (const empty of ['""', "''", `""''`]) assert.deepEqual(argv(`-e ${empty} -- --pre harmless x`), ['-e', '--', '--pre', 'harmless', 'x'], empty);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
