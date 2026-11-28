@@ -1711,6 +1711,68 @@ function applyWrite(vars, { key, value }) {
     vars.set('VPS', UNKNOWN_HOST);
   } else vars.set(key, value === undefined ? UNKNOWN_HOST : sshValue(key, value, vars.get(key)));
 }
+// #4741: what the walk below does not follow by itself, because the command string is one word, unquoted, behind
+// another option, or glued from pieces: a shell's -c string, eval's and iex's arguments, what follows cmd /c or pwsh -c
+// (any prefix of -Command or -CommandWithArgs, and -cwa), and rg's --pre program. Each is judged like a command line
+const CODE_CARRIER = /sh|eval|iex|invoke-expression|cmd|\brg\b/i;
+const SHELL_PIECE = /\$?'([^']*)'|\$?"((?:\\[\s\S]|[^"\\])*)"|\\([\s\S])|([^'"\\$]+|[\s\S])/g;
+// a word as the shell hands it on: quotes gone, 's'"udo x" joined
+const shellValue = (w) => w.replace(SHELL_PIECE, (_m, single, double, escaped, plain) => single ?? double?.replace(/\\(["\\$`])/g, '$1') ?? escaped ?? plain);
+const PS_COMMAND = (x) => /^(?:--?|\/)c/i.test(x) && ((f) => f === 'cwa' || '-commandwithargs'.startsWith(`-${f}`))(x.replace(/^(?:--?|\/)/, '').toLowerCase());
+// -Verbose and -Debug, however far abbreviated
+const PS_SWITCH = (f) => /^-(?:vb|db)$/i.test(f) || ['-verbose', '-debug'].some((s) => f.length > 1 && s.startsWith(f.toLowerCase()));
+// cut: the second reading split this command inside a quote, so a shell's command string may be every word that is left
+function codeStrings(name, args, cut) {
+  const rest = (k) => (k < args.length ? [args.slice(k).map(shellValue).join(' ')] : []);
+  if (name === 'eval') return rest(shellValue(args[0] ?? '') === '--' ? 1 : 0);
+  if (name === 'iex' || name === 'invoke-expression') {
+    // it takes -Command and PowerShell's common parameters: two are switches, the rest take a value, any may bind it with a colon
+    let k = 0;
+    while (k < args.length) {
+      const x = shellValue(args[k]);
+      if (x === '--') return rest(k + 1);
+      if (!x.startsWith('-') && !PS_COMMAND(x)) break;
+      const colon = x.indexOf(':'), flag = colon < 0 ? x : x.slice(0, colon);
+      if (PS_COMMAND(flag)) {
+        return colon < 0 ? rest(k + 1) : [[x.slice(colon + 1), ...args.slice(k + 1).map(shellValue)].join(' ').trim()];
+      }
+      k += colon >= 0 || PS_SWITCH(flag) ? 1 : 2;
+    }
+    return rest(k);
+  }
+  if (name === 'cmd') {
+    for (let k = 0; k < args.length; k++) {
+      // a second slash is Git Bash's way to write one
+      const m = /^\/\/?(?:[a-z](?::[^\s/]*)?\/\/?)*[ck](.*)$/i.exec(shellValue(args[k]));
+      if (m) return m[1] ? [[m[1], ...args.slice(k + 1)].map(shellValue).join(' ')] : rest(k + 1);
+    }
+    return [];
+  }
+  if (name === 'pwsh' || name === 'powershell') {
+    const k = args.findIndex((x) => PS_COMMAND(shellValue(x)));
+    return k < 0 ? [] : rest(k + 1);
+  }
+  if (name === 'rg') {
+    return args.flatMap((x, k) => {
+      const m = /^--pre(?:=(.*))?$/.exec(shellValue(x));
+      return m ? [m[1] ?? shellValue(args[k + 1] ?? '')] : [];
+    });
+  }
+  if (!SCRIPT_SHELLS.has(name)) return [];
+  const word = (k) => (cut ? rest(k) : k < args.length ? [shellValue(args[k])] : []);
+  let runs = false;
+  for (let k = 0; k < args.length; k++) {
+    const x = shellValue(args[k]);
+    if (x === '--' || x === '-') return runs ? word(k + 1) : [];
+    const fish = name === 'fish' ? /^--command(?:=([\s\S]*))?$/.exec(x) : null;
+    if (fish?.[1] !== undefined) return [fish[1]];
+    if (fish) runs = true;
+    if (!/^[-+]./.test(x)) return runs ? word(k) : []; // the first operand: the command after -c, else a script file
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(x)) runs = true;
+    if (/^(?:[-+][A-Za-z]*[oO]|--rcfile|--init-file)$/.test(x)) k++;
+  }
+  return [];
+}
 // #4767: reading quotes as bash does is right for plain text only. Where bash and PowerShell count them differently (a
 // smart quote, a backslash before a quote, a here-string, <# #>, --%), where bash nests them ("$( )", "${ }"), where a
 // quote may not be one at all (a comment, a heredoc body, one left open), or where a search runs its own text (an alias
@@ -1754,12 +1816,16 @@ function bodyLeavesQuote(text) {
 }
 const countLost = (text) => MISCOUNTS.test(text) || REDEFINES.test(text) || leftOpen(text)
   || (/grep|\brg\b/i.test(text) && SEARCH_PROGRAM.test(text.replace(/["'\\]/g, ''))) || (text.includes('<<') && bodyLeavesQuote(text));
-function freshRead(command, hosts, role, deployHost, depth = 0) {
-  return freshEnvOne(command, hosts, role, deployHost, depth)
-    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true) : null);
+// walked: the strings already followed, over all levels of one command. Two ways to find one (eval's words joined, and
+// a quoted one of them alone) lead to the same strings below, so without it the work doubles at every level of nesting.
+// One seen before was walked and passed: a block would have ended the whole walk
+function freshRead(command, hosts, role, deployHost, depth = 0, walked = new Set()) {
+  return freshEnvOne(command, hosts, role, deployHost, depth, false, walked)
+    ?? (countLost(stripMessages(String(command ?? ''))) ? freshEnvOne(command, hosts, role, deployHost, depth, true, walked) : null);
 }
-// flat: the second reading. It follows no string into a nested one (the first reading does), so the two stay linear
-function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) {
+// flat: the second reading. It follows the same strings as the first, since after a lost quote count only it sees them.
+// A string it follows gets the second reading only, so the readings never multiply from one level to the next
+function freshEnvOne(command, hosts, role, deployHost, depth, flat, walked) {
   if (depth > 8) return FRESH_ENV('commands nested deeper than the guard reads');
   const stripped = stripMessages(String(command ?? ''));
   const raw = flat ? stripped : blankComments(stripped);
@@ -1770,16 +1836,27 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
   for (const segment of raw.matchAll(flat ? SEGMENTS : SEGMENT)) {
     const seg = segment[0];
     if (/win32_process|\bwmic\b/i.test(seg) && /\bcreate\b/i.test(seg)) return FRESH_ENV('WMI Win32_Process Create');
-    if (!FRESH_NAME.test(seg) && !FRESH_NAME.test(unhide(seg))) continue;
+    if (!FRESH_NAME.test(seg) && !CODE_CARRIER.test(seg)) {
+      // a carrier's own name may be split by quotes or a backslash, with what it runs split so that no launcher shows
+      const plain = unhide(seg.replace(/["']/g, ''));
+      if (!FRESH_NAME.test(plain) && !CODE_CARRIER.test(plain) && !FRESH_NAME.test(unhide(seg))) continue;
+    }
     // flat: a quote the cut left alone is dropped, never read as opening a word that swallows the rest
     const tokens = [...seg.matchAll(flat ? WORD : GIT_TOKEN)], w = tokens.map((m) => m[0]);
     const u = w.map(unquote), names = w.map(cmdName);
     const runsQuote = runnerArg(w, u, names, false);
+    const cut = flat && leftOpen(seg);
+    const follow = (text) => {
+      const key = `${flat}\0${vars.get('VPS')}\0${text}`; // the reading and the deploy host change the verdict
+      if (walked.has(key)) return null;
+      walked.add(key);
+      return flat ? freshEnvOne(text, hosts, role, vars.get('VPS'), depth + 1, true, walked) : freshRead(text, hosts, role, vars.get('VPS'), depth + 1, walked);
+    };
     let cmd = true;
     for (let i = 0; i < w.length; i++) {
       while (written < writes.length && writes[written].at <= segment.index + tokens[i].index) applyWrite(vars, writes[written++]);
-      if (!flat && /["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
-        const why = freshRead(u[i], hosts, role, vars.get('VPS'), depth + 1);
+      if (/["']/.test(w[i]) && /[\s;&|]/.test(u[i]) && runsQuote(i)) {
+        const why = follow(u[i]);
         if (why) return why;
       }
       if (/^[({`]$/.test(w[i])) { cmd = true; continue; }
@@ -1802,7 +1879,7 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
           const s = ENV_SPLIT.exec(option);
           if (s) {
             const split = option.slice(s[0].length) || (u[++i] ?? '');
-            const why = flat ? null : freshRead([split, ...w.slice(i + 1)].join(' '), hosts, role, vars.get('VPS'), depth + 1);
+            const why = follow([split, ...w.slice(i + 1)].join(' '));
             if (why) return why;
             cmd = false;
             break;
@@ -1814,6 +1891,13 @@ function freshEnvOne(command, hosts, role, deployHost, depth = 0, flat = false) 
       if (name === 'timeout') { while (w[i + 1]?.startsWith('-')) { if (TIMEOUT_OPT_ARG.test(u[++i])) i++; } i++; continue; }
       const why = freshLaunch(name, u.slice(i + 1, i + 41), hosts, role, vars);
       if (why) return FRESH_ENV(why);
+      // its arguments end at the next ( ) { } or backtick, where another command word may start: each word is read once
+      let end = i + 1;
+      while (end < w.length && !/^[(){}`]$/.test(w[end])) end++;
+      for (const code of codeStrings(name, w.slice(i + 1, end), cut)) {
+        const inner = follow(code);
+        if (inner) return inner;
+      }
       cmd = false;
     }
   }
