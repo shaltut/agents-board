@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const FILES = ['cli/cb.ts', 'cli/relay.ts', 'cli/relay-refusal.ts', 'cli/jobs.ts', 'cli/usage.ts', 'cli/update-install.ts',
-  'cli/stage-words.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs',
+  'cli/stage-words.ts', 'cli/tick.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs',
   'cli/runner.ts', 'cli/runner-board.ts', 'cli/runner-job.ts', 'cli/triage.ts',
   'cli/supervise.ts', 'cli/supervise-plan.ts', 'cli/lease.ts', 'cli/lease-worker.ts'];
 // what a file may still do, until the slice that takes it away: the relay and the runner listen for notices until the
@@ -20,6 +20,8 @@ const BANNED: [string, RegExp][] = [
   ['.begin(', /\.begin\s*\(/],
   ['an advisory lock', /pg_advisory/],
   ['pg_notify', /pg_notify/],
+  // its default connection runs the web's list as SQL: nothing the bridge or the worker API can carry
+  ['the web\'s call list', /\{[^}]*\b(?:callFn|useDb)\b[^}]*\}\s*from\s*'\.\.\/server\/rpc/],
   ['LISTEN', /\b(?:sql|tx|db|direct)\s*\.listen\s*\(/], // not an HTTP or socket server's listen
 ];
 

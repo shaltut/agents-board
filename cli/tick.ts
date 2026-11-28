@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { callFn } from '../server/rpc.ts';
+import { call } from './board.ts';
 import { dotenv } from '../server/db.ts';
 import { backWhy, reaskHint, flat } from './help.ts';
 
@@ -98,7 +98,7 @@ function github(refs: { repo: string; n: string }[], ttl: (key: string) => numbe
 }
 
 export async function tick(project: string, actor: string) {
-  const b: any = await callFn('tick', { project, actor });
+  const b: any = await call('tick', { project, actor });
   const items: Item[] = [];
   const add = (section: string, who: string, text: string, cmd: string | null, detail?: string) => items.push({ section, who, text, cmd, ...(detail ? { detail } : {}) });
   const P = q(project);

@@ -479,7 +479,7 @@ await check();
 // this session's cb calls run on this connection (bridge.ts): no connect of their own
 const unbridge = await serveBridge(sql, key, databaseUrl(), log, {
   binding: heldBinding,
-  served: (text) => { if (/\bcb\.iam\s*\(/.test(text)) { forget(); check(); } },
+  served: (fn) => { if (fn === 'iam') { forget(); check(); } },
 }).catch((e) => { log(`bridge failed: ${e?.message}`); return async () => {}; });
 for (const s of ['SIGTERM', 'SIGINT'] as const) process.on(s, () => { unbridge().finally(() => process.exit(0)); setTimeout(() => process.exit(0), 500); });
 setInterval(check, 30_000); // safety net if a notify is missed while reconnecting

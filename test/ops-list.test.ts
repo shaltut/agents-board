@@ -16,7 +16,7 @@ const named = (src: string, caller: RegExp) => [...src.matchAll(caller)].flatMap
 
 // these call call() by that name; cb.ts hands the same call() to squad-up and squad-trust, which know it as callFn
 const CALL_FILES = ['cli/cb.ts', 'cli/relay.ts', 'cli/relay-refusal.ts', 'cli/jobs.ts', 'cli/usage.ts', 'cli/update-install.ts',
-  'cli/stage-words.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs'];
+  'cli/stage-words.ts', 'cli/tick.ts', 'hooks/session-start.mjs', 'hooks/usage-stop.mjs'];
 const CALLED = [...new Set([
   ...CALL_FILES.flatMap((f) => named(read(f), /(?<![\w.])call\(/g)),
   ...named(read('cli/squad-up.ts'), /\bcallFn\(/g),

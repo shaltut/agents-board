@@ -46,7 +46,7 @@ async function reinject(pane, source, ms) {
     const { call } = await import('../cli/board.ts');
     // through the seat's relay when it runs (after a compaction it does): its connection is open, which saves the
     // ~800 ms a new connection to a board on another machine costs; else a connection of its own
-    sql = await openBridge(seatKey(machine(), pane), databaseUrl(), undefined, { machine: machine(), pane }).catch(() => null)
+    sql = await openBridge(seatKey(machine(), pane), databaseUrl(), { machine: machine(), pane }).catch(() => null)
       ?? connect(undefined, { max: 1, app: 'cb-hook' });
     // bound = the pane's row names a project (cb iam); the relay's own row before cb iam has none (cb start)
     const r = await call('resume_for_pane', { machine: machine(), pane }, sql);

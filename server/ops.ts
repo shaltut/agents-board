@@ -23,7 +23,7 @@ export const OPS: Record<string, Op> = Object.fromEntries([
     page_get page_set project_state_preview question_assign read_project resolve resume role_text seat_backup_clear
     seat_effort session_project_of sessions_overview squad_get squad_options squad_set stage_fail stage_pass stage_set
     start_words task_add task_block task_done task_find task_finish_line task_move task_notes_total task_project
-    task_status task_tag task_unblock task_update tell withdraw
+    task_status task_tag task_unblock task_update tell tick withdraw
     broadcast_seen inbox_ping job_add job_cancel job_get job_hold job_log_url job_move job_retry jobs_ended jobs_list
     refusal_targets relay_hold resume_for_pane schema_check seat_code seat_model stage_words_for usage_report
     usage_summary work_still_open

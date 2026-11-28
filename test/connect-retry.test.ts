@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { neverSent, ranWords, withConnectRetry, checkFirst, onlyReads } from '../cli/connect-retry.ts';
 import { namesCommand, COMMANDS } from '../cli/help.ts';
 import { serveBridge, openBridge } from '../cli/bridge.ts';
+import { call } from '../cli/board.ts';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
 
@@ -164,9 +165,9 @@ test('the relay bridge forwards syscall: a connect timeout is retried through it
     const db = await openBridge(key, url);
     assert.ok(db, 'bridge opened');
     outcomes.push(err('ETIMEDOUT', 'connect'), [{ result: 'ok' }]);
-    assert.deepEqual(await withConnectRetry(db, clock()).unsafe('select 1'), [{ result: 'ok' }]);
+    assert.equal(await call('resume', { actor: 'W1' }, withConnectRetry(db, clock())), 'ok');
     outcomes.push(err('ETIMEDOUT', 'read'), [{ result: 'twice' }]);
-    const e = await withConnectRetry(db, clock()).unsafe('select 1').catch((x: any) => x);
+    const e = await call('resume', { actor: 'W1' }, withConnectRetry(db, clock())).catch((x: any) => x);
     assert.equal(e.code, 'ETIMEDOUT'); assert.equal(e.syscall, 'read');
     assert.equal(outcomes.length, 1, 'not sent again');
     await db.end();
