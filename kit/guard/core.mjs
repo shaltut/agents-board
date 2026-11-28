@@ -1434,8 +1434,13 @@ const PASSWORD_WORD = new RegExp(String.raw`(?<![\w$])${PASSWORD}`, 'i');
 // the whole environment listed, then filtered for it
 const DUMPS = /^\s*(?:env|printenv|set|export\s+-p|(?:get-childitem|gci|ls|dir)\s+env:[\\/]?)\s*$/i;
 const FILTERS_PASSWORD = /^\s*(?:grep|egrep|fgrep|rg|findstr|select-string|sls|where-object|where|\?)(?![\w.-])[^\n]*(?:opencode|passw)/i;
-const PROC_ENVIRON_PATH = String.raw`proc[\\/]+[^\\/\s"';|&]{1,40}[\\/]+(?:task[\\/]+[^\\/\s"';|&]{1,40}[\\/]+)?environ(?![\w.-])`;
+// a pid as written or as the shell fills it in (PR 213 review): $( ) with one pair of parentheses inside it, backticks,
+// a quoted word, or plain characters. Each piece has its own first character, and all are bounded
+const SUBSTITUTED = String.raw`\$\((?:[^()\n]|\([^()\n]{0,80}\)){0,80}\)`;
+const PID = '(?:' + SUBSTITUTED + String.raw`|\x60[^\x60\n]{0,80}\x60|"(?:[^"$\n]|\$(?!\()|${SUBSTITUTED}){0,80}"|'[^'\n]{0,80}'|\$(?!\()|[^\\/\s"';|&$\x60()]){1,40}["']?`;
+const PROC_ENVIRON_PATH = String.raw`proc[\\/]+${PID}[\\/]+(?:task[\\/]+${PID}[\\/]+)?environ(?![\w.-])`;
 const PROC_ENVIRON = new RegExp(String.raw`(?<![\w.-])\/${PROC_ENVIRON_PATH}`, 'i');
+const PROC_ENVIRONS = new RegExp(PROC_ENVIRON.source, 'gi');
 // ps that prints each process's environment: BSD's e among the dashless letters, and macOS's -E
 const PS_WORD = /(?<![\w.$\\/-])ps(?![\w.\\/-])/;
 const PS_BSD_ENV = /^[acfghjlmrstuvwxz]*e[acefghjlmrstuvwxz]*$/;
@@ -1454,10 +1459,10 @@ function passwordRead(text) {
     if (dumped && FILTERS_PASSWORD.test(seg)) return true;
     dumped = DUMPS.test(seg);
     if (PRINTS_NAMED.test(seg) && PASSWORD_WORD.test(seg)) return true;
-    if (PROC_ENVIRON.test(seg) && SECRET_READER.test(seg)) return true;
     if (psShowsEnv(seg)) return true;
   }
-  return false;
+  // the pid made plain first: a pipe inside its substitution would cut the reader from the path
+  return (text.replace(PROC_ENVIRONS, '/proc/0/environ').match(SEGMENTS) ?? []).some((seg) => PROC_ENVIRON.test(seg) && SECRET_READER.test(seg));
 }
 // cheap first: a text with none of these asks for neither
 const PASSWORD_HINT = /opencode|passw|environ|(?<![\w.$\\/-])ps\s/i;
