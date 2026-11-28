@@ -7197,3 +7197,281 @@ begin
                  and s.code_sha is distinct from board
                group by s.machine) x), '[]'::jsonb));
 end $$;
+
+-- ---------------------------------------------------------------- cb's reads and its two transactions (#3222 S1a)
+-- What cli/cb.ts used to say in its own SQL: cb now names a function (cli/board.ts), so the worker API can carry the
+-- same call. The reads keep their column names and types, so cb prints what it printed. None returns a sign-in token or
+-- a password hash. None is in the web's list (server/rpc.ts); server/ops.ts lists what cb calls.
+drop function if exists cb.session_binding cascade;
+drop function if exists cb.held_parts_of cascade;
+drop function if exists cb.task_project cascade;
+drop function if exists cb.start_projects cascade;
+drop function if exists cb.my_questions cascade;
+drop function if exists cb.start_words cascade;
+drop function if exists cb.task_finish_line cascade;
+drop function if exists cb.task_status cascade;
+drop function if exists cb.released_by cascade;
+drop function if exists cb.user_show cascade;
+drop function if exists cb.users_overview cascade;
+drop function if exists cb.user_known cascade;
+drop function if exists cb.huddle_row cascade;
+drop function if exists cb.huddle_lines cascade;
+drop function if exists cb.huddle_member_names cascade;
+drop function if exists cb.session_project_of cascade;
+drop function if exists cb.tell_delivery cascade;
+drop function if exists cb.session_tasks cascade;
+drop function if exists cb.session_questions cascade;
+drop function if exists cb.session_events cascade;
+drop function if exists cb.task_filed cascade;
+drop function if exists cb.bug_filed cascade;
+drop function if exists cb.task_row cascade;
+drop function if exists cb.task_words cascade;
+drop function if exists cb.task_notes cascade;
+drop function if exists cb.task_notes_total cascade;
+drop function if exists cb.task_goals cascade;
+drop function if exists cb.next_empty_words cascade;
+drop function if exists cb._question_pictures cascade;
+drop function if exists cb.ask_post cascade;
+drop function if exists cb.reask_post cascade;
+drop function if exists cb.ask_parent cascade;
+drop function if exists cb.ask_relay cascade;
+drop function if exists cb.questions_brief cascade;
+drop function if exists cb.question_state cascade;
+
+create function cb.session_binding(machine text, pane text)
+returns table(actor text, project text, role text, area text, agent text) language sql stable as $$
+  select s.actor, s.project, s.role, s.area, s.agent from cb.sessions s
+   where s.machine = session_binding.machine and s.pane = session_binding.pane
+$$;
+
+-- repo desc: cb keeps the last of each card, so the first part by repo wins, as in mine, resume and stage_pass
+create function cb.held_parts_of(who text) returns table(task_id bigint, repo text) language sql stable as $$
+  select h.task_id, h.repo from cb._held_parts() h where h.assignee = held_parts_of.who order by h.repo desc
+$$;
+
+create function cb.task_project(id bigint) returns text language sql stable as $$
+  select t.project from cb.tasks t where t.id = task_project.id
+$$;
+
+-- cb start's project list: only projects that get work (#4559)
+create function cb.start_projects() returns table(slug text, next int, doing int, live int) language sql stable as $$
+  select p.slug, count(t.id) filter (where t.status = 'next')::int, count(t.id) filter (where t.status = 'in_progress')::int,
+         (select count(*)::int from cb.sessions s where s.project = p.slug and s.last_seen > now() - interval '90 seconds')
+    from cb.projects p left join cb.tasks t on t.project = p.slug where p.state = 'enabled' group by p.slug order by p.slug
+$$;
+
+create function cb.my_questions(who text) returns table(id bigint, status text, body text, sent_back jsonb)
+language sql stable as $$
+  select q.id, q.status, q.body, q.sent_back from cb.questions q
+   where q.asked_by = my_questions.who and q.status in ('open', 'answered', 'sent_back') order by q.id
+$$;
+
+-- what cb start says in a project that gets no work, and to a reviewer where the lead hands out reviews
+create function cb.start_words(project text, actor text) returns jsonb language sql stable as $$
+  select jsonb_build_object('wait', cb._wait_words(start_words.project),
+                            'review', cb._review_words(start_words.project, start_words.actor))
+$$;
+
+-- how a staged card in a pipeline project is finished; a part holder gets its part's line (#3703)
+create function cb.task_finish_line(id bigint, actor text) returns text language sql stable as $$
+  select cb._finish_line(t, task_finish_line.actor) from cb.tasks t
+   where t.id = task_finish_line.id and t.stage is not null and cb._pipeline(t.project)
+$$;
+
+create function cb.task_status(id bigint) returns text language sql stable as $$
+  select t.status from cb.tasks t where t.id = task_status.id
+$$;
+
+-- the open cards a finished card held, and where each stands now
+create function cb.released_by(blocker bigint) returns table(id bigint, status text, blocked_on bigint, waits bigint[])
+language sql stable as $$
+  select t.id, t.status, t.blocked_on, cb._waits_on(t.id) from cb.task_blockers b join cb.tasks t on t.id = b.task
+   where b.blocker = released_by.blocker and t.status not in ('done', 'cancelled') order by t.id
+$$;
+
+create function cb.user_show(who text) returns table(name text, display text, role text) language sql stable as $$
+  select u.name, u.display, u.role from cb.users u where u.name = user_show.who
+$$;
+
+create function cb.users_overview()
+returns table(name text, display text, role text, open_questions int, open_tasks int) language sql stable as $$
+  select u.name, u.display, u.role,
+         (select count(*)::int from cb.questions q where q.assigned_to = u.name and q.status = 'open'),
+         (select count(*)::int from cb.tasks t where t.assignee = u.name and t.status not in ('done', 'cancelled'))
+    from cb.users u order by u.name
+$$;
+
+create function cb.user_known(who text) returns boolean language sql stable as $$
+  select exists (select 1 from cb.users u where u.name = user_known.who)
+$$;
+
+create function cb.huddle_row(id bigint) returns setof cb.huddles language sql stable as $$
+  select h.* from cb.huddles h where h.id = huddle_row.id
+$$;
+
+create function cb.huddle_lines(id bigint) returns table(at timestamptz, actor text, summary text) language sql stable as $$
+  select e.at, e.actor, e.summary from cb.events e
+   where e.kind = 'huddle' and (e.data ->> 'huddle')::bigint = huddle_lines.id order by e.id
+$$;
+
+create function cb.huddle_member_names(id bigint) returns table(actor text) language sql stable as $$
+  select m.actor from cb.huddle_members m where m.huddle_id = huddle_member_names.id order by m.added_at
+$$;
+
+create function cb.session_project_of(who text) returns text language sql stable as $$
+  select s.project from cb.sessions s where s.actor = session_project_of.who order by s.last_seen desc limit 1
+$$;
+
+create function cb.tell_delivery(who text) returns table(live boolean, has_row boolean, mins int) language sql stable as $$
+  select coalesce((select max(s.last_seen) > now() - interval '90 seconds' from cb.sessions s where s.actor = tell_delivery.who), false),
+         exists (select 1 from cb.sessions s where s.actor = tell_delivery.who), cb._board_active(tell_delivery.who)
+$$;
+
+create function cb.session_tasks(who text)
+returns table(id bigint, status text, priority text, type text, title text, project text) language sql stable as $$
+  select t.id, t.status, t.priority, t.type, t.title, t.project from cb.tasks t
+   where t.assignee = session_tasks.who and t.status not in ('done', 'cancelled') order by t.status, t.priority, t.rank
+$$;
+
+create function cb.session_questions(who text) returns table(id bigint, status text, body text) language sql stable as $$
+  select q.id, q.status, q.body from cb.questions q
+   where q.asked_by = session_questions.who and q.status in ('open', 'answered') order by q.id
+$$;
+
+create function cb.session_events(who text) returns table(at timestamptz, kind text, task_id bigint, summary text)
+language sql stable as $$
+  select e.at, e.kind, e.task_id, e.summary from cb.events e where e.actor = session_events.who order by e.id desc limit 10
+$$;
+
+-- what cb add stored: the project an alias resolved to, the default status, and whether that project gets work (#4559)
+create function cb.task_filed(id bigint) returns table(project text, status text, stage text, words text) language sql stable as $$
+  select t.project, t.status, t.stage, cb._state_words(t.project) from cb.tasks t where t.id = task_filed.id
+$$;
+
+-- who cb bug told; orch: one of them is the project's lead (#3746)
+create function cb.bug_filed(id bigint, actor text)
+returns table(project text, triagers text[], stage text, multi boolean, orch boolean, words text) language sql stable as $$
+  select t.project, cb.triagers(t.project), t.stage, t.repos is null and cb._multi_repo(t.project),
+         exists (select 1 from unnest(cb.triagers(t.project)) x where x <> bug_filed.actor and cb._is_lead(x, t.project)),
+         cb._state_words(t.project)
+    from cb.tasks t where t.id = bug_filed.id
+$$;
+
+create function cb.task_row(id bigint) returns setof cb.tasks language sql stable as $$
+  select t.* from cb.tasks t where t.id = task_row.id
+$$;
+
+-- cb show: the stage in words (#4512, with the project's pipeline on) and a parts card's parts (#3703)
+create function cb.task_words(id bigint) returns table(stage_words text, parts text) language sql stable as $$
+  select (select case when cb._pipeline(t.project) and t.stage is not null then cb._stage_words(t.stage) end
+            from cb.tasks t where t.id = task_words.id),
+         cb._parts_words(task_words.id)
+$$;
+
+-- newest first; lim null: every one
+create function cb.task_notes(id bigint, lim int default null) returns table(at timestamptz, actor text, summary text)
+language sql stable as $$
+  select e.at, e.actor, e.summary from cb.events e
+   where e.task_id = task_notes.id and e.kind in ('note', 'done') order by e.id desc limit task_notes.lim
+$$;
+
+create function cb.task_notes_total(id bigint) returns int language sql stable as $$
+  select count(*)::int from cb.events e where e.task_id = task_notes_total.id and e.kind in ('note', 'done')
+$$;
+
+create function cb.task_goals(task bigint) returns table(id bigint, title text, status text) language sql stable as $$
+  select g.id, g.title, g.status from cb.goal_tasks gt join cb.goals g on g.id = gt.goal_id
+   where gt.task_id = task_goals.task and gt.state = 'in' and g.status <> 'done' order by g.status, g.rank
+$$;
+
+-- why cb next had nothing: the project gets no work (#4559), a reviewer waits for the lead (#4744), or the queued cards
+-- are kept for another agent (#4593)
+create function cb.next_empty_words(project text, actor text) returns jsonb language sql stable as $$
+  select jsonb_build_object('wait', cb._wait_words(cb.resolve(next_empty_words.project)),
+                            'review', cb._review_words(cb.resolve(next_empty_words.project), next_empty_words.actor),
+                            'skipped', cb._for_skipped(cb.resolve(next_empty_words.project), next_empty_words.actor))
+$$;
+
+-- pictures: [{caption, data: base64}], added in the order given (cb.question_image_add checks each)
+create function cb._question_pictures(id text, pictures jsonb, replace_all boolean, actor text) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare p record;
+begin
+  for p in select e.value, e.n from jsonb_array_elements(coalesce(pictures, '[]'::jsonb)) with ordinality as e(value, n) order by e.n loop
+    perform cb.question_image_add(id => id, data => decode(p.value ->> 'data', 'base64'), caption => p.value ->> 'caption',
+                                  replace_all => replace_all and p.n = 1, actor => actor);
+  end loop;
+end $$;
+
+-- cb ask: one transaction, so a question never shows without the pictures it was asked with.
+-- #3331: a resend of a question that is still open (the first run stored it, then failed or seemed to) returns that
+-- question instead of a second copy. Every field the asker gives must match, with a follow-up's task, reply pane and
+-- recipient taken from its parent and the ids read as cb.ask reads them: a wrong match would drop a question, a miss
+-- only repeats one. With pictures it always posts: new pictures must never be dropped silently. The lock: a resend while
+-- the first run's commit is still in flight waits for it, then sees it.
+create function cb.ask_post(project text, body text, options jsonb default null, blocking boolean default false,
+                            task_id text default null, context text default null, reply_to jsonb default null,
+                            multi boolean default false, actor text default null, to_user text default null,
+                            parent text default null, if_answer text default null, images jsonb default '[]')
+returns jsonb language plpgsql as $$
+#variable_conflict use_variable
+declare pics jsonb := coalesce(images, '[]'::jsonb); qid bigint;
+begin
+  if jsonb_array_length(pics) = 0 then
+    perform pg_advisory_xact_lock(hashtext(trim(actor) || '|' || trim(body)));
+    with a as (
+      select case when nullif(trim(parent), '') is null then null
+                  else cb.norm_id(regexp_replace(trim(parent), '^[qQ]', '')) end as par,
+             case when nullif(trim(task_id), '') is null then null else cb.norm_id(task_id) end as tid)
+    select q.id into qid from a left join cb.questions p on p.id = a.par cross join cb.questions q
+     where q.asked_by = trim(actor) and q.project = cb.resolve(project) and q.body = trim(body)
+       and q.options is not distinct from cb._options(options)
+       and q.parent_id is not distinct from a.par
+       and (if_answer is null and q.if_answer is null or lower(q.if_answer) = lower(trim(if_answer)))
+       and q.context is not distinct from context and q.multi = coalesce(multi, false) and q.blocking = coalesce(blocking, false)
+       and q.task_id is not distinct from coalesce(a.tid, p.task_id)
+       and q.reply_to is not distinct from coalesce(reply_to, p.reply_to)
+       and q.assigned_to is not distinct from coalesce(to_user, p.assigned_to)
+       and q.status in ('open', 'dormant') order by q.id limit 1;
+    if qid is not null then return jsonb_build_object('id', qid, 'again', true); end if;
+  end if;
+  qid := cb.ask(project => project, body => body, options => options, blocking => blocking, task_id => task_id,
+                context => context, reply_to => reply_to, multi => multi, actor => actor, to_user => to_user,
+                parent => parent, if_answer => if_answer);
+  perform cb._question_pictures(qid::text, pics, false, actor);
+  return jsonb_build_object('id', qid, 'again', false);
+end $$;
+
+-- cb reask: new pictures replace the old ones, and go in first, in the same transaction: cb.reask sees them, which is
+-- what a "Show me" send-back needs. Without pictures the question keeps what it has.
+create function cb.reask_post(id text, body text default null, options jsonb default null, free boolean default false,
+                              multi boolean default null, context text default null, actor text default null,
+                              images jsonb default '[]')
+returns void language plpgsql as $$
+#variable_conflict use_variable
+begin
+  perform cb._question_pictures(id, images, true, actor);
+  perform cb.reask(id => id, body => body, options => options, free => free, multi => multi, context => context, actor => actor);
+end $$;
+
+create function cb.ask_parent(id bigint) returns table(parent_id bigint, if_answer text) language sql stable as $$
+  select q.parent_id, q.if_answer from cb.questions q where q.id = ask_parent.id
+$$;
+
+-- will the answer reach the asking name? live: a relay listens on it (the 90 s of cb.sessions_overview); mine: the name
+-- this pane's own live relay serves
+create function cb.ask_relay(actor text, machine text, pane text) returns table(live boolean, mine text) language sql stable as $$
+  select exists (select 1 from cb.sessions s where s.actor = ask_relay.actor and s.last_seen > now() - interval '90 seconds'),
+         (select s.actor from cb.sessions s where s.machine = ask_relay.machine and s.pane = ask_relay.pane
+             and s.last_seen > now() - interval '90 seconds')
+$$;
+
+create function cb.questions_brief(ids jsonb) returns table(id bigint, body text, answer text) language sql stable as $$
+  select q.id, q.body, q.answer from cb.questions q
+   where q.id in (select x::bigint from jsonb_array_elements_text(questions_brief.ids) x)
+$$;
+
+create function cb.question_state(id bigint) returns table(status text, assigned_to text, display text) language sql stable as $$
+  select q.status, q.assigned_to, u.display from cb.questions q left join cb.users u on u.name = q.assigned_to
+   where q.id = question_state.id
+$$;

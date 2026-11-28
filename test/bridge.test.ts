@@ -270,11 +270,11 @@ test('cb ask: a stored question exits 0 even when the board drops right after, a
   const sql = await freshDb(); clients.push(sql);
   const pane = `p-ask-${process.pid}`;
   const relaySql = connect(TEST_URL, { app: 'cb-relay', max: 1 }); clients.push(relaySql);
-  // a relay whose board connection drops once the question is in: the insert runs in cb's own transaction, the
-  // reads after it come through here and time out, as seen live ("board unreachable (CONNECT_TIMEOUT)", then a duplicate)
-  const flaky: any = (strings: any, ...values: any[]) => Array.isArray(strings?.raw) && /from cb\.sessions where actor|select parent_id, if_answer/.test(strings.join('$'))
-    ? Promise.reject(Object.assign(new Error('write CONNECT_TIMEOUT'), { code: 'CONNECT_TIMEOUT' })) : relaySql(strings, ...values);
-  flaky.unsafe = (...a: any[]) => relaySql.unsafe(...a);
+  // a relay whose board connection drops once the question is in: cb.ask_post goes through, and the two reads after it
+  // time out, as seen live ("board unreachable (CONNECT_TIMEOUT)", then a duplicate)
+  const flaky: any = (strings: any, ...values: any[]) => relaySql(strings, ...values);
+  flaky.unsafe = (text: string, ...a: any[]) => /\bcb\.(ask_relay|ask_parent)\(/.test(text)
+    ? Promise.reject(Object.assign(new Error('write CONNECT_TIMEOUT'), { code: 'CONNECT_TIMEOUT' })) : relaySql.unsafe(text, ...a);
   const stop = await serveBridge(flaky, seatKey('testbox', pane), TEST_URL, undefined,
     { binding: (who: any) => who.pane === pane ? { actor: 'W5@test', project: null } : undefined });
   const ask = async (...a: string[]) => {
