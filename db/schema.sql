@@ -270,6 +270,9 @@ alter table cb.sessions add column if not exists session_id text;
 -- #4786: the model the seat's relay last read off its agent's screen (cb.seat_model). model is what the session was bound
 -- with; an agent can change model inside its pane. Cleared by cb.iam and when another session takes the pane
 alter table cb.sessions add column if not exists running_model text;
+-- #4766: the effort the session was started with, as it says (cb.seat_effort): a level, 'default' for none given to it,
+-- null when it said nothing (a session from before, or bound by hand): then the supervisor does not judge it
+alter table cb.sessions add column if not exists effort text;
 -- #3221: a relay holding low-priority notices (runner results, GitHub, digests, nudges, card edits, broadcasts, memory)
 -- marks it here: hold_from is the card-event cursor (`after`) the held read used, hold_at when the hold began. A relay
 -- that restarts mid-hold reads from hold_from again and keeps the window's clock, so nothing held is lost or doubled.
@@ -334,6 +337,7 @@ drop function if exists cb.mine cascade;
 drop function if exists cb._seat_name cascade;
 drop function if exists cb.iam cascade;
 drop function if exists cb.seat_model cascade;
+drop function if exists cb.seat_effort cascade;
 drop function if exists cb._running_model cascade;
 drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
@@ -1753,6 +1757,7 @@ begin
         -- the relay's next check takes its session id as it is (#4379): the session that bound may be one its relay
         -- has not seen yet, and must not be reset to the relay's own name a moment after it bound
         session_id = null,
+        effort = case when excluded.actor = cb.sessions.actor then cb.sessions.effort end, -- #4766: kept as model is
         running_model = null; -- #4786: what ran before this bind says nothing about now; the relay reads it again
   -- a name binding again is a new session: a closing mark the supervisor left on its old rows no longer applies (#3601)
   update cb.sessions s set closing_at = null where s.actor = trim(actor) and s.closing_at is not null;
@@ -1787,6 +1792,7 @@ begin
         area = case when sid <> cb.sessions.session_id then null else cb.sessions.area end,
         model = case when sid <> cb.sessions.session_id then null else cb.sessions.model end,
         running_model = case when sid <> cb.sessions.session_id then null else cb.sessions.running_model end,
+        effort = case when sid <> cb.sessions.session_id then null else cb.sessions.effort end,
         repo = case when sid <> cb.sessions.session_id then null else cb.sessions.repo end,
         broadcast_seen = case when sid <> cb.sessions.session_id then excluded.broadcast_seen else cb.sessions.broadcast_seen end,
         hold_from = case when sid <> cb.sessions.session_id then null else cb.sessions.hold_from end,
@@ -1991,6 +1997,22 @@ begin
   if mo !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' then return; end if;
   update cb.sessions s set running_model = mo
    where s.machine = lower(trim(machine)) and s.pane = trim(pane) and s.running_model is distinct from mo;
+end $$;
+
+-- #4766: what the session says it was started with (cb iam --effort, from its first prompt). A function of its own, not
+-- an argument of cb.iam, so a board rolled back past it still binds (the CLI skips a missing function)
+create function cb.seat_effort(machine text, pane text, effort text) returns void language plpgsql as $$
+#variable_conflict use_variable
+declare ag text; ef text := trim(coalesce(effort, '')); levels text;
+begin
+  select s.agent into ag from cb.sessions s where s.machine = lower(trim(machine)) and s.pane = trim(pane);
+  if ag is null then return; end if;
+  if ef <> 'default' and not coalesce(cb._efforts()->ag ? ef, false) then
+    select string_agg(u.x, ', ' order by u.n) into levels from jsonb_array_elements_text(cb._efforts()->ag) with ordinality u(x, n);
+    raise exception 'effort for % must be default% (got "%"): use the --effort of the seat''s first prompt, or leave it out',
+      ag, coalesce(' or one of ' || levels, ''), ef;
+  end if;
+  update cb.sessions s set effort = ef where s.machine = lower(trim(machine)) and s.pane = trim(pane);
 end $$;
 
 -- The model a seat really runs, where the board can tell: the relay's screen reading, else what the usage hook reported
@@ -5761,7 +5783,10 @@ begin
   if found then return jsonb_build_object('seat', k, 'agent', bk.agent, 'model', bk.model); end if;
   ag := coalesce(sq->'roles'->role->'seats'->k->>'agent', sq->'roles'->role->>'agent', 'claude');
   return jsonb_build_object('seat', k, 'agent', ag,
-    'model', coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, ag)));
+    'model', coalesce(sq->'roles'->role->'seats'->k->>'model', sq->'roles'->role->>'model', cb._role_model(role, ag)),
+    -- #4766, as seatSpec (cli/squad-up.ts): the seat's own, else the role's on the role's agent; null: the default
+    'effort', coalesce(sq->'roles'->role->'seats'->k->>'effort',
+                       case when ag = coalesce(sq->'roles'->role->>'agent', 'claude') then sq->'roles'->role->>'effort' end));
 end $$;
 
 -- What the page's form offers, with the same limits as cb.squad_set: the roles, the agents (main = may run a seat now;
@@ -5814,9 +5839,11 @@ begin
         'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
         'in_squad', coalesce(sq->'roles' ? s.role, false),
         'want_agent', w.want->>'agent', 'want_model', w.want->>'model',
-        -- a seat bound without --model is not judged on its model
+        'effort', s.effort, 'want_effort', w.want->>'effort',  -- #4766
+        -- a seat bound without --model is not judged on its model, one that said no effort not on its effort
         'same', case when w.want is null then null
-                     else s.agent = w.want->>'agent' and (s.model is null or s.model = w.want->>'model') end,
+                     else s.agent = w.want->>'agent' and (s.model is null or s.model = w.want->>'model')
+                          and (s.effort is null or s.effort = coalesce(w.want->>'effort', 'default')) end,
         'holds', (select count(*) from cb.tasks t where t.assignee = s.actor and t.status not in ('done', 'cancelled')),
         'last_seen', s.last_seen) order by s.role nulls last, s.actor)
       from cb.sessions s
@@ -6676,8 +6703,9 @@ begin
       'owner', coalesce((select jsonb_object_agg(ar, cb._kept((select jsonb_agg(to_jsonb(d.labels)) from design d where ar = any(d.labels) and coalesce(d.stage_since, d.updated_at) >= now() - interval '15 minutes'))) from unnest(areas) ar), '{}')),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object(
         'actor', a.actor, 'role', cb._role(a.actor), 'area', s.area, 'repo', cb._repo(a.actor), 'machine', s.machine, 'pane', s.pane,
-        -- the session's agent (#4002) and the model it bound with (#4332); null for a holder with no session row
-        'agent', s.agent, 'model', s.model,
+        -- the session's agent (#4002), the model it bound with (#4332) and the effort it said (#4766); null for a holder
+        -- with no session row
+        'agent', s.agent, 'model', s.model, 'effort', s.effort,
         'bound', s.project, -- #4559: the project that latest session is bound to
         'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
         'holds', (select count(*) from cb.tasks t where t.assignee = a.actor and t.status not in ('done', 'cancelled'))

@@ -23,6 +23,8 @@ export interface Squad {
 export interface Seat {
   actor: string; machine: string | null; role: string | null; area: string | null; repo: string | null; agent: string | null
   model: string | null; in_squad: boolean; want_agent: string | null; want_model: string | null; same: boolean | null
+  /** #4766: the effort the session said it was started with (a level or 'default'; null: it said none), and the seat's */
+  effort?: string | null; want_effort?: string | null
   holds: number; last_seen: string
   /** #4786: the model the seat really runs, where the board can tell, and whether it is another than `model` */
   running_model?: string | null; model_differs?: boolean
@@ -544,7 +546,9 @@ export function seatNote(s: Seat, sq: Squad | null, supervised: boolean): string
   // #4786: first, since the squad's setting says nothing about a model switched inside the agent
   if (s.model_differs) return `${name} was started on ${setupLabel(s.agent, s.model)} and now runs ${s.running_model}.`
   if (s.same !== false) return null
-  const was = `${name} runs ${setupLabel(s.agent, s.model)}; the squad says ${setupLabel(s.want_agent, s.want_model)}.`
+  // #4766: the efforts are named only when they differ
+  const wantEffort = s.want_effort ?? 'default', moved = !!s.effort && s.effort !== wantEffort
+  const was = `${name} runs ${setupLabel(s.agent, s.model, moved ? s.effort : null)}; the squad says ${setupLabel(s.want_agent, s.want_model, moved ? wantEffort : null)}.`
   if (!supervised || s.role === 'lead') return `${was} It changes at its next start.`
   return s.holds > 0 ? `${was} It is busy with ${plural(s.holds, 'card')}: it will restart on the new setting when idle.` : `${was} It will restart on the new setting when idle.`
 }

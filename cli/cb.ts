@@ -41,7 +41,7 @@ const OPTIONS = {
   multi: { type: 'boolean' }, blocking: { type: 'boolean' }, free: { type: 'boolean' }, to: { type: 'string' }, context: { type: 'string', short: 'c' },
   'reply-to': { type: 'string' }, restart: { type: 'boolean' }, tag: { type: 'string' }, type: { type: 'string' }, force: { type: 'boolean' },
   epic: { type: 'string' }, by: { type: 'string' }, after: { type: 'string' }, if: { type: 'string' },
-  area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, file: { type: 'string', short: 'f' },
+  area: { type: 'string' }, role: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' }, file: { type: 'string', short: 'f' },
   budget: { type: 'string' }, max: { type: 'string' },
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
@@ -671,11 +671,15 @@ async function run(): Promise<unknown> {
       return { out: `relay on for ${pane}@${machine()}: answers and changes to your tasks now arrive in this session`, json: { machine: machine(), pane, agent, relay: 'on' } };
     }
     case 'iam': {
-      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook iris --role builder');
+      need(1, 'iam <name> [project] [--role <role>] [--area <area>] [--model <model>] [--effort <effort>] [--repo <repo>] [--agent <agent>]   e.g. cb iam W1@macbook iris --role builder');
       if (!pane) throw new Error('cb iam needs a herdr pane ($HERDR_PANE_ID); use --as <name> on each command instead');
       // a Claude cb iam sends no agent: the 8 arguments a rolled-back cb.iam still takes (cli/iam-args.ts)
       const p = await callFn('iam', iamArgs({ machine: machine(), pane, actor: args[0]!, project: args[1], role: o.role, area: o.area,
         model: o.model, repo: o.repo, agent: o.agent }, process.env.CB_AGENT));
+      // #4766: after the bind, on its own: a board rolled back past it has no cb.seat_effort (42883) and still binds
+      if (o.effort !== undefined) {
+        await sql`select cb.seat_effort(${machine()}, ${pane}, ${o.effort})`.catch((e: any) => { if (e.code !== '42883') throw e; });
+      }
       const [b] = await sql`select project, role, area from cb.sessions where machine = ${machine()} and pane = ${pane}`;
       const pack = b?.project ? packText(await callFn('mem_pack', { project: b.project, machine: machine() })) : '';
       const goals = b?.project ? goalsText(await callFn('goals_list', { project: b.project }) as any[]) : '';
