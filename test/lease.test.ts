@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import postgres from 'postgres';
 import { freshDb, TEST_URL } from './helpers.ts';
 import { connect } from '../server/db.ts';
-import { keepAlive, supervisorLease, SURE_MS } from '../cli/lease.ts';
+import { keepAlive, keepAliveApart, supervisorLease, SURE_MS } from '../cli/lease.ts';
 
 const clients: any[] = [];
 after(() => Promise.all(clients.map((c) => c.end())));
@@ -136,6 +136,42 @@ test('a renewal the board refuses aborts the tick and then exits', async () => {
     assert.equal(did[0], 'abort', 'the tick first');
     assert.match(did[1]!, /no longer this supervisor's/);
   } finally { await mine.release(); }
+});
+
+// found reading the start path: startOne is synchronous (spawnSync herdr, Atomics.wait), so one seat's start holds the
+// main thread, for longer than the lease lasts when its first prompt stalls: a timer on that thread renews nothing
+test('the lease is renewed while the main thread is held, and a refusal reaches it', async () => {
+  const { sql } = await setup();
+  const mine = lease('pc pid 1');
+  assert.equal(await mine.keep(), null);
+  await sql`create table if not exists public.lease_writes (at_ms double precision)`;
+  await sql`truncate public.lease_writes`;
+  await sql.unsafe(`create or replace function public.lease_write() returns trigger language plpgsql as
+    $$ begin insert into public.lease_writes values (extract(epoch from clock_timestamp()) * 1000); return new; end $$;
+    create trigger lease_write after update on cb.leases for each row execute function public.lease_write()`);
+  const did: string[] = [];
+  const stop = keepAliveApart(mine.token()!, { app: 'cb-supervisor/test', every: 100, abort: () => did.push('abort'), lost: (why) => did.push(why), say: () => {} });
+  try {
+    const writes = async () => (await sql`select count(*)::int as n from public.lease_writes`)[0].n as number;
+    for (let i = 0; i < 200 && !(await writes()); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(await writes(), 'the thread is up');
+    const from = Date.now();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000); // as a seat's start holds it
+    const to = Date.now(); // nothing on this thread has run since `from`
+    const [{ n }] = await sql`select count(*)::int as n from public.lease_writes where at_ms > ${from + 300} and at_ms < ${to - 300}`;
+    assert.ok(n >= 3, `renewed ${n} times while held`);
+    assert.deepEqual(did, []);
+    await sql`update cb.leases set holder = 'mac pid 2', token = gen_random_uuid()`; // another took it
+    await until(() => did.length >= 2);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(did.length, 2, did.join(' | '));
+    assert.equal(did[0], 'abort', 'the tick first');
+    assert.match(did[1]!, /no longer this supervisor's/);
+  } finally {
+    await stop();
+    await sql.unsafe('drop trigger if exists lease_write on cb.leases; drop function if exists public.lease_write(); drop table if exists public.lease_writes');
+    await mine.release();
+  }
 });
 
 // found reading the diff: the timer could renew a lease being deleted (read as "another took it", exit 1), and the loop
