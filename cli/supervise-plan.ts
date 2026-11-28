@@ -11,6 +11,9 @@ export type Session = { actor: string; role: string; area: string | null; repo: 
   model?: string | null; // the model it bound with (cb iam --model, #4332); null or absent: unknown, never judged
   effort?: string | null }; // the effort it said it was started with (#4766: a level or 'default'); null or absent: unknown, never judged
 export type State = { project: string; squad: Squad; supervised: boolean;
+  // #4806: false: no stages, so no waiting work is counted; absent (an older board): stages. supervised_unstaged: a
+  // squad the supervisor runs there (the tick reads it into supervised)
+  pipeline?: boolean; supervised_unstaged?: boolean;
   // #4559 slice 3: a supervised squad's project that gets no work (disabled, archived), and since when
   winding_down?: boolean; state_at?: string | null;
   state?: string; // the project's own: enabled, disabled or archived; absent (an older board): enabled
@@ -207,6 +210,8 @@ export function planTick(i: TickInput): TickPlan {
       if (n <= 0 || anyLeft <= 0) break;
       if (startable(w)) { start(w); anyLeft--; }
     }
+    // #4806: with no stages the board cannot say what waits for a seat, and nothing would start it again: it stays open
+    if (state.pipeline === false) continue;
     // a seat stays open while work it could take waits; kept work for another agent does not keep it
     const wanted4 = (agent: string) => anyWait || Object.keys(keptWait).some((k) => fits(agent, k));
     for (const w of g.names) {

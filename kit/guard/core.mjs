@@ -1553,8 +1553,37 @@ function filledEnd(raw, k) {
   if (open === '`') { const j = nextTick[k]; return j < 0 ? raw.length : j + 1; }
   return ends[k + 1];
 }
-// a word the shell fills in: $X, ${...}, $(...), or cmd's %X% (round 4, I2)
-const isFilled = (u) => u.startsWith('$') || /^%[A-Za-z_]\w*%/.test(u);
+// a word the shell fills in: $X, ${...}, $(...), cmd's %X% (round 4, I2), or a quoted word that starts with a backtick
+// (#4795: a bare backtick is its own token, judged as an opener)
+const isFilled = (u) => u.startsWith('$') || (u.length > 1 && u.startsWith('`')) || /^%[A-Za-z_]\w*%/.test(u);
+// #4798/#4802 (PR 181 review): where a substitution ends is not worked out (a ) in ${ }, a heredoc, a comment or a case
+// label fakes it). Only a CLEAN one is taken as ended: nothing in it can fake its closer (no quote, bracket, #, <, \,
+// no $( or ${ inside, not the word case). What is left of a word once those are out is DIRTY when anything is still open
+const CLEAN_PIECE = /\$\((?:[^()"'`#<\\{}$]|\$(?![({]))*\)|`(?:[^()"'`#<\\{}$]|\$(?![({]))*`|\$\{[A-Za-z_]\w*(?::?[-=?+](?:[^()"'`#<\\{}$]|\$(?![({]))*)?\}/g;
+const withoutClean = (v) => v.replace(CLEAN_PIECE, (m) => (/\bcase\b/.test(m) ? m : ' '));
+const DIRTY = /\$[({]|`/;
+// a slash makes a filled word a path only when it is outside every substitution, which is known only for a word with
+// nothing left open
+const isPathWord = (v) => { const left = withoutClean(v); return !DIRTY.test(left) && /[\\/]/.test(left); };
+// is the word at raw[j] a substitution, or does it hold one, that is not clean? A bare one is read for at most
+// CLEAN_REACH tokens and counts as open past that (linear)
+const CLEAN_REACH = 64;
+// a bare $( or ${, alone or glued after other text (""$( check$( --git-dir=$(): the tokens split it from what follows
+const bareDollar = (raw, j) => (raw[j] ?? '').endsWith('$') && /^[({]$/.test(raw[j + 1] ?? '');
+// the tokens do not say whether a word touches the backtick after it, so an opening one is read as if it did
+const gluedTick = (raw, j) => raw[j] !== '`' && raw[j + 1] === '`' && !shape(raw).closingTick[j + 1];
+// the index just past a bare substitution that starts in raw[j], else just past raw[j]
+const pastBare = (raw, j) => (bareDollar(raw, j) ? shape(raw).ends[j + 1] : raw[j] === '`' ? filledEnd(raw, j) : j + 1);
+function opensUnknown(raw, j) {
+  if (gluedTick(raw, j)) return opensUnknown(raw, j + 1);
+  const x = raw[j] ?? '', dollar = bareDollar(raw, j);
+  if (x !== '`' && !dollar) return DIRTY.test(withoutClean(x));
+  const end = pastBare(raw, j);
+  if (end - j > CLEAN_REACH) return true;
+  const inner = raw.slice(j + (dollar ? 2 : 1), end - 1).join(' ');
+  const closer = !dollar ? '`' : raw[j + 1] === '(' ? ')' : '}';
+  return raw[end - 1] !== closer || DIRTY.test(withoutClean(`${dollar ? x + raw[j + 1] : x}${inner}${closer}`));
+}
 // git's own options a filled word may carry before its subcommand: more than this many and the word is judged a writer
 const MAX_FILLED_OPTS = 32;
 const GIT_GLOBAL_OPTS = new Set(['-v', '--version', '-h', '--help', '-C', '-c', '--exec-path', '--html-path', '--man-path', '--info-path',
@@ -1569,8 +1598,8 @@ const NO_RUN = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', '
 // skipped (round 4, I2: -c alias.x=checkout, --config-env, --exec-path=, --attr-source <v>). The subcommand slot holds a
 // git command, a bare $VAR / ${VAR} / %VAR%, or a ${...} / $(...) / backtick group; a path ($HOME/.codex/...) is not one
 // (round 4, I1). judge(words, atCommand) is the segment's budgeted gitCallWrites (round 4, I5).
-function filledWrites(raw, k, judge) {
-  const after = filledEnd(raw, k);
+function filledWrites(raw, k, judge, cut) {
+  const after = filledEnd(raw, k), head = ['git'];
   for (let j = after, opts = 0; j < raw.length; j++) {
     const x = raw[j];
     if (x === ')' || (x === '`' && shape(raw).closingTick[j])) return false; // the filled word's command ended
@@ -1581,12 +1610,20 @@ function filledWrites(raw, k, judge) {
       if (!GIT_GLOBAL_OPTS.has(v.split('=')[0]) && !/^-C./.test(v)) return false;
       const opt = v === '-c' || v === '--config-env' || GIT_OPT_ARG.has(v) ? [v, unquote(raw[j + 1] ?? '')] : [v];
       if (gitCallWrites(['git', ...opt, 'status'], true, false)) return true;
+      // the option's value, the next word or attached to this one; a bare substitution there is skipped whole, and
+      // stands in the judged words as one filled word
+      head.push(v);
       if (GIT_OPT_ARG.has(v)) j++;
+      if (cut && opensUnknown(raw, j)) cut();
+      const bare = bareDollar(raw, j) || (raw[j] === '`' && !shape(raw).closingTick[j]);
+      if (GIT_OPT_ARG.has(v)) head.push(bare ? '$' : unquote(raw[j] ?? ''));
+      if (bare) j = pastBare(raw, j) - 1;
       continue;
     }
-    const filledSub = x === '`' || (x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/\$|%[A-Za-z_]\w*%/.test(v) && !/[\\/]/.test(v));
+    const filledSub = x === '`' || gluedTick(raw, j) ||(x === '$' && /^[({]$/.test(raw[j + 1] ?? '')) || /^(?:\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)$/.test(v) || (/[$`]|%[A-Za-z_]\w*%/.test(v) && !isPathWord(x)); // x as written: a quoted ) must be seen
     if (!filledSub && !GIT_COMMANDS.has(v.toLowerCase())) return false;
-    return judge(() => ['git', ...raw.slice(after).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
+    if (cut && filledSub && opensUnknown(raw, j)) cut();
+    return judge(() => [...head, ...raw.slice(j).filter((y) => !GIT_OPENER.test(y)).map(unquote)], true);
   }
   return false;
 }
@@ -1644,7 +1681,31 @@ const gitWrites = (seg, inQuote = false) => {
   }
   return false;
 };
-const FORMAT_WRITE = /(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
+// #4802: SEGMENTS cuts at ; & | and newline even inside a substitution. When the subcommand place (or a git option's
+// value) after a filled word opens one that is not clean, nothing tells where that git call ends: the rest of the
+// command, with the path it writes, may be part of it. A quoted command line is read as one too (bash -c '...'), each
+// time with a layer of quotes off, so it always shrinks
+function cutsGitCall(seg) {
+  const raw = seg.match(GIT_TOKEN) ?? [];
+  let hit = false, ticks = 0;
+  const cut = () => { hit = true; };
+  const unread = () => false;
+  for (let k = 0; k < raw.length && !hit; k++) {
+    const t = raw[k];
+    if (t === '`') {
+      if (ticks++ % 2 === 0) filledWrites(raw, k, unread, cut);
+      continue;
+    }
+    const u = unquote(t);
+    if (/["']/.test(t) && /[\s;&|]/.test(u)) {
+      const inner = u === t ? t.replace(/["']/g, '') : u;
+      if (inner.length < t.length && (inner.match(SEGMENTS) ?? []).some(cutsGitCall)) return true;
+    }
+    if (isFilled(u)) filledWrites(raw, k, unread, cut);
+  }
+  return hit;
+}
+const FORMAT_WRITE =/(?<![\w.\\/-])(?:prettier|eslint|biome|dprint|oxlint)(?![\w.\\/-])[^;&|]*[ \t](?:--write|-w|--fix|--apply)(?![\w-])/i;
 const writes = (seg) => FENCE_WRITER.test(seg) || gitWrites(seg) || FORMAT_WRITE.test(seg) || IN_PLACE.test(seg) || (INTERPRETER.test(seg) && WRITE_CALL.test(seg));
 // an interpreter writes only when its code says so (review I3: node x.mjs ~/.claude/settings.json is a read)
 const INTERPRETER = /(?<![\w.\\/-])(?:python3?|py|node|deno|bun|ruby|perl|awk|gawk|sh|bash|zsh|pwsh|powershell)(?![\w.\\/-])/i;
@@ -2453,6 +2514,7 @@ function fenceWriteOne(command) {
   // PR 77 review M1: a function or alias defined on the same line moves the writer into another segment (f() { cp x "$1";
   // }; f .claude/settings.json; alias c=cp; c x opencode.json), so a line that names a fence path and defines one writes
   if (DEFINES_FN.test(blankQuoted(text))) return FENCE;
+  if ((text.match(SEGMENTS) ?? []).some(cutsGitCall)) return FENCE;
   let inFence = false;
   for (const seg of text.match(SEGMENTS) ?? []) {
     // #4590: a cd's own redirect is opened by the shell before cd runs, so it is judged by its own target, never skipped
