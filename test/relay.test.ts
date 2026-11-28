@@ -370,7 +370,7 @@ test('inbox: a digest with a new P0 or a supervisor problem is not marked as a n
      ['P0 nudge', 'nudge', true], ['P2 nudge', 'nudge', false], [`card ${hot}`, null, true], [`card ${cold}`, null, false]]);
   assert.deepEqual((await sql`select (data ->> 'task')::bigint as t, task_id from cb.events where actor = 'runner' order by id`).map((r: any) => [Number(r.t), r.task_id]),
     [[Number(hot), null], [Number(cold), null]], 'the card in data, never task_id (no card activity)');
-  assert.deepEqual(Object.keys(i.events[0]).sort(), ['actor', 'id', 'kind', 'status', 'summary', 'task_id', 'title'], 'events: as on main');
+  assert.deepEqual(Object.keys(i.events[0]).sort(), ['actor', 'id', 'kind', 'status', 'summary', 'task_id', 'title', 'urgent']);
   assert.equal(i.hold, null, 'nothing held: the key is there, empty');
   // a hold keeps its first cursor and clock; null ends it; another session in the pane starts clean
   await sql`select cb.relay_hold('pc', 'w9:p1', 5)`;
@@ -389,6 +389,107 @@ test('inbox: a digest with a new P0 or a supervisor problem is not marked as a n
   await sql`update cb.events set at = now() - interval '25 hours' where id = ${old}`;
   await sql`select cb.relay_hold('pc', 'w9:p1', 0)`;
   assert.equal(Number((await sql`select cb.inbox('pc', 'w9:p1', ${start}, 'S2') as i`)[0].i.hold.from), Number(old), 'capped at the newest event older than 24 h');
+});
+
+// #3221 (Q3128): what the settle window never holds, marked by the board
+test('inbox: a direct question, a person\'s line, a P0 card and a card cancelled, blocked or taken off me are urgent', async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  await sql`select cb.iam('pc', 'w9:p2', 'W1', 'demo')`;
+  await sql`insert into cb.users (name, display) values ('cai', 'Cai')`;
+  const [{ start }] = await sql`select coalesce(max(id), 0) as start from cb.events`;
+  const said: [string, string, boolean][] = [
+    ['orch', 'take #19 next', false],
+    ['orch', 'are you on #19?', true],
+    ['orch', 'which one? the first or the second', true],
+    ['orch', 'did you run it (all of it?) yet', true],
+    ['orch', 'see https://example.invalid/pr?tab=files, done', false],
+    ['runner', 'job #1 test: passed. is this ok?', false],
+    ['ahmed', 'stop there', true],
+    ['cai', 'looks fine', true],
+  ];
+  for (const [actor, summary] of said)
+    await sql`insert into cb.events (actor, project, kind, summary, data) values (${actor}, 'demo', 'message', ${summary}, ${sql.json({ to: 'W1' })})`;
+  const add = async (title: string, priority = 'P2') =>
+    String((await sql`select cb.task_add(project => 'demo', title => ${title}, priority => ${priority}, status => 'in_progress', assignee => 'W1', actor => 'orch') as id`)[0]!.id);
+  const plain = await add('plain'), hot = await add('hot', 'P0'), gone = await add('gone'), stuck = await add('stuck'), given = await add('given');
+  await sql`select cb.log('demo', 'a note', ${plain}, '{}', 'orch')`;
+  await sql`select cb.log('demo', 'a P0 note', ${hot}, '{}', 'orch')`;
+  await sql`select cb.log('demo', 'a person on my card', ${plain}, '{}', 'cai')`;
+  await sql`select cb.task_move(${plain}, 'review', 'to review', 'orch')`;
+  await sql`select cb.task_move(${gone}, 'cancelled', 'duplicate', 'orch')`;
+  await sql`select cb.task_move(${stuck}, 'blocked', 'waiting', 'orch')`;
+  await sql`select cb.task_update(${given}, ${sql.json({ assignee: 'W2' })}, 'orch')`;
+  await sql`select cb.task_done(${plain}, 'merged', '{}', 'orch')`;
+  const [{ i }] = await sql`select cb.inbox('pc', 'w9:p2', ${start}) as i`;
+  assert.deepEqual(i.messages.map((m: any) => [m.actor, m.summary, m.urgent]), said);
+  const line = (summary: string) => i.events.find((e: any) => e.summary === summary)?.urgent;
+  assert.deepEqual(['a note', 'a P0 note', 'a person on my card', 'to review', 'duplicate', 'waiting'].map(line), [false, true, true, false, true, true]);
+  assert.equal(i.events.find((e: any) => String(e.task_id) === given && e.kind === 'updated')?.urgent, true, 'taken off me');
+  assert.equal(i.events.find((e: any) => e.kind === 'done')?.urgent, false, 'a closed notice');
+  assert.equal(i.events.filter((e: any) => e.kind === 'task_created' && String(e.task_id) === plain)[0]?.urgent, false);
+});
+
+// #3221 (Q3128), end to end with a 5 s window
+test('session lines wait the settle window and go in one push; a closed notice waits for one; urgent lines go at once; a held card line survives its card leaving', { timeout: 90_000 }, async () => {
+  const sql = await db();
+  await sql`select cb.ensure_project('demo')`;
+  const path = process.platform === 'win32' ? String.raw`\\.\pipe\cb-relay-settle-` + process.pid : join(tmpdir(), `cb-relay-settle-${process.pid}.sock`);
+  const pane = `p-relay-settle-${process.pid}`, me = 'W7@testbox';
+  rmSeat(pane);
+  fs.writeFileSync(seatFiles(pane).lock, '');
+  await sql`select cb.iam('testbox', ${pane}, ${me}, 'demo')`;
+  const add = async (title: string) =>
+    String((await sql`select cb.task_add(project => 'demo', title => ${title}, status => 'in_progress', assignee => ${me}, actor => 'orch') as id`)[0]!.id);
+  const first = await add('first'), second = await add('second');
+  const inbox = fakeInbox(path, 'tok');
+  const env = { ...process.env, CB_DATABASE_URL: TEST_URL, CB_MACHINE: 'testbox', HERDR_PANE_ID: pane, CB_AGENT: '',
+                CB_RELAY_SETTLE_MS: '5000', CLAUDE_CODE_MESSAGING_SOCKET: path, CLAUDE_CODE_MESSAGING_TOKEN: 'tok' };
+  const relay = spawn('node', ['cli/relay.ts', '--child'], { stdio: 'ignore', env });
+  const exited = new Promise((r) => relay.on('exit', r));
+  const pushes = () => inbox.got.map((g) => g.message.content as string);
+  const upTo = async (n: number, ms: number) => { for (const t = Date.now(); inbox.got.length < n && Date.now() - t < ms;) await wait(50); return inbox.got.length >= n; };
+  try {
+    await wait(1500);
+    // a tell and a card note: one push, after the window
+    const began = Date.now();
+    await sql`select cb.tell(${me}, 'first line', 'orch')`;
+    await wait(1000);
+    await sql`select cb.log('demo', 'a note on it', ${first}, '{}', 'orch')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 0, `held: ${JSON.stringify(pushes())}`);
+    assert.ok(await upTo(1, 10_000), 'delivered when the window ends');
+    assert.ok(Date.now() - began >= 4500, `not before the window: ${Date.now() - began} ms`);
+    await wait(800);
+    assert.equal(inbox.got.length, 1, 'one push');
+    assert.match(pushes()[0]!, /Message from orch: first line[\s\S]*orch noted on #\d+ "first"[^\n]*a note on it/);
+    // a closed notice: no wake of its own, past the window; the next push carries it
+    await sql`select cb.task_done(${second}, 'merged and closed', '{}', 'orch')`;
+    await wait(8000);
+    assert.equal(inbox.got.length, 1, `a closed notice never wakes by itself: ${JSON.stringify(pushes().slice(1))}`);
+    // a direct question goes at once and takes it along
+    const asked = Date.now();
+    await sql`select cb.tell(${me}, 'are you free?', 'orch')`;
+    assert.ok(await upTo(2, 4000), 'a direct question goes at once');
+    assert.ok(Date.now() - asked < 4000);
+    assert.match(pushes()[1]!, /closed #\d+ "second"[\s\S]*are you free\?/);
+    // a held note whose card moves on with no event for me: the board stops returning it, the relay still has it
+    const third = await add('third');
+    assert.ok(await upTo(3, 12_000), 'the new card is told');
+    await sql`select cb.log('demo', 'keep this line', ${third}, '{}', 'orch')`;
+    await wait(1500);
+    assert.equal(inbox.got.length, 3);
+    await sql`update cb.tasks set assignee = 'W2@testbox' where id = ${third}`;
+    await sql`select pg_notify('cb', 'test')`;
+    assert.ok(await upTo(4, 10_000), 'still delivered');
+    await wait(800);
+    assert.equal(pushes().join('\n').match(/keep this line/g)?.length, 1, 'once');
+  } finally {
+    await inbox.close();
+    await Promise.race([exited, wait(8000)]);
+    if (relay.exitCode === null) relay.kill();
+    rmSeat(pane);
+  }
 });
 
 // #3221 review I2 and I1 (rename), end to end
