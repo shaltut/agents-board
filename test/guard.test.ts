@@ -410,6 +410,41 @@ const freshEnvFine = [
   `python -c "import os; os.environ.pop('FOO', None)"`, `python -c "import os; del os.environ['FOO']"`, 'node --test test/guard-codex.test.ts', 'pnpm test',
   'docker run --rm alpine env', 'git log --grep=CB_ROLE', 'echo x=CB_ROLE', 'systemctl --user status x',
 ];
+// #4734: "at" is an English word and a common variable name. It schedules only when a time follows it (or -t, a time the
+// guard cannot read, or xargs feeding it one): in a script a heredoc writes, or between the | of a search pattern, it does not
+const atFine = [
+  `python - <<'EOF'\ns = open('a.js').read()\ns = s.replace('x', '''\n  const at = s.indexOf(k);\n  if (at < 0) throw new Error('missing');\n  if (argv[at] === k) at++;\n''')\nEOF\ngrep -nE "\\b(const|let) (argv|at)\\b" a.js`,
+  String.raw`grep -n "fresh environment\|schtasks\|'at'\|cron" kit/guard/core.mjs`, 'grep -E "before|at|after" notes.md', 'grep -E "(at|on) the end" notes.md',
+  'rg "x;at;y" src', "node -e \"for (const k of a) {\n  if (at === -1) continue;\n  at = k;\n}\"", "node -e \"\n  if (at >= 0) break;\n\"",
+  'at -l', 'at -c 5', 'at -r 3', 'at -V', 'at --version', 'echo x | at',
+];
+const atRuns = ['at now', 'at now+1min', 'at "now + 1 hour"', "at 'midnight'", 'at noon tomorrow', 'at teatime', 'at 4pm', 'at 16:00', 'at 0400 -f job.sh', 'at -m -q b now', 'at -f job.sh 10:00',
+  'at -mf job.sh now', 'at -t 202601011200', 'at -mt202601011200', 'at < job.sh now', 'at <job.sh now', "at now <<'EOF'\nls\nEOF", 'at "$WHEN"', 'at $(date +%H:%M)', 'at `cat t`',
+  'at 2>&1 now', 'echo now | xargs at', String.raw`at \\host 10:00 cmd`, 'echo x | /usr/bin/at now', 'if true; then at now; fi', 'bash -c "echo x | at now"', 'at \\\n now',
+  'at n""ow', "at 'mid'night", String.raw`at \now`, 'at tomorrow', 'at friday', 'at jul 4', 'at next week'];
+test('#4734: the word at in quoted data or a script being written is not a scheduler launch; a real at with a time stays blocked', () => {
+  for (const c of atFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  for (const c of atRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment \(at\)/, c);
+});
+
+// #4736 (folded into #4734): the | of a quoted search pattern is not a pipe, so the word between two of them is not a
+// command. Only a search command's own quoted strings are read as data; a quoted string a shell or a program runs is not
+const searchFine = [
+  'grep -E "a|batch|b" f', "grep -nE 'relay|batch|queue' cli/relay.ts", 'rg -n "x|sudo|y" src', "git grep -E 'tmux new|crontab' -- docs", 'git -C ../x grep "a;batch;b"',
+  'cd cli && LC_ALL=C grep -E "a|batch|b" relay.ts | head -5', 'cb bug "guard: blocked" -b "the search was grep -E \\"a|batch|b\\" cli/relay.ts" -l guard',
+  `python3 - <<'EOF'\nimport re\nat = 1\nx = re.compile('foo|at|bar')\nEOF`,
+];
+// A lone quoted command after bash -c, sh -c, eval or rg --pre is not pinned: this rule never walked it (main allows it too)
+const searchStillRuns = ['grep x f | batch', 'grep "a|b" f; batch < j', 'grep "$(echo x | batch)" f', 'grep `true; batch -f j` f',
+  "bash <<'EOF'\nat now\nEOF", "bash -c 'true | batch'", 'echo "see grep " ; sudo codex exec x "y"', "echo hi # don't\ngrep x f ' ; sudo codex ; '", "grep x $'a\\'' ; batch ; echo ''",
+  "git grep -O'x;batch' y", "alias grep=eval; grep 'true;batch'", "grep() { eval \"$1\"; }; grep 'true;batch'",
+  // PowerShell: a backslash does not escape, so "C:\src\" ends there and what follows runs
+  String.raw`rg x "C:\src\"; sudo codex exec "C:\w\"`];
+test('#4736: a quoted search pattern or bug body naming a launcher passes; the same word where something runs it is blocked', () => {
+  for (const c of searchFine) assert.deepEqual(evaluate({ tool: 'shell', command: c, role: 'builder' }), { allow: true }, c);
+  for (const c of searchStillRuns) assert.match(evaluate({ tool: 'shell', command: c, role: 'builder' }).reason ?? '', /fresh environment/, c);
+});
+
 // N1 (PR 116 review, the lead's ruling): the lead keeps these; every other role is blocked
 const leadKeeps = ['herdr agent prompt w1:p2 hi', 'herdr pane send-keys w1:p2 "cb next" Enter', 'herdr --machine macbook agent prompt w1:p2 hi',
   'ssh "$VPS" uptime', 'ssh -o BatchMode=yes "$VPS" "test -e /srv/x"', 'ssh "${VPS}" uptime', 'ssh $DEPLOY_HOST uptime', 'herdr -m macbook pane send-keys w1:p1 codex Enter'];
@@ -935,6 +970,13 @@ test('long commands stay fast', () => {
     ['kill scan, 200 KB of kill words', () => check(kb200('kill '))],
     ['kill scan, 200 KB of taskkill /pid', () => check(kb200('taskkill /pid 1 '))],
     ['kill scan, 200 KB of quoted words', () => check('echo ' + kb200('"a b" '))],
+    // #4736: the search-pattern pass reads the command once; #4734: at reads its own 40 words
+    ['search blanking, 200 KB of quoted patterns, as a builder', asBuilder('grep ' + kb200('"a|batch" '))],
+    ['search blanking, 200 KB of open parentheses and blanks, as a builder', asBuilder('grep x ' + kb200('(          '))],
+    ['search blanking, 200 KB after one unclosed quote, as a builder', asBuilder('grep "' + kb200('a '))],
+    ['search blanking, a 200 KB option word, as a builder', asBuilder('grep -' + 'a'.repeat(200000) + ' x')],
+    ['at, 200 KB of at segments, as a builder', asBuilder(kb200('at -m x$; at < 0; '))],
+    ['at, a 200 KB time word, as a builder', asBuilder('at ' + 'a'.repeat(200000))],
     // bounded by the 16-command cap: each git, gh or az word reads to its segment's end
     ['16 git pushes (the cap), then 100 KB, as a builder', asBuilder('git push origin feat/x '.repeat(16) + tail100KB)],
     ['16 gh -R (the cap), then 100 KB, as a builder', asBuilder('gh -R x '.repeat(16) + '-R '.repeat(33000))],
