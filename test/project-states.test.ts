@@ -207,17 +207,21 @@ test('#4621: while disabled no question is rewritten, the project is not merged 
 
 test('#4621: a card freed from its question while disabled waits in Next with its holder, however the question ends', async () => {
   const { sql, session, set } = await setup();
-  for (const title of ['asks and is withdrawn', 'asks and is unblocked']) // #4 and #5
+  for (const title of ['asks and is withdrawn', 'asked by a follow-up']) // #4 and #5
     await sql`select cb.task_add(project => 'cedar', title => ${title}, status => 'in_progress', assignee => 'W1@pc', actor => 'W1@pc')`;
   const blocking = async (task: string) =>
     (await session`select cb.ask(project => 'cedar', body => ${'about ' + task}, blocking => true, task_id => ${task}, actor => 'W1@pc') as q`)[0].q;
   const answered = await blocking('1'), withdrawn = await blocking('4');
-  await blocking('5');
+  // a follow-up that opens on one answer takes #5, and gives it back when the answer is changed to another
+  const parent = (await session`select cb.ask(project => 'cedar', body => 'ship?', options => '["yes","no"]'::jsonb, actor => 'W1@pc') as q`)[0].q;
+  await session`select cb.ask(project => 'cedar', body => 'when?', blocking => true, task_id => '5', parent => ${parent}, if_answer => 'yes', actor => 'W1@pc')`;
   await set('disabled');
+  await sql`select cb.answer(${parent}, 'yes', 'ahmed')`;
+  assert.equal((await sql`select status from cb.tasks where id = 5`)[0].status, 'blocked', 'the follow-up holds it');
+  await sql`select cb.answer(${parent}, 'no', 'ahmed')`;
   await sql`select cb.answer(${answered}, 'left', 'ahmed')`;
   await session`select cb.answer_delivered(${answered}, 'W1@pc', 'W1@pc')`;
   await session`select cb.withdraw(${withdrawn}, 'W1@pc')`;
-  await session`select cb.task_unblock('5', null, 'W1@pc')`;
   const cards = await sql`select id::int, status, assignee, blocked_on from cb.tasks where id in (1, 4, 5) order by id`;
   assert.deepEqual(cards.map((c: any) => ({ ...c })), [1, 4, 5].map((id) => ({ id, status: 'next', assignee: 'W1@pc', blocked_on: null })));
   // enabled again, its holder takes it back
