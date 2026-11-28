@@ -1917,7 +1917,7 @@ const GH_TEXT_AT = /(?<=(?:^|[;&|(\n])[ \t]*)gh[ \t]+(?:pr[ \t]+edit|issue[ \t]+
 const GH_TEXT_FLAG = /^(?:--body|--title|-b|-t)$/;
 const plainText = (v) => /^(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27)$/.test(v) && !/\\\x22|[\u2018-\u201f]/.test(v) && !(v[0] === '"' && /\$[({]|\x60/.test(v));
 // only a command that may hold such text pays for the second reading
-const MAY_HOLD_TEXT = /\bgh[ \t]+(?:pr|issue)[ \t]|\bcat[ \t]*(?:<<|>)/;
+const MAY_HOLD_TEXT = /\bgh[ \t]+(?:pr|issue)[ \t]|\bcat[ \t]*<</; // cat > file <<W is already read by stripMessages
 const GH_WORD = /(?:\x22(?:\\.|[^\x22\\])*\x22|\x27[^\x27]*\x27|\\.|[^\s;&|\x22\x27\\])+/y;
 function seatText(command) {
   if (!MAY_HOLD_TEXT.test(command)) return stripMessages(command);
