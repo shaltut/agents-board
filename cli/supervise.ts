@@ -15,7 +15,7 @@ import { classifyAgentGet, find, herdrJson, herdrName, launchSpec, promptCommand
 import { mayBeLeaving, nextBackup, onBackups, pastSeatNames, planTick, quotaChecks, quotaWatched, windDownQuiet, type Leaving, type Session, type State, type TickPlan } from './supervise-plan.ts';
 import { getAdapter } from './agents/index.ts';
 import { DeadlineError, withDeadline } from './deadline.ts';
-import { keepAliveApart, supervisorLease } from './lease.ts';
+import { fenced, keepAliveApart, supervisorLease } from './lease.ts';
 import type { AgentAdapter, QuotaSignal, SeatHandle } from './agents/types.ts';
 
 export const TICK_MS = 20 * 60_000;
@@ -526,7 +526,7 @@ if (import.meta.main) {
   // stopped by hand (Ctrl-C, its pane closed): the lease is given back, so the next start need not wait it out
   let current: AbortController | undefined; // the running tick's
   let renewal: ReturnType<typeof keepAliveApart> | undefined;
-  const run: Runner = (m, args, timeout) => { renewal?.beat(); return realRun(m, args, timeout); };
+  const run = fenced(realRun, () => renewal); // each herdr call: a word to the renewal thread, and refused once the lease is not sure
   const giveBack = async () => { await renewal?.stop(); await lease?.release(); }; // the thread first: it must not renew a lease being deleted
   if (lease) for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
     process.once(sig, () => { current?.abort(new Error('the supervisor is stopping')); giveBack().finally(() => process.exit(0)); });
