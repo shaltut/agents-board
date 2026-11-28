@@ -34,7 +34,7 @@ const codexHooks = (pre: unknown) => JSON.stringify({ hooks: { SessionStart: [{ 
 const CODEX_MATCHER = ADAPTERS.codex.guardInstallSpec!(BOARD).matchers[process.platform as 'win32' | 'darwin' | 'linux'];
 const CODEX_GOOD = [{ matcher: CODEX_MATCHER, hooks: [{ type: 'command', command: `${NODE} ${BOARD}/kit/guard/shim-codex.mjs`, timeout: 30 }] }];
 const AGY_GOOD = { 'cb-guard': { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `node ${BOARD}/kit/guard/shim-agy.mjs`, timeout: 10 }] }] } };
-const PLUGIN_GOOD = `export const CbGuard = async () => ({ "tool.execute.before": async (input, output) => run(${JSON.stringify(`${BOARD}/kit/guard/shim-opencode.mjs`)}, input, output) });\n`;
+const PLUGIN_GOOD = `export const CbGuard = async () => ({ "tool.execute.before": async (input, output) => run(${JSON.stringify(`${BOARD}/kit/guard/shim-opencode.mjs`)}, input, output), "shell.env": async () => {} });\n`;
 
 /** A home folder with the guard installed for every agent, and a seat folder agy trusts (unless told otherwise). */
 function world(t: { after: (fn: () => void) => void }, o: { codexHook?: boolean; agyTrusted?: boolean; plugin?: boolean } = {}) {
@@ -242,6 +242,8 @@ test('seatRefusal reads the guard files, never a substring: crafted Codex, agy a
     ['the shim named in a comment, no hook', `// runs ${BOARD}/kit/guard/shim-opencode.mjs\n`],
     ['a hook running a missing shim', `export default { "tool.execute.before": () => run("${BOARD}/nowhere/shim-opencode.mjs") }\n`],
     ['a relative shim path', 'export default { "tool.execute.before": () => run("./shim-opencode.mjs") }\n'],
+    // #4892: a plugin from before it emptied the server password in tool shells
+    ['a plugin with no shell.env hook', PLUGIN_GOOD.replace(', "shell.env": async () => {}', '')],
   ] as const) {
     writeFileSync(plugin, src);
     assert.match(ocRefusal() ?? 'READY', /does not register tool\.execute\.before/, what);

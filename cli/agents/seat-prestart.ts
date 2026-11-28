@@ -119,15 +119,17 @@ function agyHookRefusal(cwd: string, home: string, platform: NodeJS.Platform): s
   return ok ? null : 'no enabled PreToolUse hook in the seat folder\'s .agents/hooks.json with a catch-all matcher whose command is node running this board\'s kit/guard/shim-agy.mjs (the same bytes, with its core.mjs): install or reinstall the guard';
 }
 
-/** The OpenCode plugin is the board's cb-guard.js: it registers tool.execute.before and runs this board's shim-opencode.mjs
+/** The OpenCode plugin is the board's cb-guard.js: it registers tool.execute.before and shell.env (#4892: it empties the
+ *  server password in the seat's shells, so an older plugin is refused), and runs this board's shim-opencode.mjs
  *  (a quoted absolute path in its source; the same bytes as kit/guard's, with its core.mjs, review 70-M2). Files in the plugins folder load without a config entry. */
 function opencodePluginRefusal(env: NodeJS.ProcessEnv, home: string, platform: NodeJS.Platform): string | null {
   const src = read(join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode', 'plugins', 'cb-guard.js'));
   if (src === null) return 'no cb-guard plugin in the OpenCode plugins folder: install the guard first';
   const win = platform === 'win32';
   const shims = [...src.matchAll(/["'`]([^"'`\r\n]*shim-opencode\.mjs)["'`]/g)].map((m) => hookPath(m[1]!, win, home) as string);
-  const ok = /tool\.execute\.before/.test(src) && shims.some((f) => isAbs(f) && isFile(f) && sameAsKitGuard(f, 'shim-opencode.mjs'));
-  return ok ? null : 'the OpenCode cb-guard plugin does not register tool.execute.before with this board\'s kit/guard/shim-opencode.mjs (the same bytes, with its core.mjs): reinstall the guard';
+  const hooked = /tool\.execute\.before/.test(src) && /["']shell\.env["']\s*:/.test(src);
+  const ok = hooked && shims.some((f) => isAbs(f) && isFile(f) && sameAsKitGuard(f, 'shim-opencode.mjs'));
+  return ok ? null : 'the OpenCode cb-guard plugin does not register tool.execute.before and shell.env with this board\'s kit/guard/shim-opencode.mjs (the same bytes, with its core.mjs): reinstall the guard';
 }
 
 /** The same folder (case-insensitive on Windows, where agy stores native paths). Exact, never a parent: whether agy's trust
