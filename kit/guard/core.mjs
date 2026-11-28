@@ -2181,6 +2181,7 @@ const SEG_RUN = /[^\\/\s"';&|)>]+/g;
 const SEG_UP = /[\\/]+\.\.(?:[\\/]+|(?=[\s"';&|)>]|$))/y;
 const BEFORE_SEG = /[\\/\s"'=:(>]/;
 export function foldUp(s) {
+  if (!s.includes('..')) return s; // most commands: nothing to fold
   let out = '', done = 0;
   SEG_RUN.lastIndex = 0;
   for (let run; (run = SEG_RUN.exec(s));) {
