@@ -59,11 +59,26 @@ test('the lister says why a list could not be read', (t) => {
   const dir = fakeCli(t, 'agy', `console.error('please sign in'); process.exit(3);`);
   const list = makeLister({ timeoutMs: 20_000, env: { ...process.env, PATH: dir } });
   assert.match(list('agy').error ?? '', /exit 3/);
+  assert.match(list('agy').err ?? '', /please sign in/, '#4856: what it printed is kept, to name a sign-out');
   assert.deepEqual(list('opencode'), { path: null });
 });
 
-const fake = (table: Partial<Record<string, { out?: string; error?: string }>>): Lister =>
+const fake = (table: Partial<Record<string, { out?: string; err?: string; error?: string }>>): Lister =>
   (agent) => (table[agent] ? { path: `/bin/${agent}`, ...table[agent] } : { path: null });
+
+test('#4856: agy asking to sign in is named as that, however it exits and whichever stream says it', async () => {
+  const words = 'Please sign in to view available models\n';
+  for (const agy of [{ out: words }, { out: '', err: words }, { error: 'exit 1', out: words }, { error: 'exit 1', err: words }]) {
+    const r = await reportModels({ machine: 'pc', save: async () => ({}), list: fake({ agy }) });
+    assert.match(r.join('\n'), /agy: list not read \(agy is not signed in in this session\): the board keeps the last one\. [^\n]*ssh[^\n]*herdr pane/, JSON.stringify(agy));
+    assert.doesNotMatch(r.join('\n'), /view available models/, 'what the CLI printed is not repeated');
+  }
+  // a list that was read is sent, whatever else it said; the words from another agent are not read as agy's
+  const read = await reportModels({ machine: 'pc', save: async () => ({ agy: 2 }), list: fake({ agy: { out: AGY, err: words } }) });
+  assert.match(read.join('\n'), /agy: 2 models sent for pc/);
+  const other = await reportModels({ machine: 'pc', save: async () => ({}), list: fake({ opencode: { out: words } }) });
+  assert.match(other.join('\n'), /opencode: list not read \(no model names in what `opencode models` printed\)/);
+});
 
 test('reportModels sends the lists it could read, and says what it left out', async () => {
   const calls: any[] = [];
