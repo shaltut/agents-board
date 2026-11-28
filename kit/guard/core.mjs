@@ -829,7 +829,7 @@ const PAST_PUSH = new Set(['push', 'send-pack', 'http-push', 'subtree']);
 const filledPart = (x) => isFilled(x) || /[$`%]/.test(x);
 // the program's name is what the shell fills in: not a path that ends in a literal name ($HOME/bin/tool); a default in
 // braces (${GIT:-/x/y}) says nothing about what the variable holds
-const filledName = (x) => isFilled(x) && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
+const filledName = (x) => isFilled(x) && !x.endsWith(',') && cmdName(x) !== 'git' && (/[$%]/.test(cmdName(x)) || x.includes(':-'));
 function filledOptions(w, i) {
   let j = i + 1;
   let aliased = false;
@@ -2699,14 +2699,27 @@ const SPLIT_NAME = new RegExp(String.raw`(?<![\w{$])\^?(?:g${GAP}*i${GAP}*t|g${G
 const GAPS = new RegExp(GAP, 'g');
 const NAME_SET = /(?<![\w$-])\$?([a-z_]\w*)[ \t]*=[ \t]*(["']?)(git|gh|az)\2(?![\w=./\\-])/gi;
 const VAR_USE = /\$(?:\{(\w+)\}|(\w+))/g;
+// #4828: $x = git rev-parse main (PowerShell; no shell reads it as a string) runs git and $x takes the output, so it
+// does not hold the name: a $ target, no quotes, and more words in the same statement. The call itself is still judged,
+// and one glued to the = ($x =git push) is set apart so that it is
+const MORE_WORDS = /^[ \t]{1,64}[^\s;&|#)}<>]/;
+const takesOutput = (match, quote, text, end) => match.startsWith('$') && !quote && MORE_WORDS.test(text.slice(end, end + 65));
 export function revealed(command) {
   const text = command.replace(ANSI_C, (_all, body) => requote(ansiText(body)))
     .replace(ECHOED, (_all, _q, a, _p, b) => a ?? b)
     .replace(EMPTY_BRACE, '$1')
     .replace(SPLIT_NAME, (m) => m.replace(GAPS, ''))
     .replace(/\$(?=(["'])(?:git|gh|az)\1)/gi, ''); // $"git" is git: the dollar goes with the locale quote
-  const set = new Map([...text.matchAll(NAME_SET)].map((m) => [m[1], m[3]]));
-  return set.size ? text.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : text;
+  const set = new Map();
+  const spaced = text.replace(NAME_SET, (all, name, quote, tool, at, whole) => {
+    if (!takesOutput(all, quote, whole, at + all.length)) {
+      set.set(name, tool);
+      return all;
+    }
+    const head = all.slice(0, -tool.length);
+    return /[ \t]$/.test(head) ? all : `${head} ${tool}`;
+  });
+  return set.size ? spaced.replace(VAR_USE, (all, a, b) => set.get(a ?? b) ?? all) : spaced;
 }
 
 // One decision for one tool call. req: { tool: 'shell' | 'edit' | 'ask' | 'unknown'; command?; role?; protectedBranches?;
