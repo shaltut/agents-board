@@ -892,6 +892,65 @@ test('secret files (#4347): no seat reads one into its context; using one where 
   assert.deepEqual(shell('cat .env'), {});
 });
 
+// #3222 S6: a worker key lets its holder act as every seat of the machine on the board, so no seat reads one: the
+// folder and all in it, however the home folder is spelled, a glob that reaches it, a read of the whole board folder
+// that goes down into it, and a read after moving there. Listing it stays open
+const keyReads = [
+  'cat ~/.claude-board/keys/machine.key', 'cat ~/.claude-board/keys/*', 'cat ~/.claude-board/keys/*.key', 'cat ~/.claude-board/keys/m*',
+  'head -c 100 "$HOME/.claude-board/keys/runner.k?y"', 'cat ${HOME}/.claude-board/keys/*', String.raw`type %USERPROFILE%\.claude-board\keys\*`,
+  String.raw`Get-Content $env:USERPROFILE\.claude-board\keys\*`, 'cat "$HOME/.claude-board"/keys/*', 'cat ~/.claude-board//./keys/*',
+  'cp -r ~/.claude-board/keys /tmp/x', 'tar czf /tmp/k.tgz ~/.claude-board/keys', 'grep -r cbk1 ~/.claude-board/keys', 'base64 < ~/.claude-board/keys/machine.key',
+  'cat ~/.claude-board/keys*', 'cat ~/.claude-board/k*/*', 'cat ~/.claude-board/*/machine*', String.raw`gc ~\.claude-board\ke?s\*`, 'cp -r ~/.claude-board/k* /tmp/x',
+  // a pipe inside quotes cuts nothing
+  'grep -E "cbk1|secret" ~/.claude-board/keys/*', 'rg "cbk1|x" ~/.claude-board',
+  // the whole board folder, read downwards
+  'grep -r CB_BOARD_URL ~/.claude-board', 'grep -rn x "$HOME/.claude-board/"', 'grep x ~/.claude-board -r', 'rg cbk1 ~/.claude-board', 'cp -a ~/.claude-board /tmp/x',
+  'cp -R ~/.claude-board/ /tmp/x', 'tar czf /tmp/b.tgz ~/.claude-board', String.raw`Copy-Item -Recurse $HOME\.claude-board C:\Temp\x`, 'grep -r x ~/.claude-board/*',
+  // after moving there, a relative name reaches them
+  'cd ~/.claude-board/keys && cat *', String.raw`Set-Location ~\.claude-board\keys; Get-Content *`, 'cd ~/.claude-board && cat keys/*', 'pushd ~/.claude-board/keys; head *',
+  'cd "$HOME/.claude-board" && grep -r x .', 'cd ~/.claude-board; cat */machine*', 'cd ~/.claude-board && cd keys && cat *', 'cd .claude-board && cat keys/*',
+  'cd ~/.claude-board && rg cbk1', 'cd ~/.claude-board && cp -r . /tmp/x', 'cd ~/.claude-board && grep -r x *', 'grep -r x "$HOME"/.claude-board', 'grep -r x C:/home/u/.claude-board',
+  // a move whose own words run a read
+  'cd "$(cat ~/.claude-board/keys/m*)"', 'cd `head -1 ~/.claude-board/keys/*`',
+  // the folder the test override names
+  'cat $CB_KEY_DIR/*', 'cat "${CB_KEY_DIR}"/machine*', String.raw`Get-Content $env:CB_KEY_DIR\*`, String.raw`type %CB_KEY_DIR%\*`,
+];
+const keyUses = [
+  'ls -la ~/.claude-board/keys', 'ls ~/.claude-board/keys/ | head', String.raw`Get-ChildItem ~\.claude-board\keys`, 'stat ~/.claude-board/keys/machine.key',
+  'test -f ~/.claude-board/keys/machine.key && echo yes', 'cb key check', 'echo $CB_KEY_DIR', 'CB_KEY_DIR=/tmp/k node --test test/worker-api.test.ts', 'ls "$CB_KEY_DIR"',
+  'cat ~/.claude-board/guard/core.mjs', 'cat "$HOME/.claude-board"/guard/core.mjs', 'grep -E "keys|token" ~/.claude-board/guard/core.mjs', 'grep -rn keys ~/.claude-board/guard',
+  'ls ~/.claude-board', 'ls -ltr ~/.claude-board | head', 'cd ~/.claude-board && ls keys', 'cd ~/.claude-board && cat guard/core.mjs',
+  'cd ~/.claude-board/keys && ls', 'cd ~/.claude-board/keys; cd ~/w && cat README.md', 'cat src/keys/index.ts', 'cat docs/claude-board-keys.md',
+  'grep -rn "claude-board/keys" docs', 'cb log 1 "the keys live in ~/.claude-board/keys: never cat them"',
+  // a search of the code for the folder's name is no read of it, and neither is one that goes down into other folders
+  String.raw`grep -rn "\.claude-board" cli`, 'grep -rIn ".claude-board" .', String.raw`grep -rn "claude-board\b\|\.claude-board\|homedir()" cli`,
+  'cd ~/.claude-board && grep -rl "must be an integer" supervisor runner', 'cd ~/.claude-board && rg integer runner',
+];
+test('#3222 S6: no seat reads a worker key; listing the folder and reading the rest of the board folder pass', () => {
+  blocksByRole('builder', keyReads);
+  passes('builder', keyUses);
+  for (const role of ROLES.filter((r) => r !== 'builder')) {
+    blocksByRole(role, keyReads.filter((_, i) => i % 5 === 0));
+    passes(role, keyUses.filter((_, i) => i % 4 === 0));
+  }
+  assert.match(shell('cat ~/.claude-board/keys/*', { CB_ROLE: 'builder' }).reason!, /worker key/);
+  // for an agent that reads files itself
+  for (const p of ['/home/u/.claude-board/keys/machine.key', String.raw`C:\home\.claude-board\keys\runner.key`, '~/.claude-board/keys/note']) assert.equal(secretPath(p), true, p);
+  for (const p of ['~/.claude-board/guard/core.mjs', '~/.claude-board/runner.json', 'docs/claude-board-keys.md']) assert.equal(secretPath(p), false, p);
+});
+
+test('#3222 S6: long runs of folder names, globs, quotes and moves are read in linear time', () => {
+  const budget = machineBudget();
+  const kb = (s: string) => s.repeat(Math.ceil(200000 / s.length));
+  for (const [name, command] of [['folder names', 'cat ' + kb('/.claude-board/')], ['separators', 'cat ~/.claude-board' + '/'.repeat(200000) + 'x'], ['dot steps', 'cat ~/.claude-board/' + kb('./') + 'x'],
+    ['stars', 'cat ~/.claude-board/' + '*'.repeat(200000)], ['escaped quotes', 'cat .claude-board "' + kb('\\"')], ['open quotes', 'cat .claude-board ' + kb('"a|')],
+    ['moves', kb('cd ~/.claude-board; ')], ['reads after a move', 'cd ~/.claude-board; ' + kb('cat x; ')], ['flags', 'cp ~/.claude-board ' + kb('-x ')], ['variable names', 'cat ' + kb('$CB_KEY_DI')],
+    ['one long r flag', 'grep ~/.claude-board -' + 'r'.repeat(200000) + '!'], ['one long a flag', 'cp ~/.claude-board -' + 'a'.repeat(200000) + '!'],
+    ['search flags after a move', 'cd ~/.claude-board; rg ' + kb('-x ') + 'a b'], ['search names after a move', 'cd ~/.claude-board; ' + kb('rg ')]]) {
+    withinBudget(name!, (again) => evaluate({ tool: 'shell', command: command + ' '.repeat(again), role: 'builder' }), budget);
+  }
+});
+
 // review #6 I4: for an adapter whose agent reads files natively (agy's read_file), the same names as a path check
 test('secretPath: the secret names as a file path, any separator', () => {
   for (const p of ['deploy/.env', String.raw`C:\w\app\.env.local`, '/home/u/.ssh/id_ed25519', 'secrets/tls.key', '.pgpass', '/home/u/.aws/credentials'])
