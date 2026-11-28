@@ -330,6 +330,7 @@ test('one key holds 64 streams at most, however many it opens at once', async ()
   const [key, other] = [await issue(sql), await issue(sql, 'boxb')];
   const w = workerApp(() => new Promise((r) => setTimeout(r, 300)));
   const open = (k: string) => w.request('/events?ch=cb', { headers: bearer(k) });
+  process.env.CB_API_PING_MS = '100'; // a cancelled stream leaves at its next ping
   const replies = await Promise.all(Array.from({ length: 70 }, () => open(key)));
   try {
     assert.deepEqual([200, 429].map((s) => replies.filter((r) => r.status === s).length), [64, 6]);
@@ -338,5 +339,7 @@ test('one key holds 64 streams at most, however many it opens at once', async ()
     replies.push(theirs);
   } finally {
     await Promise.all(replies.map((r) => r.body?.cancel()));
+    await new Promise((r) => setTimeout(r, 300));
+    delete process.env.CB_API_PING_MS;
   }
 });

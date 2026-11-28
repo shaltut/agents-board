@@ -216,8 +216,11 @@ export function workerApp(listen: () => Promise<unknown>) {
     if (!wanted.length || !wanted.every((ch) => CHANNELS[who.kind].includes(ch))) {
       throw new Refused(403, `a ${who.kind} key listens on: ${CHANNELS[who.kind].join(', ') || 'nothing'}`);
     }
-    if ((streams.get(key.id) ?? 0) >= MAX_STREAMS_PER_KEY) throw new Refused(429, 'too many open streams with this key');
     await listen();
+    // nothing is awaited between this count and its stream's start, so opens that arrive together are all counted
+    const open = streams.get(key.id) ?? 0;
+    if (open >= MAX_STREAMS_PER_KEY) throw new Refused(429, 'too many open streams with this key');
+    streams.set(key.id, open + 1);
     c.header('X-Accel-Buffering', 'no'); // nginx would otherwise hold the events back
     return streamSSE(c, async (stream) => {
       const send: Subscriber = (channel, payload) => {
@@ -226,7 +229,6 @@ export function workerApp(listen: () => Promise<unknown>) {
         stream.writeSSE({ event: channel, data: payload }).catch(() => {});
       };
       subscribers.add(send);
-      streams.set(key.id, (streams.get(key.id) ?? 0) + 1);
       try {
         await stream.writeSSE({ event: 'listen', data: '' });
         while (!stream.aborted) {
