@@ -16,11 +16,18 @@ const cut = (s: any, n = 100) => { const v = String(s ?? '').replace(/\s+/g, ' '
 // PowerShell also reads ‘ ’ ‚ ‛ as single quotes; in bash '' just closes and reopens the quote.
 export const q = (s: any) => { const v = String(s); return /^\w[\w@.:/=-]*$/.test(v) ? v : `'${v.replace(/['‘’‚‛]/g, "''")}'`; };
 
+/** #4860: why messages to a seat wait (cb._unreachable's answer): what shows it, and the pane its name is still on. */
+export const noRelayWhy = (u: any) => [
+  u.waiting ? `${u.waiting} message${u.waiting === 1 ? '' : 's'} waiting` : '',
+  u.wrote_mins === null ? '' : `wrote to the board ${dur(u.wrote_mins)} ago`,
+].filter(Boolean).join(', ') + (u.pane ? `; last bound to ${u.pane}@${u.machine} (relay last seen ${dur(u.relay_mins)} ago)` : '; never bound to a pane');
+export const NO_RELAY_FIX = 'if its agent was started by hand, first close the pane its agent runs in now (find it with herdr agent list; it is not the pane the board last had)';
+
 type Item = { section: string; who: string; text: string; cmd: string | null; detail?: string };
 type Pr = { state: string; head: string; mergeable: string; merge?: string };
 
 const SECTIONS: [string, string][] = [
-  ['asks', "AHMED'S ASKS, LATE"], ['answers', 'ANSWERS NOT ACTED ON'], ['questions', 'YOUR OPEN QUESTIONS'], ['ready', 'READY TO MERGE'],
+  ['asks', "AHMED'S ASKS, LATE"], ['answers', 'ANSWERS NOT ACTED ON'], ['questions', 'YOUR OPEN QUESTIONS'], ['no_relay', 'SEATS WITH NO RELAY'], ['ready', 'READY TO MERGE'],
   ['conditional', 'GO WITH CONDITIONS (check first)'], ['stuck', 'STUCK'],
   ['idle', 'IDLE'], ['github', 'BOARD VS GITHUB'], ['locks', 'LOCKS'], ['huddles', 'HUDDLES'],
 ];
@@ -111,6 +118,10 @@ export async function tick(project: string, actor: string) {
       add('questions', actor, `Q${x.id} sent back ${ago(s.at)}, ${s.by}: ${cut(backWhy(s.reason, s.note), 300)}`, reaskHint(x.id, s.reason), `asked: ${cut(x.body)}`);
     } else add('questions', x.for, `Q${x.id} open ${ago(x.created_at)}, ${x.for}: ${cut(x.body)}${x.no_options ? ' ⚠ no options' : ''}`,
       x.no_options ? `cb withdraw ${x.id}` : null, x.no_options ? 'then ask again with -o "Label (Recommended)=why" -o ...' : undefined);
+
+  // #4860. ?? []: a board older than this has no list
+  for (const u of b.no_relay ?? [])
+    add('no_relay', u.actor, `${u.actor} has no relay: ${noRelayWhy(u)}; ${NO_RELAY_FIX}`, `cb squad up ${q(u.project ?? project)}`);
 
   const prs = b.prs.map((t: any) => ({ ...t, ref: prRef(t.pr, project) }));
   const prKey = (t: any) => (t.ref ? `${t.ref.repo}#${t.ref.n}` : `?${t.pr}`);

@@ -343,6 +343,7 @@ drop function if exists cb._model_differs cascade;
 drop function if exists cb.inbox cascade;
 drop function if exists cb._person cascade;
 drop function if exists cb.broadcast cascade;
+drop function if exists cb._unreachable cascade;
 drop function if exists cb.sessions_overview cascade;
 drop function if exists cb.tell cascade;
 drop function if exists cb.type_to cascade;
@@ -2030,6 +2031,39 @@ create function cb._model_differs(launched text, running text) returns boolean l
   select coalesce(position(lower(regexp_replace(launched, '\[[^]]*\]$', '')) in lower(running)) = 0, false)
 $$;
 
+-- #4860: a seat nothing can be pushed to, though something should be. No relay on its latest binding (no check-in for
+-- 90 s, as live below), and either it wrote to the board in the last 30 minutes and more than 90 s past that check-in
+-- (so it runs: a seat started by hand has no relay, and its name stays on the pane that had it before), or messages of
+-- the last 24 h wait for it. A name never bound counts when it writes and holds work. Null: nothing to say, which
+-- includes a seat that stopped with nothing after its last check-in, and one the supervisor is closing
+create function cb._unreachable(who text) returns jsonb language plpgsql stable as $$
+declare s cb.sessions; wrote timestamptz; waits int; held text;
+begin
+  if who is null or who in ('ahmed', 'relay', 'unknown', 'board', 'supervisor', 'runner', 'github')
+     or exists (select 1 from cb.users u where u.name = who) then return null; end if;
+  select * into s from cb.sessions x where x.actor = who order by x.last_seen desc limit 1;
+  if s.last_seen > now() - interval '90 seconds' or s.closing_at > now() - interval '5 minutes' then return null; end if;
+  -- as cb._board_active: a follow-up question opening is written as its asker by whoever answered the parent
+  select max(e.at) into wrote from cb.events e
+   where e.actor = who and e.at > now() - interval '30 minutes' and not (e.kind = 'asked' and e.data ? 'opened_by');
+  if wrote <= s.last_seen + interval '90 seconds' then wrote := null; end if;
+  select count(*) into waits from cb.events e
+   where e.kind = 'message' and e.data ->> 'to' = who and e.at > now() - interval '24 hours'
+     and e.id > coalesce(s.broadcast_seen, 0);
+  if s.actor is null then
+    select w.project into held from (
+      select t.project from cb.tasks t where t.assignee = who and t.status in ('in_progress', 'blocked', 'review')
+      union all
+      select t.project from cb._held_parts() h join cb.tasks t on t.id = h.task_id where h.assignee = who and h.status = 'in_progress') w
+     limit 1;
+    if wrote is null or held is null then return null; end if;
+  elsif wrote is null and waits = 0 then return null;
+  end if;
+  return jsonb_build_object('actor', who, 'project', coalesce(s.project, held), 'machine', s.machine, 'pane', s.pane,
+    'relay_mins', floor(extract(epoch from now() - s.last_seen) / 60)::int,
+    'wrote_mins', floor(extract(epoch from now() - wrote) / 60)::int, 'waiting', waits);
+end $$;
+
 -- One row per session/worker: bound sessions (cb iam), plus anyone who acted or holds open work in
 -- the last week. live = its relay checked in within 90s (relays poll every 30s).
 -- jit off: the many per-actor subplans push the estimate past jit_above_cost, and LLVM compiling the plan took 2.2 of
@@ -2042,6 +2076,7 @@ begin
     select jsonb_build_object(
       'actor', a.actor, 'project', s.project, 'machine', s.machine, 'pane', s.pane, 'last_seen', s.last_seen,
       'live', coalesce(s.last_seen > now() - interval '90 seconds', false),
+      'unreachable', cb._unreachable(a.actor),  -- #4860
       'role', case when cb._pipeline(s.project) then cb._role(a.actor) else s.role end, 'area', s.area, 'model', s.model,
       'running_model', cb._running_model(s.machine, s.pane),  -- #4786
       'model_differs', cb._model_differs(s.model, cb._running_model(s.machine, s.pane)),
@@ -2657,6 +2692,13 @@ begin
         'for', coalesce(q.assigned_to, 'ahmed'), 'no_options', coalesce(jsonb_array_length(q.options), 0) = 0,
         'status', q.status, 'sent_back', q.sent_back) order by q.id)
       from cb.questions q where q.status in ('open', 'sent_back') and q.asked_by = me and (p is null or q.project = p)), '[]'),
+    -- #4860: seats nothing can be pushed to; only those that wrote lately or have a message waiting can be one
+    'no_relay', case when off then '[]'::jsonb else coalesce((select jsonb_agg(u.j order by u.j ->> 'actor')
+      from (select e.actor as name from cb.events e where e.at > now() - interval '30 minutes'
+            union
+            select e.data ->> 'to' from cb.events e where e.kind = 'message' and e.at > now() - interval '24 hours') c
+     cross join lateral (select cb._unreachable(c.name) as j offset 0) u
+     where u.j is not null and (p is null or u.j ->> 'project' = p) and cb._live(u.j ->> 'project')), '[]') end,
     -- in progress, and the holder has written nothing anywhere for 30 minutes (relay heartbeats don't count)
     'silent', coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'title', t.title, 'assignee', t.assignee, 'last_at', l.at) order by l.at nulls first, t.id)
       from cb.tasks t cross join lateral (select max(e.at) as at from cb.events e where e.actor = t.assignee) l
