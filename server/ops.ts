@@ -7,8 +7,9 @@
 export type Kind = 'machine' | 'runner' | 'supervisor';
 /** kinds: whose keys may call it over the worker API; none: only a caller with its own database connection.
  *  bytes: pictures travel in it, so its request may be 16 MB, not 1. machineLabel: its machine argument says what a row
- *  is about, not who is calling. */
-export type Op = { setof?: true; kinds: readonly Kind[]; bytes?: true; machineLabel?: true };
+ *  is about, not who is calling. toOwnSeat: it records a delivery, so its delivered_to must be a seat of the key's own
+ *  machine. relayActor: its actor may also be exactly "relay", which is how a relay's own marks are signed. */
+export type Op = { setof?: true; kinds: readonly Kind[]; bytes?: true; machineLabel?: true; toOwnSeat?: true; relayActor?: true };
 
 const seat: readonly Kind[] = ['machine'];
 const list = (more: Omit<Op, 'kinds'> & { kinds?: readonly Kind[] }, names: string) =>
@@ -17,7 +18,7 @@ const one = {}, rows = { setof: true } as const, never = { kinds: [] };
 
 export const OPS: Record<string, Op> = Object.fromEntries([
   ...list(one, `
-    answer_delivered ask_record ask_reply asks_list brief broadcast digest epics_list fault_file github_watches
+    ask_record ask_reply asks_list brief broadcast digest epics_list fault_file github_watches
     goals_list huddle_add huddle_close huddle_open huddle_say huddles_list iam lock_queue lock_release lock_take log
     machine_models_set mem_find mem_list mem_pack mem_retire mem_rule mem_show mem_supersede next_empty_words next_step
     page_get page_set project_state_preview question_assign read_project resolve resume role_text seat_backup_clear
@@ -30,6 +31,9 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   `),
   ...list({ bytes: true }, 'ask_post reask_post'),
   ...list({ machineLabel: true }, 'mem_add'),
+  // the relay's two delivery writes (server/worker.ts bind; the SQL checks who an answer or an ask is for)
+  ...list({ toOwnSeat: true, relayActor: true }, 'answer_delivered'),
+  ...list({ toOwnSeat: true }, 'ask_delivered'),
   ...list(rows, `
     answers_pending ask_parent ask_relay bug_filed held_parts_of huddle_lines huddle_member_names huddle_row mine
     my_questions question_state questions_brief released_by session_binding session_events session_questions
@@ -47,7 +51,4 @@ export const OPS: Record<string, Op> = Object.fromEntries([
   // tell and jobs_list, which it also calls, are a seat's today and need the supervisor's kind then too.
   ...list(never, 'board_now lease_release lease_renew lease_take seat_switch supervise_log supervise_mark supervise_state'),
   ...list({ ...never, ...rows }, 'sessions_live squad_history supervised_projects'),
-  // a write that names neither a machine nor an actor, so the worker API has nothing to bind to the key: not served until
-  // the slice that moves the relay (S3) gives it one
-  ...list(never, 'ask_delivered'),
 ]);

@@ -89,6 +89,9 @@ signed-in admin (or the dashboard on Ahmed's PC, before the move) can act as `ah
   typing into a session, no project states, no keys;
 - writes only as `name@<its machine>`, never as `ahmed`, and for its own machine; each of its events carries the key's
   id (`cb.events.client`);
+- marks an answer or an ask delivered only to a seat of its own machine (`delivered_to`, required), and an answer only
+  when that seat is who it goes to (the SQL checks it for every caller). On `answer_delivered` alone its actor may be
+  exactly `relay`, which is how a relay signs those marks;
 - **reads the whole board**: a read may name any session or project. `reply_to` (where an answer is delivered) is the
   caller's own text, as it is today.
 

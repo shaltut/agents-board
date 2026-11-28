@@ -143,7 +143,7 @@ The body is required: -b "...", or a second quoted phrase after a quoted title (
       does: 'Answered questions no relay has delivered yet. Workers: the fallback without a relay. Orchestrator: deliver each, then cb delivered.',
       eg: 'cb pending' },
     delivered: { use: 'cb delivered <qid> [session]', topic: 'ask',
-      does: 'Mark an answer delivered; unblocks its task back to Next.',
+      does: 'Mark an answer delivered; unblocks its task back to Next. A [session] must be the one the answer goes to (the asker, or the seat in the pane it replies to): leave it out to mark an answer you passed on by hand.',
       eg: 'cb delivered Q12 W2@macbook' },
     reask: { use: 'cb reask Q<id> ["<new question>"] [-o "<Label>=<why>" ... | --free] [--multi] [-c "<context>"] [-i "<Caption>=<picture>" ...]', topic: 'ask',
       does: 'Ahmed sent your question back (more details, his own question, simpler, the options are wrong, or "Show me": add pictures): rewrite it in place. Same Q id; it shows up on his board again as new. Give only what changes: the text, the options, the context, or several.',

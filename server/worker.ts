@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { connect } from './db.ts';
-import { OPS, type Kind } from './ops.ts';
+import { OPS, type Kind, type Op } from './ops.ts';
 import { selectFn } from './rpc.ts';
 import { clientIp } from './client-ip.ts';
 import { servedSha } from './release.ts';
@@ -224,18 +224,21 @@ async function signature(conn: any, fn: string): Promise<Signature> {
 }
 
 /** A write is the key's own: its machine and runner, filled in or refused when another is named, and an actor it may be. */
-async function bind(tx: any, who: Who, sig: Signature, args: Record<string, unknown>, machineIsLabel: boolean) {
+async function bind(tx: any, who: Who, sig: Signature, args: Record<string, unknown>, op: Op) {
   const own = (name: 'machine' | 'runner', value: string | null) => {
     if (!sig.args.has(name) || value === null) return;
     if (args[name] != null && args[name] !== value) throw new Refused(403, `this key is for ${name} ${value}: it cannot write as another`);
     args[name] = value;
   };
-  if (!machineIsLabel) own('machine', who.machine);
+  if (!op.machineLabel) own('machine', who.machine);
   if (who.kind === 'runner') own('runner', who.runner);
-  if (!sig.args.has('actor')) return;
-  const actor = args.actor;
-  const [row] = typeof actor === 'string' ? await tx`select cb._actor_ok(${who.kind}, ${who.machine}, ${actor}) as ok` : [];
-  if (!row?.ok) {
+  const mine = async (name: unknown) => typeof name === 'string'
+    && (await tx`select cb._actor_ok(${who.kind}, ${who.machine}, ${name}) as ok`)[0]?.ok === true;
+  if (op.toOwnSeat && !(await mine(args.delivered_to))) {
+    throw new Refused(403, `delivered_to must name a seat of this key's machine, like name@${who.machine}`);
+  }
+  if (!sig.args.has('actor') || (op.relayActor && args.actor === 'relay')) return;
+  if (!(await mine(args.actor))) {
     throw new Refused(403, who.kind === 'machine' ? `a write with this key names an actor of its machine, like name@${who.machine} (--as), never the owner`
       : `a ${who.kind} key cannot write as this actor`);
   }
@@ -302,7 +305,7 @@ export function workerApp(listen: () => Promise<unknown>) {
         await tx.unsafe(`set local application_name = '${APP_NAME[now.kind]}'`); // one of three constants
         await tx`select set_config('cb.client', ${key.id}, true), set_config('statement_timeout', '30s', true)`;
         const sig = await signature(tx, fn);
-        if (sig.writes) await bind(tx, now, sig, args, !!op.machineLabel);
+        if (sig.writes) await bind(tx, now, sig, args, op);
         else await tx`set transaction read only`; // a read may name any actor, so it must not be able to write
         ran();
         return selectFn(tx, fn, args, !!op.setof);

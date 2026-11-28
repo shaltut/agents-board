@@ -1104,6 +1104,7 @@ drop function if exists cb._skipped cascade;
 drop function if exists cb._picked cascade;
 drop function if exists cb.answers_pending cascade;
 drop function if exists cb.answer_delivered cascade;
+drop function if exists cb._answer_is_for cascade;
 drop function if exists cb.brief cascade;
 drop function if exists cb.seen cascade;
 drop function if exists cb.last_seen cascade;
@@ -1584,6 +1585,15 @@ begin
    order by coalesce(q.answered_at, (q.sent_back ->> 'at')::timestamptz), q.id;
 end $$;
 
+-- Who an answer, or a send-back, goes to, as cb.inbox picks it: the seat now in the pane the question replies to, by
+-- its name or by the pane's own (what a relay calls a pane with none), or the asker.
+create function cb._answer_is_for(q cb.questions, who text) returns boolean language sql stable as $$
+  select coalesce(who = q.asked_by, false) or (coalesce(q.reply_to ->> 'pane', '') <> '' and (
+    coalesce(lower(who) = lower((q.reply_to ->> 'pane') || '@' || (q.reply_to ->> 'machine')), false)
+    or exists (select 1 from cb.sessions s
+                where s.machine = lower(q.reply_to ->> 'machine') and s.pane = q.reply_to ->> 'pane' and s.actor = who)))
+$$;
+
 -- Orchestrator: answer handed to the session. Idempotent. Unblocks the task.
 -- sent_back_at (#616): the relay delivers that send-back only (its sent_back.at); a question rewritten (or sent back
 -- again) since is left as it is, quietly. answered_at (#1346), likewise: the answer it pushed; one changed since is
@@ -1598,6 +1608,12 @@ begin
   select q.status, q.answer, q.answered_at into cur, ans, at_ from cb.questions q where q.id = qid for update;
   if cur is null then raise exception 'question Q% not found', qid; end if;
   if cur = 'delivered' then return; end if;
+  -- a mark that names the wrong seat would lose the answer: whoever names one names who it goes to (#4913; the worker
+  -- API requires a name). Naming nobody is a mark by hand, on the database
+  if delivered_to is not null and not (select cb._answer_is_for(q, delivered_to) from cb.questions q where q.id = qid) then
+    raise exception 'Q%''s answer goes to %, not %: leave the session out to mark it delivered by hand', qid,
+      (select coalesce(nullif(q.reply_to ->> 'pane', ''), q.asked_by) from cb.questions q where q.id = qid), delivered_to;
+  end if;
   if cur = 'sent_back' then  -- the asker was told (#616); the question waits for its rewrite and keeps holding its task
     update cb.questions q set sent_back = q.sent_back || jsonb_build_object('delivered_at', now(), 'delivered_to', delivered_to)
      where q.id = qid and q.sent_back ->> 'delivered_at' is null and (sent_back_at is null or q.sent_back ->> 'at' = sent_back_at);
