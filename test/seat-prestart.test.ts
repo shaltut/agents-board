@@ -15,6 +15,7 @@ import { CLAUDE_ONLY_ENV, isClaudeOnly } from '../cli/agents/env.ts';
 import { codexPromptText, createCodexAdapter } from '../cli/agents/codex.ts';
 import { opencodeEndpointPath, writeOpencodeEndpoint } from '../cli/agents/opencode.ts';
 import { seatRefusal } from '../cli/agents/seat-prestart.ts';
+import { BASH } from './bash.ts';
 
 const BOARD = fileURLToPath(new URL('..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '');
 // Plainly fake values: the names are what count, and no value is ever printed by a child.
@@ -22,7 +23,8 @@ const CANARY = { GITHUB_PERSONAL_ACCESS_TOKEN: 'not-a-token', CLAUDE_CODE_FAKE_S
 const ALL: ReadonlySet<AgentKind> = new Set(['claude', 'codex', 'opencode', 'agy']);
 const GATE = { installed: ALL, env: { CB_MCP_GATE_OK: 'codex,opencode,agy' } };
 const noPause = () => {};
-const shellOk = (sh: string) => { const r = spawnSync(sh, ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; };
+const exe = (sh: string) => (sh === 'bash' ? BASH : sh);
+const shellOk = (sh: string) => { const r = spawnSync(exe(sh), ['-c', 'env >/dev/null && echo ok'], { encoding: 'utf8' }); return r.status === 0 && r.stdout.trim() === 'ok'; };
 const bashOk = shellOk('bash'), zshOk = shellOk('zsh');
 const pwshOk = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
 
@@ -73,7 +75,7 @@ function pane(env0: Record<string, string | undefined>, cwd: string, shell = 'ba
   const calls: string[][] = [], typed: string[] = [];
   const env = { ...env0 };
   let out = '', agent: { names: string[]; password: string | null; tmp: string } | null = null;
-  const sh = (script: string) => spawnSync('bash', ['-c', script], { env: env as NodeJS.ProcessEnv, cwd, encoding: 'utf8' });
+  const sh = (script: string) => spawnSync(BASH, ['-c', script],{ env: env as NodeJS.ProcessEnv, cwd, encoding: 'utf8' });
   const run: Runner = (_m, args) => {
     calls.push(args);
     const [a, b] = args;
@@ -123,7 +125,7 @@ test('one Claude-only list: every adapter strips it from its launch env, and bot
 for (const [sh, has] of [['bash', bashOk], ['zsh', zshOk]] as const) {
   test(`prestart.sh in a real ${sh}: the Claude-only names leave the shell itself, a child sees none, the rest stays`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
-    const r = spawnSync(sh, ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(exe(sh), ['-c', `${prestartLine('posix', BOARD, ['codex', 'm', 'w9:p1', 'n0nce1'])}\nnode -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(','))"`], { env: seatEnv(w.env, 'codex'), cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce1$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
@@ -148,7 +150,7 @@ for (const [sh, has, on] of [['bash', bashOk, 'shopt -s expand_aliases'], ['zsh'
   test(`prestart.sh in a ${sh} whose aliases and functions shadow grep, env, sed and node: still strips, still ready`, { skip: !has && `no ${sh}` }, (t) => {
     const w = world(t);
     const script = `${on}\n${SHADOWS}${prestartLine('posix', BOARD, ['opencode', 'm', 'w9:p1', 'n0nce3', '41234'])}\ncommand node -e "process.stdout.write('NAMES ' + Object.keys(process.env).join(',') + ' PW ' + (process.env.OPENCODE_SERVER_PASSWORD || '').length)"`;
-    const r = spawnSync(sh, ['-c', script], { env: seatEnv(w.env, 'opencode'), cwd: w.ws, encoding: 'utf8' });
+    const r = spawnSync(exe(sh), ['-c', script], { env: seatEnv(w.env, 'opencode'),cwd: w.ws, encoding: 'utf8' });
     assert.match(r.stdout, /^cb-seat-ready:n0nce3$/m, r.stdout + r.stderr);
     const names = r.stdout.slice(r.stdout.indexOf('NAMES ') + 6, r.stdout.indexOf(' PW ')).split(',');
     assert.deepEqual(names.filter(isClaudeOnly), []);
