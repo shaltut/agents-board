@@ -607,7 +607,9 @@ The squad `count` per role is then the most the supervisor keeps up. Every 60 s 
   for Enable. Never the lead or a hand-started session, and a seat holding a card of an enabled project is kept. After
   Enable, the seats that hold cards are restored as above, whatever was restored before the disable. A squad without
   `"supervise": true` gets only the disable message;
-- looks for a seat stopped by its model's quota (#4787): for each seat of the squad, and the lead, that herdr shows
+- looks for a seat stopped by its model's quota (#4787). This one runs for **every enabled project with a squad**,
+  with or without a pipeline or `"supervise": true`, since it only reads screens and tells (it still needs `cb
+  supervise` running): for each seat of the squad, and the lead, that herdr shows
   not working (`idle`, `done`, `blocked`), it reads the last lines of its screen (`herdr pane read`) and asks the
   agent's adapter. A quota stop is a `quota` board event (`quota <seat> (herdr pane <id>)`, also a digest line), and
   the lead is told once: again only after the seat has done something on the board, or bound anew, and stopped again.

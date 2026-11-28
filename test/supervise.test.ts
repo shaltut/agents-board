@@ -989,6 +989,38 @@ test('#4787: a dry run of the second check says the switch and does none of it',
   assert.ok(out.includes('would switch sv-B1@macbook (sonnet to haiku)'), out.join('\n'));
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
   assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
+// every project with a squad is checked: claude-board itself has no stages, and its stopped reviewers are why #4787 exists
+for (const [name, off] of [
+  ['a squad with no stages', (sql: any) => sql`select cb.project_pipeline('sv', false, 'ahmed')`],
+  ['a squad with supervise off', (sql: any) => sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`],
+] as const) {
+  test(`#4787: ${name} has its stopped seat told; nothing is started, restored or closed`, async () => {
+    const { sql, sup } = await stopSetup();
+    await off(sql);
+    await card(sql); // waiting work: a supervised squad would start a builder for it
+    await session(sql, 'sv-B2@macbook', 'builder', { live: false });
+    await card(sql, { assignee: 'sv-B2@macbook', status: 'in_progress' }); // down and holding: it would restore it
+    const h = fakeHerdr({ read: onPane('w1:p9') });
+    running(h);
+    const d = deps(sup, h.run);
+    await tick(d);
+    const out = await tick(d);
+    assert.deepEqual((await events(sql, 'quota')).map((e: any) => e.data.session), ['sv-B1@macbook'], out.join('\n'));
+    assert.equal((await tells(sql)).length, 1);
+    assert.ok(h.calls.every((c) => (c.args[0] === 'agent' && c.args[1] === 'list') || (c.args[0] === 'pane' && c.args[1] === 'read')), JSON.stringify(h.calls));
+    assert.equal((await sql`select count(*)::int as n from cb.events where actor = 'supervisor' and data ->> 'what' <> 'quota'`)[0].n, 0);
+  });
+}
+
+test('#4787: a disabled project that the supervisor does not run is left alone', async () => {
+  const { sql, sup } = await stopSetup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, supervise: false })}, 'ahmed')`;
+  await sql`select cb.project_state('sv', 'disabled', 'ahmed')`;
+  const h = fakeHerdr({ read: onPane('w1:p9') });
+  running(h);
+  await tick(deps(sup, h.run));
+  assert.deepEqual(h.calls, []);
+  assert.equal((await events(sql, 'quota')).length, 0);
 });
 
 test('#4787: a pane that cannot be read is said once, until it reads again', async () => {
