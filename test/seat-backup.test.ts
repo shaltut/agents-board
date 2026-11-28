@@ -29,7 +29,9 @@ async function setup() {
 const state = async (sup: any) => (await sup`select cb.supervise_state('sv') as r`)[0].r;
 const of = async (sup: any, actor = B1) => (await state(sup)).sessions.find((x: any) => x.actor === actor);
 const on = (sql: any, enabled = true) => sql`select cb.project_auto_backup('sv', ${enabled}, 'ahmed') as r`;
-const switchTo = async (sup: any, n: number, actor = B1) => (await sup`select cb.seat_switch('sv', ${actor}, ${n}) as r`)[0].r;
+// planned: the squad the switch was planned on, by default the one saved now
+const switchTo = async (sup: any, n: number, actor = B1, planned?: object) => (await sup`select cb.seat_switch('sv', ${actor}, ${n},
+  coalesce(${planned ? JSON.stringify(planned) : null}::text::jsonb, (select pr.squad from cb.projects pr where pr.slug = 'sv'))) as r`)[0].r;
 const backups = async (sql: any) => (await sql`select count(*)::int as n from cb.seat_backups`)[0].n;
 
 test('the automatic backup switch is off until Ahmed turns it on from the dashboard', async () => {
@@ -49,7 +51,7 @@ test('the automatic backup switch is off until Ahmed turns it on from the dashbo
 
 test("seat_switch records the squad's n-th backup: supervisor only, only while on, only a builder or other seat it names", async () => {
   const { sql, sup } = await setup();
-  await assert.rejects(sql`select cb.seat_switch('sv', ${B1}, 1)`, /only the supervisor can do this/);
+  await assert.rejects(sql`select cb.seat_switch('sv', ${B1}, 1, '{}'::jsonb)`, /only the supervisor can do this/);
   await assert.rejects(switchTo(sup, 1), /automatic backup is off/);
   await on(sql);
   await assert.rejects(switchTo(sup, 3), /no backup 3/);
@@ -124,6 +126,28 @@ test('only a squad the supervisor runs is switched; a switch ends the standing q
   await switchTo(sup, 1);
   await sup`select cb.supervise_log('sv', 'switch', ${B1}, 'sonnet to haiku')`;
   assert.equal((await of(sup)).quota_told, false);
+});
+
+test('a switch planned on a squad that has since changed records nothing', async () => {
+  const { sql, sup } = await setup();
+  await on(sql);
+  const planned = (await state(sup)).squad;
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, fallback: [BACKUPS[1]] } } })}, 'ahmed')`;
+  await assert.rejects(switchTo(sup, 1, B1, planned), /squad of sv changed since the switch was planned/);
+  assert.equal(await backups(sql), 0);
+});
+
+// PR 175 (#4766) added the effort a seat should run; a seat on a backup has the backup's
+test("a seat on a backup is meant to run the backup's effort, else its role's on the role's agent", async () => {
+  const { sql, sup } = await setup();
+  await sql`select cb.squad_set('sv', ${sql.json({ ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, effort: 'high',
+    fallback: [BACKUPS[0], { ...BACKUPS[1]!, effort: 'low' }] } } })}, 'ahmed')`;
+  await on(sql);
+  const want = async () => (await sql`select cb._seat_want('sv', ${B1}, 'builder', null, null) ->> 'effort' as e`)[0].e;
+  await switchTo(sup, 1);
+  assert.equal(await want(), 'high');
+  await switchTo(sup, 2);
+  assert.equal(await want(), 'low');
 });
 
 test('no_backup_told stands like quota_told; a switch and a missing backup have their digest lines', async () => {

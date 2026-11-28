@@ -936,7 +936,8 @@ test('#4787: the switch on in a squad the supervisor does not run: told, never s
   const { sql, sup, h } = await switchSetup();
   const { version: _v, ...squad } = (await sql`select cb.squad_get('sv', true) as s`)[0].s;
   await sql`select cb.squad_set('sv', ${sql.json({ ...squad, supervise: false })}, 'ahmed')`;
-  await tick(deps(sup, h.run)); await tick(deps(sup, h.run));
+  const d = deps(sup, h.run);
+  await tick(d); await tick(d);
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
   assert.equal(await said(sql, /Nothing was switched or closed/), 1);
 });
@@ -947,15 +948,87 @@ test("#4787: quota words that are not in the CLI's banner spot are told, never s
   const quoted = '● The adapter looks for this line:\n  ⎿ grep\n● Claude usage limit reached is what it matches.\n> ';
   const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? '> ' : quoted, stderr: '' }) });
   running(h);
-  await tick(deps(sup, h.run)); await tick(deps(sup, h.run)); await tick(deps(sup, h.run));
+  const d = deps(sup, h.run);
+  await tick(d); await tick(d); await tick(d);
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
   assert.equal(await said(sql, /will not switch it.*Nothing was switched or closed/s), 1);
   assert.deepEqual([(await events(sql, 'quota')).length, (await events(sql, 'switch')).length, (await events(sql, 'no_backup')).length], [1, 0, 0]);
 });
 
+// R1 on 1d020fc: the board's once-only note was also the second sighting, so any later banner switched at once
+// a builder whose screen the test changes between checks
+async function screenSetup() {
+  const { sql, sup } = await switchSetup();
+  const shown = { stdout: BANNER, status: 0 };
+  const h = fakeHerdr({ read: (pane) => (pane === 'w1:p1' ? { status: 0, stdout: '> ', stderr: '' } : { ...shown, stderr: '' }) });
+  running(h);
+  return { sql, sup, h, shown, d: deps(sup, h.run) };
+}
+const QUOTED = '● The adapter looks for this line:\n● Claude usage limit reached is what it matches.\n> ';
+
+for (const [name, between] of [['an ordinary screen', { stdout: 'all fine\n> ', status: 0 }], ['the words in its own output', { stdout: QUOTED, status: 0 }],
+  ['a screen herdr cannot read', { stdout: '', status: 1 }]] as const) {
+  test(`#4787: only two checks in a row at the banner spot switch; ${name} between them starts over`, async () => {
+    const { h, shown, d } = await screenSetup();
+    await tick(d);
+    Object.assign(shown, between);
+    await tick(d);
+    Object.assign(shown, { stdout: BANNER, status: 0 });
+    await tick(d);
+    assert.deepEqual(exits(h.calls), [], 'one banner after the break');
+    await tick(d);
+    assert.deepEqual(exits(h.calls), ['sv-b1-macbook'], 'two in a row');
+  });
+}
+
+test('#4787: a working check between two banners starts over; so does a new supervisor', async () => {
+  const { sup, h, d } = await screenSetup();
+  await tick(d);
+  const busy = fakeHerdr({ status: 'working' });
+  running(busy);
+  await tick(deps(sup, busy.run, { memory: d.memory }));
+  await tick(d);
+  assert.deepEqual(exits(h.calls), [], 'one banner after it worked');
+  await tick(deps(sup, h.run)); // restarted: it has seen nothing
+  assert.deepEqual(exits(h.calls), []);
+});
+
+test('#4787: an alert for quoted words counts for no sighting: the real banner must then be seen twice', async () => {
+  const { sql, h, shown, d } = await screenSetup();
+  shown.stdout = QUOTED;
+  await tick(d); await tick(d);
+  shown.stdout = BANNER;
+  await tick(d);
+  assert.deepEqual([exits(h.calls), (await events(sql, 'quota')).length], [[], 1], 'told once, and not switched on the first banner');
+  await tick(d);
+  assert.deepEqual(exits(h.calls), ['sv-b1-macbook']);
+});
+
+// R1 on 1d020fc: the backup was recorded from the squad as saved then, and the one planned before was started
+const OTHER = { ...SQUAD, roles: { ...SQUAD.roles, builder: { ...SQUAD.roles.builder, fallback: [OPUS] } } };
+for (const [name, at, closed] of [['before /exit', 'supervise_mark', 0], ['after /exit, before the record', 'cb.seat_switch', 1]] as const) {
+  test(`#4787: a squad saved during the close, ${name}: no backup is recorded and the removed one is not started`, async () => {
+    const { sql, sup, h, d } = await switchSetup();
+    await tick(d);
+    let saved = false;
+    const gated = (text: TemplateStringsArray, ...values: any[]) => {
+      if (saved || !text.join('?').includes(at)) return sup(text, ...values);
+      saved = true;
+      const save = () => sql`select cb.squad_set('sv', ${sql.json(OTHER)}, 'ahmed')`;
+      // the mark: saved right after it, before the re-check. The record: saved right before it
+      return at === 'supervise_mark' ? sup(text, ...values).then(async (rows: any) => { await save(); return rows; }) : save().then(() => sup(text, ...values));
+    };
+    const out = await tick(deps(gated, h.run, { memory: d.memory }));
+    assert.ok(saved, out.join('\n'));
+    assert.equal(exits(h.calls).length, closed, out.join('\n'));
+    assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0, out.join('\n'));
+    assert.ok(!starts(h.calls).some((c) => c.args.join(' ').includes('--model haiku')), out.join('\n'));
+  });
+}
+
 test('#4787: a seat that acts after the mark, right before /exit, is not closed', async () => {
-  const { sql, sup, h } = await switchSetup();
-  await tick(deps(sup, h.run));
+  const { sql, sup, h, d } = await switchSetup();
+  await tick(d);
   let marked = false;
   const gated = (text: TemplateStringsArray, ...values: any[]) => {
     const query = sup(text, ...values);
@@ -963,7 +1036,7 @@ test('#4787: a seat that acts after the mark, right before /exit, is not closed'
     marked = true;
     return query.then(async (rows: any) => { await sql`insert into cb.events (actor, project, kind, summary) values ('sv-B1@macbook', 'sv', 'note', 'working again')`; return rows; });
   };
-  const out = await tick(deps(gated, h.run));
+  const out = await tick(deps(gated, h.run, { memory: d.memory }));
   assert.ok(marked, out.join('\n'));
   assert.deepEqual(exits(h.calls), [], out.join('\n'));
   assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
@@ -1000,14 +1073,15 @@ test('#4787: no backups: the seat stays; a backup this machine cannot start is p
   const lead = await switchSetup();
   const h = fakeHerdr({ read: (pane) => ({ status: 0, stdout: pane === 'w1:p1' ? BANNER : '> ', stderr: '' }) });
   running(h);
-  await tick(deps(lead.sup, h.run)); await tick(deps(lead.sup, h.run));
+  const ld = deps(lead.sup, h.run);
+  await tick(ld); await tick(ld);
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
 });
 
 test('#4787: a dry run of the second check says the switch and does none of it', async () => {
   const { sql, h, sup, d } = await switchSetup();
   await tick(d);
-  const out = await tick(deps(sup, h.run, { dryRun: true }));
+  const out = await tick(deps(sup, h.run, { dryRun: true, memory: d.memory }));
   assert.ok(out.includes('would switch sv-B1@macbook (sonnet to haiku)'), out.join('\n'));
   assert.deepEqual([exits(h.calls), starts(h.calls).length], [[], 0]);
   assert.equal((await sql`select count(*)::int as n from cb.seat_backups`)[0].n, 0);
