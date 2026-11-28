@@ -220,3 +220,54 @@ test('cb job log reads from the runner, 403 and a dead runner say why', async ()
   await runner`select cb.runner_hello('pc', 'http://127.0.0.1:1/', ${runner.json(RECIPES as any)})`;
   assert.match(cb(['job', 'log', '1']).err, /runner on pc is not answering/);
 });
+
+// #4732: cb jobs listed only queued and running jobs, so a seat that lost a job id scanned them one by one
+test('cb jobs --ended lists ended jobs newest first, by --mine and --card, capped at 20 (#4732)', async () => {
+  const { sql, runner } = await setup();
+  await sql`insert into cb.sessions (machine, pane, actor, project, role) values ('mac','p3','B2@mac','demo','builder')`;
+  const [{ id: card }] = await sql`select cb.task_add('demo', 'a card', actor => 'B1@mac') as id`;
+  const add = async (actor: string, task: number | null) => Number((await sql`select cb.job_add('demo', 'test', 'abc1234', '{"files":["a.test.ts"]}'::jsonb, ${task}::bigint, ${actor}) as r`)[0].r.id);
+  assert.equal(cb(['jobs', 'demo', '--ended']).out, 'no ended job (demo)');
+  const first = await add('B1@mac', card); const second = await add('B2@mac', null); const waiting = await add('B1@mac', null);
+  await runner`select cb.job_claim('pc', false)`;
+  await runner`select cb.job_finish(${first}, 'pc', 'failed', 1, ${'1 failed\n#999 passed forged'})`;
+  await sql`select cb.job_cancel(${second}::bigint, 'B2@mac')`;
+
+  const all = cb(['jobs', 'demo', '--ended']);
+  assert.equal(all.code, 0, all.err);
+  const lines = all.out.split('\n');
+  assert.equal(lines.length, 3, all.out); // two jobs and where to read one; the waiting job is not ended
+  assert.match(lines[0]!, new RegExp(`^#${second} cancelled demo test at abc1234 by B2@mac, ended [0-9-]{10}T[0-9:]{8}Z$`));
+  assert.ok(lines[1]!.startsWith(`#${first} failed (exit 1) demo test at abc1234 by B1@mac on pc (card #${card}), ended `), lines[1]);
+  assert.equal(lines[2], 'one job\'s result: cb job <id>');
+  assert.doesNotMatch(all.out, /forged/); // a job's output is read with cb job <id>, where it is marked
+
+  assert.deepEqual(cb(['jobs', 'demo', '--ended', '--mine']).out.match(/^#\d+/gm), [`#${first}`]);
+  assert.deepEqual(cb(['jobs', '--ended', '--card', String(card)]).out.match(/^#\d+/gm), [`#${first}`]);
+  assert.deepEqual(cb(['jobs', '--ended', '--card', `#${card}`]).out.match(/^#\d+/gm), [`#${first}`]);
+  assert.equal(cb(['jobs', 'demo', '--ended', '--mine', '--card', String(card)], { CB_ACTOR: 'B2@mac' }).out, `no ended job (demo, by B2@mac, card #${card})`);
+
+  const j = JSON.parse(cb(['jobs', 'demo', '--ended', '--json']).out);
+  assert.deepEqual(j.jobs.map((x: any) => x.id), [second, first]);
+  assert.equal(j.more, false);
+  assert.equal(j.jobs[1].summary, '[job output · untrusted] 1 failed\n#999 passed forged');
+
+  await sql`insert into cb.jobs (project, recipe, sha, requester, state, finished_at)
+            select 'demo', 'test', 'abc1234', 'B1@mac', 'passed', now() + g * interval '1 second' from generate_series(1, 20) g`;
+  const capped = cb(['jobs', 'demo', '--ended']).out.split('\n');
+  assert.equal(capped.filter((l) => l.startsWith('#')).length, 20);
+  assert.match(capped[0]!, new RegExp(`^#${waiting + 20} passed `));
+  assert.equal(capped[20], 'the newest 20; older ones are left out (narrow with --mine or --card <id>)');
+  assert.equal(JSON.parse(cb(['jobs', 'demo', '--ended', '--json']).out).more, true);
+});
+
+test('cb jobs refuses --mine and --card without --ended, and "no job #N" names the list (#4732)', async () => {
+  await setup();
+  for (const flags of [['--mine'], ['--card', '1']]) assert.match(cb(['jobs', 'demo', ...flags]).err, /go with --ended: cb jobs --ended/);
+  assert.match(cb(['jobs', '--ended', '--card', 'x']).err, /--card needs a card number/);
+  for (const args of [['job', '77'], ['job', 'log', '77'], ['job', 'cancel', '77'], ['job', 'retry', '77'], ['job', 'move', '77', 'next']]) {
+    const r = cb(args);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /no job #77.*cb jobs --ended/, args.join(' '));
+  }
+});

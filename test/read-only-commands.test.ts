@@ -24,7 +24,7 @@ function cb(args: string[], env: Record<string, string> = {}) {
 
 // one form per mark: every command marked reads: true, and every subcommand of a list ('' bare, '#' a bare number)
 const FORMS: string[][] = [['brief', 'demo'], ['brief', 'demo', '--json'], ['mine'], ['resume'], ['tick', 'demo'], ['goals', 'demo'],
-  ['epics', 'demo'], ['pending', 'demo'], ['role', 'builder'], ['users'], ['huddles', 'demo'], ['jobs', 'demo'], ['show', '2'],
+  ['epics', 'demo'], ['pending', 'demo'], ['role', 'builder'], ['users'], ['huddles', 'demo'], ['jobs', 'demo'], ['jobs', 'demo', '--ended'], ['show', '2'],
   ['search', 'demo', 'card'], ['session', 'W1@test'], ['sessions', 'demo'], ['digest', 'demo'], ['start'], ['help'],
   ['mem', 'find', 'gotcha'], ['mem', 'list', 'demo'], ['mem', 'show', 'M1'], ['page', 'show', '2'], ['squad', 'show', 'demo'],
   ['huddle', 'show', '1'], ['lock', 'queue'], ['job', 'show', '1'], ['job', 'log', '1'], ['job', '1'], ['asks'], ['github'],

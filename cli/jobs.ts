@@ -82,6 +82,21 @@ export async function runCmd(sql: any, o: { recipe?: string; sha?: string; card?
   }
 }
 
+// #4732: no summary in the lines: it is the job's output, read one at a time with cb job <id>, where it is marked
+export async function endedCmd(sql: any, o: { project: string | null; requester?: string; card?: string }): Promise<Result> {
+  const card = o.card?.replace(/^#/, '');
+  if (card !== undefined && !/^\d+$/.test(card)) throw new Error('--card needs a card number. Run: cb help jobs');
+  const [{ l }] = await sql`select cb.jobs_ended(${o.project}, ${o.requester ?? null}, ${card ?? null}::bigint) as l`;
+  const lines = l.jobs.map((j: any) => `#${j.id} ${j.state}${j.exit_code != null ? ` (exit ${j.exit_code})` : ''} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}${j.task_id ? ` (card #${j.task_id})` : ''}, ended ${new Date(j.finished_at).toISOString().slice(0, 19)}Z`);
+  const asked = [o.project, o.requester && `by ${o.requester}`, card && `card #${card}`].filter(Boolean).join(', ');
+  if (!lines.length) lines.push(`no ended job${asked ? ` (${asked})` : ''}`);
+  else {
+    if (l.more) lines.push(`the newest ${l.jobs.length}; older ones are left out (narrow with --mine or --card <id>)`);
+    lines.push("one job's result: cb job <id>");
+  }
+  return { out: lines.join('\n'), json: { ...l, jobs: l.jobs.map(markedJson) }, code: 0 };
+}
+
 export async function jobsCmd(sql: any, project: string | null): Promise<Result> {
   const [{ l }] = await sql`select cb.jobs_list(${project}) as l`;
   const lines = l.jobs.map((j: any) => `#${j.id} ${j.state} ${j.project}${repoTag(j)} ${j.recipe} at ${sha7(j)} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}`);
@@ -117,7 +132,7 @@ export async function jobCmd(sql: any, sub: string | undefined, id: string | und
     return { out: r.moved ? `job #${id} moved ${place}` : `job #${id} is already ${place === 'up' || place === 'next' ? 'first' : 'last'}`, json: r, code: 0 };
   }
   const [{ j }] = await sql`select cb.job_get(${id!}::bigint) as j`;
-  if (!j) throw new Error(`no job #${id}`);
+  if (!j) throw new Error(`no job #${id}: cb jobs lists queued and running jobs, cb jobs --ended the ended ones`);
   if (sub === 'show') return { out: `${endLine(j)}\n${j.project} by ${j.requester}${j.runner ? ` on ${j.runner}` : ''}, params ${JSON.stringify(j.params)}`, json: markedJson(j), code: 0 };
   return logCmd(sql, j, tail);
 }

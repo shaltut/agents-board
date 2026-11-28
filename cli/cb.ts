@@ -21,7 +21,7 @@ import { faultHook } from './fault-hook.ts';
 import { faultsCmd } from './faults.ts';
 import { triageCmd } from './triage.ts';
 import { stageWordsFor } from './stage-words.ts';
-import { splitRunArgs, runCmd, jobsCmd, jobCmd } from './jobs.ts';
+import { splitRunArgs, runCmd, jobsCmd, endedCmd, jobCmd } from './jobs.ts';
 import { usageCmd } from './usage.ts';
 import { cardBlock, resumeText } from './resume-text.ts';
 import { help, unknownHelp, COMMANDS, backWhy, reaskHint, flat, namesCommand } from './help.ts';
@@ -45,6 +45,7 @@ const OPTIONS = {
   kind: { type: 'string', short: 'k' }, review: { type: 'string' }, machine: { type: 'string' }, all: { type: 'boolean' }, propose: { type: 'boolean' }, done: { type: 'boolean' }, approved: { type: 'boolean' }, stage: { type: 'string' }, why: { type: 'string' }, admin: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
   sha: { type: 'string' }, card: { type: 'string' }, wait: { type: 'boolean' }, tail: { type: 'string' }, once: { type: 'boolean' },
   repo: { type: 'string' }, agent: { type: 'string' }, 'cards-in': { type: 'string' }, notes: { type: 'boolean' }, since: { type: 'string' }, overwrite: { type: 'boolean' },
+  ended: { type: 'boolean' }, mine: { type: 'boolean' },
   root: { type: 'string' }, manifest: { type: 'string' }, check: { type: 'boolean' }, from: { type: 'string' }, rollback: { type: 'boolean' },
 } as const;
 
@@ -870,7 +871,13 @@ ${body}`, json: pg };
     }
     case 'run':
       return runCmd(sql, { recipe: args[0], sha: o.sha, card: o.card, project: o.project ?? sessionProject, repo: o.repo?.trim() || undefined, params: runParams, wait: !!o.wait, json: !!o.json, actor });
-    case 'jobs': return jobsCmd(sql, args[0] ?? o.project ?? sessionProject);
+    case 'jobs': {
+      const named = args[0] ?? o.project;
+      // a card's jobs are found whatever project this session is bound to
+      if (o.ended) return endedCmd(sql, { project: named ?? (o.card !== undefined ? null : sessionProject), requester: o.mine ? actor : undefined, card: o.card });
+      if (o.mine || o.card !== undefined) throw new Error('--mine and --card go with --ended: cb jobs --ended [--mine] [--card <id>]');
+      return jobsCmd(sql, named ?? sessionProject);
+    }
     case 'usage': return usageCmd(sql, o.all ? null : args[0] ?? sessionProject ?? null, o.since); // #4349
     case 'faults': return faultsCmd({ since: o.since }); // #4535: this machine's fault log; never the board
     case 'triage': // #4535: judge the fault log's groups and file the real ones on claude-board
