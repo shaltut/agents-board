@@ -12,6 +12,7 @@ import { callFn, RpcError } from './rpc.ts';
 import * as q from './queries.ts';
 import { reconcile, startTelegram, telegramConnect, telegramDisconnect, telegramStatus } from './telegram.ts';
 import { startGithub } from './github.ts';
+import { notify, workerApp } from './worker.ts';
 import { releaseApp, loadRelease, servedSha } from './release.ts';
 import { readRoleSeeds } from '../db/roles.ts';
 
@@ -25,6 +26,11 @@ app.onError((e: any, c) => e?.name === 'PostgresError'
   ? c.json({ ok: false, error: e.message }, 400)
   : (console.error(e), c.json({ ok: false, error: 'server error' }, 500)));
 const opt = (v?: string) => (v ? v : undefined);
+
+// The worker API (#3222): its own sign-in (a machine's key), mounted before everything below, so no cookie, link or
+// local trust ever applies to it. Anything else under /w is not there.
+app.route('/w/v1', workerApp(() => ensureListen()));
+app.all('/w/*', (c) => c.json({ ok: false, error: 'not found' }, 404, { 'X-CB-Proto': '1' }));
 
 // Default-deny. Everyone signs in (#1749): admins (Ahmed, the owner, is the user ahmed) get the whole board, by
 // password; members (Cai, Ana) get only their own questions and tasks, by password or their private link.
@@ -367,7 +373,13 @@ export const fanQueue = (every = 1000) => {
 /** Never rejects: a failed LISTEN (the DB down at boot) is logged and retried with backoff, not cached, so the
  *  server stays up without live updates until it connects. 'listen' fans out on every (re)connect: what changed
  *  while the connection was down is caught up. listen is injectable for the test. */
-export function ensureListen(listen = () => Promise.all([sql.listen('cb', fan, () => fan('listen')), sql.listen('cb_queue', () => fanQueue())])) {
+export function ensureListen(listen = () => Promise.all([
+  sql.listen('cb', (table) => { fan(table); notify('cb', table); }, () => { fan('listen'); notify('listen'); }),
+  sql.listen('cb_queue', () => fanQueue()),
+  // the workers' own channels (server/worker.ts): a seat's binding changed ("machine:pane"), a job moved
+  sql.listen('cb_bind', (seat) => notify('cb_bind', seat)),
+  sql.listen('cb_jobs', (job) => notify('cb_jobs', job)),
+])) {
   listening ??= listen().then((r) => { wait = 1000; return r; }, (e: any) => {
     listening = null;
     console.error(`live updates: LISTEN failed (${e?.message ?? e}); retrying in ${wait / 1000}s`);
